@@ -3,7 +3,7 @@ use crate::command_helpers::{
     emit_system, execute_skill_command, list_ides, list_mcp_servers, list_skills,
     rewind_transcript, run_doctor, terminal_setup_advice,
 };
-use crate::AppState;
+use crate::{AppState, MessageRole};
 use anyhow::Result;
 use puffer_provider_openai::{
     build_authorization_url as build_openai_authorization_url,
@@ -417,9 +417,15 @@ pub fn dispatch_command(
     )?;
 
     match command.kind {
-        CommandKind::Prompt => {
-            execute_prompt_command(state, resources, session_store, command, args)
-        }
+        CommandKind::Prompt => execute_prompt_command(
+            state,
+            resources,
+            providers,
+            auth_store,
+            session_store,
+            command,
+            args,
+        ),
         CommandKind::Local | CommandKind::Ui => {
             execute_local_command(
                 state,
@@ -439,6 +445,8 @@ pub fn dispatch_command(
 fn execute_prompt_command(
     state: &mut AppState,
     resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &AuthStore,
     session_store: &SessionStore,
     command: &CommandSpec,
     args: &str,
@@ -446,7 +454,29 @@ fn execute_prompt_command(
     let rendered = prompt_by_id(resources, command.name)
         .map(|prompt| prompt.value.template.replace("$ARGUMENTS", args))
         .unwrap_or_else(|| format!("Prompt command /{} invoked with: {}", command.name, args));
-    emit_system(state, session_store, rendered)
+    state.push_message(MessageRole::User, rendered.clone());
+    session_store.append_event(
+        state.session.id,
+        TranscriptEvent::UserMessage {
+            text: rendered.clone(),
+        },
+    )?;
+
+    match crate::runtime::execute_user_prompt(state, resources, providers, auth_store, &rendered) {
+        Ok(reply) => {
+            state.push_message(MessageRole::Assistant, reply.clone());
+            session_store.append_event(
+                state.session.id,
+                TranscriptEvent::AssistantMessage { text: reply },
+            )?;
+        }
+        Err(error) => {
+            let message = format!("Prompt command /{} failed: {error}", command.name);
+            emit_system(state, session_store, message)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn execute_local_command(
@@ -988,6 +1018,7 @@ fn cmd(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RenderedMessage;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, MascotConfig, PufferConfig, UiConfig};
     use puffer_provider_registry::{AuthStore, ProviderRegistry};
     use puffer_resources::LoadedResources;
@@ -1216,5 +1247,47 @@ mod tests {
         assert_eq!(record.metadata.note.as_deref(), Some("keep shipping"));
         assert_eq!(record.metadata.slug.as_deref(), Some("shipyard"));
         assert!(record.metadata.tags.iter().any(|tag| tag == "parity"));
+    }
+
+    #[test]
+    fn prompt_commands_append_user_message_and_surface_runtime_failures() {
+        let tempdir = tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        ensure_workspace_dirs(&paths).unwrap();
+        let session_store = SessionStore::from_paths(&paths).unwrap();
+        let session = session_store
+            .create_session(tempdir.path().to_path_buf())
+            .unwrap();
+        let mut state = AppState::new(
+            PufferConfig::default(),
+            tempdir.path().to_path_buf(),
+            session,
+        );
+
+        dispatch_command(
+            &mut state,
+            &supported_commands(),
+            &LoadedResources::default(),
+            &ProviderRegistry::new(),
+            &AuthStore::default(),
+            &session_store,
+            "/review",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            state.transcript.first(),
+            Some(RenderedMessage {
+                role: MessageRole::User,
+                ..
+            })
+        ));
+        assert!(matches!(
+            state.transcript.last(),
+            Some(RenderedMessage {
+                role: MessageRole::System,
+                text,
+            }) if text.contains("Prompt command /review failed")
+        ));
     }
 }
