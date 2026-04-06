@@ -1,0 +1,7 @@
+id: read_file
+name: read_file
+description: Read a file from the workspace.
+handler: read_file
+approval_policy: auto
+sandbox_policy: read-only
+

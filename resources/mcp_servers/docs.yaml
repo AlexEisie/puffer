@@ -1,0 +1,5 @@
+id: docs
+display_name: Docs
+transport: stdio
+target: puffer-docs-mcp
+enabled: true

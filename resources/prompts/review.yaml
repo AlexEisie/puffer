@@ -1,0 +1,7 @@
+id: review
+description: Review the current work and look for bugs, regressions, and missing tests.
+template: |
+  Review the current worktree carefully.
+  Focus on bugs, regressions, behavior changes, and missing tests.
+  Extra instruction: $ARGUMENTS
+

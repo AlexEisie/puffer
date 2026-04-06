@@ -1,0 +1,19 @@
+[package]
+name = "puffer-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+puffer-config = { path = "../puffer-config" }
+puffer-core = { path = "../puffer-core" }
+puffer-provider-registry = { path = "../puffer-provider-registry" }
+puffer-resources = { path = "../puffer-resources" }
+puffer-session-store = { path = "../puffer-session-store" }
+
+[dev-dependencies]
+insta.workspace = true
+uuid.workspace = true

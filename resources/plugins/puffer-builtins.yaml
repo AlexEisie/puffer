@@ -1,0 +1,17 @@
+id: puffer-builtins
+display_name: Puffer Builtins
+description: Built-in generalized integrations for Puffer Code.
+commands:
+  - name: plugin
+    description: Manage Puffer plugins
+  - name: mcp
+    description: Manage MCP servers
+  - name: ide
+    description: Manage IDE integrations
+skills:
+  - reviewer
+mcp_servers:
+  - id: filesystem
+    display_name: Filesystem
+    transport: stdio
+    target: internal://filesystem

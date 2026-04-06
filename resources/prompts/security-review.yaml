@@ -1,0 +1,7 @@
+id: security-review
+description: Review the current work for security issues.
+template: |
+  Review the pending changes for security issues.
+  Focus on auth, secrets, sandbox escapes, data leaks, and unsafe execution paths.
+  Extra instruction: $ARGUMENTS
+

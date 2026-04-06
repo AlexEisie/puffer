@@ -1,0 +1,6 @@
+id: btw
+description: Capture a quick side question or note.
+template: |
+  Address this side question or note briefly and directly:
+  $ARGUMENTS
+

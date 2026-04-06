@@ -1,0 +1,5 @@
+id: filesystem
+display_name: Filesystem
+transport: stdio
+target: puffer-mcp-filesystem
+enabled: true

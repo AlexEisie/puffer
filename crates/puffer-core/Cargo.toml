@@ -1,0 +1,24 @@
+[package]
+name = "puffer-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+indexmap.workspace = true
+reqwest = { version = "0.12.24", features = ["blocking", "json"] }
+serde.workspace = true
+serde_json.workspace = true
+puffer-config = { path = "../puffer-config" }
+puffer-provider-openai = { path = "../puffer-provider-openai" }
+puffer-provider-registry = { path = "../puffer-provider-registry" }
+puffer-resources = { path = "../puffer-resources" }
+puffer-session-store = { path = "../puffer-session-store" }
+puffer-transport-anthropic = { path = "../puffer-transport-anthropic" }
+
+[dev-dependencies]
+uuid.workspace = true

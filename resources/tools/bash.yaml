@@ -1,0 +1,7 @@
+id: bash
+name: bash
+description: Run a shell command in the current workspace.
+handler: bash
+approval_policy: on-request
+sandbox_policy: workspace-write
+

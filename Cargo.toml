@@ -1,0 +1,39 @@
+[workspace]
+members = [
+    "crates/puffer-cli",
+    "crates/puffer-config",
+    "crates/puffer-core",
+    "crates/puffer-provider-openai",
+    "crates/puffer-provider-registry",
+    "crates/puffer-resources",
+    "crates/puffer-session-store",
+    "crates/puffer-test-support",
+    "crates/puffer-transport-anthropic",
+    "crates/puffer-tui",
+]
+default-members = ["crates/puffer-cli"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1.0.100"
+base64 = "0.22.1"
+clap = { version = "4.5.53", features = ["derive"] }
+crossterm = "0.29.0"
+dirs = "6.0.0"
+indexmap = { version = "2.12.1", features = ["serde"] }
+insta = "1.44.1"
+ratatui = "0.29.0"
+reqwest = { version = "0.12.24", features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.145", features = ["preserve_order"] }
+serde_yaml = "0.9.34"
+sha2 = "0.10.9"
+tempfile = "3.23.0"
+thiserror = "2.0.17"
+toml = "0.9.8"
+uuid = { version = "1.18.1", features = ["serde", "v4"] }

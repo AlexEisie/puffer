@@ -1,0 +1,4 @@
+id: vscode
+display_name: Visual Studio Code
+command: code
+auto_connect: false

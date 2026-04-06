@@ -1,0 +1,13 @@
+id: example
+display_name: Example Plugin
+description: Example declarative plugin bundle
+commands:
+  - name: example-doctor
+    description: Show example plugin status
+skills:
+  - reviewer
+mcp_servers:
+  - id: docs
+    display_name: Docs
+    transport: stdio
+    target: puffer-docs-mcp

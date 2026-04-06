@@ -1,0 +1,16 @@
+[package]
+name = "puffer-resources"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+indexmap.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+puffer-config = { path = "../puffer-config" }
+puffer-provider-registry = { path = "../puffer-provider-registry" }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,6 @@
+id: pr-comments
+description: Summarize and respond to pull-request comments.
+template: |
+  Gather and summarize pull-request comments relevant to the current work.
+  Additional context: $ARGUMENTS
+

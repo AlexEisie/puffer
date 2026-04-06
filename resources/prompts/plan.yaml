@@ -1,0 +1,6 @@
+id: plan
+description: Create or refine an implementation plan.
+template: |
+  Create or refine the current implementation plan.
+  Requested focus: $ARGUMENTS
+

@@ -1,0 +1,23 @@
+id: openai
+display_name: OpenAI
+base_url: https://api.openai.com
+default_api: openai-responses
+auth_modes:
+  - api_key
+  - oauth
+models:
+  - id: gpt-5
+    display_name: GPT-5
+    provider: openai
+    api: openai-responses
+    context_window: 272000
+    max_output_tokens: 16384
+    supports_reasoning: true
+  - id: gpt-5-mini
+    display_name: GPT-5 Mini
+    provider: openai
+    api: openai-responses
+    context_window: 272000
+    max_output_tokens: 16384
+    supports_reasoning: true
+

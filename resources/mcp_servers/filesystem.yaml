@@ -1,0 +1,5 @@
+id: filesystem
+display_name: Filesystem MCP
+transport: stdio
+target: builtin:filesystem
+description: Workspace filesystem access via MCP.

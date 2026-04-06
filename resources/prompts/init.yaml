@@ -1,0 +1,7 @@
+id: init
+description: Initialize project instructions and defaults.
+template: |
+  Initialize project guidance for this repository.
+  Consider setup, conventions, commands, and local workflow.
+  Extra instruction: $ARGUMENTS
+

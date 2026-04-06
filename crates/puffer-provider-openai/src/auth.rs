@@ -1,0 +1,278 @@
+use anyhow::{anyhow, Context, Result};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
+use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+/// The registered OpenAI OAuth client id used for Codex-style CLI flows.
+pub const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+
+/// The OpenAI OAuth authorization endpoint.
+pub const OPENAI_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
+
+/// The OpenAI OAuth token endpoint.
+pub const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+
+/// The default localhost redirect URI for the OpenAI/Codex OAuth flow.
+pub const OPENAI_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+
+/// The default OpenAI OAuth scope set used by the Codex-like flow.
+pub const OPENAI_SCOPE: &str = "openid profile email offline_access";
+
+/// Authentication modes supported by the OpenAI provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OpenAIAuth {
+    ApiKey(String),
+    OAuthBearer(String),
+}
+
+/// Persisted OAuth credentials for the OpenAI/Codex flow.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenAIOAuthCredentials {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_at_ms: u64,
+    pub account_id: Option<String>,
+}
+
+/// Stores generated PKCE values for the OpenAI OAuth flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAIPkce {
+    pub verifier: String,
+    pub challenge: String,
+    pub state: String,
+}
+
+/// Parameters required to build an OpenAI OAuth authorization URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAIOAuthConfig {
+    pub state: String,
+    pub code_challenge: String,
+    pub redirect_uri: String,
+    pub originator: String,
+}
+
+impl Default for OpenAIOAuthConfig {
+    fn default() -> Self {
+        Self {
+            state: "puffer-state".to_string(),
+            code_challenge: "puffer-code-challenge".to_string(),
+            redirect_uri: OPENAI_REDIRECT_URI.to_string(),
+            originator: "puffer".to_string(),
+        }
+    }
+}
+
+/// Generates a PKCE verifier/challenge pair and state for OpenAI OAuth.
+pub fn generate_pkce() -> OpenAIPkce {
+    let verifier = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let digest = Sha256::digest(verifier.as_bytes());
+    let challenge = URL_SAFE_NO_PAD.encode(digest);
+    OpenAIPkce {
+        verifier: verifier.clone(),
+        challenge,
+        state: Uuid::new_v4().simple().to_string(),
+    }
+}
+
+/// Builds an OpenAI OAuth authorization URL from the provided flow parameters.
+pub fn build_authorization_url(config: &OpenAIOAuthConfig) -> String {
+    let mut url = url::Url::parse(OPENAI_AUTHORIZE_URL).expect("valid OpenAI authorize URL");
+    url.query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", OPENAI_CODEX_CLIENT_ID)
+        .append_pair("redirect_uri", &config.redirect_uri)
+        .append_pair("scope", OPENAI_SCOPE)
+        .append_pair("code_challenge", &config.code_challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", &config.state)
+        .append_pair("id_token_add_organizations", "true")
+        .append_pair("codex_cli_simplified_flow", "true")
+        .append_pair("originator", &config.originator);
+    url.to_string()
+}
+
+/// Extracts an OAuth code and optional state from pasted manual input.
+pub fn parse_authorization_input(input: &str) -> (Option<String>, Option<String>) {
+    let value = input.trim();
+    if value.is_empty() {
+        return (None, None);
+    }
+
+    if let Ok(url) = url::Url::parse(value) {
+        return (
+            url.query_pairs()
+                .find(|(key, _)| key == "code")
+                .map(|(_, value)| value.into_owned()),
+            url.query_pairs()
+                .find(|(key, _)| key == "state")
+                .map(|(_, value)| value.into_owned()),
+        );
+    }
+
+    if let Some((code, state)) = value.split_once('#') {
+        return (Some(code.to_string()), Some(state.to_string()));
+    }
+
+    if value.contains("code=") {
+        let mut code = None;
+        let mut state = None;
+        for (key, value) in url::form_urlencoded::parse(value.as_bytes()) {
+            if key == "code" {
+                code = Some(value.into_owned());
+            } else if key == "state" {
+                state = Some(value.into_owned());
+            }
+        }
+        return (code, state);
+    }
+
+    (Some(value.to_string()), None)
+}
+
+/// Exchanges an OpenAI OAuth authorization code for persisted OAuth credentials.
+pub fn exchange_authorization_code(
+    code: &str,
+    verifier: &str,
+    redirect_uri: Option<&str>,
+) -> Result<OpenAIOAuthCredentials> {
+    let client = Client::new();
+    let response = client
+        .post(OPENAI_TOKEN_URL)
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", OPENAI_CODEX_CLIENT_ID),
+            ("code", code),
+            ("code_verifier", verifier),
+            ("redirect_uri", redirect_uri.unwrap_or(OPENAI_REDIRECT_URI)),
+        ])
+        .send()
+        .context("failed to exchange OpenAI authorization code")?;
+    let status = response.status();
+    let payload: OpenAITokenResponse = response
+        .json()
+        .context("failed to parse OpenAI token response")?;
+    if !status.is_success() {
+        return Err(anyhow!(
+            "OpenAI token exchange failed with status {}",
+            status
+        ));
+    }
+    token_response_to_credentials(payload)
+}
+
+/// Refreshes OpenAI OAuth credentials using a stored refresh token.
+pub fn refresh_oauth_token(refresh_token: &str) -> Result<OpenAIOAuthCredentials> {
+    let client = Client::new();
+    let response = client
+        .post(OPENAI_TOKEN_URL)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", OPENAI_CODEX_CLIENT_ID),
+        ])
+        .send()
+        .context("failed to refresh OpenAI OAuth token")?;
+    let status = response.status();
+    let payload: OpenAITokenResponse = response
+        .json()
+        .context("failed to parse OpenAI refresh response")?;
+    if !status.is_success() {
+        return Err(anyhow!(
+            "OpenAI token refresh failed with status {}",
+            status
+        ));
+    }
+    token_response_to_credentials(payload)
+}
+
+fn token_response_to_credentials(payload: OpenAITokenResponse) -> Result<OpenAIOAuthCredentials> {
+    let access_token = payload
+        .access_token
+        .ok_or_else(|| anyhow!("OpenAI token response did not include access_token"))?;
+    let refresh_token = payload
+        .refresh_token
+        .ok_or_else(|| anyhow!("OpenAI token response did not include refresh_token"))?;
+    let expires_in = payload
+        .expires_in
+        .ok_or_else(|| anyhow!("OpenAI token response did not include expires_in"))?;
+    Ok(OpenAIOAuthCredentials {
+        account_id: decode_account_id(&access_token),
+        access_token,
+        refresh_token,
+        expires_at_ms: now_ms() + (expires_in as u64) * 1000,
+    })
+}
+
+fn decode_account_id(access_token: &str) -> Option<String> {
+    let payload = access_token.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload.as_bytes()).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    value
+        .get("https://api.openai.com/auth")
+        .and_then(|claim| claim.get("chatgpt_account_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAITokenResponse {
+    access_token: Option<String>,
+    refresh_token: Option<String>,
+    expires_in: Option<u32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authorization_url_contains_expected_parameters() {
+        let url = build_authorization_url(&OpenAIOAuthConfig {
+            state: "state-1".to_string(),
+            code_challenge: "challenge-1".to_string(),
+            redirect_uri: OPENAI_REDIRECT_URI.to_string(),
+            originator: "puffer".to_string(),
+        });
+        assert!(url.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"));
+        assert!(url.contains("state=state-1"));
+        assert!(url.contains("code_challenge=challenge-1"));
+    }
+
+    #[test]
+    fn parse_authorization_input_handles_url() {
+        let (code, state) =
+            parse_authorization_input("http://localhost:1455/auth/callback?code=abc&state=xyz");
+        assert_eq!(code.as_deref(), Some("abc"));
+        assert_eq!(state.as_deref(), Some("xyz"));
+    }
+
+    #[test]
+    fn generate_pkce_produces_non_empty_values() {
+        let pkce = generate_pkce();
+        assert!(!pkce.verifier.is_empty());
+        assert!(!pkce.challenge.is_empty());
+        assert!(!pkce.state.is_empty());
+    }
+
+    #[test]
+    fn decodes_account_id_from_jwt_payload() {
+        let payload = serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct-123"
+            }
+        });
+        let payload = URL_SAFE_NO_PAD.encode(payload.to_string());
+        let token = format!("header.{payload}.sig");
+        assert_eq!(decode_account_id(&token).as_deref(), Some("acct-123"));
+    }
+}
