@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum ModelDiscoveryFormat {
     OpenAiModels,
     AnthropicModels,
+    MistralModels,
     OllamaModels,
 }
 
