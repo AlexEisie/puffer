@@ -528,15 +528,17 @@ fn execute_local_command(
 ) -> Result<()> {
     match command.name {
         "help" => {
+            let registry = ToolRegistry::from_resources(resources);
             let mut text = String::from("Supported commands:\n");
             for command in commands {
                 let _ = writeln!(&mut text, "/{:<16} {}", command.name, command.description);
             }
             let _ = writeln!(
                 &mut text,
-                "\nResource counts: prompts={} tools={} skills={} plugins={} mcp_servers={} ides={}",
+                "\nResource counts: prompts={} tools={} executable_tools={} skills={} plugins={} mcp_servers={} ides={}",
                 resources.prompts.len(),
                 resources.tools.len(),
+                registry.tools().count(),
                 resources.skills.len(),
                 resources.plugins.len(),
                 resources.mcp_servers.len(),
@@ -544,24 +546,28 @@ fn execute_local_command(
             );
             emit_system(state, session_store, text)
         }
-        "status" => emit_system(
-            state,
-            session_store,
-            format!(
-                "provider={:?} model={:?} theme={} color={} effort={} fast={} sandbox={} vim={} messages={} slug={} parent={:?}",
-                state.current_provider,
-                state.current_model,
-                state.config.theme,
-                state.prompt_color,
-                state.effort_level,
-                state.fast_mode,
-                state.sandbox_mode,
-                state.vim_mode,
-                state.transcript.len(),
-                state.session.slug.as_deref().unwrap_or("<none>"),
-                state.session.parent_session_id
-            ),
-        ),
+        "status" => {
+            let registry = ToolRegistry::from_resources(resources);
+            emit_system(
+                state,
+                session_store,
+                format!(
+                    "provider={:?} model={:?} theme={} color={} effort={} fast={} sandbox={} vim={} messages={} slug={} parent={:?} executable_tools={}",
+                    state.current_provider,
+                    state.current_model,
+                    state.config.theme,
+                    state.prompt_color,
+                    state.effort_level,
+                    state.fast_mode,
+                    state.sandbox_mode,
+                    state.vim_mode,
+                    state.transcript.len(),
+                    state.session.slug.as_deref().unwrap_or("<none>"),
+                    state.session.parent_session_id,
+                    registry.tools().count()
+                ),
+            )
+        }
         "usage" => emit_system(
             state,
             session_store,
