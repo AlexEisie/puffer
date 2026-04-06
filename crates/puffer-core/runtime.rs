@@ -43,10 +43,14 @@ pub fn execute_user_prompt(
     input: &str,
 ) -> Result<TurnExecution> {
     let (provider, model_id) = resolve_provider_and_model(state, providers)?;
-    match provider.id.as_str() {
-        "anthropic" => execute_anthropic(state, resources, provider, model_id, auth_store, input),
-        "openai" => execute_openai(state, resources, provider, model_id, auth_store, input),
-        other => bail!("provider {other} is not executable yet"),
+    match resolve_model_api(state, providers, provider, &model_id).as_str() {
+        "anthropic-messages" => {
+            execute_anthropic(state, resources, provider, model_id, auth_store, input)
+        }
+        "openai-responses" => {
+            execute_openai(state, resources, provider, model_id, auth_store, input)
+        }
+        other => bail!("provider {} with api {other} is not executable yet", provider.id),
     }
 }
 fn resolve_provider_and_model<'a>(
@@ -84,6 +88,26 @@ fn resolve_provider_and_model<'a>(
         .map(|model| model.id.clone())
         .ok_or_else(|| anyhow!("provider {} has no configured models", provider.id))?;
     Ok((provider, model_id))
+}
+
+fn resolve_model_api(
+    state: &AppState,
+    providers: &ProviderRegistry,
+    provider: &ProviderDescriptor,
+    model_id: &str,
+) -> String {
+    state
+        .current_model
+        .as_ref()
+        .and_then(|selected| providers.resolve_model(selected).map(|model| model.api.clone()))
+        .or_else(|| {
+            provider
+                .models
+                .iter()
+                .find(|model| model.id == model_id)
+                .map(|model| model.api.clone())
+        })
+        .unwrap_or_else(|| provider.default_api.clone())
 }
 fn execute_anthropic(
     state: &AppState,
