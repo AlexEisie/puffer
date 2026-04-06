@@ -375,6 +375,41 @@ fn agents_command_creates_workspace_file() {
 }
 
 #[test]
+fn agents_command_can_list_and_use_agent_presets() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+    std::fs::write(
+        paths.workspace_config_dir.join("agents.yaml"),
+        "agents:\n  - id: reviewer\n    role: review\n    model: openai/gpt-5\n",
+    )
+    .unwrap();
+
+    dispatch_command(
+        &mut state,
+        &supported_commands(),
+        &LoadedResources::default(),
+        &ProviderRegistry::new(),
+        &AuthStore::default(),
+        &session_store,
+        "/agents use reviewer",
+    )
+    .unwrap();
+
+    assert_eq!(state.current_model.as_deref(), Some("openai/gpt-5"));
+    assert_eq!(state.current_provider.as_deref(), Some("openai"));
+}
+
+#[test]
 fn prompt_commands_append_user_message_and_surface_runtime_failures() {
     let tempdir = tempdir().unwrap();
     let paths = ConfigPaths::discover(tempdir.path());

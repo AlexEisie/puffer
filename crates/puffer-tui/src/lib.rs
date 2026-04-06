@@ -124,7 +124,6 @@ fn handle_key(
             auth_store,
             auth_path,
             session_store,
-            commands,
             tui,
         );
     }
@@ -195,7 +194,6 @@ fn handle_overlay_key(
     auth_store: &mut AuthStore,
     auth_path: &Path,
     session_store: &SessionStore,
-    commands: &[CommandSpec],
     tui: &mut TuiState,
 ) -> Result<bool> {
     let Some(overlay) = tui.overlay.as_mut() else {
@@ -211,15 +209,14 @@ fn handle_overlay_key(
         KeyCode::Enter => {
             if let Some(command) = overlay.selected_command() {
                 tui.overlay = None;
-                dispatch_command(
+                handle_submit(
                     state,
-                    commands,
                     resources,
                     providers,
                     auth_store,
                     auth_path,
                     session_store,
-                    &command,
+                    command,
                 )?;
             } else {
                 tui.overlay = None;

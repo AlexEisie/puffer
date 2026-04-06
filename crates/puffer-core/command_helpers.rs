@@ -6,6 +6,7 @@ use puffer_provider_registry::ProviderRegistry;
 use puffer_resources::{plugin_by_id, plugin_mcp_servers, skill_by_name, LoadedResources};
 use puffer_session_store::{SessionStore, TranscriptEvent};
 use puffer_tools::ToolRegistry;
+use serde::Deserialize;
 use std::fs;
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -488,22 +489,75 @@ pub(crate) fn handle_agents_command(
             default_agents_contents(state.current_model.as_deref()),
         )?;
     }
-    if args.trim() == "path" {
+    let trimmed = args.trim();
+    if trimmed == "path" {
         return emit_system(
             state,
             session_store,
             format!("Agents file: {}", agents_path.display()),
         );
     }
-    emit_system(
-        state,
-        session_store,
-        format!(
-            "Agents file: {}\n{}",
-            agents_path.display(),
-            fs::read_to_string(&agents_path)?
+    let contents = fs::read_to_string(&agents_path)?;
+    let parsed = parse_agents_file(&contents)?;
+    match trimmed {
+        "" | "show" => emit_system(
+            state,
+            session_store,
+            format!("Agents file: {}\n{}", agents_path.display(), contents),
         ),
-    )
+        "list" => {
+            let mut text = String::from("Agents:\n");
+            for agent in parsed.agents {
+                let _ = writeln!(
+                    &mut text,
+                    "- {} role={} model={}",
+                    agent.id, agent.role, agent.model
+                );
+            }
+            emit_system(state, session_store, text)
+        }
+        _ if trimmed.starts_with("show ") => {
+            let agent_id = trimmed.trim_start_matches("show ").trim();
+            if let Some(agent) = parsed.agents.iter().find(|agent| agent.id == agent_id) {
+                emit_system(
+                    state,
+                    session_store,
+                    format!(
+                        "Agent {}\nrole={}\nmodel={}",
+                        agent.id, agent.role, agent.model
+                    ),
+                )
+            } else {
+                emit_system(state, session_store, format!("Unknown agent {agent_id}."))
+            }
+        }
+        _ if trimmed.starts_with("use ") => {
+            let agent_id = trimmed.trim_start_matches("use ").trim();
+            if let Some(agent) = parsed.agents.iter().find(|agent| agent.id == agent_id) {
+                state.current_model = Some(agent.model.clone());
+                state.current_provider = agent
+                    .model
+                    .split_once('/')
+                    .map(|(provider, _)| provider.to_string())
+                    .or_else(|| state.current_provider.clone());
+                emit_system(
+                    state,
+                    session_store,
+                    format!(
+                        "Selected agent {}.\nrole={}\nmodel={}",
+                        agent.id, agent.role, agent.model
+                    ),
+                )
+            } else {
+                emit_system(state, session_store, format!("Unknown agent {agent_id}."))
+            }
+        }
+        _ => emit_system(
+            state,
+            session_store,
+            "Usage: /agents [path|list|show <id>|use <id>]".to_string(),
+        ),
+    }
 }
 
 pub(crate) fn append_tool_invocations(
@@ -609,6 +663,179 @@ pub(crate) fn handle_memory_command(
     )
 }
 
+pub(crate) fn handle_plugin_command(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    session_store: &SessionStore,
+    args: &str,
+) -> Result<()> {
+    let paths = ConfigPaths::discover(&state.cwd);
+    ensure_workspace_dirs(&paths)?;
+    let plugins_dir = paths.workspace_config_dir.join("resources/plugins");
+    fs::create_dir_all(&plugins_dir)?;
+    let plugin_path = plugins_dir.join("workspace.yaml");
+    if !plugin_path.exists() {
+        fs::write(&plugin_path, default_plugin_contents())?;
+    }
+    if args.trim() == "path" {
+        return emit_system(
+            state,
+            session_store,
+            format!("Plugins directory: {}", plugins_dir.display()),
+        );
+    }
+    if !args.trim().is_empty() && args.trim() != "show" {
+        return describe_plugin(state, resources, session_store, args);
+    }
+    emit_system(
+        state,
+        session_store,
+        format!(
+            "Plugins directory: {}\nloaded_plugins={}\n{}{}",
+            plugins_dir.display(),
+            resources.plugins.len(),
+            if resources.plugins.is_empty() {
+                format!("Example plugin file: {}\n", plugin_path.display())
+            } else {
+                let mut summary = String::from("Loaded plugins:\n");
+                for plugin in &resources.plugins {
+                    let _ = writeln!(
+                        &mut summary,
+                        "- {} -> {}",
+                        plugin.value.id, plugin.value.display_name
+                    );
+                }
+                summary
+            },
+            fs::read_to_string(&plugin_path)?
+        ),
+    )
+}
+
+pub(crate) fn handle_mcp_command(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    session_store: &SessionStore,
+    args: &str,
+) -> Result<()> {
+    let paths = ConfigPaths::discover(&state.cwd);
+    ensure_workspace_dirs(&paths)?;
+    let mcp_dir = paths.workspace_config_dir.join("resources/mcp_servers");
+    fs::create_dir_all(&mcp_dir)?;
+    let server_path = mcp_dir.join("workspace.yaml");
+    if !server_path.exists() {
+        fs::write(&server_path, default_mcp_contents())?;
+    }
+    if args.trim() == "path" {
+        return emit_system(
+            state,
+            session_store,
+            format!("MCP directory: {}", mcp_dir.display()),
+        );
+    }
+    if !args.trim().is_empty() && args.trim() != "show" {
+        return list_mcp_servers(state, resources, session_store);
+    }
+    let mut summary = String::new();
+    if resources.mcp_servers.is_empty() && plugin_mcp_servers(resources).is_empty() {
+        let _ = writeln!(&mut summary, "Example MCP file: {}", server_path.display());
+    } else {
+        let _ = writeln!(&mut summary, "Loaded MCP servers:");
+        for server in &resources.mcp_servers {
+            let _ = writeln!(
+                &mut summary,
+                "- {} -> {}",
+                server.value.id, server.value.display_name
+            );
+        }
+        for (plugin, server) in plugin_mcp_servers(resources) {
+            let _ = writeln!(
+                &mut summary,
+                "- {}:{} -> {}",
+                plugin.id, server.id, server.display_name
+            );
+        }
+    }
+    emit_system(
+        state,
+        session_store,
+        format!(
+            "MCP directory: {}\n{}{}",
+            mcp_dir.display(),
+            summary,
+            fs::read_to_string(&server_path)?
+        ),
+    )
+}
+
+pub(crate) fn handle_ide_command(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    session_store: &SessionStore,
+    args: &str,
+) -> Result<()> {
+    let paths = ConfigPaths::discover(&state.cwd);
+    ensure_workspace_dirs(&paths)?;
+    let ide_dir = paths.workspace_config_dir.join("resources/ides");
+    fs::create_dir_all(&ide_dir)?;
+    let ide_path = ide_dir.join("workspace.yaml");
+    if !ide_path.exists() {
+        fs::write(&ide_path, default_ide_contents())?;
+    }
+    if args.trim() == "path" {
+        return emit_system(
+            state,
+            session_store,
+            format!("IDE directory: {}", ide_dir.display()),
+        );
+    }
+    if args.trim() == "open" {
+        return emit_system(
+            state,
+            session_store,
+            format!("Open your IDE integration from {}.", ide_dir.display()),
+        );
+    }
+    emit_system(
+        state,
+        session_store,
+        format!(
+            "IDE directory: {}\nloaded_ides={}\n{}{}",
+            ide_dir.display(),
+            resources.ides.len(),
+            if resources.ides.is_empty() {
+                format!("Example IDE file: {}\n", ide_path.display())
+            } else {
+                let mut summary = String::from("Loaded IDE integrations:\n");
+                for ide in &resources.ides {
+                    let _ = writeln!(
+                        &mut summary,
+                        "- {} -> {}",
+                        ide.value.id, ide.value.display_name
+                    );
+                }
+                summary
+            },
+            fs::read_to_string(&ide_path)?
+        ),
+    )
+}
+
+pub(crate) fn reload_plugins_summary(
+    state: &AppState,
+    resources: &LoadedResources,
+) -> Result<String> {
+    let paths = ConfigPaths::discover(&state.cwd);
+    let plugins_dir = paths.workspace_config_dir.join("resources/plugins");
+    Ok(format!(
+        "Reloaded plugin registry for this session.\nplugins={}\nskills={}\nmcp_servers={}\nsource_dir={}",
+        resources.plugins.len(),
+        resources.skills.len(),
+        resources.mcp_servers.len(),
+        plugins_dir.display()
+    ))
+}
+
 fn format_tool_invocation(invocation: &ToolInvocation) -> String {
     let status = if invocation.success { "ok" } else { "error" };
     let output = invocation.output.trim();
@@ -663,4 +890,44 @@ fn default_agents_contents(model: Option<&str>) -> String {
         "agents:\n  - id: default\n    role: coding\n    model: {}\n",
         model.unwrap_or("anthropic/claude-sonnet-4-5")
     )
+}
+
+fn default_plugin_contents() -> &'static str {
+    "id: workspace\n\
+display_name: Workspace Plugin\n\
+description: Customize plugin commands for this workspace.\n\
+commands:\n\
+  - name: demo\n\
+    description: Example command\n"
+}
+
+fn default_mcp_contents() -> &'static str {
+    "id: workspace\n\
+display_name: Workspace MCP\n\
+transport: stdio\n\
+endpoint: \"\"\n\
+target: workspace\n\
+description: Example MCP server\n"
+}
+
+fn default_ide_contents() -> &'static str {
+    "id: workspace\n\
+display_name: Workspace IDE\n\
+description: Example IDE integration\n"
+}
+
+fn parse_agents_file(raw: &str) -> Result<AgentsFile> {
+    Ok(serde_yaml::from_str(raw)?)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AgentsFile {
+    agents: Vec<AgentEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AgentEntry {
+    id: String,
+    role: String,
+    model: String,
 }

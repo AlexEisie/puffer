@@ -333,6 +333,7 @@ fn anthropic_tool_definitions(registry: &ToolRegistry) -> Vec<Value> {
         .collect()
 }
 
+#[cfg(test)]
 fn anthropic_tool_schema(handler: &str) -> Value {
     match handler {
         "bash" => json!({
@@ -626,6 +627,7 @@ mod tests {
             default_api: "anthropic-messages".to_string(),
             auth_modes: vec![AuthMode::ApiKey],
             headers: Default::default(),
+            discovery: None,
             models: vec![puffer_provider_registry::ModelDescriptor {
                 id: "claude-sonnet-4-5".to_string(),
                 display_name: "Claude Sonnet 4.5".to_string(),

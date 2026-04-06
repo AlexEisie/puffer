@@ -234,6 +234,7 @@ fn sample_providers() -> ProviderRegistry {
         default_api: "anthropic-messages".to_string(),
         auth_modes: vec![AuthMode::ApiKey, AuthMode::OAuth],
         headers: Default::default(),
+        discovery: None,
         models: vec![ModelDescriptor {
             id: "claude-sonnet-4-5".to_string(),
             display_name: "Claude Sonnet 4.5".to_string(),
@@ -251,6 +252,7 @@ fn sample_providers() -> ProviderRegistry {
         default_api: "responses".to_string(),
         auth_modes: vec![AuthMode::ApiKey, AuthMode::OAuth],
         headers: Default::default(),
+        discovery: None,
         models: vec![ModelDescriptor {
             id: "gpt-5".to_string(),
             display_name: "GPT-5".to_string(),
