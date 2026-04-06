@@ -12,6 +12,7 @@ use puffer_core::{dispatch_command, execute_user_turn, supported_commands, AppSt
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use puffer_session_store::{SessionStore, TranscriptEvent};
+use puffer_tools::{BashToolInput, ToolInput, ToolRegistry};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io;
@@ -143,6 +144,11 @@ fn handle_submit(
         return Ok(());
     }
 
+    if let Some(shell_command) = parse_shell_shortcut(&submitted) {
+        execute_shell_shortcut(state, resources, session_store, shell_command)?;
+        return Ok(());
+    }
+
     state.push_message(MessageRole::User, submitted.clone());
     session_store.append_event(
         state.session.id,
@@ -170,6 +176,60 @@ fn handle_submit(
     }
 
     Ok(())
+}
+
+fn execute_shell_shortcut(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    session_store: &SessionStore,
+    shell_command: &str,
+) -> Result<()> {
+    let rendered_command = format!("!{shell_command}");
+    state.push_message(MessageRole::User, rendered_command.clone());
+    session_store.append_event(
+        state.session.id,
+        TranscriptEvent::UserMessage {
+            text: rendered_command,
+        },
+    )?;
+
+    let registry = ToolRegistry::from_resources(resources);
+    let result = registry.execute(
+        "bash",
+        &state.cwd,
+        ToolInput::Bash(BashToolInput {
+            command: shell_command.to_string(),
+        }),
+    )?;
+
+    let reply = if result.output.stderr.is_empty() {
+        result.output.stdout
+    } else if result.output.stdout.is_empty() {
+        result.output.stderr
+    } else {
+        format!("{}\n{}", result.output.stdout, result.output.stderr)
+    };
+    let role = if result.success {
+        MessageRole::Assistant
+    } else {
+        MessageRole::System
+    };
+    state.push_message(role, reply.clone());
+    session_store.append_event(
+        state.session.id,
+        TranscriptEvent::AssistantMessage { text: reply },
+    )?;
+    Ok(())
+}
+
+fn parse_shell_shortcut(input: &str) -> Option<&str> {
+    let command = input.strip_prefix("!!").or_else(|| input.strip_prefix('!'))?;
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 #[cfg(test)]
@@ -222,6 +282,13 @@ mod tests {
         assert!(rendered.contains("Commands"));
         assert!(rendered.contains("Inspector"));
         assert!(rendered.contains("/review"));
+    }
+
+    #[test]
+    fn parse_shell_shortcut_accepts_bang_prefix() {
+        assert_eq!(parse_shell_shortcut("!printf hi"), Some("printf hi"));
+        assert_eq!(parse_shell_shortcut("!!printf hi"), Some("printf hi"));
+        assert_eq!(parse_shell_shortcut("/help"), None);
     }
 
     #[test]

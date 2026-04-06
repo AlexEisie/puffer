@@ -1,6 +1,7 @@
 mod runtime;
 
 use anyhow::Result;
+use arboard::Clipboard;
 use puffer_config::PufferConfig;
 use puffer_provider_openai::{
     build_authorization_url as build_openai_authorization_url,
@@ -18,6 +19,7 @@ use puffer_transport_anthropic::{
 };
 use serde::Serialize;
 use std::fmt::Write as _;
+use std::process::Command;
 use std::path::PathBuf;
 
 pub use runtime::execute_user_prompt as execute_user_turn;
@@ -596,6 +598,10 @@ fn execute_local_command(
             state.transcript.clear();
             emit_system(state, session_store, "Transcript cleared.".to_string())
         }
+        "copy" => copy_last_message(state, session_store),
+        "context" => describe_context(state, resources, session_store),
+        "diff" => describe_git_diff(state, session_store),
+        "doctor" => run_doctor(state, resources, providers, session_store),
         "add-dir" => {
             let dir = if args.is_empty() {
                 state.cwd.clone()
@@ -1304,6 +1310,138 @@ fn list_ides(
             ide.value.display_name, ide.value.description
         );
     }
+    emit_system(state, session_store, text)
+}
+
+fn copy_last_message(state: &mut AppState, session_store: &SessionStore) -> Result<()> {
+    let text = state
+        .transcript
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, MessageRole::Assistant | MessageRole::System))
+        .map(|message| message.text.clone())
+        .ok_or_else(|| anyhow::anyhow!("no assistant or system message is available to copy"))?;
+
+    match Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text.clone())) {
+        Ok(()) => emit_system(
+            state,
+            session_store,
+            format!("Copied {} characters to the clipboard.", text.chars().count()),
+        ),
+        Err(_) => {
+            let fallback_path = state.cwd.join(".puffer-last-copy.txt");
+            std::fs::write(&fallback_path, &text)?;
+            emit_system(
+                state,
+                session_store,
+                format!(
+                    "Clipboard unavailable. Wrote {} characters to {}.",
+                    text.chars().count(),
+                    fallback_path.display()
+                ),
+            )
+        }
+    }
+}
+
+fn describe_context(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    session_store: &SessionStore,
+) -> Result<()> {
+    let transcript_chars = state
+        .transcript
+        .iter()
+        .map(|message| message.text.chars().count())
+        .sum::<usize>();
+    emit_system(
+        state,
+        session_store,
+        format!(
+            "Context summary:\nmessages={}\ncharacters={}\nworking_dirs={}\nprompts={}\ntools={}\nskills={}\nplugins={}",
+            state.transcript.len(),
+            transcript_chars,
+            state.working_dirs.len(),
+            resources.prompts.len(),
+            resources.tools.len(),
+            resources.skills.len(),
+            resources.plugins.len()
+        ),
+    )
+}
+
+fn describe_git_diff(state: &mut AppState, session_store: &SessionStore) -> Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&state.cwd)
+        .args(["diff", "--stat", "--no-ext-diff"])
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if text.is_empty() {
+                emit_system(state, session_store, "No git diff detected.".to_string())
+            } else {
+                emit_system(state, session_store, format!("Git diff:\n{text}"))
+            }
+        }
+        Ok(output) => emit_system(
+            state,
+            session_store,
+            format!(
+                "git diff failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ),
+        Err(error) => emit_system(
+            state,
+            session_store,
+            format!("git diff could not run: {error}"),
+        ),
+    }
+}
+
+fn run_doctor(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    session_store: &SessionStore,
+) -> Result<()> {
+    let checks = [
+        ("git", ["--version"].as_slice()),
+        ("sh", ["-lc", "printf ok"].as_slice()),
+        ("tmux", ["-V"].as_slice()),
+    ];
+    let mut text = String::from("Puffer doctor summary:\n");
+    for (program, args) in checks {
+        let result = Command::new(program).args(args).output();
+        match result {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let line = if stdout.is_empty() { "ok".to_string() } else { stdout };
+                let _ = writeln!(&mut text, "{program}: {line}");
+            }
+            Ok(output) => {
+                let _ = writeln!(
+                    &mut text,
+                    "{program}: unavailable ({})",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            Err(error) => {
+                let _ = writeln!(&mut text, "{program}: unavailable ({error})");
+            }
+        }
+    }
+    let _ = writeln!(&mut text, "providers={}", providers.providers().count());
+    let _ = writeln!(&mut text, "tools={}", resources.tools.len());
+    let _ = writeln!(&mut text, "skills={}", resources.skills.len());
+    let _ = writeln!(
+        &mut text,
+        "auth_provider={}",
+        state.current_provider.as_deref().unwrap_or("<unset>")
+    );
     emit_system(state, session_store, text)
 }
 
