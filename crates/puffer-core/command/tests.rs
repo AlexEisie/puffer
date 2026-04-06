@@ -343,6 +343,98 @@ fn hooks_command_creates_workspace_file() {
 }
 
 #[test]
+fn plugin_command_creates_workspace_plugin_file() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+
+    dispatch_command(
+        &mut state,
+        &supported_commands(),
+        &LoadedResources::default(),
+        &ProviderRegistry::new(),
+        &AuthStore::default(),
+        &session_store,
+        "/plugin",
+    )
+    .unwrap();
+
+    let plugin_path = paths.workspace_config_dir.join("resources/plugins/workspace.yaml");
+    assert!(plugin_path.exists());
+}
+
+#[test]
+fn mcp_command_creates_workspace_mcp_file() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+
+    dispatch_command(
+        &mut state,
+        &supported_commands(),
+        &LoadedResources::default(),
+        &ProviderRegistry::new(),
+        &AuthStore::default(),
+        &session_store,
+        "/mcp",
+    )
+    .unwrap();
+
+    let mcp_path = paths
+        .workspace_config_dir
+        .join("resources/mcp_servers/workspace.yaml");
+    assert!(mcp_path.exists());
+}
+
+#[test]
+fn ide_command_creates_workspace_ide_file() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+
+    dispatch_command(
+        &mut state,
+        &supported_commands(),
+        &LoadedResources::default(),
+        &ProviderRegistry::new(),
+        &AuthStore::default(),
+        &session_store,
+        "/ide",
+    )
+    .unwrap();
+
+    let ide_path = paths.workspace_config_dir.join("resources/ides/workspace.yaml");
+    assert!(ide_path.exists());
+}
+
+#[test]
 fn agents_command_creates_workspace_file() {
     let tempdir = tempdir().unwrap();
     let paths = ConfigPaths::discover(tempdir.path());
