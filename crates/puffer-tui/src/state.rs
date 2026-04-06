@@ -1,4 +1,5 @@
 use crate::popup::popup_rows;
+use crate::usage::UsageOverlay;
 use anyhow::Result;
 use puffer_config::{ensure_workspace_dirs, ConfigPaths};
 use puffer_core::CommandSpec;
@@ -246,6 +247,7 @@ pub(crate) enum OverlayState {
         entries: Vec<ModelPickerEntry>,
         selection: usize,
     },
+    Usage(UsageOverlay),
 }
 
 impl OverlayState {
@@ -262,7 +264,7 @@ impl OverlayState {
             | Self::ThemePicker { selection, .. } => {
                 *selection = selection.saturating_sub(1);
             }
-            Self::ApiKeyPrompt { .. } => {}
+            Self::ApiKeyPrompt { .. } | Self::Usage(..) => {}
         }
     }
 
@@ -290,7 +292,7 @@ impl OverlayState {
             } => {
                 *selection = (*selection + 1).min(entries.len().saturating_sub(1));
             }
-            Self::ApiKeyPrompt { .. } => {}
+            Self::ApiKeyPrompt { .. } | Self::Usage(..) => {}
         }
     }
 
@@ -342,7 +344,8 @@ impl OverlayState {
                 .map(|entry| format!("/theme {}", entry.selector)),
             Self::ProviderPicker { .. }
             | Self::AuthPicker { .. }
-            | Self::ApiKeyPrompt { .. } => None,
+            | Self::ApiKeyPrompt { .. }
+            | Self::Usage(..) => None,
         }
     }
 
@@ -359,7 +362,8 @@ impl OverlayState {
             Self::SessionPicker { .. }
             | Self::AgentPicker { .. }
             | Self::LogoutPicker { .. }
-            | Self::ThemePicker { .. } => None,
+            | Self::ThemePicker { .. }
+            | Self::Usage(..) => None,
         }
     }
 
@@ -369,7 +373,7 @@ impl OverlayState {
             Self::ModelPicker { entries, selection, .. } => {
                 entries.get(*selection).map(|entry| entry.selector.as_str())
             }
-            _ => None,
+            Self::Usage(..) | _ => None,
         }
     }
 
@@ -434,7 +438,7 @@ impl OverlayState {
                     *selection = index;
                 }
             }
-            Self::ApiKeyPrompt { .. } => {}
+            Self::ApiKeyPrompt { .. } | Self::Usage(..) => {}
         }
     }
 
@@ -469,7 +473,7 @@ impl OverlayState {
             Self::ApiKeyPrompt { value, cursor, .. } => {
                 *cursor = previous_boundary(value, *cursor);
             }
-            _ => {}
+            Self::Usage(..) | _ => {}
         }
     }
 
@@ -479,7 +483,7 @@ impl OverlayState {
             Self::ApiKeyPrompt { value, cursor, .. } => {
                 *cursor = next_boundary(value, *cursor);
             }
-            _ => {}
+            Self::Usage(..) | _ => {}
         }
     }
 
@@ -489,7 +493,7 @@ impl OverlayState {
             Self::ApiKeyPrompt { cursor, .. } => {
                 *cursor = 0;
             }
-            _ => {}
+            Self::Usage(..) | _ => {}
         }
     }
 
@@ -499,7 +503,7 @@ impl OverlayState {
             Self::ApiKeyPrompt { value, cursor, .. } => {
                 *cursor = value.len();
             }
-            _ => {}
+            Self::Usage(..) | _ => {}
         }
     }
 
@@ -510,7 +514,7 @@ impl OverlayState {
                 value.insert(*cursor, ch);
                 *cursor += ch.len_utf8();
             }
-            _ => {}
+            Self::Usage(..) | _ => {}
         }
     }
 
@@ -525,7 +529,7 @@ impl OverlayState {
                 value.drain(start..*cursor);
                 *cursor = start;
             }
-            _ => {}
+            Self::Usage(..) | _ => {}
         }
     }
 
@@ -539,7 +543,7 @@ impl OverlayState {
                 let end = next_boundary(value, *cursor);
                 value.drain(*cursor..end);
             }
-            _ => {}
+            Self::Usage(..) | _ => {}
         }
     }
 
@@ -547,7 +551,7 @@ impl OverlayState {
     pub(crate) fn api_key_value(&self) -> Option<&str> {
         match self {
             Self::ApiKeyPrompt { value, .. } => Some(value.as_str()),
-            _ => None,
+            Self::Usage(..) | _ => None,
         }
     }
 }

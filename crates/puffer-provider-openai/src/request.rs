@@ -72,6 +72,8 @@ pub struct OpenAIResponsesToolRequest {
     pub input: Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<OpenAIResponsesTool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<OpenAIResponsesToolChoice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,9 +85,18 @@ pub struct OpenAIResponsesToolRequest {
 pub struct OpenAIResponsesTool {
     #[serde(rename = "type")]
     pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
     pub parameters: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filters: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_location: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_web_access: Option<bool>,
 }
 
 /// A tool selection directive for the OpenAI Responses API.
@@ -326,7 +337,11 @@ mod tests {
                         },
                         "required": ["path"]
                     }),
+                    filters: None,
+                    user_location: None,
+                    external_web_access: None,
                 }],
+                include: Vec::new(),
                 tool_choice: Some(OpenAIResponsesToolChoice::Mode(
                     OpenAIResponsesToolChoiceMode::Auto,
                 )),

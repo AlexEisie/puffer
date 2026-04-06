@@ -193,6 +193,9 @@ pub(crate) fn execute_shell_shortcut(
         &state.cwd,
         ToolInput::Bash {
             command: shell_command.to_string(),
+            timeout: None,
+            run_in_background: false,
+            dangerously_disable_sandbox: false,
         },
     )?;
     state.record_task("bash", shell_command.to_string(), result.success);

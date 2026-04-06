@@ -1,6 +1,7 @@
 use crate::state::{
     load_agent_picker_entries, AuthPickerAction, AuthPickerEntry, ModelPickerEntry, OverlayState,
 };
+use crate::usage::UsageOverlay;
 use anyhow::Result;
 use puffer_config::ConfigPaths;
 use puffer_core::AppState;
@@ -11,10 +12,7 @@ use puffer_provider_registry::{
 use puffer_session_store::SessionStore;
 
 /// Returns whether the current session still needs a selected provider/model pair.
-pub(crate) fn needs_initial_provider_setup(
-    state: &AppState,
-    providers: &ProviderRegistry,
-) -> bool {
+pub(crate) fn needs_initial_provider_setup(state: &AppState, providers: &ProviderRegistry) -> bool {
     let Some(provider_id) = state.current_provider.as_deref() else {
         return true;
     };
@@ -31,7 +29,10 @@ pub(crate) fn needs_initial_provider_setup(
         return false;
     };
     selected_provider != provider_id
-        || !provider.models.iter().any(|model| model.id == selected_model)
+        || !provider
+            .models
+            .iter()
+            .any(|model| model.id == selected_model)
 }
 
 /// Builds the initial onboarding overlay when provider/model setup is incomplete.
@@ -100,6 +101,7 @@ pub(crate) fn overlay_from_command(
         "login" if !args.is_empty() => auth_picker(providers, auth_store, args, false)?,
         "logout" if args.is_empty() => logout_picker(providers, auth_store),
         "theme" if args.is_empty() => Some(theme_picker()),
+        "usage" if args.is_empty() => Some(UsageOverlay::open(state, providers, auth_store)),
         _ => None,
     };
     Ok(overlay)
@@ -121,9 +123,7 @@ pub(crate) fn provider_setup_overlay(
 }
 
 /// Returns the first provider step used after the initial theme selection.
-pub(crate) fn initial_provider_overlay(
-    providers: &ProviderRegistry,
-) -> Option<OverlayState> {
+pub(crate) fn initial_provider_overlay(providers: &ProviderRegistry) -> Option<OverlayState> {
     provider_picker(providers, true)
 }
 
@@ -141,14 +141,17 @@ pub(crate) fn back_overlay(
         } => auth_picker(providers, auth_store, provider_id, *onboarding)?,
         OverlayState::AuthPicker { onboarding, .. } => provider_picker(providers, *onboarding),
         OverlayState::ProviderPicker { onboarding, .. } if *onboarding => Some(theme_picker()),
-        OverlayState::ModelPicker { onboarding, .. } if *onboarding => provider_picker(providers, true),
+        OverlayState::ModelPicker { onboarding, .. } if *onboarding => {
+            provider_picker(providers, true)
+        }
         OverlayState::SessionPicker { .. }
         | OverlayState::AgentPicker { .. }
         | OverlayState::ModelPicker { .. }
         | OverlayState::ProviderPicker { .. }
         | OverlayState::LoginPicker { .. }
         | OverlayState::LogoutPicker { .. }
-        | OverlayState::ThemePicker { .. } => None,
+        | OverlayState::ThemePicker { .. }
+        | OverlayState::Usage(..) => None,
     };
     Ok(next)
 }
@@ -181,7 +184,10 @@ fn provider_picker(providers: &ProviderRegistry, onboarding: bool) -> Option<Ove
         })
         .collect::<Vec<_>>();
     providers.sort_by_key(|provider| provider_rank(provider.id.as_str()));
-    let entries = providers.into_iter().map(provider_entry).collect::<Vec<_>>();
+    let entries = providers
+        .into_iter()
+        .map(provider_entry)
+        .collect::<Vec<_>>();
     if entries.is_empty() {
         return None;
     }
@@ -244,7 +250,8 @@ fn auth_picker(
     if auth_store.has_auth(provider_id) {
         entries.push(AuthPickerEntry {
             label: "stored".to_string(),
-            description: "Use the stored credentials in ~/.puffer/auth.json".to_string(),
+            description: "Use the stored credentials in ~/.puffer/auth.json and secure storage"
+                .to_string(),
             action: AuthPickerAction::UseStored,
         });
     }
@@ -335,10 +342,7 @@ fn model_picker(
     }
 }
 
-fn logout_picker(
-    providers: &ProviderRegistry,
-    auth_store: &AuthStore,
-) -> Option<OverlayState> {
+fn logout_picker(providers: &ProviderRegistry, auth_store: &AuthStore) -> Option<OverlayState> {
     let entries = auth_store
         .provider_ids()
         .map(|provider_id| ModelPickerEntry {

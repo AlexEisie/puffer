@@ -71,8 +71,27 @@ pub(super) fn execute_turn(
                 arguments: tool_call.arguments.clone(),
             })
             .collect::<Vec<_>>();
-        let tool_results =
-            execute_openai_tool_calls(resources, &openai_calls, &registry, &state.cwd)?;
+        let tool_results = execute_openai_tool_calls(
+            resources,
+            &openai_calls,
+            &registry,
+            &state.cwd,
+            &OpenAIRequestConfig {
+                base_url: provider.base_url.clone(),
+                version: APP_VERSION.to_string(),
+                auth: OpenAIAuth::None,
+                originator: "puffer".to_string(),
+                session_id: None,
+                account_id: None,
+                custom_headers: Vec::new(),
+                query_params: provider
+                    .query_params
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            },
+            &model_id,
+        )?;
         invocations.extend(tool_results.invocations);
         messages.push(MistralChatMessage {
             role: choice

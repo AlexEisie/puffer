@@ -498,6 +498,7 @@ fn codex_import_without_base_url_clears_previous_openai_override() {
         &mut auth_store,
         &auth_path,
         &session_store,
+        &supported_commands(),
         &mut tui,
         true,
     )
@@ -525,6 +526,30 @@ fn codex_import_without_base_url_clears_previous_openai_override() {
     } else {
         std::env::remove_var("PUFFER_HOME");
     }
+}
+
+#[test]
+fn try_open_overlay_builds_usage_overlay() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+
+    let state = sample_state();
+    let mut providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let mut tui = TuiState::default();
+    let opened = try_open_overlay(
+        &state,
+        &mut providers,
+        &auth_store,
+        &session_store,
+        &mut tui,
+        "/usage",
+    )
+    .unwrap();
+    assert!(opened);
+    assert!(matches!(tui.overlay, Some(OverlayState::Usage(..))));
 }
 
 #[test]
@@ -894,6 +919,9 @@ fn sample_auth_store() -> AuthStore {
             plan_type: None,
             rate_limit_tier: None,
             scopes: vec!["org:create_api_key".to_string()],
+            organization_name: None,
+            organization_role: None,
+            workspace_role: None,
         },
     );
     auth_store

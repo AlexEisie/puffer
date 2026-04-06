@@ -10,6 +10,8 @@ path = "lib.rs"
 [dependencies]
 anyhow.workspace = true
 arboard.workspace = true
+glob.workspace = true
+fslock.workspace = true
 indexmap.workspace = true
 reqwest = { version = "0.12.24", features = ["blocking", "json"] }
 serde.workspace = true

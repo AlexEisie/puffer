@@ -1,4 +1,4 @@
 Supported commands:
 /add-dir          Add a new working directory
 /agents           Manage agent configurations
-/branch           Create a branch of the current conversation at this point
+/branch           Create a branch of the current

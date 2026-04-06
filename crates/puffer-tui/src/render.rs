@@ -8,6 +8,7 @@ use self::summary::{footer_lines, header_lines, session_lines};
 use crate::markdown::render_markdown;
 use crate::popup::popup_rows;
 use crate::state::AuthPickerEntry;
+use crate::usage::render_usage_overlay;
 use crate::{ModelPickerEntry, OverlayState};
 use puffer_core::{AppState, CommandSpec, MessageRole, RenderedMessage};
 use puffer_provider_registry::AuthStore;
@@ -199,7 +200,11 @@ pub(crate) fn render(
         render_command_popup(frame, layout[1], prompt_row, input, slash_selection, commands);
     }
     if let Some(overlay) = active_overlay.as_ref() {
-        render_overlay(frame, layout[1], overlay);
+        if let OverlayState::Usage(usage) = overlay {
+            render_usage_overlay(frame, frame.area(), usage);
+        } else {
+            render_overlay(frame, layout[1], overlay);
+        }
     }
 }
 
@@ -555,6 +560,7 @@ fn overlay_title(overlay: &OverlayState) -> &'static str {
         OverlayState::LoginPicker { .. } => "Select Provider",
         OverlayState::LogoutPicker { .. } => "Logout Provider",
         OverlayState::ThemePicker { .. } => "Select Theme",
+        OverlayState::Usage(..) => "Usage",
     }
 }
 
@@ -610,6 +616,7 @@ fn overlay_rows(overlay: &OverlayState) -> Vec<OverlayRow> {
                 text: format!("key  {}", masked_secret(value)),
             },
         ],
+        OverlayState::Usage(..) => Vec::new(),
     }
 }
 

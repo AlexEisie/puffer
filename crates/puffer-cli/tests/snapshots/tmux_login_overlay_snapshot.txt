@@ -1,4 +1,4 @@
-╭ Login ───────────────────────────────────────────────────────────────╮
-│Select Provider                                                       │
-│anthropic  Anthropic                                                  │
-│openai  OpenAI                                                        │
+╭ Login ──────────────────────────────────────────╮
+│Select Provider                                  │
+│anthropic  Anthropic                             │
+│openai  OpenAI                                   │
