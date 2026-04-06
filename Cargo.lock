@@ -1522,6 +1522,7 @@ dependencies = [
  "puffer-tui",
  "serde_json",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -1633,7 +1634,6 @@ dependencies = [
  "anyhow",
  "base64",
  "indexmap",
- "puffer-provider-registry",
  "reqwest",
  "serde",
  "serde_json",
@@ -1654,6 +1654,7 @@ dependencies = [
  "puffer-provider-registry",
  "puffer-resources",
  "puffer-session-store",
+ "puffer-test-support",
  "puffer-tools",
  "ratatui",
  "uuid",

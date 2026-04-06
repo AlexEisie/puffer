@@ -25,6 +25,7 @@ use puffer_transport_anthropic::{
 use std::io::Read as _;
 use std::io::Write as _;
 use std::time::Duration;
+use uuid::Uuid;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -315,7 +316,8 @@ fn main() -> Result<()> {
         Some(Command::Tool { command }) => run_tool_command(command, &resources, &cwd),
         Some(Command::Resume { session_id }) => {
             let session_store = SessionStore::from_paths(&paths)?;
-            let session = session_store.load_session(session_id.parse()?)?;
+            let session =
+                session_store.load_session(resolve_session_query(&session_store, &session_id)?)?;
             let mut state = restore_state_from_session(config.clone(), session);
             puffer_tui::run_app(
                 &mut state,
@@ -329,8 +331,8 @@ fn main() -> Result<()> {
         }
         Some(Command::Fork { session_id }) => {
             let session_store = SessionStore::from_paths(&paths)?;
-            let session =
-                session_store.fork_session(session_id.parse()?, std::env::current_dir()?)?;
+            let source = resolve_session_query(&session_store, &session_id)?;
+            let session = session_store.fork_session(source, std::env::current_dir()?)?;
             let record = session_store.load_session(session.id)?;
             let mut state = restore_state_from_session(config.clone(), record);
             puffer_tui::run_app(
@@ -379,8 +381,8 @@ fn run_tool_command(
                                 "name": tool.spec.name,
                                 "description": tool.spec.description,
                                 "handler": tool.spec.handler,
-                                "approval_policy": tool.spec.approval_policy,
-                                "sandbox_policy": tool.spec.sandbox_policy,
+                                "approval_policy": tool.spec.policy.approval_policy,
+                                "sandbox_policy": tool.spec.policy.sandbox_policy,
                             })
                         })
                         .collect::<Vec<_>>(),
@@ -399,8 +401,8 @@ fn run_tool_command(
                     "name": tool.spec.name,
                     "description": tool.spec.description,
                     "handler": tool.spec.handler,
-                    "approval_policy": tool.spec.approval_policy,
-                    "sandbox_policy": tool.spec.sandbox_policy,
+                    "approval_policy": tool.spec.policy.approval_policy,
+                    "sandbox_policy": tool.spec.policy.sandbox_policy,
                 }))?
             );
         }
@@ -412,11 +414,8 @@ fn run_tool_command(
         }
         ToolCommand::Bash { command } => {
             let registry = ToolRegistry::from_resources(resources);
-            let result = registry.execute(
-                "bash",
-                cwd,
-                puffer_tools::ToolInput::Bash(puffer_tools::BashToolInput { command }),
-            )?;
+            let result =
+                registry.execute("bash", cwd, puffer_tools::ToolInput::Bash { command })?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         ToolCommand::Read { path } => {
@@ -424,9 +423,7 @@ fn run_tool_command(
             let result = registry.execute(
                 "read_file",
                 cwd,
-                puffer_tools::ToolInput::ReadFile(puffer_tools::ReadFileToolInput {
-                    path: path.into(),
-                }),
+                puffer_tools::ToolInput::ReadFile { path: path.into() },
             )?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
@@ -435,10 +432,10 @@ fn run_tool_command(
             let result = registry.execute(
                 "write_file",
                 cwd,
-                puffer_tools::ToolInput::WriteFile(puffer_tools::WriteFileToolInput {
+                puffer_tools::ToolInput::WriteFile {
                     path: path.into(),
                     contents,
-                }),
+                },
             )?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
@@ -465,7 +462,9 @@ fn run_session_command(command: Option<SessionCommand>, paths: &ConfigPaths) -> 
                 session_store.set_note(id, None)?;
                 println!("cleared note for session {session_id}");
             } else {
-                let note = note.ok_or_else(|| anyhow::anyhow!("note text is required unless --clear is used"))?;
+                let note = note.ok_or_else(|| {
+                    anyhow::anyhow!("note text is required unless --clear is used")
+                })?;
                 session_store.set_note(id, Some(note))?;
                 println!("updated note for session {session_id}");
             }
@@ -810,6 +809,31 @@ fn restore_state_from_session(
                 format!("Command: /{} {}", name, args).trim().to_string(),
             ),
             TranscriptEvent::SessionRenamed { .. } => {}
+            TranscriptEvent::StateSnapshot {
+                current_model,
+                current_provider,
+                theme,
+                prompt_color,
+                effort_level,
+                fast_mode,
+                sandbox_mode,
+                remote_name,
+                remote_environment,
+                statusline_enabled,
+                working_dirs,
+            } => {
+                state.current_model = current_model;
+                state.current_provider = current_provider;
+                state.config.theme = theme;
+                state.prompt_color = prompt_color;
+                state.effort_level = effort_level;
+                state.fast_mode = fast_mode;
+                state.sandbox_mode = sandbox_mode;
+                state.remote_name = remote_name;
+                state.remote_environment = remote_environment;
+                state.statusline_enabled = statusline_enabled;
+                state.working_dirs = working_dirs.into_iter().map(Into::into).collect();
+            }
         }
     }
     state
@@ -839,4 +863,14 @@ fn to_registry_oauth_credential_anthropic(
         email: credential.email_address,
         scopes: credential.scopes,
     }
+}
+
+fn resolve_session_query(session_store: &SessionStore, query: &str) -> Result<Uuid> {
+    if let Ok(session_id) = query.parse() {
+        return Ok(session_id);
+    }
+    let session = session_store
+        .find_session(query)?
+        .ok_or_else(|| anyhow::anyhow!("no session matched `{query}`"))?;
+    Ok(session.id)
 }

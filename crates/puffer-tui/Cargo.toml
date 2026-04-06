@@ -17,4 +17,5 @@ puffer-tools = { path = "../puffer-tools" }
 
 [dev-dependencies]
 insta.workspace = true
+puffer-test-support = { path = "../puffer-test-support" }
 uuid.workspace = true

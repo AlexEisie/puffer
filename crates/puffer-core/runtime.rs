@@ -7,9 +7,7 @@ use puffer_provider_registry::{
     AuthStore, OAuthCredential, ProviderDescriptor, ProviderRegistry, StoredCredential,
 };
 use puffer_resources::LoadedResources;
-use puffer_tools::{
-    BashToolInput, ReadFileToolInput, ToolInput, ToolKind, ToolRegistry, WriteFileToolInput,
-};
+use puffer_tools::ToolRegistry;
 use puffer_transport_anthropic::{
     build_messages_request, AnthropicAuth, AnthropicMessage, AnthropicModelRequest,
     AnthropicRequestConfig,
@@ -79,92 +77,94 @@ fn execute_anthropic(
     input: &str,
 ) -> Result<String> {
     let auth = anthropic_auth_for_provider(auth_store, &provider.id)?;
-    let tool_registry = ToolRegistry::from_resources(resources);
-    let tool_definitions = anthropic_tool_definitions(&tool_registry);
-    let mut messages = vec![json!({
-        "role": "user",
-        "content": input,
-    })];
+    let registry = ToolRegistry::from_resources(resources);
+    let request = build_messages_request(
+        &AnthropicRequestConfig {
+            base_url: provider.base_url.clone(),
+            session_id: state.session.id.to_string(),
+            custom_headers: provider.headers.clone(),
+            remote_container_id: None,
+            remote_session_id: None,
+            client_app: None,
+            entrypoint: "cli".to_string(),
+            user_type: "external".to_string(),
+            version: "0.1.0".to_string(),
+            workload: None,
+            additional_protection: false,
+            cch_enabled: true,
+            auth: auth.clone(),
+            beta_header: None,
+            client_request_id: None,
+        },
+        &AnthropicModelRequest {
+            model: model_id.clone(),
+            max_tokens: 1024,
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: input.to_string(),
+            }],
+        },
+    )?;
 
-    for _ in 0..8 {
-        let request = build_messages_request(
-            &AnthropicRequestConfig {
-                base_url: provider.base_url.clone(),
-                session_id: state.session.id.to_string(),
-                custom_headers: provider.headers.clone(),
-                remote_container_id: None,
-                remote_session_id: None,
-                client_app: None,
-                entrypoint: "cli".to_string(),
-                user_type: "external".to_string(),
-                version: "0.1.0".to_string(),
-                workload: None,
-                additional_protection: false,
-                cch_enabled: true,
-                auth: auth.clone(),
-                beta_header: None,
-                client_request_id: None,
-            },
-            &AnthropicModelRequest {
-                model: model_id.clone(),
-                max_tokens: 1024,
-                messages: vec![AnthropicMessage {
-                    role: "user".to_string(),
-                    content: input.to_string(),
-                }],
-            },
-        )?;
+    let mut body = json!({
+        "model": model_id,
+        "max_tokens": 1024,
+        "messages": [
+            {
+                "role": "user",
+                "content": input,
+            }
+        ],
+        "system": [
+            {
+                "type": "text",
+                "text": request.attribution_prefix_block.clone(),
+            }
+        ]
+    });
 
-        let mut body = json!({
+    let tools = anthropic_tool_definitions(&registry);
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(tools);
+    }
+
+    let response = send_http_request(&request.url, &request.headers, &body.to_string(), true)?;
+    if let Some(tool_results) = execute_anthropic_tool_calls(&response, &registry, &state.cwd)? {
+        let follow_up_body = json!({
             "model": model_id,
             "max_tokens": 1024,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": input,
+                },
+                {
+                    "role": "assistant",
+                    "content": response.get("content").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+                },
+                {
+                    "role": "user",
+                    "content": tool_results,
+                }
+            ],
             "system": [
                 {
                     "type": "text",
                     "text": request.attribution_prefix_block,
                 }
             ],
-            "messages": messages,
+            "tools": anthropic_tool_definitions(&registry),
         });
-        if !tool_definitions.is_empty() {
-            body["tools"] = Value::Array(tool_definitions.clone());
-        }
-
-        let response = send_http_request(&request.url, &request.headers, &body.to_string(), true)?;
-        let content = response
-            .get("content")
-            .and_then(Value::as_array)
-            .cloned()
-            .ok_or_else(|| anyhow!("anthropic response missing content array"))?;
-        let tool_calls = parse_anthropic_tool_calls(&content, &tool_registry)?;
-        if tool_calls.is_empty() {
-            return parse_anthropic_text(&response);
-        }
-
-        messages.push(json!({
-            "role": "assistant",
-            "content": content,
-        }));
-        let tool_results = tool_calls
-            .into_iter()
-            .map(|call| {
-                let result = tool_registry.execute(&call.tool_id, &state.cwd, call.input)?;
-                let text = format!("{}{}", result.output.stdout, result.output.stderr);
-                Ok::<Value, anyhow::Error>(json!({
-                    "type": "tool_result",
-                    "tool_use_id": call.tool_use_id,
-                    "content": text,
-                    "is_error": !result.success,
-                }))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        messages.push(json!({
-            "role": "user",
-            "content": tool_results,
-        }));
+        let follow_up = send_http_request(
+            &request.url,
+            &request.headers,
+            &follow_up_body.to_string(),
+            true,
+        )?;
+        return parse_anthropic_text(&follow_up);
     }
 
-    bail!("anthropic tool loop exceeded iteration limit")
+    parse_anthropic_text(&response)
 }
 
 fn execute_openai(
@@ -264,32 +264,36 @@ fn parse_anthropic_text(response: &Value) -> Result<String> {
     Ok(parts.join("\n"))
 }
 
-fn anthropic_tool_definitions(tool_registry: &ToolRegistry) -> Vec<Value> {
-    tool_registry
+fn anthropic_tool_definitions(registry: &ToolRegistry) -> Vec<Value> {
+    registry
         .tools()
         .map(|tool| {
             json!({
-                "name": tool.spec.name,
+                "name": tool.spec.id,
                 "description": tool.spec.description,
-                "input_schema": anthropic_tool_schema(tool.kind),
+                "input_schema": anthropic_tool_schema(tool.spec.handler.as_str()),
             })
         })
         .collect()
 }
 
-fn anthropic_tool_schema(kind: ToolKind) -> Value {
-    match kind {
-        ToolKind::Bash => json!({
+fn anthropic_tool_schema(handler: &str) -> Value {
+    match handler {
+        "bash" => json!({
             "type": "object",
-            "properties": { "command": { "type": "string" } },
+            "properties": {
+                "command": { "type": "string" }
+            },
             "required": ["command"],
         }),
-        ToolKind::ReadFile => json!({
+        "read_file" => json!({
             "type": "object",
-            "properties": { "path": { "type": "string" } },
+            "properties": {
+                "path": { "type": "string" }
+            },
             "required": ["path"],
         }),
-        ToolKind::WriteFile => json!({
+        "write_file" => json!({
             "type": "object",
             "properties": {
                 "path": { "type": "string" },
@@ -297,80 +301,59 @@ fn anthropic_tool_schema(kind: ToolKind) -> Value {
             },
             "required": ["path", "contents"],
         }),
+        _ => json!({
+            "type": "object",
+            "properties": {},
+        }),
     }
 }
 
-fn parse_anthropic_tool_calls(
-    content: &[Value],
-    tool_registry: &ToolRegistry,
-) -> Result<Vec<AnthropicToolCall>> {
-    let mut calls = Vec::new();
+fn execute_anthropic_tool_calls(
+    response: &Value,
+    registry: &ToolRegistry,
+    cwd: &std::path::Path,
+) -> Result<Option<Value>> {
+    let Some(content) = response.get("content").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+
+    let mut results = Vec::new();
     for item in content {
         if item.get("type").and_then(Value::as_str) != Some("tool_use") {
             continue;
         }
-        let name = item
+        let tool_id = item
             .get("name")
             .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("anthropic tool_use missing name"))?;
+            .ok_or_else(|| anyhow!("anthropic tool_use block missing name"))?;
         let tool_use_id = item
             .get("id")
             .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("anthropic tool_use missing id"))?
-            .to_string();
-        let tool = tool_registry
-            .tools()
-            .find(|tool| tool.spec.name == name || tool.spec.id == name)
-            .ok_or_else(|| anyhow!("unknown anthropic tool {name}"))?;
-        let input = tool_input_from_json(
-            tool.kind,
-            item.get("input")
-                .ok_or_else(|| anyhow!("anthropic tool_use missing input"))?,
-        )?;
-        calls.push(AnthropicToolCall {
-            tool_id: tool.spec.id.clone(),
-            tool_use_id,
-            input,
-        });
+            .ok_or_else(|| anyhow!("anthropic tool_use block missing id"))?;
+        let input = item
+            .get("input")
+            .ok_or_else(|| anyhow!("anthropic tool_use block missing input"))?;
+        let execution = registry.execute_json(tool_id, cwd, input.clone())?;
+        let output_text = if execution.output.stderr.is_empty() {
+            execution.output.stdout
+        } else if execution.output.stdout.is_empty() {
+            execution.output.stderr
+        } else {
+            format!("{}\n{}", execution.output.stdout, execution.output.stderr)
+        };
+        results.push(json!({
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": output_text,
+            "is_error": !execution.success,
+        }));
     }
-    Ok(calls)
-}
 
-fn tool_input_from_json(kind: ToolKind, value: &Value) -> Result<ToolInput> {
-    match kind {
-        ToolKind::Bash => Ok(ToolInput::Bash(BashToolInput {
-            command: value
-                .get("command")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("bash tool input missing command"))?
-                .to_string(),
-        })),
-        ToolKind::ReadFile => Ok(ToolInput::ReadFile(ReadFileToolInput {
-            path: value
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("read_file tool input missing path"))?
-                .into(),
-        })),
-        ToolKind::WriteFile => Ok(ToolInput::WriteFile(WriteFileToolInput {
-            path: value
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("write_file tool input missing path"))?
-                .into(),
-            contents: value
-                .get("contents")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("write_file tool input missing contents"))?
-                .to_string(),
-        })),
+    if results.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(Value::Array(results)))
     }
-}
-
-struct AnthropicToolCall {
-    tool_id: String,
-    tool_use_id: String,
-    input: ToolInput,
 }
 
 fn parse_openai_text(response: &Value) -> Result<String> {
@@ -417,145 +400,109 @@ fn parse_openai_text_fallback(response: &Value, state: &AppState) -> Result<Stri
     )
 }
 
-fn anthropic_tool_definitions(registry: &ToolRegistry) -> Vec<Value> {
-    registry
-        .tools()
-        .map(|tool| {
-            let input_schema = match tool.spec.handler.as_str() {
-                "bash" => json!({
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "Shell command to execute",
-                        }
-                    },
-                    "required": ["command"],
-                }),
-                "read_file" => json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the file to read",
-                        }
-                    },
-                    "required": ["path"],
-                }),
-                "write_file" => json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the file to write",
-                        },
-                        "contents": {
-                            "type": "string",
-                            "description": "Text to write to the file",
-                        }
-                    },
-                    "required": ["path", "contents"],
-                }),
-                _ => json!({
-                    "type": "object",
-                    "properties": {},
-                }),
-            };
-            json!({
-                "name": tool.spec.id,
-                "description": tool.spec.description,
-                "input_schema": input_schema,
-            })
-        })
-        .collect()
-}
-
-fn parse_anthropic_tool_calls(
-    content: &[Value],
-    registry: &ToolRegistry,
-) -> Result<Vec<ParsedAnthropicToolCall>> {
-    let mut calls = Vec::new();
-    for item in content {
-        if item.get("type").and_then(Value::as_str) != Some("tool_use") {
-            continue;
-        }
-        let tool_id = item
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("anthropic tool_use block missing name"))?;
-        if registry.tool(tool_id).is_none() {
-            bail!("anthropic requested unknown tool {tool_id}");
-        }
-        let tool_use_id = item
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("anthropic tool_use block missing id"))?
-            .to_string();
-        let input = item
-            .get("input")
-            .ok_or_else(|| anyhow!("anthropic tool_use block missing input"))?;
-        calls.push(ParsedAnthropicToolCall {
-            tool_id: tool_id.to_string(),
-            tool_use_id,
-            input: parse_tool_input(tool_id, input)?,
-        });
-    }
-    Ok(calls)
-}
-
-fn parse_tool_input(tool_id: &str, input: &Value) -> Result<ToolInput> {
-    match tool_id {
-        "bash" => {
-            let command = input
-                .get("command")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("bash tool input missing command"))?;
-            Ok(ToolInput::Bash(BashToolInput {
-                command: command.to_string(),
-            }))
-        }
-        "read_file" => {
-            let path = input
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("read_file tool input missing path"))?;
-            Ok(ToolInput::ReadFile(ReadFileToolInput {
-                path: path.into(),
-            }))
-        }
-        "write_file" => {
-            let path = input
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("write_file tool input missing path"))?;
-            let contents = input
-                .get("contents")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("write_file tool input missing contents"))?;
-            Ok(ToolInput::WriteFile(WriteFileToolInput {
-                path: path.into(),
-                contents: contents.to_string(),
-            }))
-        }
-        other => bail!("tool input parsing is not implemented for {other}"),
-    }
-}
-
-struct ParsedAnthropicToolCall {
-    tool_id: String,
-    tool_use_id: String,
-    input: ToolInput,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use puffer_config::PufferConfig;
+    use puffer_provider_registry::{AuthMode, ProviderDescriptor};
+    use puffer_resources::{LoadedItem, LoadedResources, SourceInfo, SourceKind, ToolSpec};
+    use puffer_session_store::SessionMetadata;
+    use uuid::Uuid;
+
+    fn provider() -> ProviderDescriptor {
+        ProviderDescriptor {
+            id: "anthropic".to_string(),
+            display_name: "Anthropic".to_string(),
+            base_url: "https://api.anthropic.com".to_string(),
+            default_api: "anthropic-messages".to_string(),
+            auth_modes: vec![AuthMode::ApiKey],
+            headers: Default::default(),
+            models: vec![puffer_provider_registry::ModelDescriptor {
+                id: "claude-sonnet-4-5".to_string(),
+                display_name: "Claude Sonnet 4.5".to_string(),
+                provider: "anthropic".to_string(),
+                api: "anthropic-messages".to_string(),
+                context_window: 200_000,
+                max_output_tokens: 8192,
+                supports_reasoning: true,
+            }],
+        }
+    }
+
+    fn state() -> AppState {
+        AppState::new(
+            PufferConfig::default(),
+            std::env::current_dir().unwrap(),
+            SessionMetadata {
+                id: Uuid::nil(),
+                display_name: None,
+                cwd: std::env::current_dir().unwrap(),
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                parent_session_id: None,
+                slug: None,
+                tags: Vec::new(),
+                note: None,
+            },
+        )
+    }
 
     #[test]
     fn anthropic_tool_schema_lists_expected_fields() {
-        let schema = anthropic_tool_schema(ToolKind::WriteFile);
+        let schema = anthropic_tool_schema("write_file");
         let required = schema.get("required").and_then(Value::as_array).unwrap();
         assert!(required.iter().any(|value| value == "path"));
         assert!(required.iter().any(|value| value == "contents"));
+    }
+
+    #[test]
+    fn resolve_selection_uses_first_provider_model_when_unset() {
+        let mut registry = ProviderRegistry::new();
+        registry.register(provider());
+        let state = state();
+        let (provider, model_id) = resolve_provider_and_model(&state, &registry).unwrap();
+        assert_eq!(provider.id, "anthropic");
+        assert_eq!(model_id, "claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn execute_anthropic_tool_calls_runs_registered_tools() {
+        let resources = LoadedResources {
+            tools: vec![LoadedItem {
+                value: ToolSpec {
+                    id: "bash".to_string(),
+                    name: "bash".to_string(),
+                    description: "Run shell".to_string(),
+                    handler: "bash".to_string(),
+                    approval_policy: None,
+                    sandbox_policy: None,
+                },
+                source_info: SourceInfo {
+                    path: "bash.yaml".into(),
+                    kind: SourceKind::Builtin,
+                },
+            }],
+            ..LoadedResources::default()
+        };
+        let registry = ToolRegistry::from_resources(&resources);
+        let response = json!({
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "bash",
+                    "input": {
+                        "command": "printf hi"
+                    }
+                }
+            ]
+        });
+        let result = execute_anthropic_tool_calls(
+            &response,
+            &registry,
+            std::env::current_dir().unwrap().as_path(),
+        )
+        .unwrap();
+        assert!(result.is_some());
     }
 }

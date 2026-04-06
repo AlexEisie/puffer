@@ -22,11 +22,13 @@ pub(crate) fn list_tools(
     for tool in registry.tools() {
         let approval = tool
             .spec
+            .policy
             .approval_policy
             .as_deref()
             .unwrap_or("unspecified");
         let sandbox = tool
             .spec
+            .policy
             .sandbox_policy
             .as_deref()
             .unwrap_or("unspecified");
@@ -50,10 +52,12 @@ pub(crate) fn describe_permissions(
             "- {}: approval={} sandbox={}\n",
             tool.spec.name,
             tool.spec
+                .policy
                 .approval_policy
                 .as_deref()
                 .unwrap_or("unspecified"),
             tool.spec
+                .policy
                 .sandbox_policy
                 .as_deref()
                 .unwrap_or("unspecified")

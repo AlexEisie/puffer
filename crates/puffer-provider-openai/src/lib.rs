@@ -6,6 +6,7 @@
 
 mod auth;
 mod request;
+mod response;
 
 pub use auth::OpenAIAuth;
 pub use auth::OpenAIOAuthConfig;
@@ -18,7 +19,16 @@ pub use auth::OPENAI_SCOPE;
 pub use auth::OPENAI_TOKEN_URL;
 pub use request::BuiltOpenAIRequest;
 pub use request::OpenAIRequestConfig;
+pub use request::OpenAIResponsesNamedToolChoice;
 pub use request::OpenAIResponsesRequest;
+pub use request::OpenAIResponsesTool;
+pub use request::OpenAIResponsesToolChoice;
+pub use request::OpenAIResponsesToolChoiceMode;
+pub use request::OpenAIResponsesToolRequest;
+pub use response::OpenAIResponseToolCall;
+pub use response::OpenAIResponsesContentItem;
+pub use response::OpenAIResponsesOutputItem;
+pub use response::OpenAIResponsesResponse;
 
 /// Generates a PKCE verifier, challenge, and state for the OpenAI OAuth flow.
 pub fn generate_pkce() -> OpenAIPkce {
@@ -57,9 +67,35 @@ pub fn build_responses_request(
     request::build_responses_request(config, request)
 }
 
+/// Builds an ordered OpenAI Responses API request with tool definitions.
+pub fn build_tool_responses_request(
+    config: &OpenAIRequestConfig,
+    request: &OpenAIResponsesToolRequest,
+) -> anyhow::Result<BuiltOpenAIRequest> {
+    request::build_tool_responses_request(config, request)
+}
+
+/// Parses a serialized OpenAI Responses API payload into typed response data.
+pub fn parse_responses_response(payload: &str) -> anyhow::Result<OpenAIResponsesResponse> {
+    response::parse_responses_response(payload)
+}
+
+/// Extracts assistant text from a parsed OpenAI Responses API payload.
+pub fn extract_responses_text(response: &OpenAIResponsesResponse) -> String {
+    response::extract_responses_text(response)
+}
+
+/// Extracts tool calls from a parsed OpenAI Responses API payload.
+pub fn extract_responses_tool_calls(
+    response: &OpenAIResponsesResponse,
+) -> anyhow::Result<Vec<OpenAIResponseToolCall>> {
+    response::extract_responses_tool_calls(response)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn crate_root_builds_authorization_url() {
@@ -89,5 +125,60 @@ mod tests {
         .expect("request should build");
         assert_eq!(request.method, "POST");
         assert_eq!(request.url, "https://api.openai.com/v1/responses");
+    }
+
+    #[test]
+    fn crate_root_builds_tool_request() {
+        let request = build_tool_responses_request(
+            &OpenAIRequestConfig {
+                base_url: "https://api.openai.com".to_string(),
+                version: "0.1.0".to_string(),
+                auth: OpenAIAuth::ApiKey("sk-test".to_string()),
+            },
+            &OpenAIResponsesToolRequest {
+                model: "gpt-5".to_string(),
+                input: "use tools".to_string(),
+                tools: vec![OpenAIResponsesTool {
+                    kind: "function".to_string(),
+                    name: "read_file".to_string(),
+                    description: "Reads a file from disk.".to_string(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" }
+                        }
+                    }),
+                }],
+                tool_choice: Some(OpenAIResponsesToolChoice::Mode(
+                    OpenAIResponsesToolChoiceMode::Auto,
+                )),
+            },
+        )
+        .expect("request should build");
+
+        let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body["tools"][0]["name"], json!("read_file"));
+        assert_eq!(body["tool_choice"], json!("auto"));
+    }
+
+    #[test]
+    fn crate_root_parses_tool_calls() {
+        let response = parse_responses_response(
+            r#"{
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_123",
+                        "name": "read_file",
+                        "arguments": "{\"path\":\"Cargo.toml\"}"
+                    }
+                ]
+            }"#,
+        )
+        .expect("response should parse");
+
+        let calls = extract_responses_tool_calls(&response).expect("tool calls should parse");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
     }
 }

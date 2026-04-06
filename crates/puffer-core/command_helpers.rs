@@ -1,10 +1,8 @@
-use crate::{AppState, MessageRole, RenderedMessage};
+use crate::{AppState, MessageRole};
 use anyhow::Result;
 use arboard::Clipboard;
 use puffer_provider_registry::ProviderRegistry;
-use puffer_resources::{
-    plugin_by_id, plugin_mcp_servers, skill_by_name, LoadedResources,
-};
+use puffer_resources::{plugin_by_id, plugin_mcp_servers, skill_by_name, LoadedResources};
 use puffer_session_store::{SessionStore, TranscriptEvent};
 use puffer_tools::ToolRegistry;
 use std::fmt::Write as _;
@@ -51,8 +49,16 @@ pub(crate) fn describe_permissions(
             "- {} [{}]: approval={} sandbox={}",
             tool.spec.name,
             tool.spec.handler,
-            tool.spec.approval_policy.as_deref().unwrap_or("<unspecified>"),
-            tool.spec.sandbox_policy.as_deref().unwrap_or("<unspecified>")
+            tool.spec
+                .policy
+                .approval_policy
+                .as_deref()
+                .unwrap_or("<unspecified>"),
+            tool.spec
+                .policy
+                .sandbox_policy
+                .as_deref()
+                .unwrap_or("<unspecified>")
         );
     }
     emit_system(state, session_store, text)
@@ -73,7 +79,11 @@ pub(crate) fn run_doctor(
         state.current_model.as_deref().unwrap_or("<unset>")
     );
     let _ = writeln!(&mut text, "tool_count={}", registry.tools().count());
-    let _ = writeln!(&mut text, "provider_count={}", providers.providers().count());
+    let _ = writeln!(
+        &mut text,
+        "provider_count={}",
+        providers.providers().count()
+    );
     let _ = writeln!(&mut text, "working_dirs={}", state.working_dirs.len());
     let _ = writeln!(&mut text, "transcript_messages={}", state.transcript.len());
     emit_system(state, session_store, text)
@@ -87,7 +97,11 @@ pub(crate) fn describe_plugin(
 ) -> Result<()> {
     if args.is_empty() {
         if resources.plugins.is_empty() {
-            return emit_system(state, session_store, "No plugins are installed.".to_string());
+            return emit_system(
+                state,
+                session_store,
+                "No plugins are installed.".to_string(),
+            );
         }
         let mut text = String::from("Plugins:\n");
         for plugin in &resources.plugins {
@@ -102,10 +116,7 @@ pub(crate) fn describe_plugin(
     let Some(plugin) = plugin_by_id(resources, args) else {
         return emit_system(state, session_store, format!("Unknown plugin {args}."));
     };
-    let mut text = format!(
-        "Plugin {}\n{}\n",
-        plugin.value.id, plugin.value.description
-    );
+    let mut text = format!("Plugin {}\n{}\n", plugin.value.id, plugin.value.description);
     if !plugin.value.commands.is_empty() {
         let commands = plugin
             .value
@@ -150,9 +161,7 @@ pub(crate) fn list_mcp_servers(
         let _ = writeln!(
             &mut text,
             "{} [{}] -> {}",
-            server.value.id,
-            server.value.transport,
-            server.value.endpoint
+            server.value.id, server.value.transport, server.value.endpoint
         );
     }
     for (plugin, server) in servers {
@@ -187,17 +196,13 @@ pub(crate) fn list_ides(
         let _ = writeln!(
             &mut text,
             "{} - {}",
-            ide.value.display_name,
-            ide.value.description
+            ide.value.display_name, ide.value.description
         );
     }
     emit_system(state, session_store, text)
 }
 
-pub(crate) fn copy_last_message(
-    state: &mut AppState,
-    session_store: &SessionStore,
-) -> Result<()> {
+pub(crate) fn copy_last_message(state: &mut AppState, session_store: &SessionStore) -> Result<()> {
     let last = state
         .transcript
         .iter()
@@ -214,7 +219,11 @@ pub(crate) fn copy_last_message(
     }
 
     match Clipboard::new().and_then(|mut clipboard| clipboard.set_text(last.clone())) {
-        Ok(()) => emit_system(state, session_store, "Copied the latest assistant response.".to_string()),
+        Ok(()) => emit_system(
+            state,
+            session_store,
+            "Copied the latest assistant response.".to_string(),
+        ),
         Err(_) => emit_system(
             state,
             session_store,
@@ -242,10 +251,7 @@ pub(crate) fn describe_context(
     )
 }
 
-pub(crate) fn describe_git_diff(
-    state: &mut AppState,
-    session_store: &SessionStore,
-) -> Result<()> {
+pub(crate) fn describe_git_diff(state: &mut AppState, session_store: &SessionStore) -> Result<()> {
     emit_system(state, session_store, render_git_diff_summary(&state.cwd))
 }
 
@@ -302,12 +308,13 @@ fn render_git_diff_summary(cwd: &PathBuf) -> String {
     }
 }
 
-pub(crate) fn rewind_transcript(
-    state: &mut AppState,
-    session_store: &SessionStore,
-) -> Result<()> {
+pub(crate) fn rewind_transcript(state: &mut AppState, session_store: &SessionStore) -> Result<()> {
     if state.transcript.is_empty() {
-        return emit_system(state, session_store, "Transcript is already empty.".to_string());
+        return emit_system(
+            state,
+            session_store,
+            "Transcript is already empty.".to_string(),
+        );
     }
     state.transcript.pop();
     emit_system(

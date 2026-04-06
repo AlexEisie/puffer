@@ -14,4 +14,3 @@ serde_json.workspace = true
 sha2.workspace = true
 uuid.workspace = true
 url = "2.5.7"
-puffer-provider-registry = { path = "../puffer-provider-registry" }

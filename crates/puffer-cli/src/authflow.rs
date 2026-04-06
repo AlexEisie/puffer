@@ -127,12 +127,7 @@ mod tests {
         assert!(response.contains("Authentication completed"));
 
         let callback = handle.join().unwrap();
-        let expected = format!(
-            "http://127.0.0.1:{port}/callback?code=test-code&state=test-state"
-        );
-        assert_eq!(
-            callback.as_deref(),
-            Some(expected.as_str())
-        );
+        let expected = format!("http://127.0.0.1:{port}/callback?code=test-code&state=test-state");
+        assert_eq!(callback.as_deref(), Some(expected.as_str()));
     }
 }

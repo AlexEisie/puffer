@@ -1,11 +1,58 @@
 use crate::auth::OpenAIAuth;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// A minimal OpenAI Responses API request payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpenAIResponsesRequest {
     pub model: String,
     pub input: String,
+}
+
+/// A tool-enabled OpenAI Responses API request payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OpenAIResponsesToolRequest {
+    pub model: String,
+    pub input: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<OpenAIResponsesTool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<OpenAIResponsesToolChoice>,
+}
+
+/// A tool definition accepted by the OpenAI Responses API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OpenAIResponsesTool {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+}
+
+/// A tool selection directive for the OpenAI Responses API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum OpenAIResponsesToolChoice {
+    Mode(OpenAIResponsesToolChoiceMode),
+    Named(OpenAIResponsesNamedToolChoice),
+}
+
+/// A simple tool-choice mode for the OpenAI Responses API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAIResponsesToolChoiceMode {
+    Auto,
+    None,
+    Required,
+}
+
+/// A named tool-choice directive for the OpenAI Responses API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenAIResponsesNamedToolChoice {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: String,
 }
 
 /// Runtime request configuration for the OpenAI provider.
@@ -30,6 +77,21 @@ pub(crate) fn build_responses_request(
     config: &OpenAIRequestConfig,
     request: &OpenAIResponsesRequest,
 ) -> anyhow::Result<BuiltOpenAIRequest> {
+    build_request(config, request)
+}
+
+/// Builds a tool-enabled OpenAI Responses API request with ordered headers.
+pub(crate) fn build_tool_responses_request(
+    config: &OpenAIRequestConfig,
+    request: &OpenAIResponsesToolRequest,
+) -> anyhow::Result<BuiltOpenAIRequest> {
+    build_request(config, request)
+}
+
+fn build_request<T: Serialize>(
+    config: &OpenAIRequestConfig,
+    request: &T,
+) -> anyhow::Result<BuiltOpenAIRequest> {
     let mut headers = vec![
         ("Content-Type".to_string(), "application/json".to_string()),
         (
@@ -53,6 +115,7 @@ pub(crate) fn build_responses_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn api_key_uses_bearer_auth() {
@@ -71,6 +134,51 @@ mod tests {
         assert_eq!(
             request.headers[2],
             ("Authorization".to_string(), "Bearer sk-test".to_string())
+        );
+    }
+
+    #[test]
+    fn tool_request_serializes_tools_and_choice() {
+        let request = build_tool_responses_request(
+            &OpenAIRequestConfig {
+                base_url: "https://api.openai.com".to_string(),
+                version: "0.1.0".to_string(),
+                auth: OpenAIAuth::OAuthBearer("oauth-token".to_string()),
+            },
+            &OpenAIResponsesToolRequest {
+                model: "gpt-5".to_string(),
+                input: "inspect Cargo.toml".to_string(),
+                tools: vec![OpenAIResponsesTool {
+                    kind: "function".to_string(),
+                    name: "read_file".to_string(),
+                    description: "Reads a file from disk.".to_string(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string"
+                            }
+                        },
+                        "required": ["path"]
+                    }),
+                }],
+                tool_choice: Some(OpenAIResponsesToolChoice::Mode(
+                    OpenAIResponsesToolChoiceMode::Auto,
+                )),
+            },
+        )
+        .unwrap();
+
+        let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body["model"], json!("gpt-5"));
+        assert_eq!(body["tools"][0]["name"], json!("read_file"));
+        assert_eq!(body["tool_choice"], json!("auto"));
+        assert_eq!(
+            request.headers[2],
+            (
+                "Authorization".to_string(),
+                "Bearer oauth-token".to_string()
+            )
         );
     }
 }

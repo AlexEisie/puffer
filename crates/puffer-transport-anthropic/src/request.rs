@@ -1,8 +1,8 @@
+use crate::{compute_fingerprint, AnthropicAuth, OAUTH_BETA_HEADER};
+use anyhow::{anyhow, Result};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-
-use crate::auth::{AnthropicAuth, OAUTH_BETA_HEADER};
-use crate::compute_fingerprint;
+use serde_json::Value;
 
 /// Represents a minimal Anthropic messages request body.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -17,6 +17,23 @@ pub struct AnthropicModelRequest {
 pub struct AnthropicMessage {
     pub role: String,
     pub content: String,
+}
+
+/// Describes a tool exposed to Anthropic's messages API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AnthropicToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+/// Selects how Anthropic should choose from the declared tool list.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnthropicToolChoice {
+    Auto,
+    Any,
+    Tool { name: String },
 }
 
 /// Carries runtime configuration for building an Anthropic request.
@@ -53,7 +70,17 @@ pub struct BuiltAnthropicRequest {
 pub fn build_messages_request(
     config: &AnthropicRequestConfig,
     payload: &AnthropicModelRequest,
-) -> anyhow::Result<BuiltAnthropicRequest> {
+) -> Result<BuiltAnthropicRequest> {
+    build_messages_request_with_tools(config, payload, &[], None)
+}
+
+/// Builds an Anthropic `/v1/messages` request with tool metadata and optional tool choice.
+pub fn build_messages_request_with_tools(
+    config: &AnthropicRequestConfig,
+    payload: &AnthropicModelRequest,
+    tools: &[AnthropicToolDefinition],
+    tool_choice: Option<&AnthropicToolChoice>,
+) -> Result<BuiltAnthropicRequest> {
     let first_user_text = payload
         .messages
         .iter()
@@ -106,7 +133,7 @@ pub fn build_messages_request(
         method: "POST",
         url: format!("{}/v1/messages", config.base_url.trim_end_matches('/')),
         headers,
-        body: serde_json::to_string(payload)?,
+        body: build_request_body(payload, tools, tool_choice)?,
         attribution_prefix_block: attribution_header(config, &fingerprint),
     })
 }
@@ -127,7 +154,7 @@ pub fn anthropic_user_agent(config: &AnthropicRequestConfig) -> String {
     )
 }
 
-/// Builds the Anthropic attribution system-block payload, including the optional CCH placeholder.
+/// Builds the Anthropic attribution system block, including the optional CCH placeholder.
 pub fn attribution_header(config: &AnthropicRequestConfig, fingerprint: &str) -> String {
     let cch = if config.cch_enabled {
         " cch=00000;"
@@ -176,9 +203,28 @@ fn append_auth_headers(headers: &mut Vec<(String, String)>, config: &AnthropicRe
     }
 }
 
+fn build_request_body(
+    payload: &AnthropicModelRequest,
+    tools: &[AnthropicToolDefinition],
+    tool_choice: Option<&AnthropicToolChoice>,
+) -> Result<String> {
+    let mut body = serde_json::to_value(payload)?;
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("Anthropic request payload must serialize to an object"))?;
+    if !tools.is_empty() {
+        object.insert("tools".to_string(), serde_json::to_value(tools)?);
+    }
+    if let Some(choice) = tool_choice {
+        object.insert("tool_choice".to_string(), serde_json::to_value(choice)?);
+    }
+    Ok(serde_json::to_string(&body)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn base_config(auth: AnthropicAuth) -> AnthropicRequestConfig {
         AnthropicRequestConfig {
@@ -261,5 +307,40 @@ mod tests {
             .headers
             .iter()
             .any(|(key, value)| key == "X-Organization-Uuid" && value == "org-1"));
+    }
+
+    #[test]
+    fn request_with_tools_serializes_tool_payload() {
+        let request = build_messages_request_with_tools(
+            &base_config(AnthropicAuth::ApiKey("key-1".to_string())),
+            &AnthropicModelRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                max_tokens: 256,
+                messages: vec![AnthropicMessage {
+                    role: "user".to_string(),
+                    content: "inspect the repo".to_string(),
+                }],
+            },
+            &[AnthropicToolDefinition {
+                name: "bash".to_string(),
+                description: "Runs a shell command".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"}
+                    },
+                    "required": ["command"]
+                }),
+            }],
+            Some(&AnthropicToolChoice::Tool {
+                name: "bash".to_string(),
+            }),
+        )
+        .unwrap();
+
+        let body: Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body["tools"][0]["name"], "bash");
+        assert_eq!(body["tool_choice"]["type"], "tool");
+        assert_eq!(body["tool_choice"]["name"], "bash");
     }
 }
