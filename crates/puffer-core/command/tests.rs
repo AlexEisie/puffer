@@ -2,7 +2,7 @@ use super::*;
 use crate::RenderedMessage;
 use puffer_config::{ensure_workspace_dirs, ConfigPaths, MascotConfig, PufferConfig, UiConfig};
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
-use puffer_resources::LoadedResources;
+use puffer_resources::{LoadedItem, LoadedResources};
 use puffer_session_store::{SessionMetadata, SessionStore};
 use std::path::PathBuf;
 use tempfile::tempdir;
