@@ -159,6 +159,23 @@ enum ToolCommand {
         /// JSON argument payload.
         args: String,
     },
+    /// Run the built-in bash tool with a shell command.
+    Bash {
+        /// Shell command to execute.
+        command: String,
+    },
+    /// Run the built-in read tool against a file path.
+    Read {
+        /// File path to read.
+        path: String,
+    },
+    /// Run the built-in write tool against a file path.
+    Write {
+        /// File path to write.
+        path: String,
+        /// File contents to write.
+        contents: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -391,6 +408,38 @@ fn run_tool_command(
             let registry = ToolRegistry::from_resources(resources);
             let payload: puffer_tools::ToolInput = serde_json::from_str(&args)?;
             let result = registry.execute(&tool_id, cwd, payload)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        ToolCommand::Bash { command } => {
+            let registry = ToolRegistry::from_resources(resources);
+            let result = registry.execute(
+                "bash",
+                cwd,
+                puffer_tools::ToolInput::Bash(puffer_tools::BashToolInput { command }),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        ToolCommand::Read { path } => {
+            let registry = ToolRegistry::from_resources(resources);
+            let result = registry.execute(
+                "read_file",
+                cwd,
+                puffer_tools::ToolInput::ReadFile(puffer_tools::ReadFileToolInput {
+                    path: path.into(),
+                }),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        ToolCommand::Write { path, contents } => {
+            let registry = ToolRegistry::from_resources(resources);
+            let result = registry.execute(
+                "write_file",
+                cwd,
+                puffer_tools::ToolInput::WriteFile(puffer_tools::WriteFileToolInput {
+                    path: path.into(),
+                    contents,
+                }),
+            )?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
     }

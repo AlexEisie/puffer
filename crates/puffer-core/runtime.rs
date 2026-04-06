@@ -16,13 +16,14 @@ use serde_json::{json, Value};
 /// Executes one user prompt against the currently selected provider and model.
 pub fn execute_user_prompt(
     state: &AppState,
+    resources: &LoadedResources,
     providers: &ProviderRegistry,
     auth_store: &AuthStore,
     input: &str,
 ) -> Result<String> {
     let (provider, model_id) = resolve_provider_and_model(state, providers)?;
     match provider.id.as_str() {
-        "anthropic" => execute_anthropic(state, provider, model_id, auth_store, input),
+        "anthropic" => execute_anthropic(state, resources, provider, model_id, auth_store, input),
         "openai" => execute_openai(state, provider, model_id, auth_store, input),
         other => bail!("provider {other} is not executable yet"),
     }
@@ -67,50 +68,99 @@ fn resolve_provider_and_model<'a>(
 
 fn execute_anthropic(
     state: &AppState,
+    resources: &LoadedResources,
     provider: &ProviderDescriptor,
     model_id: String,
     auth_store: &AuthStore,
     input: &str,
 ) -> Result<String> {
     let auth = anthropic_auth_for_provider(auth_store, &provider.id)?;
-    let request = build_messages_request(
-        &AnthropicRequestConfig {
-            base_url: provider.base_url.clone(),
-            session_id: state.session.id.to_string(),
-            custom_headers: provider.headers.clone(),
-            remote_container_id: None,
-            remote_session_id: None,
-            client_app: None,
-            entrypoint: "cli".to_string(),
-            user_type: "external".to_string(),
-            version: "0.1.0".to_string(),
-            workload: None,
-            additional_protection: false,
-            cch_enabled: true,
-            auth,
-            beta_header: None,
-            client_request_id: None,
-        },
-        &AnthropicModelRequest {
-            model: model_id,
-            max_tokens: 1024,
-            messages: vec![AnthropicMessage {
-                role: "user".to_string(),
-                content: input.to_string(),
-            }],
-        },
-    )?;
+    let tool_registry = ToolRegistry::from_resources(resources);
+    let tool_definitions = anthropic_tool_definitions(&tool_registry);
+    let mut messages = vec![json!({
+        "role": "user",
+        "content": input,
+    })];
 
-    let mut body: Value = serde_json::from_str(&request.body)?;
-    body["system"] = json!([
-        {
-            "type": "text",
-            "text": request.attribution_prefix_block,
+    for _ in 0..8 {
+        let request = build_messages_request(
+            &AnthropicRequestConfig {
+                base_url: provider.base_url.clone(),
+                session_id: state.session.id.to_string(),
+                custom_headers: provider.headers.clone(),
+                remote_container_id: None,
+                remote_session_id: None,
+                client_app: None,
+                entrypoint: "cli".to_string(),
+                user_type: "external".to_string(),
+                version: "0.1.0".to_string(),
+                workload: None,
+                additional_protection: false,
+                cch_enabled: true,
+                auth: auth.clone(),
+                beta_header: None,
+                client_request_id: None,
+            },
+            &AnthropicModelRequest {
+                model: model_id.clone(),
+                max_tokens: 1024,
+                messages: vec![AnthropicMessage {
+                    role: "user".to_string(),
+                    content: input.to_string(),
+                }],
+            },
+        )?;
+
+        let mut body = json!({
+            "model": model_id,
+            "max_tokens": 1024,
+            "system": [
+                {
+                    "type": "text",
+                    "text": request.attribution_prefix_block,
+                }
+            ],
+            "messages": messages,
+        });
+        if !tool_definitions.is_empty() {
+            body["tools"] = Value::Array(tool_definitions.clone());
         }
-    ]);
 
-    let response = send_http_request(&request.url, &request.headers, &body.to_string(), true)?;
-    parse_anthropic_text(&response)
+        let response = send_http_request(&request.url, &request.headers, &body.to_string(), true)?;
+        let content = response
+            .get("content")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| anyhow!("anthropic response missing content array"))?;
+        let tool_calls = parse_anthropic_tool_calls(&content, &tool_registry)?;
+        if tool_calls.is_empty() {
+            return parse_anthropic_text(&response);
+        }
+
+        messages.push(json!({
+            "role": "assistant",
+            "content": content,
+        }));
+        let tool_results = tool_calls
+            .into_iter()
+            .map(|call| {
+                let result = tool_registry.execute(&call.tool_id, &state.cwd, call.input)?;
+                let text = format!("{}{}", result.output.stdout, result.output.stderr);
+                Ok::<Value, anyhow::Error>(json!({
+                    "type": "tool_result",
+                    "tool_use_id": call.tool_use_id,
+                    "content": text,
+                    "is_error": !result.success,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        messages.push(json!({
+            "role": "user",
+            "content": tool_results,
+        }));
+    }
+
+    bail!("anthropic tool loop exceeded iteration limit")
 }
 
 fn execute_openai(
