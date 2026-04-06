@@ -1081,6 +1081,55 @@ fn handle_memory_command(state: &mut AppState, session_store: &SessionStore, arg
     Ok("Usage: /memory [show|note <text>|clear-note|tag add <tag>|tag remove <tag>]".to_string())
 }
 
+fn ensure_keybindings_file(state: &AppState) -> Result<String> {
+    let dir = state.cwd.join(".puffer");
+    let path = dir.join("keybindings.toml");
+    if !path.exists() {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            &path,
+            "# Puffer keybindings\nsubmit = \"enter\"\nclear = \"esc\"\nexit = \"ctrl+c\"\n",
+        )?;
+    }
+    Ok(format!(
+        "Keybindings file: {}\nDefaults:\nsubmit=enter\nclear=esc\nexit=ctrl+c",
+        path.display()
+    ))
+}
+
+fn describe_agent_files(state: &AppState) -> String {
+    let files = find_agent_files(&state.cwd);
+    if files.is_empty() {
+        return "Agent files:\n<none found>\nExpected names: AGENTS.md, CLAUDE.md".to_string();
+    }
+    let mut text = String::from("Agent files:\n");
+    for file in files {
+        let _ = writeln!(&mut text, "- {}", file.display());
+    }
+    text
+}
+
+fn find_agent_files(start: &PathBuf) -> Vec<PathBuf> {
+    let mut current = start.clone();
+    let mut files = Vec::new();
+    loop {
+        for name in ["AGENTS.md", "CLAUDE.md"] {
+            let candidate = current.join(name);
+            if candidate.exists() {
+                files.push(candidate);
+            }
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent.to_path_buf();
+    }
+    files
+}
+
 fn describe_permissions(
     state: &mut AppState,
     resources: &LoadedResources,
