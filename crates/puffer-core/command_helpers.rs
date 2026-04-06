@@ -430,6 +430,7 @@ pub(crate) fn handle_keybindings_command(
 
 pub(crate) fn handle_hooks_command(
     state: &mut AppState,
+    resources: &LoadedResources,
     session_store: &SessionStore,
     args: &str,
 ) -> Result<()> {
@@ -450,8 +451,22 @@ pub(crate) fn handle_hooks_command(
         state,
         session_store,
         format!(
-            "Hooks file: {}\n{}",
+            "Hooks file: {}\nloaded_hooks={}\n{}{}",
             hooks_path.display(),
+            resources.hooks.len(),
+            if resources.hooks.is_empty() {
+                String::new()
+            } else {
+                let mut summary = String::from("Loaded hooks:\n");
+                for hook in &resources.hooks {
+                    let _ = writeln!(
+                        &mut summary,
+                        "- {} [{}] -> {}",
+                        hook.value.id, hook.value.event, hook.value.command
+                    );
+                }
+                summary
+            },
             fs::read_to_string(&hooks_path)?
         ),
     )

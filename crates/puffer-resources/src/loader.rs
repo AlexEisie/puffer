@@ -1,8 +1,9 @@
 use crate::model::{
-    IdeSpec, LoadedItem, LoadedResources, MascotSpec, McpServerSpec, PluginSpec, PromptTemplate,
-    ProviderPack, SkillSpec, SourceInfo, SourceKind, ToolSpec,
+    HookSpec, IdeSpec, LoadedItem, LoadedResources, MascotSpec, McpServerSpec, PluginSpec,
+    PromptTemplate, ProviderPack, SkillSpec, SourceInfo, SourceKind, ToolSpec,
 };
 use anyhow::{Context, Result};
+use indexmap::IndexMap;
 use puffer_config::ConfigPaths;
 use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
@@ -13,33 +14,69 @@ use std::path::{Path, PathBuf};
 pub fn load_resources(paths: &ConfigPaths) -> Result<LoadedResources> {
     let mut loaded = LoadedResources::default();
     for (root, kind) in resource_roots(paths) {
-        loaded.providers.extend(load_yaml_dir::<ProviderPack>(
-            &root.join("providers"),
-            kind,
-        )?);
-        loaded
-            .tools
-            .extend(load_yaml_dir::<ToolSpec>(&root.join("tools"), kind)?);
-        loaded.prompts.extend(load_yaml_dir::<PromptTemplate>(
-            &root.join("prompts"),
-            kind,
-        )?);
-        loaded
-            .skills
-            .extend(load_skill_dir(&root.join("skills"), kind)?);
-        loaded
-            .mascots
-            .extend(load_yaml_dir::<MascotSpec>(&root.join("mascots"), kind)?);
-        loaded
-            .plugins
-            .extend(load_yaml_dir::<PluginSpec>(&root.join("plugins"), kind)?);
-        loaded.mcp_servers.extend(load_yaml_dir::<McpServerSpec>(
-            &root.join("mcp_servers"),
-            kind,
-        )?);
-        loaded
-            .ides
-            .extend(load_yaml_dir::<IdeSpec>(&root.join("ides"), kind)?);
+        merge_by_id(
+            &mut loaded.providers,
+            load_yaml_dir::<ProviderPack>(&root.join("providers"), kind)?,
+            |item| item.value.id.clone(),
+            "provider",
+            &mut loaded.diagnostics,
+        );
+        merge_by_id(
+            &mut loaded.tools,
+            load_yaml_dir::<ToolSpec>(&root.join("tools"), kind)?,
+            |item| item.value.id.clone(),
+            "tool",
+            &mut loaded.diagnostics,
+        );
+        merge_by_id(
+            &mut loaded.prompts,
+            load_yaml_dir::<PromptTemplate>(&root.join("prompts"), kind)?,
+            |item| item.value.id.clone(),
+            "prompt",
+            &mut loaded.diagnostics,
+        );
+        merge_by_id(
+            &mut loaded.hooks,
+            load_yaml_dir::<HookSpec>(&root.join("hooks"), kind)?,
+            |item| item.value.id.clone(),
+            "hook",
+            &mut loaded.diagnostics,
+        );
+        merge_by_id(
+            &mut loaded.skills,
+            load_skill_dir(&root.join("skills"), kind)?,
+            |item| item.value.name.clone(),
+            "skill",
+            &mut loaded.diagnostics,
+        );
+        merge_by_id(
+            &mut loaded.mascots,
+            load_yaml_dir::<MascotSpec>(&root.join("mascots"), kind)?,
+            |item| item.value.id.clone(),
+            "mascot",
+            &mut loaded.diagnostics,
+        );
+        merge_by_id(
+            &mut loaded.plugins,
+            load_yaml_dir::<PluginSpec>(&root.join("plugins"), kind)?,
+            |item| item.value.id.clone(),
+            "plugin",
+            &mut loaded.diagnostics,
+        );
+        merge_by_id(
+            &mut loaded.mcp_servers,
+            load_yaml_dir::<McpServerSpec>(&root.join("mcp_servers"), kind)?,
+            |item| item.value.id.clone(),
+            "mcp_server",
+            &mut loaded.diagnostics,
+        );
+        merge_by_id(
+            &mut loaded.ides,
+            load_yaml_dir::<IdeSpec>(&root.join("ides"), kind)?,
+            |item| item.value.id.clone(),
+            "ide",
+            &mut loaded.diagnostics,
+        );
     }
     Ok(loaded)
 }
@@ -224,6 +261,34 @@ fn first_descriptive_line(raw: &str) -> &str {
         .trim()
 }
 
+fn merge_by_id<T, F>(
+    existing: &mut Vec<LoadedItem<T>>,
+    incoming: Vec<LoadedItem<T>>,
+    key: F,
+    label: &str,
+    diagnostics: &mut Vec<String>,
+)
+where
+    T: Clone,
+    F: Fn(&LoadedItem<T>) -> String,
+{
+    let mut merged = IndexMap::new();
+    for item in existing.iter().cloned() {
+        merged.insert(key(&item), item);
+    }
+    for item in incoming {
+        let id = key(&item);
+        if let Some(previous) = merged.insert(id.clone(), item.clone()) {
+            diagnostics.push(format!(
+                "{label} `{id}` from {} overrides {}",
+                item.source_info.path.display(),
+                previous.source_info.path.display()
+            ));
+        }
+    }
+    *existing = merged.into_values().collect();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,11 +301,17 @@ mod tests {
         let root = temp.path().join("workspace");
         let resources_dir = root.join("resources");
         fs::create_dir_all(resources_dir.join("prompts")).unwrap();
+        fs::create_dir_all(resources_dir.join("hooks")).unwrap();
         fs::create_dir_all(resources_dir.join("skills/reviewer")).unwrap();
         fs::create_dir_all(resources_dir.join("plugins")).unwrap();
         fs::write(
             resources_dir.join("prompts/plan.yaml"),
             "id: plan\ndescription: Plan\ntemplate: body\n",
+        )
+        .unwrap();
+        fs::write(
+            resources_dir.join("hooks/tool_end.yaml"),
+            "id: tool-end\nevent: tool_end\ncommand: echo hook\n",
         )
         .unwrap();
         fs::write(
@@ -257,9 +328,44 @@ mod tests {
         let paths = ConfigPaths::discover(&root);
         let loaded = load_resources(&paths).unwrap();
         assert_eq!(loaded.prompts.len(), 1);
+        assert_eq!(loaded.hooks.len(), 1);
         assert_eq!(loaded.skills.len(), 1);
         assert_eq!(loaded.plugins.len(), 1);
         assert_eq!(loaded.skills[0].value.name, "reviewer");
         assert_eq!(loaded.plugins[0].value.id, "example");
+    }
+
+    #[test]
+    fn workspace_resources_override_bundled_resources_by_id() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let builtin = root.join("resources/prompts");
+        let workspace = root.join(".puffer/resources/prompts");
+        fs::create_dir_all(&builtin).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(
+            builtin.join("review.yaml"),
+            "id: review\ndescription: Builtin\ntemplate: builtin\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("review.yaml"),
+            "id: review\ndescription: Workspace\ntemplate: workspace\n",
+        )
+        .unwrap();
+
+        let paths = ConfigPaths::discover(&root);
+        let loaded = load_resources(&paths).unwrap();
+        assert_eq!(loaded.prompts.len(), 1);
+        assert_eq!(loaded.prompts[0].value.description, "Workspace");
+        assert!(loaded.prompts[0]
+            .source_info
+            .path
+            .to_string_lossy()
+            .contains(".puffer/resources/prompts/review.yaml"));
+        assert!(loaded
+            .diagnostics
+            .iter()
+            .any(|item| item.contains("prompt `review`")));
     }
 }

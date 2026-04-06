@@ -177,6 +177,18 @@ enum ToolCommand {
         /// File contents to write.
         contents: String,
     },
+    /// Run the built-in replace-in-file tool against a file path.
+    Replace {
+        /// File path to modify.
+        path: String,
+        /// Text to replace.
+        old: String,
+        /// Replacement text.
+        new: String,
+        /// Replace all occurrences instead of the first match only.
+        #[arg(long = "all", default_value_t = false)]
+        replace_all: bool,
+    },
     /// Run the built-in directory listing tool.
     ListDir {
         /// Optional directory path to list. Defaults to the current working directory.
@@ -447,6 +459,25 @@ fn run_tool_command(
                 puffer_tools::ToolInput::WriteFile {
                     path: path.into(),
                     contents,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        ToolCommand::Replace {
+            path,
+            old,
+            new,
+            replace_all,
+        } => {
+            let registry = ToolRegistry::from_resources(resources);
+            let result = registry.execute(
+                "replace_in_file",
+                cwd,
+                puffer_tools::ToolInput::ReplaceInFile {
+                    path: path.into(),
+                    old,
+                    new,
+                    replace_all,
                 },
             )?;
             println!("{}", serde_json::to_string_pretty(&result)?);

@@ -86,6 +86,7 @@ pub enum ToolKind {
     Bash,
     ReadFile,
     WriteFile,
+    ReplaceInFile,
     ListDir,
     SearchText,
 }
@@ -97,6 +98,7 @@ impl ToolKind {
             "bash" => Some(Self::Bash),
             "read_file" => Some(Self::ReadFile),
             "write_file" => Some(Self::WriteFile),
+            "replace_in_file" => Some(Self::ReplaceInFile),
             "list_dir" => Some(Self::ListDir),
             "search_text" => Some(Self::SearchText),
             _ => None,
@@ -109,6 +111,7 @@ impl ToolKind {
             Self::Bash => "bash",
             Self::ReadFile => "read_file",
             Self::WriteFile => "write_file",
+            Self::ReplaceInFile => "replace_in_file",
             Self::ListDir => "list_dir",
             Self::SearchText => "search_text",
         }
@@ -163,6 +166,16 @@ pub struct WriteFileToolInput {
     pub contents: String,
 }
 
+/// Typed input for the built-in replace-in-file tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplaceInFileToolInput {
+    pub path: PathBuf,
+    pub old: String,
+    pub new: String,
+    #[serde(default)]
+    pub replace_all: bool,
+}
+
 /// Typed input for the built-in directory-listing tool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListDirToolInput {
@@ -185,6 +198,12 @@ pub enum ToolInput {
     Bash { command: String },
     ReadFile { path: PathBuf },
     WriteFile { path: PathBuf, contents: String },
+    ReplaceInFile {
+        path: PathBuf,
+        old: String,
+        new: String,
+        replace_all: bool,
+    },
     ListDir { path: Option<PathBuf> },
     SearchText { query: String, path: Option<PathBuf> },
 }
@@ -196,6 +215,7 @@ impl ToolInput {
             Self::Bash { .. } => ToolKind::Bash,
             Self::ReadFile { .. } => ToolKind::ReadFile,
             Self::WriteFile { .. } => ToolKind::WriteFile,
+            Self::ReplaceInFile { .. } => ToolKind::ReplaceInFile,
             Self::ListDir { .. } => ToolKind::ListDir,
             Self::SearchText { .. } => ToolKind::SearchText,
         }
@@ -216,6 +236,20 @@ impl ToolInput {
                 ToolKind::WriteFile,
                 TypedToolInput::WriteFile(WriteFileToolInput { path, contents }),
             ),
+            Self::ReplaceInFile {
+                path,
+                old,
+                new,
+                replace_all,
+            } => (
+                ToolKind::ReplaceInFile,
+                TypedToolInput::ReplaceInFile(ReplaceInFileToolInput {
+                    path,
+                    old,
+                    new,
+                    replace_all,
+                }),
+            ),
             Self::ListDir { path } => (
                 ToolKind::ListDir,
                 TypedToolInput::ListDir(ListDirToolInput { path }),
@@ -234,6 +268,7 @@ pub enum TypedToolInput {
     Bash(BashToolInput),
     ReadFile(ReadFileToolInput),
     WriteFile(WriteFileToolInput),
+    ReplaceInFile(ReplaceInFileToolInput),
     ListDir(ListDirToolInput),
     SearchText(SearchTextToolInput),
 }
@@ -260,6 +295,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         builtin_tool_definition(ToolKind::Bash),
         builtin_tool_definition(ToolKind::ReadFile),
         builtin_tool_definition(ToolKind::WriteFile),
+        builtin_tool_definition(ToolKind::ReplaceInFile),
         builtin_tool_definition(ToolKind::ListDir),
         builtin_tool_definition(ToolKind::SearchText),
     ]
@@ -347,6 +383,55 @@ pub fn builtin_tool_definition(kind: ToolKind) -> ToolDefinition {
             },
             policy: ToolPolicyHints::default(),
         },
+        ToolKind::ReplaceInFile => ToolDefinition {
+            id: "replace_in_file".to_string(),
+            name: "replace_in_file".to_string(),
+            description: "Replace text inside one workspace file.".to_string(),
+            handler: kind.handler().to_string(),
+            kind,
+            input_schema: ToolInputSchema {
+                properties: BTreeMap::from([
+                    (
+                        "path".to_string(),
+                        ToolPropertySchema {
+                            value_type: ToolSchemaType::String,
+                            description: "Path to the file to update.".to_string(),
+                            required: true,
+                        },
+                    ),
+                    (
+                        "old".to_string(),
+                        ToolPropertySchema {
+                            value_type: ToolSchemaType::String,
+                            description: "Exact text to replace.".to_string(),
+                            required: true,
+                        },
+                    ),
+                    (
+                        "new".to_string(),
+                        ToolPropertySchema {
+                            value_type: ToolSchemaType::String,
+                            description: "Replacement text.".to_string(),
+                            required: true,
+                        },
+                    ),
+                    (
+                        "replace_all".to_string(),
+                        ToolPropertySchema {
+                            value_type: ToolSchemaType::String,
+                            description: "When true, replace every occurrence.".to_string(),
+                            required: false,
+                        },
+                    ),
+                ]),
+            },
+            metadata: ToolMetadata {
+                may_spawn_processes: false,
+                may_read_files: true,
+                may_write_files: true,
+            },
+            policy: ToolPolicyHints::default(),
+        },
         ToolKind::ListDir => ToolDefinition {
             id: "list_dir".to_string(),
             name: "list_dir".to_string(),
@@ -413,6 +498,7 @@ pub fn builtin_tool_definition_by_handler(handler: &str) -> Option<ToolDefinitio
         "bash" => Some(builtin_tool_definition(ToolKind::Bash)),
         "read_file" => Some(builtin_tool_definition(ToolKind::ReadFile)),
         "write_file" => Some(builtin_tool_definition(ToolKind::WriteFile)),
+        "replace_in_file" => Some(builtin_tool_definition(ToolKind::ReplaceInFile)),
         "list_dir" => Some(builtin_tool_definition(ToolKind::ListDir)),
         "search_text" => Some(builtin_tool_definition(ToolKind::SearchText)),
         _ => None,
@@ -432,7 +518,14 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             ids,
-            vec!["bash", "read_file", "write_file", "list_dir", "search_text"]
+            vec![
+                "bash",
+                "read_file",
+                "write_file",
+                "replace_in_file",
+                "list_dir",
+                "search_text"
+            ]
         );
     }
 
@@ -496,6 +589,16 @@ mod tests {
             }
             .kind(),
             ToolKind::SearchText
+        );
+        assert_eq!(
+            ToolInput::ReplaceInFile {
+                path: "note.txt".into(),
+                old: "a".to_string(),
+                new: "b".to_string(),
+                replace_all: false,
+            }
+            .kind(),
+            ToolKind::ReplaceInFile
         );
     }
 }

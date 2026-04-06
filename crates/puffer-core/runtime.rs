@@ -17,6 +17,7 @@ use puffer_transport_anthropic::{
 };
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
+use std::process::Command;
 
 /// Describes one tool call executed during a model turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,7 +150,8 @@ fn execute_anthropic(
         }
 
         let response = send_http_request(&request.url, &request.headers, &body.to_string(), true)?;
-        if let Some(tool_results) = execute_anthropic_tool_calls(&response, &registry, &state.cwd)?
+        if let Some(tool_results) =
+            execute_anthropic_tool_calls(resources, &response, &registry, &state.cwd)?
         {
             invocations.extend(tool_results.invocations);
             messages.push(json!({
@@ -234,7 +236,8 @@ fn execute_openai(
             .id
             .clone()
             .ok_or_else(|| anyhow!("OpenAI response missing id for tool continuation"))?;
-        let tool_results = execute_openai_tool_calls(&tool_calls, &registry, &state.cwd)?;
+        let tool_results =
+            execute_openai_tool_calls(resources, &tool_calls, &registry, &state.cwd)?;
         invocations.extend(tool_results.invocations);
         previous_response_id = Some(response_id);
         next_input = json!(tool_results.outputs);
@@ -330,9 +333,6 @@ fn anthropic_tool_definitions(registry: &ToolRegistry) -> Vec<Value> {
         .collect()
 }
 
-#[cfg(test)]
-#[cfg(test)]
-#[cfg(test)]
 fn anthropic_tool_schema(handler: &str) -> Value {
     match handler {
         "bash" => json!({
@@ -357,6 +357,16 @@ fn anthropic_tool_schema(handler: &str) -> Value {
             },
             "required": ["path", "contents"],
         }),
+        "replace_in_file" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "old": { "type": "string" },
+                "new": { "type": "string" },
+                "replace_all": { "type": "boolean" }
+            },
+            "required": ["path", "old", "new"],
+        }),
         "list_dir" => json!({
             "type": "object",
             "properties": {
@@ -380,6 +390,7 @@ fn anthropic_tool_schema(handler: &str) -> Value {
 }
 
 fn execute_anthropic_tool_calls(
+    resources: &LoadedResources,
     response: &Value,
     registry: &ToolRegistry,
     cwd: &std::path::Path,
@@ -406,6 +417,16 @@ fn execute_anthropic_tool_calls(
             .get("input")
             .ok_or_else(|| anyhow!("anthropic tool_use block missing input"))?;
         let execution = registry.execute_json(tool_id, cwd, input.clone())?;
+        run_tool_hooks(
+            resources,
+            cwd,
+            "tool_end",
+            tool_id,
+            input,
+            execution.success,
+            &execution.output.stdout,
+            &execution.output.stderr,
+        );
         let output_text = if execution.output.stderr.is_empty() {
             execution.output.stdout
         } else if execution.output.stdout.is_empty() {
@@ -460,6 +481,7 @@ fn openai_tool_definitions(registry: &ToolRegistry) -> Vec<OpenAIResponsesTool> 
 }
 
 fn execute_openai_tool_calls(
+    resources: &LoadedResources,
     tool_calls: &[puffer_provider_openai::OpenAIResponseToolCall],
     registry: &ToolRegistry,
     cwd: &std::path::Path,
@@ -468,6 +490,16 @@ fn execute_openai_tool_calls(
     let mut invocations = Vec::new();
     for tool_call in tool_calls {
         let execution = registry.execute_json(&tool_call.name, cwd, tool_call.arguments.clone())?;
+        run_tool_hooks(
+            resources,
+            cwd,
+            "tool_end",
+            &tool_call.name,
+            &tool_call.arguments,
+            execution.success,
+            &execution.output.stdout,
+            &execution.output.stderr,
+        );
         let output = if execution.output.stderr.is_empty() {
             execution.output.stdout
         } else if execution.output.stdout.is_empty() {
@@ -491,6 +523,32 @@ fn execute_openai_tool_calls(
         outputs,
         invocations,
     })
+}
+
+fn run_tool_hooks(
+    resources: &LoadedResources,
+    cwd: &std::path::Path,
+    event: &str,
+    tool_id: &str,
+    input: &Value,
+    success: bool,
+    stdout: &str,
+    stderr: &str,
+) {
+    for hook in resources.hooks.iter().filter(|hook| hook.value.event == event) {
+        let _ = Command::new("sh")
+            .arg("-lc")
+            .arg(&hook.value.command)
+            .current_dir(cwd)
+            .env("PUFFER_HOOK_ID", &hook.value.id)
+            .env("PUFFER_HOOK_EVENT", event)
+            .env("PUFFER_TOOL_ID", tool_id)
+            .env("PUFFER_TOOL_INPUT", input.to_string())
+            .env("PUFFER_TOOL_SUCCESS", if success { "true" } else { "false" })
+            .env("PUFFER_TOOL_STDOUT", stdout)
+            .env("PUFFER_TOOL_STDERR", stderr)
+            .output();
+    }
 }
 
 fn parse_openai_text(response: &Value) -> Result<String> {
@@ -649,6 +707,7 @@ mod tests {
             ]
         });
         let result = execute_anthropic_tool_calls(
+            &resources,
             &response,
             &registry,
             std::env::current_dir().unwrap().as_path(),
@@ -711,6 +770,7 @@ mod tests {
             arguments: json!({ "command": "printf hi" }),
         }];
         let result = execute_openai_tool_calls(
+            &resources,
             &tool_calls,
             &registry,
             std::env::current_dir().unwrap().as_path(),
@@ -720,5 +780,54 @@ mod tests {
         assert_eq!(result.outputs[0].call_id, "call_1");
         assert!(result.outputs[0].output.contains("hi"));
         assert_eq!(result.invocations[0].tool_id, "bash");
+    }
+
+    #[test]
+    fn tool_hooks_run_for_completed_tool_calls() {
+        let temp = tempfile::tempdir().unwrap();
+        let hook_output = temp.path().join("hook.txt");
+        let resources = LoadedResources {
+            hooks: vec![LoadedItem {
+                value: puffer_resources::HookSpec {
+                    id: "tool-end".to_string(),
+                    event: "tool_end".to_string(),
+                    command: format!("printf \"$PUFFER_TOOL_ID\" > {}", hook_output.display()),
+                },
+                source_info: SourceInfo {
+                    path: "hook.yaml".into(),
+                    kind: SourceKind::Builtin,
+                },
+            }],
+            tools: vec![LoadedItem {
+                value: ToolSpec {
+                    id: "bash".to_string(),
+                    name: "bash".to_string(),
+                    description: "Run shell".to_string(),
+                    handler: "bash".to_string(),
+                    approval_policy: None,
+                    sandbox_policy: None,
+                },
+                source_info: SourceInfo {
+                    path: "bash.yaml".into(),
+                    kind: SourceKind::Builtin,
+                },
+            }],
+            ..LoadedResources::default()
+        };
+        let registry = ToolRegistry::from_resources(&resources);
+        let response = json!({
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "bash",
+                    "input": {
+                        "command": "printf hi"
+                    }
+                }
+            ]
+        });
+        let _ = execute_anthropic_tool_calls(&resources, &response, &registry, temp.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(hook_output).unwrap(), "bash");
     }
 }

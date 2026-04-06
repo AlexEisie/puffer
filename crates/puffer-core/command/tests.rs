@@ -305,11 +305,23 @@ fn hooks_command_creates_workspace_file() {
         tempdir.path().to_path_buf(),
         session,
     );
+    let mut resources = LoadedResources::default();
+    resources.hooks.push(puffer_resources::LoadedItem {
+        value: puffer_resources::HookSpec {
+            id: "tool-end".to_string(),
+            event: "tool_end".to_string(),
+            command: "echo hook".to_string(),
+        },
+        source_info: puffer_resources::SourceInfo {
+            path: "hooks/tool_end_echo.yaml".into(),
+            kind: puffer_resources::SourceKind::Builtin,
+        },
+    });
 
     dispatch_command(
         &mut state,
         &supported_commands(),
-        &LoadedResources::default(),
+        &resources,
         &ProviderRegistry::new(),
         &AuthStore::default(),
         &session_store,
@@ -320,6 +332,13 @@ fn hooks_command_creates_workspace_file() {
     let hooks_path = paths.workspace_config_dir.join("hooks.yaml");
     let hooks = std::fs::read_to_string(hooks_path).unwrap();
     assert!(hooks.contains("on_tool_start"));
+    assert!(matches!(
+        state.transcript.last(),
+        Some(RenderedMessage {
+            role: MessageRole::System,
+            text,
+        }) if text.contains("loaded_hooks=1") && text.contains("tool-end")
+    ));
 }
 
 #[test]

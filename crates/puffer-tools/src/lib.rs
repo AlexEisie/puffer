@@ -14,6 +14,7 @@ pub use model::builtin_tool_definitions;
 pub use model::BashToolInput;
 pub use model::ListDirToolInput;
 pub use model::ReadFileToolInput;
+pub use model::ReplaceInFileToolInput;
 pub use model::SearchTextToolInput;
 pub use model::ToolDefinition;
 pub use model::ToolExecutionResult;

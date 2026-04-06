@@ -619,7 +619,7 @@ fn execute_local_command(
             }
         }
         "permissions" => describe_permissions(state, resources, session_store),
-        "hooks" => handle_hooks_command(state, session_store, args),
+        "hooks" => handle_hooks_command(state, resources, session_store, args),
         "statusline" => {
             if args.is_empty() {
                 state.statusline_enabled = !state.statusline_enabled;

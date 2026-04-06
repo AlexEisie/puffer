@@ -62,6 +62,14 @@ pub struct PromptTemplate {
     pub template: String,
 }
 
+/// Declares a YAML-editable hook specification.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HookSpec {
+    pub id: String,
+    pub event: String,
+    pub command: String,
+}
+
 /// Declares a skill resource loaded from `SKILL.md`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SkillSpec {
@@ -163,9 +171,11 @@ pub struct LoadedResources {
     pub providers: Vec<LoadedItem<ProviderPack>>,
     pub tools: Vec<LoadedItem<ToolSpec>>,
     pub prompts: Vec<LoadedItem<PromptTemplate>>,
+    pub hooks: Vec<LoadedItem<HookSpec>>,
     pub skills: Vec<LoadedItem<SkillSpec>>,
     pub mascots: Vec<LoadedItem<MascotSpec>>,
     pub plugins: Vec<LoadedItem<PluginSpec>>,
     pub mcp_servers: Vec<LoadedItem<McpServerSpec>>,
     pub ides: Vec<LoadedItem<IdeSpec>>,
+    pub diagnostics: Vec<String>,
 }

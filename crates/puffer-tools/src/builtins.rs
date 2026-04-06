@@ -1,7 +1,8 @@
 use crate::model::TypedToolInput;
 use crate::{
     BashToolInput, ListDirToolInput, ReadFileToolInput, SearchTextToolInput,
-    ToolExecutionResult, ToolInput, ToolKind, ToolOutput, WriteFileToolInput,
+    ReplaceInFileToolInput, ToolExecutionResult, ToolInput, ToolKind, ToolOutput,
+    WriteFileToolInput,
 };
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
@@ -15,6 +16,7 @@ pub fn builtin_tool_kind(handler: &str) -> Option<ToolKind> {
         "bash" => Some(ToolKind::Bash),
         "read_file" => Some(ToolKind::ReadFile),
         "write_file" => Some(ToolKind::WriteFile),
+        "replace_in_file" => Some(ToolKind::ReplaceInFile),
         "list_dir" => Some(ToolKind::ListDir),
         "search_text" => Some(ToolKind::SearchText),
         _ => None,
@@ -39,6 +41,15 @@ pub fn parse_builtin_input(kind: ToolKind, input: Value) -> Result<ToolInput> {
             Ok(ToolInput::WriteFile {
                 path: input.path,
                 contents: input.contents,
+            })
+        }
+        ToolKind::ReplaceInFile => {
+            let input = serde_json::from_value::<ReplaceInFileToolInput>(input)?;
+            Ok(ToolInput::ReplaceInFile {
+                path: input.path,
+                old: input.old,
+                new: input.new,
+                replace_all: input.replace_all,
             })
         }
         ToolKind::ListDir => {
@@ -75,6 +86,7 @@ pub fn execute_builtin_tool(
         TypedToolInput::Bash(input) => execute_bash_tool(tool_id, cwd, input),
         TypedToolInput::ReadFile(input) => execute_read_file_tool(tool_id, cwd, input),
         TypedToolInput::WriteFile(input) => execute_write_file_tool(tool_id, cwd, input),
+        TypedToolInput::ReplaceInFile(input) => execute_replace_in_file_tool(tool_id, cwd, input),
         TypedToolInput::ListDir(input) => execute_list_dir_tool(tool_id, cwd, input),
         TypedToolInput::SearchText(input) => execute_search_text_tool(tool_id, cwd, input),
     }
@@ -150,6 +162,42 @@ pub fn execute_write_file_tool(
             metadata: serde_json::json!({
                 "path": path,
                 "bytes_written": input.contents.len(),
+            }),
+        },
+    })
+}
+
+/// Executes the built-in `replace_in_file` tool.
+pub fn execute_replace_in_file_tool(
+    tool_id: &str,
+    cwd: &Path,
+    input: ReplaceInFileToolInput,
+) -> Result<ToolExecutionResult> {
+    let path = absolutize(cwd, &input.path);
+    let original = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read file {}", path.display()))?;
+    if !original.contains(&input.old) {
+        return Err(anyhow!(
+            "failed to replace text in {}: pattern not found",
+            path.display()
+        ));
+    }
+    let updated = if input.replace_all {
+        original.replace(&input.old, &input.new)
+    } else {
+        original.replacen(&input.old, &input.new, 1)
+    };
+    fs::write(&path, &updated)
+        .with_context(|| format!("failed to write file {}", path.display()))?;
+    Ok(ToolExecutionResult {
+        tool_id: tool_id.to_string(),
+        success: true,
+        output: ToolOutput {
+            stdout: format!("updated {}", path.display()),
+            stderr: String::new(),
+            metadata: serde_json::json!({
+                "path": path,
+                "replace_all": input.replace_all,
             }),
         },
     })
@@ -299,6 +347,10 @@ mod tests {
         assert_eq!(builtin_tool_kind("bash"), Some(ToolKind::Bash));
         assert_eq!(builtin_tool_kind("read_file"), Some(ToolKind::ReadFile));
         assert_eq!(builtin_tool_kind("write_file"), Some(ToolKind::WriteFile));
+        assert_eq!(
+            builtin_tool_kind("replace_in_file"),
+            Some(ToolKind::ReplaceInFile)
+        );
         assert_eq!(builtin_tool_kind("list_dir"), Some(ToolKind::ListDir));
         assert_eq!(builtin_tool_kind("search_text"), Some(ToolKind::SearchText));
         assert_eq!(builtin_tool_kind("unknown"), None);
@@ -336,6 +388,27 @@ mod tests {
         .unwrap();
         assert!(result.output.stdout.contains("nested/"));
         assert!(result.output.stdout.contains("note.txt"));
+    }
+
+    #[test]
+    fn replace_in_file_tool_updates_first_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("note.txt");
+        fs::write(&path, "alpha beta alpha").unwrap();
+        let result = execute_replace_in_file_tool(
+            "replace_in_file",
+            temp.path(),
+            ReplaceInFileToolInput {
+                path: "note.txt".into(),
+                old: "alpha".to_string(),
+                new: "omega".to_string(),
+                replace_all: false,
+            },
+        )
+        .unwrap();
+        assert!(result.output.stdout.contains("updated"));
+        let updated = fs::read_to_string(path).unwrap();
+        assert_eq!(updated, "omega beta alpha");
     }
 
     #[test]
