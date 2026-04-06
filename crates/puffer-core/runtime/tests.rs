@@ -159,6 +159,32 @@ fn execute_user_prompt_accepts_openai_family_aliases() {
     assert!(!error
         .to_string()
         .contains("provider openrouter with api openai-completions is not executable yet"));
+
+    let mut descriptor = provider();
+    descriptor.id = "mistral".to_string();
+    descriptor.display_name = "Mistral".to_string();
+    descriptor.base_url = "https://example.invalid".to_string();
+    descriptor.default_api = "mistral-conversations".to_string();
+    descriptor.models[0].provider = "mistral".to_string();
+    descriptor.models[0].api = "mistral-conversations".to_string();
+    let mut registry = ProviderRegistry::new();
+    registry.register(descriptor);
+    let mut mistral_state = state();
+    mistral_state.current_provider = Some("mistral".to_string());
+    mistral_state.current_model = Some("mistral/claude-sonnet-4-5".to_string());
+    let mut auth = AuthStore::default();
+    auth.set_api_key("mistral", "sk-test");
+    let error = execute_user_prompt(
+        &mistral_state,
+        &LoadedResources::default(),
+        &registry,
+        &auth,
+        "hello",
+    )
+    .unwrap_err();
+    assert!(!error
+        .to_string()
+        .contains("provider mistral with api mistral-conversations is not executable yet"));
 }
 
 #[test]

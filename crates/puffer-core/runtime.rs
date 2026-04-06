@@ -54,7 +54,7 @@ pub fn execute_user_prompt(
         "openai-responses" | "azure-openai-responses" | "openai-codex-responses" => {
             execute_openai(state, resources, provider, model_id, auth_store, input)
         }
-        "openai-completions" => {
+        "openai-completions" | "mistral-conversations" => {
             execute_openai_completions(state, resources, provider, model_id, auth_store, input)
         }
         other => bail!(

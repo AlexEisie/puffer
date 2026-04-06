@@ -12,12 +12,12 @@
 │ │kimi-coding  Kimi Coding           │ ││Parent: root    │
 │ │minimax-cn  MiniMax CN             │ ││Dir: workspace  │
 │ │minimax  MiniMax                   │ ││Transcript: 0   │
-│ │openai  OpenAI                     │ │└────────────────┘
-│ │openrouter  OpenRouter             │ │┌Tools───────────┐
-│ │vercel-ai-gateway  Vercel AI Gatewa│ ││Configured: 8   │
-│ │xai  xAI                           │ ││Executable: 8   │
-│ └───────────────────────────────────┘ ││Kinds: bash=on  │
-│                                       ││read=on write=on│
+│ │mistral  Mistral                   │ │└────────────────┘
+│ │openai  OpenAI                     │ │┌Tools───────────┐
+│ │openrouter  OpenRouter             │ ││Configured: 8   │
+│ │vercel-ai-gateway  Vercel AI Gatewa│ ││Executable: 8   │
+│ │xai  xAI                           │ ││Kinds: bash=on  │
+│ └───────────────────────────────────┘ ││read=on write=on│
 │                                       ││replace=on      │
 │                                       ││move=on         │
 │                                       ││remove=on       │

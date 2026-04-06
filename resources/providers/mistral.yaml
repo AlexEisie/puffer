@@ -1,0 +1,21 @@
+id: mistral
+display_name: Mistral
+base_url: https://api.mistral.ai
+default_api: mistral-conversations
+auth_modes:
+  - api_key
+models:
+  - id: devstral-medium-latest
+    display_name: Devstral 2 (latest)
+    provider: mistral
+    api: mistral-conversations
+    context_window: 128000
+    max_output_tokens: 128000
+    supports_reasoning: false
+  - id: magistral-medium-2509
+    display_name: Magistral Medium
+    provider: mistral
+    api: mistral-conversations
+    context_window: 40000
+    max_output_tokens: 40000
+    supports_reasoning: true
