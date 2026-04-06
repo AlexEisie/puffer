@@ -1,5 +1,5 @@
 use super::*;
-use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
+use puffer_config::{ensure_workspace_dirs, save_user_config, ConfigPaths, PufferConfig};
 use puffer_provider_registry::{AuthMode, ModelDescriptor, OAuthCredential, ProviderDescriptor};
 use puffer_resources::{
     IdeSpec, LoadedItem, MascotSpec, McpServerSpec, PluginCommandSpec, PluginSpec, PromptTemplate,
@@ -9,8 +9,14 @@ use puffer_session_store::{SessionMetadata, SessionStore};
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use tempfile::tempdir;
 use uuid::Uuid;
+
+fn puffer_home_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[test]
 fn render_shows_command_popup_for_slash_input() {
@@ -199,6 +205,175 @@ fn try_open_overlay_builds_logout_picker() {
         tui.overlay,
         Some(OverlayState::LogoutPicker { .. })
     ));
+}
+
+#[test]
+fn logout_clears_active_provider_selection() {
+    let tempdir = tempdir().unwrap();
+    let _lock = puffer_home_lock().lock().unwrap();
+    let old_home = std::env::var_os("PUFFER_HOME");
+    let home = tempdir.path().join("home");
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::env::set_var("PUFFER_HOME", &home);
+
+    let paths = ConfigPaths::discover(&workspace);
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store.create_session(workspace.clone()).unwrap();
+    let mut config = PufferConfig::default();
+    config.default_provider = Some("anthropic".to_string());
+    config.default_model = Some("anthropic/claude-sonnet-4-5".to_string());
+    save_user_config(&paths, &config).unwrap();
+    let mut state = AppState::new(config, workspace, session);
+    state.current_provider = Some("anthropic".to_string());
+    state.current_model = Some("anthropic/claude-sonnet-4-5".to_string());
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = sample_auth_store();
+    auth_store.save(&auth_path).unwrap();
+
+    handle_auth_command(
+        &mut state,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        "/logout anthropic",
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(state.current_provider, None);
+    assert_eq!(state.current_model, None);
+    assert_eq!(state.config.default_provider, None);
+    assert_eq!(state.config.default_model, None);
+    assert!(!auth_store.has_auth("anthropic"));
+
+    if let Some(value) = old_home {
+        std::env::set_var("PUFFER_HOME", value);
+    } else {
+        std::env::remove_var("PUFFER_HOME");
+    }
+}
+
+#[test]
+fn logout_clears_selection_when_model_provider_matches_logged_out_provider() {
+    let tempdir = tempdir().unwrap();
+    let _lock = puffer_home_lock().lock().unwrap();
+    let old_home = std::env::var_os("PUFFER_HOME");
+    let home = tempdir.path().join("home");
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::env::set_var("PUFFER_HOME", &home);
+
+    let paths = ConfigPaths::discover(&workspace);
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store.create_session(workspace.clone()).unwrap();
+    let mut config = PufferConfig::default();
+    config.default_provider = Some("anthropic".to_string());
+    config.default_model = Some("openai/gpt-5".to_string());
+    save_user_config(&paths, &config).unwrap();
+    let mut state = AppState::new(config, workspace, session);
+    state.current_provider = Some("anthropic".to_string());
+    state.current_model = Some("openai/gpt-5".to_string());
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = sample_auth_store();
+    auth_store.set_api_key("openai", "sk-openai");
+    auth_store.save(&auth_path).unwrap();
+
+    handle_auth_command(
+        &mut state,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        "/logout openai",
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(state.current_provider, None);
+    assert_eq!(state.current_model, None);
+    assert_eq!(state.config.default_provider, None);
+    assert_eq!(state.config.default_model, None);
+    assert!(!auth_store.has_auth("openai"));
+
+    let mut providers = sample_providers();
+    let mut tui = TuiState::default();
+    submit_queued_prompt_if_ready(
+        &mut state,
+        &sample_resources(),
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+    assert!(matches!(
+        tui.overlay,
+        Some(OverlayState::ProviderPicker {
+            onboarding: true,
+            ..
+        })
+    ));
+
+    if let Some(value) = old_home {
+        std::env::set_var("PUFFER_HOME", value);
+    } else {
+        std::env::remove_var("PUFFER_HOME");
+    }
+}
+
+#[test]
+fn missing_auth_for_selected_provider_reopens_auth_picker() {
+    let tempdir = tempdir().unwrap();
+    let _lock = puffer_home_lock().lock().unwrap();
+    let old_home = std::env::var_os("PUFFER_HOME");
+    let home = tempdir.path().join("home");
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::env::set_var("PUFFER_HOME", &home);
+
+    let paths = ConfigPaths::discover(&workspace);
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store.create_session(workspace.clone()).unwrap();
+    let mut config = PufferConfig::default();
+    config.default_provider = Some("openai".to_string());
+    config.default_model = Some("openai/gpt-5".to_string());
+    save_user_config(&paths, &config).unwrap();
+    let mut state = AppState::new(config, workspace, session);
+    state.current_provider = Some("openai".to_string());
+    state.current_model = Some("openai/gpt-5".to_string());
+    let mut providers = sample_providers();
+    let mut tui = TuiState::default();
+
+    submit_queued_prompt_if_ready(
+        &mut state,
+        &sample_resources(),
+        &mut providers,
+        &mut AuthStore::default(),
+        &paths.user_config_dir.join("auth.json"),
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        tui.overlay,
+        Some(OverlayState::AuthPicker { ref provider_id, .. }) if provider_id == "openai"
+    ));
+
+    if let Some(value) = old_home {
+        std::env::set_var("PUFFER_HOME", value);
+    } else {
+        std::env::remove_var("PUFFER_HOME");
+    }
 }
 
 #[test]

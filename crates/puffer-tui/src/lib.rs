@@ -248,6 +248,16 @@ fn handle_key(
                 submitted,
                 no_alt_screen,
             )?;
+            submit_queued_prompt_if_ready(
+                state,
+                resources,
+                providers,
+                auth_store,
+                auth_path,
+                session_store,
+                tui,
+                no_alt_screen,
+            )?;
         }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             tui.insert_char(ch, commands)
@@ -720,12 +730,31 @@ fn handle_auth_command(
         state.current_provider.as_deref().unwrap_or("anthropic")
     } else {
         args
-    };
-    let message = if auth_store.remove(provider).is_some() {
+    }
+    .to_string();
+    let removed = auth_store.remove(&provider);
+    let cleared_active_provider =
+        active_selection_uses_provider(state, provider.as_str());
+    if cleared_active_provider {
+        state.current_provider = None;
+        state.current_model = None;
+        state.config.default_provider = None;
+        state.config.default_model = None;
+        persist_user_config(state)?;
+    }
+    let message = if removed.is_some() {
         auth_store.save(auth_path)?;
-        format!("Removed stored credentials for {provider}.")
+        if cleared_active_provider {
+            format!("Removed stored credentials for {provider} and cleared the active selection.")
+        } else {
+            format!("Removed stored credentials for {provider}.")
+        }
     } else {
-        format!("No stored credentials exist for {provider}.")
+        if cleared_active_provider {
+            format!("No stored credentials exist for {provider}; cleared the active selection.")
+        } else {
+            format!("No stored credentials exist for {provider}.")
+        }
     };
     state.push_message(MessageRole::System, message.clone());
     session_store.append_event(
@@ -733,6 +762,17 @@ fn handle_auth_command(
         TranscriptEvent::SystemMessage { text: message },
     )?;
     Ok(true)
+}
+
+fn active_selection_uses_provider(state: &AppState, provider_id: &str) -> bool {
+    if state.current_provider.as_deref() == Some(provider_id) {
+        return true;
+    }
+    state.current_model
+        .as_deref()
+        .and_then(|selector| selector.split_once('/'))
+        .map(|(provider, _)| provider == provider_id)
+        .unwrap_or(false)
 }
 
 fn run_embedded_auth_login(

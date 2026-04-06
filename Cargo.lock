@@ -1544,6 +1544,7 @@ dependencies = [
  "anyhow",
  "dirs",
  "serde",
+ "tempfile",
  "toml",
 ]
 

@@ -99,11 +99,20 @@ impl ConfigPaths {
 /// Loads layered Puffer configuration from the user and workspace config files.
 pub fn load_config(paths: &ConfigPaths) -> Result<PufferConfig> {
     let mut config = PufferConfig::default();
+    let mut user_selection = None;
     if paths.user_config_file().exists() {
         merge_config_file(&mut config, &paths.user_config_file())?;
+        user_selection = Some((
+            config.default_provider.clone(),
+            config.default_model.clone(),
+        ));
     }
     if paths.workspace_config_file().exists() {
         merge_config_file(&mut config, &paths.workspace_config_file())?;
+    }
+    if let Some((provider, model)) = user_selection {
+        config.default_provider = provider;
+        config.default_model = model;
     }
     Ok(config)
 }
@@ -155,4 +164,81 @@ fn write_config_file(path: &Path, config: &PufferConfig) -> Result<()> {
     let raw = toml::to_string_pretty(config)
         .with_context(|| format!("failed to serialize config file {}", path.display()))?;
     fs::write(path, raw).with_context(|| format!("failed to write config file {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn load_config_preserves_user_provider_selection_over_workspace_defaults() {
+        let tempdir = tempdir().expect("tempdir");
+        let old_home = std::env::var_os("PUFFER_HOME");
+        let home = tempdir.path().join("home");
+        let workspace = tempdir.path().join("workspace");
+        fs::create_dir_all(&home).expect("home");
+        fs::create_dir_all(&workspace).expect("workspace");
+        std::env::set_var("PUFFER_HOME", &home);
+
+        let paths = ConfigPaths::discover(&workspace);
+        ensure_workspace_dirs(&paths).expect("dirs");
+
+        let mut user = PufferConfig::default();
+        user.default_provider = Some("openai".to_string());
+        user.default_model = Some("openai/gpt-5".to_string());
+        user.theme = "sunrise".to_string();
+        save_user_config(&paths, &user).expect("user config");
+
+        let mut workspace = PufferConfig::default();
+        workspace.default_provider = Some("anthropic".to_string());
+        workspace.default_model = Some("anthropic/claude-sonnet-4-5".to_string());
+        workspace.theme = "harbor".to_string();
+        save_workspace_config(&paths, &workspace).expect("workspace config");
+
+        let loaded = load_config(&paths).expect("load");
+        assert_eq!(loaded.default_provider.as_deref(), Some("openai"));
+        assert_eq!(loaded.default_model.as_deref(), Some("openai/gpt-5"));
+        assert_eq!(loaded.theme, "harbor");
+
+        if let Some(value) = old_home {
+            std::env::set_var("PUFFER_HOME", value);
+        } else {
+            std::env::remove_var("PUFFER_HOME");
+        }
+    }
+
+    #[test]
+    fn load_config_preserves_cleared_user_selection() {
+        let tempdir = tempdir().expect("tempdir");
+        let old_home = std::env::var_os("PUFFER_HOME");
+        let home = tempdir.path().join("home");
+        let workspace = tempdir.path().join("workspace");
+        fs::create_dir_all(&home).expect("home");
+        fs::create_dir_all(&workspace).expect("workspace");
+        std::env::set_var("PUFFER_HOME", &home);
+
+        let paths = ConfigPaths::discover(&workspace);
+        ensure_workspace_dirs(&paths).expect("dirs");
+
+        let mut user = PufferConfig::default();
+        user.default_provider = None;
+        user.default_model = None;
+        save_user_config(&paths, &user).expect("user config");
+
+        let mut workspace = PufferConfig::default();
+        workspace.default_provider = Some("anthropic".to_string());
+        workspace.default_model = Some("anthropic/claude-sonnet-4-5".to_string());
+        save_workspace_config(&paths, &workspace).expect("workspace config");
+
+        let loaded = load_config(&paths).expect("load");
+        assert_eq!(loaded.default_provider, None);
+        assert_eq!(loaded.default_model, None);
+
+        if let Some(value) = old_home {
+            std::env::set_var("PUFFER_HOME", value);
+        } else {
+            std::env::remove_var("PUFFER_HOME");
+        }
+    }
 }
