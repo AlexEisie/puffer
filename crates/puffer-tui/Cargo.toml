@@ -13,6 +13,7 @@ puffer-core = { path = "../puffer-core" }
 puffer-provider-registry = { path = "../puffer-provider-registry" }
 puffer-resources = { path = "../puffer-resources" }
 puffer-session-store = { path = "../puffer-session-store" }
+puffer-tools = { path = "../puffer-tools" }
 
 [dev-dependencies]
 insta.workspace = true

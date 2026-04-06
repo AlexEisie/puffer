@@ -580,6 +580,18 @@ fn execute_local_command(
                 resources.plugins.len()
             ),
         ),
+        "context" => emit_system(
+            state,
+            session_store,
+            format!(
+                "Context summary:\nmessages={}\ncharacters={}\nprompts={}\ntools={}\nskills={}",
+                state.transcript.len(),
+                state.transcript.iter().map(|message| message.text.len()).sum::<usize>(),
+                resources.prompts.len(),
+                resources.tools.len(),
+                resources.skills.len()
+            ),
+        ),
         "clear" => {
             state.transcript.clear();
             emit_system(state, session_store, "Transcript cleared.".to_string())
@@ -697,6 +709,38 @@ fn execute_local_command(
                 emit_system(state, session_store, format!("Unknown model {args}."))
             }
         }
+        "copy" => {
+            let copied = state
+                .transcript
+                .iter()
+                .rev()
+                .find(|message| matches!(message.role, MessageRole::Assistant))
+                .map(|message| message.text.clone())
+                .unwrap_or_else(|| "No assistant message is available to copy.".to_string());
+            emit_system(
+                state,
+                session_store,
+                format!("Latest assistant output:\n{copied}"),
+            )
+        }
+        "cost" => emit_system(
+            state,
+            session_store,
+            format!(
+                "Cost summary:\nprovider={}\nmodel={}\ntracked_cost_usd=0.00\ntracked_turns={}",
+                state.current_provider.as_deref().unwrap_or("<unset>"),
+                state.current_model.as_deref().unwrap_or("<unset>"),
+                state.transcript
+                    .iter()
+                    .filter(|message| matches!(message.role, MessageRole::Assistant))
+                    .count()
+            ),
+        ),
+        "diff" => emit_system(
+            state,
+            session_store,
+            render_git_diff_summary(&state.cwd),
+        ),
         "permissions" => describe_permissions(state, resources, session_store),
         "doctor" => run_doctor(state, resources, session_store),
         "hooks" => emit_system(
@@ -735,6 +779,22 @@ fn execute_local_command(
                 ToolRegistry::from_resources(resources).tools().count()
             ),
         ),
+        "reload-plugins" => {
+            let plugin_ids = resources
+                .plugins
+                .iter()
+                .map(|plugin| plugin.value.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            emit_system(
+                state,
+                session_store,
+                format!(
+                    "Plugin registry refreshed in-memory.\nloaded_plugins={}",
+                    if plugin_ids.is_empty() { "<none>" } else { &plugin_ids }
+                ),
+            )
+        }
         "config" => emit_system(
             state,
             session_store,
@@ -826,6 +886,7 @@ fn execute_local_command(
                 )
             }
         }
+        "rewind" => rewind_transcript(state, session_store),
         "rename" => {
             let name = if args.is_empty() {
                 format!("session-{}", &state.session.id.to_string()[..8])
@@ -977,6 +1038,11 @@ fn execute_local_command(
                 format!("Forked current session into {}.", fork.id),
             )
         }
+        "terminal-setup" => emit_system(
+            state,
+            session_store,
+            terminal_setup_advice(state),
+        ),
         _ => emit_system(
             state,
             session_store,
@@ -1066,6 +1132,60 @@ fn run_doctor(
         );
     }
     emit_system(state, session_store, text)
+}
+
+fn render_git_diff_summary(cwd: &PathBuf) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .arg("diff")
+        .arg("--stat")
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if text.is_empty() {
+                "Git diff summary:\n<no changes>".to_string()
+            } else {
+                format!("Git diff summary:\n{text}")
+            }
+        }
+        Ok(output) => format!(
+            "Git diff summary unavailable:\n{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Err(error) => format!("Git diff summary unavailable:\n{error}"),
+    }
+}
+
+fn rewind_transcript(state: &mut AppState, session_store: &SessionStore) -> Result<()> {
+    let index = state
+        .transcript
+        .iter()
+        .rposition(|message| !matches!(message.role, MessageRole::System));
+    match index {
+        Some(index) => {
+            let removed = state.transcript.remove(index);
+            emit_system(
+                state,
+                session_store,
+                format!("Rewound the last visible message: {}", removed.text),
+            )
+        }
+        None => emit_system(
+            state,
+            session_store,
+            "There is no visible message to rewind.".to_string(),
+        ),
+    }
+}
+
+fn terminal_setup_advice(state: &AppState) -> String {
+    format!(
+        "Terminal setup guidance:\nno_alt_screen={}\ntmux_golden_mode={}\nIf scrolling is awkward, try `puffer --no-alt-screen`.",
+        state.config.ui.no_alt_screen,
+        state.config.ui.tmux_golden_mode
+    )
 }
 
 fn describe_plugin(

@@ -223,4 +223,52 @@ mod tests {
         assert!(rendered.contains("Inspector"));
         assert!(rendered.contains("/review"));
     }
+
+    #[test]
+    fn render_shows_status_line_when_enabled() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = AppState::new(
+            PufferConfig::default(),
+            std::env::current_dir().unwrap(),
+            SessionMetadata {
+                id: Uuid::nil(),
+                display_name: None,
+                cwd: std::env::current_dir().unwrap(),
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                parent_session_id: None,
+                slug: None,
+                tags: Vec::new(),
+                note: None,
+            },
+        );
+        state.statusline_enabled = true;
+        state.current_provider = Some("anthropic".to_string());
+        state.current_model = Some("anthropic/claude-sonnet-4-5".to_string());
+        terminal
+            .draw(|frame| {
+                render::render(
+                    frame,
+                    &state,
+                    &LoadedResources::default(),
+                    &ProviderRegistry::default(),
+                    &AuthStore::default(),
+                    "",
+                    &supported_commands(),
+                )
+            })
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(rendered.contains("Status Line"));
+        assert!(rendered.contains("anthropic"));
+        assert!(rendered.contains("claude-sonnet-4-5"));
+    }
 }
