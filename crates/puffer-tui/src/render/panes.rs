@@ -27,7 +27,7 @@ const FEATURED_HELP_COMMANDS: [&str; 10] = [
 pub(super) fn render_empty_state(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let card_width = area.width.saturating_sub(6).clamp(38, 104);
     let wide = area.width >= HOME_WIDE_BREAKPOINT && area.height >= 12;
-    let desired_height = if wide { 12 } else { 10 };
+    let desired_height = if wide { 12 } else { 8 };
     let card_height = desired_height.min(area.height.saturating_sub(1).max(6));
     let card_area = Rect {
         x: area.x + area.width.saturating_sub(card_width) / 2,
@@ -193,15 +193,6 @@ fn welcome_compact_lines(state: &AppState) -> Vec<Line<'static>> {
         )),
         Line::from(Span::styled(
             path_tail(&state.cwd.display().to_string(), 38),
-            Style::default().add_modifier(Modifier::DIM),
-        )),
-        Line::default(),
-        Line::from(Span::styled(
-            "Review changes, ask a question, or type /",
-            Style::default().add_modifier(Modifier::DIM),
-        )),
-        Line::from(Span::styled(
-            "? for shortcuts · /help to begin",
             Style::default().add_modifier(Modifier::DIM),
         )),
     ]

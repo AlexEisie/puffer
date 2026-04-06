@@ -5,14 +5,14 @@
    │                   anthropic/claude-sonnet-4-5                  │
    │                            dockyard                            │
    │                                                                │
-   │            Review changes, ask a question, or type /           │
-   │                ? for shortcuts · /help to begin                │
    ╰────────────────────────────────────────────────────────────────╯
 
 
 
 
-╭──────────────────────────────────────────────────────────────────────╮
-│❯ Review changes, ask a question, or type /                           │
-│? for shortcuts · /help · /review · !pwd                              │
-╰──────────────────────────────────────────────────────────────────────╯
+
+
+
+────────────────────────────────────────────────────────────────────────
+❯ Review changes, ask a question, or type /
+? for shortcuts · /help · /review · !pwd
