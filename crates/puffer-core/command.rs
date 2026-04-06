@@ -1,9 +1,10 @@
 use crate::command_helpers::{
     append_tool_invocations, copy_last_message, describe_context, describe_git_diff,
-    describe_permissions, describe_plugin, emit_system, execute_skill_command,
-    handle_agents_command, handle_config_command, handle_hooks_command,
-    handle_keybindings_command, handle_memory_command, list_ides, list_mcp_servers, list_skills,
-    rewind_transcript, run_doctor, terminal_setup_advice,
+    describe_permissions, emit_system, execute_skill_command, handle_agents_command,
+    handle_config_command, handle_hooks_command, handle_ide_command,
+    handle_keybindings_command, handle_mcp_command, handle_memory_command,
+    handle_plugin_command, list_skills, reload_plugins_summary, rewind_transcript, run_doctor,
+    terminal_setup_advice,
 };
 use crate::{AppState, MessageRole};
 use anyhow::Result;
@@ -721,19 +722,10 @@ fn execute_local_command(
             ),
         ),
         "skills" => list_skills(state, resources, session_store),
-        "plugin" => describe_plugin(state, resources, session_store, args),
-        "reload-plugins" => emit_system(
-            state,
-            session_store,
-            format!(
-                "Reloaded plugin registry for this session.\nplugins={}\nskills={}\nmcp_servers={}",
-                resources.plugins.len(),
-                resources.skills.len(),
-                resources.mcp_servers.len()
-            ),
-        ),
-        "mcp" => list_mcp_servers(state, resources, session_store),
-        "ide" => list_ides(state, resources, session_store),
+        "plugin" => handle_plugin_command(state, resources, session_store, args),
+        "reload-plugins" => emit_system(state, session_store, reload_plugins_summary(state, resources)?),
+        "mcp" => handle_mcp_command(state, resources, session_store, args),
+        "ide" => handle_ide_command(state, resources, session_store, args),
         "login" => {
             let provider = if args.is_empty() {
                 state.current_provider.as_deref().unwrap_or("anthropic")
