@@ -1660,6 +1660,7 @@ dependencies = [
  "puffer-test-support",
  "puffer-tools",
  "ratatui",
+ "tempfile",
  "uuid",
 ]
 

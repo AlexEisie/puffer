@@ -54,6 +54,7 @@ pub fn run_app(
 
     loop {
         terminal.draw(|frame| {
+            render::set_active_overlay(tui.overlay.clone());
             render::render(
                 frame,
                 state,
@@ -64,7 +65,6 @@ pub fn run_app(
                 tui.cursor,
                 tui.slash_selection,
                 tui.scroll_offset,
-                tui.overlay.as_ref(),
                 &commands,
             )
         })?;
@@ -261,6 +261,23 @@ fn try_open_overlay(
                 None
             } else {
                 Some(OverlayState::ModelPicker {
+                    entries,
+                    selection: 0,
+                })
+            }
+        }
+        "login" if args.is_empty() => {
+            let entries = providers
+                .providers()
+                .map(|provider| ModelPickerEntry {
+                    selector: provider.id.clone(),
+                    description: provider.display_name.clone(),
+                })
+                .collect::<Vec<_>>();
+            if entries.is_empty() {
+                None
+            } else {
+                Some(OverlayState::LoginPicker {
                     entries,
                     selection: 0,
                 })
@@ -584,12 +601,18 @@ pub(crate) enum OverlayState {
         entries: Vec<ModelPickerEntry>,
         selection: usize,
     },
+    LoginPicker {
+        entries: Vec<ModelPickerEntry>,
+        selection: usize,
+    },
 }
 
 impl OverlayState {
     fn select_previous(&mut self) {
         match self {
-            Self::SessionPicker { selection, .. } | Self::ModelPicker { selection, .. } => {
+            Self::SessionPicker { selection, .. }
+            | Self::ModelPicker { selection, .. }
+            | Self::LoginPicker { selection, .. } => {
                 *selection = selection.saturating_sub(1);
             }
         }
@@ -604,6 +627,9 @@ impl OverlayState {
                 *selection = (*selection + 1).min(sessions.len().saturating_sub(1));
             }
             Self::ModelPicker { entries, selection } => {
+                *selection = (*selection + 1).min(entries.len().saturating_sub(1));
+            }
+            Self::LoginPicker { entries, selection } => {
                 *selection = (*selection + 1).min(entries.len().saturating_sub(1));
             }
         }
@@ -632,6 +658,9 @@ impl OverlayState {
             Self::ModelPicker { entries, selection } => entries
                 .get(*selection)
                 .map(|entry| format!("/model {}", entry.selector)),
+            Self::LoginPicker { entries, selection } => entries
+                .get(*selection)
+                .map(|entry| format!("/login {}", entry.selector)),
         }
     }
 }

@@ -5,7 +5,7 @@ use puffer_core::{AppState, CommandKind, CommandSpec, MessageRole, RenderedMessa
 use puffer_provider_registry::{AuthStore, StoredCredential};
 use puffer_resources::LoadedResources;
 use puffer_tools::{ToolKind, ToolRegistry};
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
@@ -637,6 +637,7 @@ fn overlay_title(overlay: &OverlayState) -> &'static str {
     match overlay {
         OverlayState::SessionPicker { .. } => "Resume Session",
         OverlayState::ModelPicker { .. } => "Select Model",
+        OverlayState::LoginPicker { .. } => "Login Provider",
     }
 }
 
@@ -658,6 +659,14 @@ fn overlay_rows(overlay: &OverlayState) -> Vec<OverlayRow> {
             })
             .collect(),
         OverlayState::ModelPicker { entries, selection } => entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| OverlayRow {
+                selected: index == *selection,
+                text: render_model_entry(entry),
+            })
+            .collect(),
+        OverlayState::LoginPicker { entries, selection } => entries
             .iter()
             .enumerate()
             .map(|(index, entry)| OverlayRow {

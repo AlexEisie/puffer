@@ -32,7 +32,6 @@ fn render_shows_command_popup_for_slash_input() {
                 4,
                 0,
                 0,
-                None,
                 &supported_commands(),
             )
         })
@@ -102,6 +101,20 @@ fn try_open_overlay_builds_resume_picker() {
 }
 
 #[test]
+fn try_open_overlay_builds_login_picker() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+
+    let providers = sample_providers();
+    let mut tui = TuiState::default();
+    let opened = try_open_overlay(&providers, &session_store, &mut tui, "/login").unwrap();
+    assert!(opened);
+    assert!(matches!(tui.overlay, Some(OverlayState::LoginPicker { .. })));
+}
+
+#[test]
 fn model_overlay_selected_command_uses_selector() {
     let overlay = OverlayState::ModelPicker {
         entries: vec![ModelPickerEntry {
@@ -136,7 +149,6 @@ fn render_shows_status_line_when_enabled() {
                 0,
                 0,
                 0,
-                None,
                 &supported_commands(),
             )
         })
