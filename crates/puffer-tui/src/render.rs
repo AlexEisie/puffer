@@ -63,8 +63,10 @@ pub(crate) fn render(
     let compact_composer = frame.area().width < COMPACT_COMPOSER_BREAKPOINT;
     let footer_height = if onboarding_active {
         4
-    } else if simplified_surface {
-        4
+    } else if help_active {
+        2
+    } else if home_active {
+        3
     } else if compact_composer {
         4
     } else if state.statusline_enabled {
@@ -110,59 +112,71 @@ pub(crate) fn render(
         );
     }
 
-    let footer_block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(border::ROUNDED)
-        .border_style(prompt_border_style(state));
-    frame.render_widget(&footer_block, layout[2]);
-    let footer_area = footer_block.inner(layout[2]);
-    let footer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(if onboarding_active {
-            [
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(0),
-                Constraint::Length(0),
-            ]
-            .as_ref()
-        } else if simplified_surface {
-            [
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(0),
-                Constraint::Length(0),
-            ]
-            .as_ref()
-        } else if compact_composer {
-            [
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(0),
-            ]
-            .as_ref()
-        } else if state.statusline_enabled {
-            [
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ]
-            .as_ref()
-        } else {
-            [
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(0),
-            ]
-            .as_ref()
-        })
-        .split(footer_area);
+    let footer = if simplified_surface {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(if help_active {
+                [Constraint::Length(1), Constraint::Length(1)].as_ref()
+            } else {
+                [
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ]
+                .as_ref()
+            })
+            .split(layout[2])
+    } else {
+        let footer_block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            .border_style(prompt_border_style(state));
+        frame.render_widget(&footer_block, layout[2]);
+        let footer_area = footer_block.inner(layout[2]);
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(if onboarding_active {
+                [
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(0),
+                    Constraint::Length(0),
+                ]
+                .as_ref()
+            } else if compact_composer {
+                [
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(0),
+                ]
+                .as_ref()
+            } else if state.statusline_enabled {
+                [
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ]
+                .as_ref()
+            } else {
+                [
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(0),
+                ]
+                .as_ref()
+            })
+            .split(footer_area)
+    };
 
     if simplified_surface {
-        // Home/help surfaces carry the key context already, so keep only prompt and hint below.
+        frame.render_widget(
+            Paragraph::new(separator_line(layout[2].width))
+                .style(Style::default().add_modifier(Modifier::DIM)),
+            footer[0],
+        );
     } else if compact_composer && !onboarding_active {
         frame.render_widget(
             Paragraph::new(status_compact_line(
@@ -194,8 +208,10 @@ pub(crate) fn render(
 
     let prompt_row = if onboarding_active {
         footer[0]
-    } else if simplified_surface {
-        footer[0]
+    } else if help_active {
+        footer[1]
+    } else if home_active {
+        footer[1]
     } else if compact_composer {
         footer[1]
     } else if state.statusline_enabled {
@@ -204,15 +220,17 @@ pub(crate) fn render(
         footer[0]
     };
     let hint_row = if onboarding_active {
-        footer[1]
-    } else if simplified_surface {
-        footer[1]
+        Some(footer[1])
+    } else if help_active {
+        None
+    } else if home_active {
+        Some(footer[2])
     } else if compact_composer {
-        footer[2]
+        Some(footer[2])
     } else if state.statusline_enabled {
-        footer[3]
+        Some(footer[3])
     } else {
-        footer[1]
+        Some(footer[1])
     };
     let summary_row = if simplified_surface
         || compact_composer
@@ -231,24 +249,33 @@ pub(crate) fn render(
             prompt_row.x + 2 + cursor.min(max_cursor) as u16,
             prompt_row.y,
         ));
-        frame.render_widget(
-            Paragraph::new(overlay_hint_line(input, onboarding_active))
-                .style(Style::default().add_modifier(Modifier::DIM)),
-            hint_row,
-        );
+        if let Some(hint_row) = hint_row {
+            frame.render_widget(
+                Paragraph::new(overlay_hint_line(input, onboarding_active))
+                    .style(Style::default().add_modifier(Modifier::DIM)),
+                hint_row,
+            );
+        }
     } else {
-        frame.render_widget(Paragraph::new(prompt_line(input)), prompt_row);
+        let prompt = if help_active && input.is_empty() {
+            Line::from("❯ /help")
+        } else {
+            prompt_line(input)
+        };
+        frame.render_widget(Paragraph::new(prompt), prompt_row);
         let max_cursor = usize::from(prompt_row.width.saturating_sub(3));
         frame.set_cursor_position((
             prompt_row.x + 2 + cursor.min(max_cursor) as u16,
             prompt_row.y,
         ));
 
-        frame.render_widget(
-            Paragraph::new(hint_line(input, commands))
-                .style(Style::default().add_modifier(Modifier::DIM)),
-            hint_row,
-        );
+        if let Some(hint_row) = hint_row {
+            frame.render_widget(
+                Paragraph::new(hint_line(input, commands))
+                    .style(Style::default().add_modifier(Modifier::DIM)),
+                hint_row,
+            );
+        }
         if let Some(summary_row) = summary_row {
             frame.render_widget(
                 Paragraph::new(status_primary_line(
@@ -273,6 +300,10 @@ pub(crate) fn render(
             render_overlay(frame, layout[1], overlay);
         }
     }
+}
+
+fn separator_line(width: u16) -> Line<'static> {
+    Line::from("─".repeat(usize::from(width)))
 }
 
 fn render_top_panel(
