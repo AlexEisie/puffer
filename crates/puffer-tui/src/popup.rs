@@ -1,5 +1,7 @@
 use puffer_core::CommandSpec;
 
+const MAX_POPUP_ROWS: usize = 24;
+
 /// Returns slash-command popup rows for the current slash-input prefix.
 pub(crate) fn popup_rows<'a>(input: &str, commands: &'a [CommandSpec]) -> Vec<&'a CommandSpec> {
     let filter = input.trim_start_matches('/');
@@ -8,7 +10,7 @@ pub(crate) fn popup_rows<'a>(input: &str, commands: &'a [CommandSpec]) -> Vec<&'
         .filter(|command| command_matches(command, filter))
         .collect::<Vec<_>>();
     rows.sort_by_key(|command| sort_key(command, filter));
-    rows.truncate(8);
+    rows.truncate(MAX_POPUP_ROWS);
     rows
 }
 
@@ -55,5 +57,12 @@ mod tests {
         let names = rows.iter().map(|row| row.name).collect::<Vec<_>>();
         assert!(names.starts_with(&["reload-plugins", "remote-control", "remote-env"]));
         assert!(names.contains(&"review"));
+    }
+
+    #[test]
+    fn popup_shows_more_than_eight_rows_for_broad_queries() {
+        let commands = supported_commands();
+        let rows = popup_rows("/", &commands);
+        assert!(rows.len() > 8);
     }
 }

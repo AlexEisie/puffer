@@ -1,4 +1,7 @@
-use crate::{SessionMetadata, SessionRecord, SessionSummary, TranscriptEvent};
+use crate::{
+    GitDiffSnapshot, SessionMetadata, SessionRecord, SessionSummary, TranscriptEvent,
+    TranscriptRewrite,
+};
 use anyhow::Context;
 use anyhow::Result;
 use puffer_config::ConfigPaths;
@@ -65,6 +68,37 @@ impl SessionStore {
         writeln!(file, "{line}")?;
         self.touch_session(session_id)?;
         Ok(())
+    }
+
+    /// Appends a transcript rewrite operation to the session log.
+    pub fn append_transcript_rewrite(
+        &self,
+        session_id: Uuid,
+        rewrite: TranscriptRewrite,
+    ) -> Result<()> {
+        self.append_event(session_id, TranscriptEvent::TranscriptRewritten { rewrite })
+    }
+
+    /// Appends a transcript-clear rewrite operation to the session log.
+    pub fn append_transcript_clear(&self, session_id: Uuid) -> Result<()> {
+        self.append_transcript_rewrite(session_id, TranscriptRewrite::Clear)
+    }
+
+    /// Appends a transcript pop-last rewrite operation to the session log.
+    pub fn append_transcript_pop_last(&self, session_id: Uuid, count: usize) -> Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+        self.append_transcript_rewrite(session_id, TranscriptRewrite::PopLast { count })
+    }
+
+    /// Appends one git diff snapshot to the session log.
+    pub fn append_git_diff_snapshot(
+        &self,
+        session_id: Uuid,
+        snapshot: GitDiffSnapshot,
+    ) -> Result<()> {
+        self.append_event(session_id, TranscriptEvent::GitDiffSnapshot { snapshot })
     }
 
     /// Updates a session display name and records the rename in the event log.
@@ -387,5 +421,41 @@ mod tests {
 
         let by_name = store.find_session("review").unwrap().unwrap();
         assert_eq!(by_name.id, session.id);
+    }
+
+    #[test]
+    fn transcript_rewrite_events_are_appended() {
+        let tempdir = tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        fs::create_dir_all(&paths.workspace_config_dir).unwrap();
+        let store = SessionStore::from_paths(&paths).unwrap();
+
+        let session = store.create_session(tempdir.path().join("src")).unwrap();
+        store
+            .append_event(
+                session.id,
+                TranscriptEvent::UserMessage {
+                    text: "before".to_string(),
+                },
+            )
+            .unwrap();
+        store.append_transcript_clear(session.id).unwrap();
+        store.append_transcript_pop_last(session.id, 2).unwrap();
+        store.append_transcript_pop_last(session.id, 0).unwrap();
+
+        let record = store.load_session(session.id).unwrap();
+        assert_eq!(record.events.len(), 3);
+        assert_eq!(
+            record.events[1],
+            TranscriptEvent::TranscriptRewritten {
+                rewrite: TranscriptRewrite::Clear,
+            }
+        );
+        assert_eq!(
+            record.events[2],
+            TranscriptEvent::TranscriptRewritten {
+                rewrite: TranscriptRewrite::PopLast { count: 2 },
+            }
+        );
     }
 }

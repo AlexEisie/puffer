@@ -1,31 +1,28 @@
 use serde::{Deserialize, Serialize};
 
-/// Represents plan-mode metadata captured in runtime state snapshots.
+/// Describes one append-only transcript rewrite operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RuntimePlanState {
-    pub mode_open: bool,
-    pub summary: Option<String>,
-    pub updated_at_ms: u64,
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum TranscriptRewrite {
+    Clear,
+    PopLast {
+        #[serde(default = "default_pop_count")]
+        count: usize,
+    },
 }
 
-/// Describes the persisted status of one runtime task entry.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeTaskStatus {
-    Completed,
-    Failed,
+fn default_pop_count() -> usize {
+    1
 }
 
-/// Stores one runtime task snapshot entry.
+/// Stores one append-only git diff snapshot for a command checkpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RuntimeTask {
-    pub id: u64,
-    pub label: String,
-    pub detail: String,
-    pub status: RuntimeTaskStatus,
-    pub plan_summary: Option<String>,
-    pub agent_id: Option<String>,
-    pub worktree: String,
+pub struct GitDiffSnapshot {
+    pub command: String,
+    pub status: String,
+    pub unstaged_diffstat: String,
+    pub staged_diffstat: String,
+    pub patch_excerpt: String,
 }
 
 /// Stores a transcript event in append-only session history.
@@ -48,6 +45,13 @@ pub enum TranscriptEvent {
     SessionRenamed {
         name: String,
     },
+    GitDiffSnapshot {
+        snapshot: GitDiffSnapshot,
+    },
+    TranscriptRewritten {
+        #[serde(flatten)]
+        rewrite: TranscriptRewrite,
+    },
     StateSnapshot {
         current_model: Option<String>,
         current_provider: Option<String>,
@@ -55,17 +59,18 @@ pub enum TranscriptEvent {
         prompt_color: String,
         effort_level: String,
         fast_mode: bool,
+        #[serde(default)]
+        plan_mode: bool,
         sandbox_mode: String,
         remote_name: Option<String>,
         remote_environment: Option<String>,
+        #[serde(default)]
+        remote_session_id: Option<String>,
+        #[serde(default)]
+        remote_session_url: Option<String>,
+        #[serde(default)]
+        remote_session_status: Option<String>,
         statusline_enabled: bool,
         working_dirs: Vec<String>,
-    },
-    RuntimeState {
-        plan: RuntimePlanState,
-        tasks: Vec<RuntimeTask>,
-        next_task_id: u64,
-        active_agent_id: Option<String>,
-        active_worktree: Option<String>,
     },
 }

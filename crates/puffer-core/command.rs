@@ -3,8 +3,9 @@ use crate::command_helpers::{
     execute_skill_command, handle_agents_command, handle_config_command, handle_hooks_command,
     handle_ide_command, handle_keybindings_command, handle_mcp_command, handle_memory_command,
     handle_permissions_command, handle_plugin_command, handle_sandbox_command,
-    handle_session_command, list_skills, persist_user_model_selection, reload_plugins_summary,
-    render_login_guidance, rewind_transcript, run_doctor, terminal_setup_advice,
+    handle_remote_control_command, handle_remote_env_command, handle_session_command, list_skills,
+    persist_user_model_selection, record_command_checkpoint, render_login_guidance,
+    rewind_transcript, run_doctor, terminal_setup_advice,
 };
 use crate::{
     render_buddy_summary, render_cost_summary, render_task_summary, render_usage_summary, AppState,
@@ -268,7 +269,7 @@ pub fn supported_commands() -> Vec<CommandSpec> {
         cmd(
             "remote-env",
             &[],
-            "Configure the default remote environment for remote sessions",
+            "Configure the remote environment for this session",
             None,
             CommandKind::Ui,
         ),
@@ -328,6 +329,7 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             None,
             CommandKind::Ui,
         ),
+        cmd("skill:<name>", &[], "Run a loaded skill by slash-safe skill name", None, CommandKind::Ui),
         cmd(
             "status",
             &[],
@@ -399,6 +401,10 @@ pub fn dispatch_command(
         .unwrap_or((without_slash, ""));
 
     if let Some(skill_name) = name.strip_prefix("skill:") {
+        session_store.append_event(state.session.id, TranscriptEvent::CommandInvoked {
+            name: format!("skill:{skill_name}"),
+            args: String::new(),
+        })?;
         return execute_skill_command(state, resources, session_store, skill_name);
     }
 
@@ -425,7 +431,7 @@ pub fn dispatch_command(
                 command,
                 args,
             )?;
-            session_store.append_event(state.session.id, state.runtime_event())
+            record_command_checkpoint(state, session_store, command.name, args)
         }
         CommandKind::Local | CommandKind::Ui => {
             execute_local_command(
@@ -438,8 +444,7 @@ pub fn dispatch_command(
                 command,
                 args,
             )?;
-            session_store.append_event(state.session.id, state.runtime_event())?;
-            session_store.append_event(state.session.id, state.snapshot_event())
+            record_command_checkpoint(state, session_store, command.name, args)
         }
     }
 }
@@ -453,26 +458,17 @@ fn execute_prompt_command(
     command: &CommandSpec,
     args: &str,
 ) -> Result<()> {
-    if command.name == "plan" {
-        let trimmed = args.trim();
-        if trimmed.is_empty() || trimmed == "show" {
-            return emit_system(state, session_store, state.render_plan_summary());
-        }
-        if trimmed == "open" {
-            state.open_plan();
-            return emit_system(state, session_store, state.render_plan_summary());
-        }
-        if trimmed == "close" {
-            state.close_plan();
-            return emit_system(state, session_store, state.render_plan_summary());
-        }
-        if trimmed == "clear" {
-            state.set_plan_summary(None);
-            state.close_plan();
-            return emit_system(state, session_store, state.render_plan_summary());
-        }
-        state.open_plan();
-        state.set_plan_summary(Some(trimmed.to_string()));
+    let preparation = crate::command_helpers::prompt::prepare_prompt_command_specialization(
+        state,
+        session_store,
+        command.name,
+        args,
+    )?;
+    if matches!(
+        preparation,
+        Some(crate::command_helpers::prompt::PromptCommandPreparation::HandledLocally)
+    ) {
+        return Ok(());
     }
 
     let prompt = prompt_by_id(resources, command.name);
@@ -507,8 +503,42 @@ fn execute_prompt_command(
             state.session.slug.clone().unwrap_or_default(),
         ),
     ]);
-    let rendered = render_prompt_by_id(resources, command.name, &variables)
-        .unwrap_or_else(|| format!("Prompt command /{} invoked with: {}", command.name, args));
+    let mut rendered = match preparation {
+        Some(crate::command_helpers::prompt::PromptCommandPreparation::PromptOverride(prompt)) => {
+            prompt
+        }
+        Some(crate::command_helpers::prompt::PromptCommandPreparation::HandledLocally) => {
+            unreachable!("handled above")
+        }
+        None => render_prompt_by_id(resources, command.name, &variables)
+            .unwrap_or_else(|| format!("Prompt command /{} invoked with: {}", command.name, args)),
+    };
+    if let Some(mode) = prompt.and_then(|prompt| prompt.value.mode.as_deref()) {
+        rendered = format!("Command mode: {mode}\n\n{rendered}");
+    }
+
+    if command.name == "compact" {
+        return crate::command_helpers::prompt::execute_compact_prompt_command(
+            state,
+            resources,
+            providers,
+            auth_store,
+            session_store,
+            &rendered,
+        );
+    }
+
+    if command.name == "plan" && !args.trim().is_empty() && !matches!(args.trim(), "show" | "open") {
+        return crate::command_helpers::prompt::execute_plan_prompt_command(
+            state,
+            resources,
+            providers,
+            auth_store,
+            session_store,
+            &rendered,
+        );
+    }
+
     state.push_message(MessageRole::User, rendered.clone());
     session_store.append_event(
         state.session.id,
@@ -553,6 +583,7 @@ fn execute_local_command(
             for command in commands {
                 let _ = writeln!(&mut text, "/{:<16} {}", command.name, command.description);
             }
+            let _ = writeln!(&mut text, "\nRun /skills to list loaded /skill:<name> entries.");
             let _ = writeln!(
                 &mut text,
                 "\nResource counts: prompts={} tools={} skills={} plugins={} mcp_servers={} ides={}",
@@ -569,13 +600,14 @@ fn execute_local_command(
             state,
             session_store,
             format!(
-                "provider={:?} model={:?} theme={} color={} effort={} fast={} sandbox={} vim={} messages={} slug={} parent={:?}",
+                "provider={:?} model={:?} theme={} color={} effort={} fast={} plan={} sandbox={} vim={} messages={} slug={} parent={:?}",
                 state.current_provider,
                 state.current_model,
                 state.config.theme,
                 state.prompt_color,
                 state.effort_level,
                 state.fast_mode,
+                state.plan_mode,
                 state.sandbox_mode,
                 state.vim_mode,
                 state.transcript.len(),
@@ -590,7 +622,8 @@ fn execute_local_command(
         ),
         "cost" => emit_system(state, session_store, render_cost_summary(state)),
         "clear" => {
-            state.transcript.clear();
+            session_store.append_transcript_clear(state.session.id)?;
+            state.apply_transcript_rewrite(&puffer_session_store::TranscriptRewrite::Clear);
             emit_system(state, session_store, "Transcript cleared.".to_string())
         }
         "add-dir" => {
@@ -598,7 +631,6 @@ fn execute_local_command(
             if !state.working_dirs.iter().any(|existing| existing == &dir) {
                 state.working_dirs.push(dir.clone());
             }
-            state.set_active_worktree(dir.clone());
             emit_system(state, session_store, format!("Added working directory {}.", dir.display()))
         }
         "exit" => {
@@ -750,7 +782,6 @@ fn execute_local_command(
                     state.current_model = Some(format!("{}/{}", provider.id, model.id));
                     state.config.default_provider = Some(provider.id.clone());
                     state.config.default_model = Some(format!("{}/{}", provider.id, model.id));
-                    state.clear_active_agent();
                     persist_user_model_selection(state)?;
                     emit_system(
                         state,
@@ -790,71 +821,14 @@ fn execute_local_command(
                 ),
             )
         }
-        "tasks" => emit_system(
-            state,
-            session_store,
-            render_task_summary(state),
-        ),
+        "tasks" => emit_system(state, session_store, render_task_summary(state)),
         "config" => handle_config_command(state, session_store, args),
         "context" => describe_context(state, resources, session_store),
-        "agents" => {
-            let result = handle_agents_command(state, session_store, args);
-            if result.is_ok() {
-                let trimmed = args.trim();
-                if let Some(agent_id) = trimmed.strip_prefix("use ").map(str::trim) {
-                    if !agent_id.is_empty()
-                        && matches!(
-                            state.transcript.last(),
-                            Some(message) if message.role == MessageRole::System
-                                && message.text.starts_with("Selected agent")
-                        )
-                    {
-                        state.set_active_agent(Some(agent_id.to_string()));
-                    }
-                }
-            }
-            result
-        }
+        "agents" => handle_agents_command(state, session_store, args),
         "memory" => handle_memory_command(state, session_store, args),
         "keybindings" => handle_keybindings_command(state, session_store),
-        "remote-control" => {
-            if args.is_empty() {
-                emit_system(
-                    state,
-                    session_store,
-                    format!(
-                        "Remote control session name: {}",
-                        state.remote_name.as_deref().unwrap_or("<unset>")
-                    ),
-                )
-            } else {
-                state.remote_name = Some(args.to_string());
-                emit_system(
-                    state,
-                    session_store,
-                    format!("Remote control session name set to {}.", args),
-                )
-            }
-        }
-        "remote-env" => {
-            if args.is_empty() {
-                emit_system(
-                    state,
-                    session_store,
-                    format!(
-                        "Remote environment: {}",
-                        state.remote_environment.as_deref().unwrap_or("<unset>")
-                    ),
-                )
-            } else {
-                state.remote_environment = Some(args.to_string());
-                emit_system(
-                    state,
-                    session_store,
-                    format!("Remote environment set to {}.", args),
-                )
-            }
-        }
+        "remote-control" => handle_remote_control_command(state, session_store, args),
+        "remote-env" => handle_remote_env_command(state, session_store, args),
         "sandbox" => handle_sandbox_command(state, session_store, args),
         "rename" => {
             let name = if args.is_empty() { format!("session-{}", &state.session.id.to_string()[..8]) } else { args.to_string() };
@@ -871,14 +845,13 @@ fn execute_local_command(
         "copy" => copy_last_message(state, session_store),
         "diff" => describe_git_diff(state, session_store),
         "doctor" => run_doctor(state, resources, providers, auth_store, session_store),
-        "buddy" => emit_system(
-            state,
-            session_store,
-            render_buddy_summary(state, resources),
-        ),
+        "buddy" => emit_system(state, session_store, render_buddy_summary(state, resources)),
         "skills" => list_skills(state, resources, session_store),
         "plugin" => handle_plugin_command(state, resources, session_store, args),
-        "reload-plugins" => emit_system(state, session_store, reload_plugins_summary(state, resources)?),
+        "reload-plugins" => {
+            state.reload_resources_requested = true;
+            emit_system(state, session_store, "Reloading plugin changes from disk for this session...".to_string())
+        }
         "mcp" => handle_mcp_command(state, resources, session_store, args),
         "ide" => handle_ide_command(state, resources, session_store, args),
         "login" => {
@@ -949,13 +922,17 @@ fn execute_local_command(
             if !args.is_empty() {
                 state.session.display_name = Some(args.to_string());
             }
+            state.remote_name = None;
+            state.remote_session_id = None;
+            state.remote_session_url = None;
+            state.remote_session_status = None;
             emit_system(
                 state,
                 session_store,
                 format!("Forked current session into {}.", state.session.id),
             )
         }
-        "rewind" => rewind_transcript(state, session_store),
+        "rewind" => rewind_transcript(state, session_store, args),
         "terminal-setup" => emit_system(state, session_store, terminal_setup_advice(state)),
         _ => emit_system(
             state,

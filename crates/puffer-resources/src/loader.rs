@@ -107,10 +107,11 @@ pub fn skill_by_name<'a>(
     resources: &'a LoadedResources,
     name: &str,
 ) -> Option<&'a LoadedItem<SkillSpec>> {
+    let normalized = normalize_skill_name(name);
     resources
         .skills
         .iter()
-        .find(|skill| skill.value.name == name)
+        .find(|skill| skill.value.name == normalized)
 }
 
 /// Looks up a plugin manifest by id.
@@ -244,10 +245,11 @@ fn load_skill_dir(dir: &Path, kind: SourceKind) -> Result<Vec<LoadedItem<SkillSp
         let raw = fs::read_to_string(&skill_path)
             .with_context(|| format!("failed to read skill file {}", skill_path.display()))?;
         let (frontmatter, body) = split_frontmatter(&raw);
-        let name = frontmatter
+        let raw_name = frontmatter
             .get("name")
             .cloned()
             .unwrap_or_else(|| path.file_name().unwrap().to_string_lossy().to_string());
+        let name = normalize_skill_name(&raw_name);
         let description = frontmatter
             .get("description")
             .cloned()
@@ -271,6 +273,26 @@ fn load_skill_dir(dir: &Path, kind: SourceKind) -> Result<Vec<LoadedItem<SkillSp
         });
     }
     Ok(items)
+}
+
+fn normalize_skill_name(raw: &str) -> String {
+    let mut normalized = String::new();
+    let mut last_was_dash = false;
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash {
+            normalized.push('-');
+            last_was_dash = true;
+        }
+    }
+    let trimmed = normalized.trim_matches('-');
+    if trimmed.is_empty() {
+        "skill".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn sorted_dir_entries(dir: &Path) -> Result<Vec<fs::DirEntry>> {
@@ -426,6 +448,32 @@ mod tests {
         assert_eq!(loaded.plugins.len(), 1);
         assert_eq!(loaded.skills[0].value.name, "reviewer");
         assert_eq!(loaded.plugins[0].value.id, "example");
+    }
+
+    #[test]
+    fn skill_names_are_normalized_for_slash_commands() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let resources_dir = root.join(".puffer/resources");
+        fs::create_dir_all(resources_dir.join("skills/review-helper")).unwrap();
+        fs::write(
+            resources_dir.join("skills/review-helper/SKILL.md"),
+            "---\nname: Review Helper ++\ndescription: Review changes\n---\nBody\n",
+        )
+        .unwrap();
+
+        let paths = ConfigPaths {
+            workspace_root: root.clone(),
+            workspace_config_dir: root.join(".puffer"),
+            user_config_dir: root.join(".home/.puffer"),
+            builtin_resources_dir: root.join("resources"),
+        };
+        let loaded = load_resources(&paths).unwrap();
+        assert_eq!(loaded.skills.len(), 1);
+        assert_eq!(loaded.skills[0].value.name, "review-helper");
+        assert!(skill_by_name(&loaded, "Review Helper ++").is_some());
+        assert!(skill_by_name(&loaded, "review helper").is_some());
+        assert!(skill_by_name(&loaded, "review-helper").is_some());
     }
 
     #[test]

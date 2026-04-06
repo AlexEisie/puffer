@@ -10,6 +10,7 @@ use tempfile::tempdir;
 
 mod login_auth;
 mod model_scope;
+mod remote_history;
 mod sandbox;
 mod usage_buddy;
 
@@ -89,7 +90,7 @@ fn local_commands_append_state_snapshots() {
 
     let record = session_store.load_session(session.id).unwrap();
     assert!(matches!(
-        record.events.last(),
+        record.events.iter().rev().nth(1),
         Some(TranscriptEvent::StateSnapshot { theme, .. }) if theme == "harbor"
     ));
 }
@@ -119,9 +120,13 @@ fn resume_switches_to_matching_session_record() {
                 prompt_color: "teal".to_string(),
                 effort_level: "high".to_string(),
                 fast_mode: true,
+                plan_mode: false,
                 sandbox_mode: "workspace-write".to_string(),
                 remote_name: None,
                 remote_environment: None,
+                remote_session_id: None,
+                remote_session_url: None,
+                remote_session_status: None,
                 statusline_enabled: true,
                 working_dirs: vec![tempdir.path().join("secondary").display().to_string()],
             },
@@ -851,6 +856,7 @@ fn session_command_lists_saved_sessions() {
     ));
 }
 
+
 #[test]
 fn cost_command_reports_runtime_summary() {
     let tempdir = tempdir().unwrap();
@@ -961,13 +967,12 @@ fn reload_plugins_reports_resource_counts() {
     )
     .unwrap();
 
+    assert!(state.reload_resources_requested);
     assert!(matches!(
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
             text,
-        }) if text.contains("plugins=1")
-            && text.contains("skills=1")
-            && text.contains("mcp_servers=1")
+        }) if text.contains("Reloading plugin changes from disk")
     ));
 }

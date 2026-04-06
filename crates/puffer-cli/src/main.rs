@@ -266,7 +266,7 @@ fn main() -> Result<()> {
     let config = load_config(&paths)?;
     let auth_path = paths.user_config_dir.join("auth.json");
     let mut auth_store = AuthStore::load(&auth_path)?;
-    let resources = load_resources(&paths)?;
+    let mut resources = load_resources(&paths)?;
 
     let mut providers = ProviderRegistry::new();
     for provider in &resources.providers {
@@ -301,7 +301,21 @@ fn main() -> Result<()> {
             run_auth_command(command, &mut auth_store, &auth_path, &providers)
         }
         Some(Command::Commands) => {
-            println!("{}", serde_json::to_string_pretty(&supported_commands())?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "builtin": supported_commands(),
+                    "skills": resources
+                        .skills
+                        .iter()
+                        .map(|skill| serde_json::json!({
+                            "name": skill.value.name,
+                            "description": skill.value.description,
+                            "command": format!("/skill:{}", skill.value.name),
+                        }))
+                        .collect::<Vec<_>>(),
+                }))?
+            );
             Ok(())
         }
         Some(Command::Providers) => {
@@ -391,7 +405,7 @@ fn main() -> Result<()> {
             let mut state = AppState::from_session_record(config.clone(), session);
             puffer_tui::run_app(
                 &mut state,
-                &resources,
+                &mut resources,
                 &mut providers,
                 &mut auth_store,
                 &auth_path,
@@ -408,7 +422,7 @@ fn main() -> Result<()> {
             let mut state = AppState::from_session_record(config.clone(), record);
             puffer_tui::run_app(
                 &mut state,
-                &resources,
+                &mut resources,
                 &mut providers,
                 &mut auth_store,
                 &auth_path,
@@ -423,7 +437,7 @@ fn main() -> Result<()> {
             let mut state = AppState::new(config.clone(), cwd, session);
             puffer_tui::run_app(
                 &mut state,
-                &resources,
+                &mut resources,
                 &mut providers,
                 &mut auth_store,
                 &auth_path,

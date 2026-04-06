@@ -2,10 +2,11 @@ use super::emit_system;
 use crate::AppState;
 use anyhow::Result;
 use puffer_config::{ensure_workspace_dirs, save_user_config, ConfigPaths};
-use puffer_resources::LoadedResources;
+use puffer_resources::{hook_by_id, LoadedResources};
 use puffer_session_store::SessionStore;
 use puffer_tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
@@ -57,25 +58,99 @@ pub(crate) fn handle_permissions_command(
     let paths = ConfigPaths::discover(&state.cwd);
     ensure_workspace_dirs(&paths)?;
     let permissions_path = paths.workspace_config_dir.join("permissions.toml");
-    if !permissions_path.exists() {
-        fs::write(&permissions_path, default_permissions_contents(resources))?;
-    }
-    match args.trim() {
-        "path" => emit_system(
+    let mut settings = load_or_initialize_permissions(&permissions_path, resources)?;
+    let trimmed = args.trim();
+    match trimmed {
+        "path" => {
+            emit_system(
+                state,
+                session_store,
+                format!("Permissions file: {}", permissions_path.display()),
+            )
+        }
+        "" | "show" | "list" => emit_system(
             state,
             session_store,
-            format!("Permissions file: {}", permissions_path.display()),
+            render_permissions_summary(&permissions_path, &settings),
         ),
-        "" | "show" => emit_system(
+        _ if trimmed.starts_with("allow ") => {
+            let tool = trimmed.trim_start_matches("allow ").trim();
+            if tool.is_empty() {
+                return emit_system(
+                    state,
+                    session_store,
+                    "Usage: /permissions allow <tool-id>".to_string(),
+                );
+            }
+            set_permission_level(&mut settings, tool, "allow");
+            write_permissions(&permissions_path, &settings)?;
+            emit_system(
+                state,
+                session_store,
+                format!("Set {} to `allow` in {}.", tool, permissions_path.display()),
+            )
+        }
+        _ if trimmed.starts_with("deny ") => {
+            let tool = trimmed.trim_start_matches("deny ").trim();
+            if tool.is_empty() {
+                return emit_system(
+                    state,
+                    session_store,
+                    "Usage: /permissions deny <tool-id>".to_string(),
+                );
+            }
+            set_permission_level(&mut settings, tool, "deny");
+            write_permissions(&permissions_path, &settings)?;
+            emit_system(
+                state,
+                session_store,
+                format!("Set {} to `deny` in {}.", tool, permissions_path.display()),
+            )
+        }
+        _ if trimmed.starts_with("ask ") => {
+            let tool = trimmed.trim_start_matches("ask ").trim();
+            if tool.is_empty() {
+                return emit_system(
+                    state,
+                    session_store,
+                    "Usage: /permissions ask <tool-id>".to_string(),
+                );
+            }
+            set_permission_level(&mut settings, tool, "ask");
+            write_permissions(&permissions_path, &settings)?;
+            emit_system(
+                state,
+                session_store,
+                format!("Set {} to `ask` in {}.", tool, permissions_path.display()),
+            )
+        }
+        _ if trimmed.starts_with("remove ") => {
+            let tool = trimmed.trim_start_matches("remove ").trim();
+            if tool.is_empty() {
+                return emit_system(
+                    state,
+                    session_store,
+                    "Usage: /permissions remove <tool-id>".to_string(),
+                );
+            }
+            settings.tools.remove(&normalize_tool_id(tool));
+            write_permissions(&permissions_path, &settings)?;
+            emit_system(
+                state,
+                session_store,
+                format!(
+                    "Removed explicit rule for {} in {}.",
+                    tool,
+                    permissions_path.display()
+                ),
+            )
+        }
+        "summary" => describe_permissions(state, resources, session_store),
+        _ => emit_system(
             state,
             session_store,
-            format!(
-                "Permissions file: {}\n{}",
-                permissions_path.display(),
-                fs::read_to_string(&permissions_path)?
-            ),
+            "Usage: /permissions [show|list|path|summary|allow <tool-id>|deny <tool-id>|ask <tool-id>|remove <tool-id>]".to_string(),
         ),
-        _ => describe_permissions(state, resources, session_store),
     }
 }
 
@@ -113,6 +188,17 @@ pub(crate) fn handle_config_command(
             state,
             session_store,
             format!("Workspace config path: {}", config_path.display()),
+        );
+    }
+
+    if trimmed == "open" {
+        return emit_system(
+            state,
+            session_store,
+            format!(
+                "Open your workspace config file at {}.",
+                config_path.display()
+            ),
         );
     }
 
@@ -202,13 +288,67 @@ pub(crate) fn handle_hooks_command(
     if !hooks_path.exists() {
         fs::write(&hooks_path, default_hooks_contents())?;
     }
-    if args.trim() == "path" {
+    let trimmed = args.trim();
+    if trimmed == "path" {
         return emit_system(
             state,
             session_store,
             format!("Hooks directory: {}", hooks_dir.display()),
         );
     }
+
+    if trimmed == "list" {
+        if resources.hooks.is_empty() {
+            return emit_system(
+                state,
+                session_store,
+                "No hook configurations are loaded.".to_string(),
+            );
+        }
+        let mut summary = String::from("Loaded hooks:\n");
+        for hook in &resources.hooks {
+            let _ = writeln!(
+                &mut summary,
+                "- {} [{}] -> {}",
+                hook.value.id, hook.value.event, hook.value.command
+            );
+        }
+        return emit_system(state, session_store, summary);
+    }
+
+    if let Some(hook_id) = trimmed.strip_prefix("show ") {
+        let hook_id = hook_id.trim();
+        if hook_id.is_empty() {
+            return emit_system(
+                state,
+                session_store,
+                "Usage: /hooks show <hook-id>".to_string(),
+            );
+        }
+        if let Some(hook) = hook_by_id(resources, hook_id) {
+            return emit_system(
+                state,
+                session_store,
+                format!(
+                    "Hook {}\nevent={}\ncommand={}\nsource={}",
+                    hook.value.id,
+                    hook.value.event,
+                    hook.value.command,
+                    hook.source_info.path.display()
+                ),
+            );
+        }
+        return emit_system(state, session_store, format!("Unknown hook `{hook_id}`."));
+    }
+
+    if trimmed == "open" {
+        return emit_system(
+            state,
+            session_store,
+            format!("Open your hooks directory at {}.", hooks_dir.display()),
+        );
+    }
+
     emit_system(
         state,
         session_store,
@@ -232,6 +372,45 @@ pub(crate) fn handle_hooks_command(
             fs::read_to_string(&hooks_path)?
         ),
     )
+}
+
+fn normalize_tool_id(tool: &str) -> String {
+    tool.trim().replace('-', "_")
+}
+
+fn set_permission_level(settings: &mut PermissionsSettings, tool: &str, level: &str) {
+    settings
+        .tools
+        .insert(normalize_tool_id(tool), level.to_string());
+}
+
+fn load_or_initialize_permissions(
+    path: &PathBuf,
+    resources: &LoadedResources,
+) -> Result<PermissionsSettings> {
+    if path.exists() {
+        return Ok(toml::from_str(&fs::read_to_string(path)?)?);
+    }
+    let default = default_permissions_contents(resources);
+    fs::write(path, default)?;
+    Ok(toml::from_str(&fs::read_to_string(path)?)?)
+}
+
+fn write_permissions(path: &PathBuf, settings: &PermissionsSettings) -> Result<()> {
+    fs::write(path, toml::to_string_pretty(settings)?)?;
+    Ok(())
+}
+
+fn render_permissions_summary(path: &PathBuf, settings: &PermissionsSettings) -> String {
+    let mut body = String::from("Tool rules:\n");
+    if settings.tools.is_empty() {
+        body.push_str("- <none>\n");
+    } else {
+        for (tool, level) in &settings.tools {
+            let _ = writeln!(&mut body, "- {tool}: {level}");
+        }
+    }
+    format!("Permissions file: {}\n{}", path.display(), body.trim_end())
 }
 
 /// Shows or updates the workspace sandbox configuration file.
@@ -377,6 +556,12 @@ event: tool_end\n\
 command: echo \"$PUFFER_TOOL_ID:$PUFFER_TOOL_SUCCESS\"\n"
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PermissionsSettings {
+    #[serde(default)]
+    tools: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SandboxSettings {
     mode: String,
@@ -424,4 +609,25 @@ fn render_sandbox_summary(path: &PathBuf, settings: &SandboxSettings) -> String 
         settings.allow_unsandboxed_fallback,
         exclusions
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn permissions_round_trip_supports_allow_and_remove() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("permissions.toml");
+        let mut settings = PermissionsSettings::default();
+        set_permission_level(&mut settings, "read-file", "allow");
+        write_permissions(&path, &settings).unwrap();
+        let loaded: PermissionsSettings =
+            toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            loaded.tools.get("read_file").map(String::as_str),
+            Some("allow")
+        );
+    }
 }
