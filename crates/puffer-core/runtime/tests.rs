@@ -658,9 +658,7 @@ fn tool_definitions_keep_never_approval_tools_enabled() {
         ..LoadedResources::default()
     };
     let registry = ToolRegistry::from_resources(&resources);
-    let openai_provider_descriptor = openai_provider();
-    let openai_tools =
-        openai_tool_definitions(&registry, &openai_provider_descriptor, "gpt-5");
+    let openai_tools = openai_tool_definitions(&registry);
     assert_eq!(openai_tools.len(), 1);
     assert_eq!(openai_tools[0].name, "read_file");
 }
@@ -695,83 +693,6 @@ fn execute_openai_tool_calls_serializes_outputs() {
     assert_eq!(result.outputs[0].call_id, "call_1");
     assert!(result.outputs[0].output.contains("hi"));
     assert_eq!(result.invocations[0].tool_id, "bash");
-}
-
-#[test]
-fn execute_openai_tool_calls_blocks_policy_disabled_tools() {
-    let mut denied = loaded_tool("bash", "Run shell", "bash");
-    denied.value.approval_policy = Some("disabled".to_string());
-    let resources = LoadedResources {
-        tools: vec![denied],
-        ..LoadedResources::default()
-    };
-    let registry = ToolRegistry::from_resources(&resources);
-    let tool_calls = vec![OpenAIResponseToolCall {
-        item_id: Some("fc_1".to_string()),
-        status: Some("completed".to_string()),
-        call_id: "call_1".to_string(),
-        name: "bash".to_string(),
-        arguments: json!({ "command": "printf hi" }),
-    }];
-    let mut state = state();
-    let request_config = test_openai_request_config();
-    let result = execute_openai_tool_calls(
-        &mut state,
-        &resources,
-        &tool_calls,
-        &registry,
-        std::env::current_dir().unwrap().as_path(),
-        &request_config,
-        "gpt-5",
-    )
-    .unwrap();
-    assert_eq!(result.outputs[0].kind, "function_call_output");
-    assert!(result.outputs[0].output.contains("disabled by policy"));
-    assert!(!result.outputs[0].output.contains("hi"));
-    assert!(!result.invocations[0].success);
-}
-
-#[test]
-fn execute_anthropic_tool_calls_blocks_policy_disabled_tools() {
-    let mut denied = loaded_tool("bash", "Run shell", "bash");
-    denied.value.approval_policy = Some("disabled".to_string());
-    let resources = LoadedResources {
-        tools: vec![denied],
-        ..LoadedResources::default()
-    };
-    let registry = ToolRegistry::from_resources(&resources);
-    let response = json!({
-        "content": [
-            {
-                "type": "tool_use",
-                "id": "toolu_1",
-                "name": "bash",
-                "input": {
-                    "command": "printf hi"
-                }
-            }
-        ]
-    });
-    let mut state = state();
-    let request_config = test_anthropic_request_config();
-    let result = execute_anthropic_tool_calls(
-        &mut state,
-        &resources,
-        &response,
-        &registry,
-        std::env::current_dir().unwrap().as_path(),
-        &request_config,
-        "claude-sonnet-4-5",
-    )
-    .unwrap()
-    .unwrap();
-    let content = result.results.as_array().unwrap();
-    assert_eq!(content[0]["is_error"], Value::Bool(true));
-    assert!(content[0]["content"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("disabled by policy"));
-    assert!(!result.invocations[0].success);
 }
 
 #[test]

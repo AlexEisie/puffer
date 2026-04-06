@@ -98,7 +98,7 @@ pub(crate) fn handle_prompt_submit(
         },
     )?;
 
-    let worker_state = state.clone();
+    let mut worker_state = state.clone();
     let worker_resources = resources.clone();
     let worker_providers = providers.clone();
     let worker_prompt = submitted.clone();
@@ -107,7 +107,7 @@ pub(crate) fn handle_prompt_submit(
     thread::spawn(move || {
         let event_sender = sender.clone();
         let outcome = execute_user_turn_streaming(
-            &worker_state,
+            &mut worker_state,
             &worker_resources,
             &worker_providers,
             &mut worker_auth_store,

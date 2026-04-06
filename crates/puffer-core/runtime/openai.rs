@@ -21,7 +21,11 @@ use puffer_tools::ToolRegistry;
 use reqwest::blocking::{Client, Response};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader};
+
+pub(super) use super::openai_sse::{
+    is_event_stream, parse_openai_sse_reader, parse_openai_sse_response,
+    parse_openai_sse_response_streaming,
+};
 
 const OPENAI_CODEX_ORIGINATOR: &str = "codex_cli_rs";
 
@@ -140,7 +144,7 @@ pub(super) fn execute_openai(
 }
 
 pub(super) fn execute_openai_streaming<F>(
-    state: &AppState,
+    state: &mut AppState,
     resources: &LoadedResources,
     provider: &ProviderDescriptor,
     model_id: String,
@@ -200,7 +204,16 @@ where
             .id
             .clone()
             .ok_or_else(|| anyhow!("OpenAI response missing id for tool continuation"))?;
-        let tool_results = execute_openai_tool_calls(resources, &tool_calls, &registry, &state.cwd)?;
+        let cwd = state.cwd.clone();
+        let tool_results = execute_openai_tool_calls(
+            state,
+            resources,
+            &tool_calls,
+            &registry,
+            &cwd,
+            &execution.request_config,
+            &model_id,
+        )?;
         if !tool_results.invocations.is_empty() {
             on_event(TurnStreamEvent::ToolInvocations(
                 tool_results.invocations.clone(),
@@ -769,7 +782,7 @@ where
         bail!("request failed with status {}: {}", status, text);
     }
     if is_event_stream(content_type.as_deref(), "") {
-        return parse_openai_sse_reader(BufReader::new(response), on_event)
+        return parse_openai_sse_reader(std::io::BufReader::new(response), on_event)
             .with_context(|| format!("failed to parse SSE response from {url}"));
     }
     let text = response.text()?;
@@ -909,93 +922,6 @@ fn codex_reasoning_config(state: &AppState, supports_reasoning: bool) -> Option<
         _ => {}
     }
     Some(reasoning)
-}
-
-pub(super) fn is_event_stream(content_type: Option<&str>, text: &str) -> bool {
-    content_type.is_some_and(|value| value.starts_with("text/event-stream"))
-        || text.trim_start().starts_with("event:")
-}
-
-pub(super) fn parse_openai_sse_response(stream: &str) -> Result<Value> {
-    parse_openai_sse_response_streaming(stream, &mut |_| {})
-}
-
-pub(super) fn parse_openai_sse_response_streaming<F>(stream: &str, on_event: &mut F) -> Result<Value>
-where
-    F: FnMut(TurnStreamEvent),
-{
-    parse_openai_sse_reader(BufReader::new(stream.as_bytes()), on_event)
-}
-
-fn parse_openai_sse_reader<R, F>(reader: BufReader<R>, on_event: &mut F) -> Result<Value>
-where
-    R: std::io::Read,
-    F: FnMut(TurnStreamEvent),
-{
-    let mut response_id = None;
-    let mut output = Vec::new();
-    let mut reader = reader;
-    let mut line = String::new();
-    let mut data_lines = Vec::new();
-
-    loop {
-        line.clear();
-        let read = reader.read_line(&mut line)?;
-        if read == 0 {
-            flush_sse_event(&data_lines, &mut response_id, &mut output, on_event)?;
-            break;
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            flush_sse_event(&data_lines, &mut response_id, &mut output, on_event)?;
-            data_lines.clear();
-            continue;
-        }
-        if let Some(data) = trimmed.strip_prefix("data:") {
-            data_lines.push(data.trim_start().to_string());
-        }
-    }
-
-    Ok(json!({
-        "id": response_id,
-        "output": output,
-    }))
-}
-
-fn flush_sse_event<F>(
-    data_lines: &[String],
-    response_id: &mut Option<String>,
-    output: &mut Vec<Value>,
-    on_event: &mut F,
-) -> Result<()>
-where
-    F: FnMut(TurnStreamEvent),
-{
-    let data = data_lines.join("\n");
-    if data.is_empty() || data == "[DONE]" {
-        return Ok(());
-    }
-    let event: Value =
-        serde_json::from_str(&data).with_context(|| format!("invalid SSE payload: {data}"))?;
-    match event.get("type").and_then(Value::as_str).unwrap_or_default() {
-        "response.created" | "response.completed" => {
-            if let Some(id) = event.pointer("/response/id").and_then(Value::as_str) {
-                *response_id = Some(id.to_string());
-            }
-        }
-        "response.output_item.done" => {
-            if let Some(item) = event.get("item") {
-                output.push(item.clone());
-            }
-        }
-        "response.output_text.delta" => {
-            if let Some(delta) = event.get("delta").and_then(Value::as_str) {
-                on_event(TurnStreamEvent::TextDelta(delta.to_string()));
-            }
-        }
-        _ => {}
-    }
-    Ok(())
 }
 
 fn openai_registry_credential(

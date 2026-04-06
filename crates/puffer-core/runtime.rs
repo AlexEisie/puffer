@@ -13,6 +13,7 @@ use reqwest::StatusCode;
 use serde_json::{json, Value};
 
 mod openai;
+mod openai_sse;
 mod claude_tools;
 mod local_tools;
 
@@ -84,7 +85,7 @@ pub fn execute_user_prompt(
 
 /// Executes one user prompt and emits incremental stream events when the provider supports them.
 pub fn execute_user_prompt_streaming<F>(
-    state: &AppState,
+    state: &mut AppState,
     resources: &LoadedResources,
     providers: &ProviderRegistry,
     auth_store: &mut AuthStore,
