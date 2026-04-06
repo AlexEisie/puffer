@@ -942,13 +942,32 @@ fn execute_local_command(
             ),
         ),
         "resume" => {
-            let sessions = session_store.list_sessions()?;
-            let mut text = String::from("Sessions:\n");
-            for session in sessions.iter().take(10) {
-                let name = session.display_name.as_deref().unwrap_or("<unnamed>");
-                let _ = writeln!(&mut text, "{} {}", session.id, name);
+            if args.is_empty() {
+                let sessions = session_store.list_sessions()?;
+                let mut text = String::from("Sessions:\n");
+                for session in sessions.iter().take(10) {
+                    let name = session.display_name.as_deref().unwrap_or("<unnamed>");
+                    let _ = writeln!(&mut text, "{} {}", session.id, name);
+                }
+                emit_system(state, session_store, text)
+            } else {
+                let session_id = args
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("resume expects a session UUID"))?;
+                let record = session_store.load_session(session_id)?;
+                state.session = record.metadata;
+                state.cwd = state.session.cwd.clone();
+                state.transcript = record
+                    .events
+                    .iter()
+                    .filter_map(event_to_rendered_message)
+                    .collect();
+                emit_system(
+                    state,
+                    session_store,
+                    format!("Resumed session {}.", state.session.id),
+                )
             }
-            emit_system(state, session_store, text)
         }
         "branch" => {
             let fork = session_store.fork_session(state.session.id, state.cwd.clone())?;
@@ -1192,6 +1211,24 @@ fn emit_system(state: &mut AppState, session_store: &SessionStore, text: String)
     state.push_message(MessageRole::System, text.clone());
     session_store.append_event(state.session.id, TranscriptEvent::SystemMessage { text })?;
     Ok(())
+}
+
+fn event_to_rendered_message(event: &TranscriptEvent) -> Option<RenderedMessage> {
+    match event {
+        TranscriptEvent::UserMessage { text } => Some(RenderedMessage {
+            role: MessageRole::User,
+            text: text.clone(),
+        }),
+        TranscriptEvent::AssistantMessage { text } => Some(RenderedMessage {
+            role: MessageRole::Assistant,
+            text: text.clone(),
+        }),
+        TranscriptEvent::SystemMessage { text } => Some(RenderedMessage {
+            role: MessageRole::System,
+            text: text.clone(),
+        }),
+        TranscriptEvent::CommandInvoked { .. } | TranscriptEvent::SessionRenamed { .. } => None,
+    }
 }
 
 fn cmd(
