@@ -15,6 +15,4 @@ pub(crate) use ecosystem::{
     handle_agents_command, handle_ide_command, handle_mcp_command, handle_plugin_command,
     reload_plugins_summary,
 };
-pub(crate) use session::{
-    append_tool_invocations, handle_memory_command, handle_session_command,
-};
+pub(crate) use session::{append_tool_invocations, handle_memory_command, handle_session_command};

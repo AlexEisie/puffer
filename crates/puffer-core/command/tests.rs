@@ -314,8 +314,14 @@ fn permissions_command_creates_workspace_permissions_file() {
             name: "bash".to_string(),
             description: "Run shell".to_string(),
             handler: "bash".to_string(),
+            handler_args: Vec::new(),
             approval_policy: Some("on-request".to_string()),
             sandbox_policy: Some("workspace-write".to_string()),
+            shared_lib: None,
+            enabled_if: None,
+            input_schema: None,
+            metadata: Default::default(),
+            display: Default::default(),
         },
         source_info: puffer_resources::SourceInfo {
             path: "tools/bash.yaml".into(),
@@ -378,7 +384,9 @@ fn hooks_command_creates_workspace_file() {
     )
     .unwrap();
 
-    let hooks_path = paths.workspace_config_dir.join("resources/hooks/tool_end.yaml");
+    let hooks_path = paths
+        .workspace_config_dir
+        .join("resources/hooks/tool_end.yaml");
     let hooks = std::fs::read_to_string(hooks_path).unwrap();
     assert!(hooks.contains("tool_end"));
     assert!(hooks.contains("PUFFER_TOOL_ID"));
@@ -417,7 +425,9 @@ fn plugin_command_creates_workspace_plugin_file() {
     )
     .unwrap();
 
-    let plugin_path = paths.workspace_config_dir.join("resources/plugins/workspace.yaml");
+    let plugin_path = paths
+        .workspace_config_dir
+        .join("resources/plugins/workspace.yaml");
     assert!(plugin_path.exists());
 }
 
@@ -437,7 +447,9 @@ fn doctor_reports_discovery_and_diagnostics() {
     );
     state.record_task("bash", "printf hi", true);
     let mut resources = LoadedResources::default();
-    resources.diagnostics.push("prompt `review` overrides builtin".to_string());
+    resources
+        .diagnostics
+        .push("prompt `review` overrides builtin".to_string());
     let mut providers = ProviderRegistry::new();
     providers.register(ProviderDescriptor {
         id: "anthropic".to_string(),
@@ -544,7 +556,9 @@ fn ide_command_creates_workspace_ide_file() {
     )
     .unwrap();
 
-    let ide_path = paths.workspace_config_dir.join("resources/ides/workspace.yaml");
+    let ide_path = paths
+        .workspace_config_dir
+        .join("resources/ides/workspace.yaml");
     assert!(ide_path.exists());
 }
 

@@ -57,7 +57,11 @@ pub(crate) fn handle_memory_command(
         }
         session_store.set_note(state.session.id, Some(rest.to_string()))?;
         state.session.note = Some(rest.to_string());
-        return emit_system(state, session_store, format!("Session note set to `{rest}`."));
+        return emit_system(
+            state,
+            session_store,
+            format!("Session note set to `{rest}`."),
+        );
     }
 
     if let Some(rest) = trimmed.strip_prefix("slug ") {
@@ -68,7 +72,11 @@ pub(crate) fn handle_memory_command(
         }
         session_store.set_slug(state.session.id, Some(rest.to_string()))?;
         state.session.slug = Some(rest.to_string());
-        return emit_system(state, session_store, format!("Session slug set to `{rest}`."));
+        return emit_system(
+            state,
+            session_store,
+            format!("Session slug set to `{rest}`."),
+        );
     }
 
     if let Some(rest) = trimmed.strip_prefix("tag add ") {
@@ -99,7 +107,11 @@ pub(crate) fn handle_memory_command(
         }
         session_store.remove_tag(state.session.id, tag)?;
         state.session.tags.retain(|existing| existing != tag);
-        return emit_system(state, session_store, format!("Removed session tag `{tag}`."));
+        return emit_system(
+            state,
+            session_store,
+            format!("Removed session tag `{tag}`."),
+        );
     }
 
     emit_system(
@@ -207,7 +219,10 @@ fn format_tool_invocation(invocation: &ToolInvocation) -> String {
     let status = if invocation.success { "ok" } else { "error" };
     let output = invocation.output.trim();
     if output.is_empty() {
-        format!("Tool {} [{}]\ninput: {}", invocation.tool_id, status, invocation.input)
+        format!(
+            "Tool {} [{}]\ninput: {}",
+            invocation.tool_id, status, invocation.input
+        )
     } else {
         format!(
             "Tool {} [{}]\ninput: {}\n{}",

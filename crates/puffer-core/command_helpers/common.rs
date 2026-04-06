@@ -62,7 +62,11 @@ pub(crate) fn run_doctor(
         auth_store.provider_ids().count()
     );
     let _ = writeln!(&mut text, "hooks={}", resources.hooks.len());
-    let _ = writeln!(&mut text, "resource_diagnostics={}", resources.diagnostics.len());
+    let _ = writeln!(
+        &mut text,
+        "resource_diagnostics={}",
+        resources.diagnostics.len()
+    );
     let _ = writeln!(&mut text, "recorded_tasks={}", state.tasks().len());
     let _ = writeln!(&mut text, "working_dirs={}", state.working_dirs.len());
     let _ = writeln!(&mut text, "transcript_messages={}", state.transcript.len());
@@ -76,10 +80,7 @@ pub(crate) fn run_doctor(
 }
 
 /// Copies the latest assistant message or echoes it when clipboard access fails.
-pub(crate) fn copy_last_message(
-    state: &mut AppState,
-    session_store: &SessionStore,
-) -> Result<()> {
+pub(crate) fn copy_last_message(state: &mut AppState, session_store: &SessionStore) -> Result<()> {
     let last = state
         .transcript
         .iter()
@@ -130,10 +131,7 @@ pub(crate) fn describe_context(
 }
 
 /// Shows the current git status summary for the workspace.
-pub(crate) fn describe_git_diff(
-    state: &mut AppState,
-    session_store: &SessionStore,
-) -> Result<()> {
+pub(crate) fn describe_git_diff(state: &mut AppState, session_store: &SessionStore) -> Result<()> {
     emit_system(state, session_store, render_git_diff_summary(&state.cwd))
 }
 
@@ -170,10 +168,7 @@ pub(crate) fn emit_system(
 }
 
 /// Removes the last rendered transcript item.
-pub(crate) fn rewind_transcript(
-    state: &mut AppState,
-    session_store: &SessionStore,
-) -> Result<()> {
+pub(crate) fn rewind_transcript(state: &mut AppState, session_store: &SessionStore) -> Result<()> {
     if state.transcript.is_empty() {
         return emit_system(
             state,
