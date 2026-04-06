@@ -785,17 +785,13 @@ fn execute_local_command(
         "agents" => emit_system(
             state,
             session_store,
-            "Agent management:\ninteractive_agent=default\nforkable_sessions=yes\nnamed_presets=not yet implemented".to_string(),
+            describe_agent_files(state),
         ),
         "memory" => {
             let message = handle_memory_command(state, session_store, args)?;
             emit_system(state, session_store, message)
         }
-        "keybindings" => emit_system(
-            state,
-            session_store,
-            "Keybinding defaults:\nenter=submit\nesc=clear input\nctrl+c=exit".to_string(),
-        ),
+        "keybindings" => emit_system(state, session_store, ensure_keybindings_file(state)?),
         "remote-control" => {
             if args.is_empty() {
                 emit_system(
