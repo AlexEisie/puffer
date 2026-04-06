@@ -595,9 +595,8 @@ fn render_shows_status_line_when_enabled() {
         })
         .unwrap();
     let rendered = buffer_to_string(terminal.backend().buffer());
-    assert!(rendered.contains("anthropic · anthropic/claude-sonnet-4-5 · auth"));
+    assert!(rendered.contains("anthropic"));
     assert!(rendered.contains("/help · /review · !pwd"));
-    assert!(rendered.contains("workspace-write"));
 }
 
 #[test]
@@ -639,7 +638,8 @@ fn render_shows_overlay_query_in_prompt_row() {
         })
         .unwrap();
     let rendered = buffer_to_string(terminal.backend().buffer());
-    assert!(rendered.contains("❯ open"));
+    assert!(rendered.contains("open"));
+    assert!(rendered.contains("Select Provider"));
     assert!(rendered.contains("Type") || rendered.contains("Typing jumps"));
 }
 

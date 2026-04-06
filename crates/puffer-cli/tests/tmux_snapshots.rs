@@ -12,6 +12,10 @@ const WIDE_TMUX_SIZE: TerminalSize = TerminalSize {
     rows: 36,
     cols: 120,
 };
+const MEDIUM_TMUX_SIZE: TerminalSize = TerminalSize {
+    rows: 24,
+    cols: 100,
+};
 const NARROW_TMUX_SIZE: TerminalSize = TerminalSize { rows: 20, cols: 72 };
 
 #[test]
@@ -25,8 +29,18 @@ fn tmux_home_narrow_matches_snapshot() {
 }
 
 #[test]
+fn tmux_home_medium_matches_snapshot() {
+    assert_tmux_home_snapshot(MEDIUM_TMUX_SIZE, "tmux_home_medium_snapshot.txt");
+}
+
+#[test]
 fn tmux_help_wide_matches_snapshot() {
     assert_tmux_help_snapshot(WIDE_TMUX_SIZE, "tmux_help_wide_snapshot.txt");
+}
+
+#[test]
+fn tmux_help_medium_matches_snapshot() {
+    assert_tmux_help_snapshot(MEDIUM_TMUX_SIZE, "tmux_help_medium_snapshot.txt");
 }
 
 #[test]
@@ -42,6 +56,11 @@ fn tmux_login_overlay_wide_matches_snapshot() {
 #[test]
 fn tmux_login_overlay_narrow_matches_snapshot() {
     assert_tmux_login_snapshot(NARROW_TMUX_SIZE, "tmux_login_overlay_narrow_snapshot.txt");
+}
+
+#[test]
+fn tmux_login_overlay_medium_matches_snapshot() {
+    assert_tmux_login_snapshot(MEDIUM_TMUX_SIZE, "tmux_login_overlay_medium_snapshot.txt");
 }
 
 fn assert_tmux_home_snapshot(size: TerminalSize, snapshot_name: &str) {

@@ -6,6 +6,8 @@ use puffer_tools::ToolRegistry;
 use ratatui::text::{Line, Span};
 use std::path::Path;
 
+const COMPACT_TOP_PANEL_BREAKPOINT: u16 = 84;
+
 /// Builds the two columns rendered inside the top information box.
 pub(super) fn top_panel_columns(
     state: &AppState,
@@ -101,15 +103,31 @@ pub(super) fn top_panel_columns(
     ]
 }
 
+/// Builds the stacked summary rows used when the viewport is narrow.
+pub(super) fn top_panel_compact_lines(
+    state: &AppState,
+    resources: &LoadedResources,
+    auth_store: &AuthStore,
+    tool_registry: &ToolRegistry,
+) -> Vec<Line<'static>> {
+    let [left, right] = top_panel_columns(state, resources, auth_store, tool_registry);
+    left.into_iter().chain(right).collect()
+}
+
 /// Returns the outer height needed for the top information box.
 pub(super) fn top_panel_height(
     state: &AppState,
     resources: &LoadedResources,
     auth_store: &AuthStore,
     tool_registry: &ToolRegistry,
+    width: u16,
 ) -> u16 {
-    let [left, right] = top_panel_columns(state, resources, auth_store, tool_registry);
-    left.len().max(right.len()) as u16 + 2
+    if width < COMPACT_TOP_PANEL_BREAKPOINT {
+        top_panel_compact_lines(state, resources, auth_store, tool_registry).len() as u16 + 2
+    } else {
+        let [left, right] = top_panel_columns(state, resources, auth_store, tool_registry);
+        left.len().max(right.len()) as u16 + 2
+    }
 }
 
 /// Builds the primary footer status line shown above the composer.
@@ -156,6 +174,29 @@ pub(super) fn status_secondary_line(
         line.push_str(" · no tools");
     }
     line
+}
+
+/// Builds a compact one-line session summary for medium and narrow footers.
+pub(super) fn status_compact_line(
+    state: &AppState,
+    resources: &LoadedResources,
+    auth_store: &AuthStore,
+    tool_registry: &ToolRegistry,
+) -> String {
+    format!(
+        "{} · {} · auth {} · tools {}/{} · {}",
+        truncate(current_provider(state), 14),
+        truncate(current_model(state), 22),
+        auth_status(state, auth_store),
+        tool_status(tool_registry).executable,
+        resources.tools.len(),
+        truncate(&path_tail(&state.cwd), 16),
+    )
+}
+
+/// Returns true when the top info box should stack instead of using two columns.
+pub(super) fn use_compact_top_panel(width: u16) -> bool {
+    width < COMPACT_TOP_PANEL_BREAKPOINT
 }
 
 /// Builds the contextual composer hint line.

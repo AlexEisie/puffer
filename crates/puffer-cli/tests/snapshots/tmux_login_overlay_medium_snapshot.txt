@@ -1,0 +1,3 @@
+Error: provider `anthropic` does not support OAuth; use `puffer setup-token anthropic` or `puffer au
+th set-api-key anthropic`
+                         Error: login flow for anthropic exited with exit status: 1

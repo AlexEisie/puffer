@@ -3,7 +3,8 @@ mod summary;
 
 use self::panes::{render_empty_state, render_help_pane};
 use self::summary::{
-    hint_line, status_primary_line, status_secondary_line, top_panel_columns, top_panel_height,
+    hint_line, status_compact_line, status_primary_line, status_secondary_line,
+    top_panel_columns, top_panel_compact_lines, top_panel_height, use_compact_top_panel,
 };
 #[cfg(test)]
 use self::summary::{footer_lines, header_lines, session_lines};
@@ -23,6 +24,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 use std::cell::RefCell;
+
+const COMPACT_COMPOSER_BREAKPOINT: u16 = 104;
 
 thread_local! {
     static ACTIVE_OVERLAY: RefCell<Option<OverlayState>> = const { RefCell::new(None) };
@@ -54,14 +57,23 @@ pub(crate) fn render(
         .as_ref()
         .map(OverlayState::is_onboarding)
         .unwrap_or(false);
+    let compact_composer = frame.area().width < COMPACT_COMPOSER_BREAKPOINT;
     let footer_height = if onboarding_active {
+        4
+    } else if compact_composer {
         4
     } else if state.statusline_enabled {
         6
     } else {
         5
     };
-    let header_height = top_panel_height(state, resources, auth_store, &tool_registry)
+    let header_height = top_panel_height(
+        state,
+        resources,
+        auth_store,
+        &tool_registry,
+        frame.area().width,
+    )
         .min(frame.area().height.saturating_sub(footer_height + 1));
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -105,6 +117,14 @@ pub(crate) fn render(
                 Constraint::Length(0),
             ]
             .as_ref()
+        } else if compact_composer {
+            [
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(0),
+            ]
+            .as_ref()
         } else if state.statusline_enabled {
             [
                 Constraint::Length(1),
@@ -124,7 +144,18 @@ pub(crate) fn render(
         })
         .split(footer_area);
 
-    if state.statusline_enabled && !onboarding_active {
+    if compact_composer && !onboarding_active {
+        frame.render_widget(
+            Paragraph::new(status_compact_line(
+                state,
+                resources,
+                auth_store,
+                &tool_registry,
+            ))
+            .style(Style::default().add_modifier(Modifier::DIM)),
+            footer[0],
+        );
+    } else if state.statusline_enabled && !onboarding_active {
         frame.render_widget(
             Paragraph::new(status_primary_line(
                 state,
@@ -142,17 +173,25 @@ pub(crate) fn render(
         );
     }
 
-    let prompt_row = if state.statusline_enabled && !onboarding_active {
+    let prompt_row = if onboarding_active {
+        footer[0]
+    } else if compact_composer {
+        footer[1]
+    } else if state.statusline_enabled {
         footer[2]
     } else {
         footer[0]
     };
-    let hint_row = if state.statusline_enabled && !onboarding_active {
+    let hint_row = if onboarding_active {
+        footer[1]
+    } else if compact_composer {
+        footer[2]
+    } else if state.statusline_enabled {
         footer[3]
     } else {
         footer[1]
     };
-    let summary_row = if state.statusline_enabled && !onboarding_active {
+    let summary_row = if compact_composer || (state.statusline_enabled && !onboarding_active) {
         None
     } else {
         Some(footer[2])
@@ -218,7 +257,6 @@ fn render_top_panel(
     auth_store: &AuthStore,
     tool_registry: &ToolRegistry,
 ) {
-    let [left, right] = top_panel_columns(state, resources, auth_store, tool_registry);
     let block = Block::default()
         .title(" Puffer Code ")
         .borders(Borders::ALL)
@@ -226,6 +264,21 @@ fn render_top_panel(
         .border_style(prompt_border_style(state));
     frame.render_widget(&block, area);
     let inner = block.inner(area);
+    if use_compact_top_panel(area.width) {
+        frame.render_widget(
+            Paragraph::new(Text::from(top_panel_compact_lines(
+                state,
+                resources,
+                auth_store,
+                tool_registry,
+            )))
+            .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
+
+    let [left, right] = top_panel_columns(state, resources, auth_store, tool_registry);
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([

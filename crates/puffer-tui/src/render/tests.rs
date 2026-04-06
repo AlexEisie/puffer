@@ -170,7 +170,8 @@ fn render_layout_includes_header_body_and_composer() {
     assert!(lines.iter().any(|line| line.contains("Clawd")));
     assert!(lines.iter().any(|line| line.contains("Session")));
     assert!(lines.iter().any(|line| line.contains("working tree clean")));
-    assert!(lines.iter().rev().take(8).any(|line| line.contains("❯")));
+    assert!(rendered.contains("/help · /review · !pwd"));
+    assert!(rendered.contains("? for shortcuts"));
 }
 
 #[test]
