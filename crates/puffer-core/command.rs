@@ -1,8 +1,9 @@
 use crate::command_helpers::{
     append_tool_invocations, copy_last_message, describe_context, describe_git_diff,
     describe_permissions, describe_plugin, emit_system, execute_skill_command,
-    handle_config_command, handle_keybindings_command, handle_memory_command, list_ides,
-    list_mcp_servers, list_skills, rewind_transcript, run_doctor, terminal_setup_advice,
+    handle_agents_command, handle_config_command, handle_hooks_command,
+    handle_keybindings_command, handle_memory_command, list_ides, list_mcp_servers, list_skills,
+    rewind_transcript, run_doctor, terminal_setup_advice,
 };
 use crate::{AppState, MessageRole};
 use anyhow::Result;
@@ -617,15 +618,7 @@ fn execute_local_command(
             }
         }
         "permissions" => describe_permissions(state, resources, session_store),
-        "hooks" => emit_system(
-            state,
-            session_store,
-            format!(
-                "Hook configuration:\nexternal_handlers=0\nresource_tools={}\nresource_prompts={}",
-                resources.tools.len(),
-                resources.prompts.len()
-            ),
-        ),
+        "hooks" => handle_hooks_command(state, session_store, args),
         "statusline" => {
             if args.is_empty() {
                 state.statusline_enabled = !state.statusline_enabled;
@@ -652,11 +645,7 @@ fn execute_local_command(
         ),
         "config" => handle_config_command(state, session_store, args),
         "context" => describe_context(state, resources, session_store),
-        "agents" => emit_system(
-            state,
-            session_store,
-            "Agent management:\ninteractive_agent=default\nforkable_sessions=yes\nnamed_presets=not yet implemented".to_string(),
-        ),
+        "agents" => handle_agents_command(state, session_store, args),
         "memory" => handle_memory_command(state, session_store, args),
         "keybindings" => handle_keybindings_command(state, session_store),
         "remote-control" => {

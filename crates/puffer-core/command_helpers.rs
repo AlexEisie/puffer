@@ -428,6 +428,67 @@ pub(crate) fn handle_keybindings_command(
     )
 }
 
+pub(crate) fn handle_hooks_command(
+    state: &mut AppState,
+    session_store: &SessionStore,
+    args: &str,
+) -> Result<()> {
+    let paths = ConfigPaths::discover(&state.cwd);
+    ensure_workspace_dirs(&paths)?;
+    let hooks_path = paths.workspace_config_dir.join("hooks.yaml");
+    if !hooks_path.exists() {
+        fs::write(&hooks_path, default_hooks_contents())?;
+    }
+    if args.trim() == "path" {
+        return emit_system(
+            state,
+            session_store,
+            format!("Hooks file: {}", hooks_path.display()),
+        );
+    }
+    emit_system(
+        state,
+        session_store,
+        format!(
+            "Hooks file: {}\n{}",
+            hooks_path.display(),
+            fs::read_to_string(&hooks_path)?
+        ),
+    )
+}
+
+pub(crate) fn handle_agents_command(
+    state: &mut AppState,
+    session_store: &SessionStore,
+    args: &str,
+) -> Result<()> {
+    let paths = ConfigPaths::discover(&state.cwd);
+    ensure_workspace_dirs(&paths)?;
+    let agents_path = paths.workspace_config_dir.join("agents.yaml");
+    if !agents_path.exists() {
+        fs::write(
+            &agents_path,
+            default_agents_contents(state.current_model.as_deref()),
+        )?;
+    }
+    if args.trim() == "path" {
+        return emit_system(
+            state,
+            session_store,
+            format!("Agents file: {}", agents_path.display()),
+        );
+    }
+    emit_system(
+        state,
+        session_store,
+        format!(
+            "Agents file: {}\n{}",
+            agents_path.display(),
+            fs::read_to_string(&agents_path)?
+        ),
+    )
+}
+
 pub(crate) fn append_tool_invocations(
     state: &mut AppState,
     session_store: &SessionStore,
@@ -572,4 +633,15 @@ fn write_workspace_config(state: &AppState, path: &PathBuf) -> Result<()> {
 
 fn default_keybindings_contents() -> &'static str {
     "submit = \"enter\"\nclear_input = \"esc\"\nexit = \"ctrl+c\"\n"
+}
+
+fn default_hooks_contents() -> &'static str {
+    "hooks:\n  on_tool_start: []\n  on_tool_finish: []\n  on_turn_end: []\n"
+}
+
+fn default_agents_contents(model: Option<&str>) -> String {
+    format!(
+        "agents:\n  - id: default\n    role: coding\n    model: {}\n",
+        model.unwrap_or("anthropic/claude-sonnet-4-5")
+    )
 }

@@ -292,6 +292,69 @@ fn keybindings_command_creates_workspace_file() {
 }
 
 #[test]
+fn hooks_command_creates_workspace_file() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+
+    dispatch_command(
+        &mut state,
+        &supported_commands(),
+        &LoadedResources::default(),
+        &ProviderRegistry::new(),
+        &AuthStore::default(),
+        &session_store,
+        "/hooks",
+    )
+    .unwrap();
+
+    let hooks_path = paths.workspace_config_dir.join("hooks.yaml");
+    let hooks = std::fs::read_to_string(hooks_path).unwrap();
+    assert!(hooks.contains("on_tool_start"));
+}
+
+#[test]
+fn agents_command_creates_workspace_file() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+
+    dispatch_command(
+        &mut state,
+        &supported_commands(),
+        &LoadedResources::default(),
+        &ProviderRegistry::new(),
+        &AuthStore::default(),
+        &session_store,
+        "/agents",
+    )
+    .unwrap();
+
+    let agents_path = paths.workspace_config_dir.join("agents.yaml");
+    let agents = std::fs::read_to_string(agents_path).unwrap();
+    assert!(agents.contains("agents:"));
+    assert!(agents.contains("id: default"));
+}
+
+#[test]
 fn prompt_commands_append_user_message_and_surface_runtime_failures() {
     let tempdir = tempdir().unwrap();
     let paths = ConfigPaths::discover(tempdir.path());
