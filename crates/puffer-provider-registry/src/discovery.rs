@@ -153,6 +153,21 @@ fn default_display_name<'a>(item: &'a Value, format: &ModelDiscoveryFormat) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::AuthMode;
+    use indexmap::IndexMap;
+
+    fn provider(discovery: ModelDiscoveryConfig) -> ProviderDescriptor {
+        ProviderDescriptor {
+            id: "custom".to_string(),
+            display_name: "Custom".to_string(),
+            base_url: "https://example.invalid".to_string(),
+            default_api: "custom-api".to_string(),
+            auth_modes: vec![AuthMode::ApiKey],
+            headers: IndexMap::new(),
+            discovery: Some(discovery),
+            models: Vec::new(),
+        }
+    }
 
     #[test]
     fn merge_discovered_models_only_adds_missing_ids() {
@@ -192,5 +207,32 @@ mod tests {
 
         assert_eq!(models.len(), 2);
         assert!(models.iter().any(|model| model.id == "claude-opus-4-1"));
+    }
+
+    #[test]
+    fn discovery_uses_custom_field_names() {
+        let discovery = ModelDiscoveryConfig {
+            path: "/models".to_string(),
+            response: ModelDiscoveryFormat::OpenAiModels,
+            api: "custom-api".to_string(),
+            context_window: 32_000,
+            max_output_tokens: 4_096,
+            supports_reasoning: false,
+            items_field: "items".to_string(),
+            id_field: "slug".to_string(),
+            display_name_field: Some("label".to_string()),
+            headers: IndexMap::new(),
+        };
+        let payload = serde_json::json!({
+            "items": [
+                { "slug": "reasoner", "label": "Reasoner" }
+            ]
+        });
+        let provider = provider(discovery.clone());
+        let models =
+            parse_discovered_models(&provider, provider.discovery.as_ref().unwrap(), &payload)
+                .expect("models");
+        assert_eq!(models[0].id, "reasoner");
+        assert_eq!(models[0].display_name, "Reasoner");
     }
 }
