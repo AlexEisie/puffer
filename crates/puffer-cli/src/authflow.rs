@@ -80,6 +80,11 @@ fn error_response() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::parse_callback_request;
+    use super::wait_for_callback_url;
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn parses_matching_get_request() {
@@ -95,5 +100,39 @@ mod tests {
     fn ignores_wrong_path() {
         let request = "GET /wrong HTTP/1.1\r\nHost: localhost\r\n\r\n";
         assert!(parse_callback_request(request, "localhost", 1455, "/auth/callback").is_none());
+    }
+
+    #[test]
+    fn callback_listener_captures_matching_request() {
+        let temp_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = temp_listener.local_addr().unwrap().port();
+        drop(temp_listener);
+
+        let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+        let thread_redirect = redirect_uri.clone();
+        let handle = thread::spawn(move || {
+            wait_for_callback_url(&thread_redirect, Duration::from_secs(2)).unwrap()
+        });
+
+        thread::sleep(Duration::from_millis(150));
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .write_all(
+                b"GET /callback?code=test-code&state=test-state HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            .unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.contains("Authentication completed"));
+
+        let callback = handle.join().unwrap();
+        let expected = format!(
+            "http://127.0.0.1:{port}/callback?code=test-code&state=test-state"
+        );
+        assert_eq!(
+            callback.as_deref(),
+            Some(expected.as_str())
+        );
     }
 }
