@@ -3,6 +3,7 @@ use crate::popup::popup_rows;
 use puffer_core::{AppState, CommandSpec, MessageRole};
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
+use puffer_tools::ToolRegistry;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Text};
@@ -84,6 +85,7 @@ pub(crate) fn render(
     frame.render_widget(transcript_widget, body[0]);
 
     let current_provider = state.current_provider.as_deref().unwrap_or("<unset>");
+    let executable_tools = ToolRegistry::from_resources(resources).tools().count();
     let inspector_lines = vec![
         format!("Provider: {current_provider}"),
         format!(
@@ -103,6 +105,7 @@ pub(crate) fn render(
         format!("Transcript: {} msgs", state.transcript.len()),
         format!("Providers: {}", providers.providers().count()),
         format!("Tools: {}", resources.tools.len()),
+        format!("Executable tools: {executable_tools}"),
         format!("Skills: {}", resources.skills.len()),
         format!("Plugins: {}", resources.plugins.len()),
         format!("MCP: {}", resources.mcp_servers.len()),
