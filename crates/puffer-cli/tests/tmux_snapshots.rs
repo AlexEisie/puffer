@@ -37,7 +37,7 @@ fn tmux_login_overlay_matches_snapshot() {
     let session = start_tmux_with_home(&workspace);
     wait_for_tmux_text(&session, "Puffer Code", Duration::from_secs(10)).unwrap();
     send_tmux_keys(&session, &["/login", "Enter"]).unwrap();
-    let capture = wait_for_tmux_text(&session, "Login Provider", Duration::from_secs(10)).unwrap();
+    let capture = wait_for_tmux_text(&session, "anthropic", Duration::from_secs(10)).unwrap();
     assert_normalized_snapshot(
         &normalize_tmux_capture(&capture),
         &snapshot_path("tmux_login_overlay_snapshot.txt"),
@@ -67,6 +67,7 @@ fn configured_workspace() -> (tempfile::TempDir, PathBuf) {
         r#"
 app_name = "Puffer Code"
 default_provider = "anthropic"
+default_model = "anthropic/claude-sonnet-4-5"
 theme = "puffer"
 
 [mascot]

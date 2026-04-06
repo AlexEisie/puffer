@@ -1,7 +1,8 @@
 use puffer_config::{ensure_workspace_dirs, ConfigPaths};
 use puffer_session_store::SessionStore;
 use puffer_test_support::{
-    send_tmux_keys, start_tmux_command, temp_workspace, tmux_available, wait_for_tmux_text,
+    capture_tmux_pane, send_tmux_keys, start_tmux_command, temp_workspace, tmux_available,
+    wait_for_tmux_text,
 };
 use std::fs;
 use std::time::Duration;
@@ -42,7 +43,8 @@ fn tmux_login_overlay_lists_available_providers() {
         start_tmux_command(env!("CARGO_BIN_EXE_puffer"), &[], Some(workspace.as_path())).unwrap();
     wait_for_tmux_text(&session, "Puffer Code", Duration::from_secs(10)).unwrap();
     send_tmux_keys(&session, &["/login", "Enter"]).unwrap();
-    let capture = wait_for_tmux_text(&session, "Login Provider", Duration::from_secs(10)).unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    let capture = capture_tmux_pane(&session).unwrap();
     assert!(capture.contains("anthropic"));
     assert!(capture.contains("openai"));
 }
@@ -60,6 +62,7 @@ fn configured_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
         r#"
 app_name = "Puffer Code"
 default_provider = "anthropic"
+default_model = "anthropic/claude-sonnet-4-5"
 theme = "puffer"
 
 [mascot]

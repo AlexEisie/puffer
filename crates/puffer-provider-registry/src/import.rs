@@ -35,7 +35,7 @@ pub struct ExternalImportCandidate {
 pub fn detect_import_candidates(
     family: ExternalImportFamily,
 ) -> Result<Vec<ExternalImportCandidate>> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = import_home_dir() else {
         return Ok(Vec::new());
     };
     let mut candidates = Vec::new();
@@ -46,6 +46,13 @@ pub fn detect_import_candidates(
         candidates.extend(read_codex_candidates(&home)?);
     }
     Ok(candidates)
+}
+
+fn import_home_dir() -> Option<PathBuf> {
+    std::env::var_os("PUFFER_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .or_else(dirs::home_dir)
 }
 
 fn read_claude_candidates(home: &Path) -> Result<Vec<ExternalImportCandidate>> {
@@ -263,7 +270,13 @@ struct CodexIdClaims {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn puffer_home_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn parse_codex_id_token_extracts_email_account_and_plan() {
@@ -285,6 +298,7 @@ mod tests {
     #[test]
     fn detect_import_candidates_reads_codex_auth_file() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _lock = puffer_home_lock().lock().expect("lock");
         let codex_dir = temp.path().join(".codex");
         fs::create_dir_all(&codex_dir).expect("dir");
         let payload = serde_json::json!({
@@ -309,14 +323,14 @@ mod tests {
             .to_string(),
         )
         .expect("write");
-        let old_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let old_home = std::env::var_os("PUFFER_HOME");
+        std::env::set_var("PUFFER_HOME", temp.path());
         let candidates =
             detect_import_candidates(ExternalImportFamily::OpenAi).expect("candidates");
         if let Some(value) = old_home {
-            std::env::set_var("HOME", value);
+            std::env::set_var("PUFFER_HOME", value);
         } else {
-            std::env::remove_var("HOME");
+            std::env::remove_var("PUFFER_HOME");
         }
         assert_eq!(candidates.len(), 2);
         assert!(candidates.iter().any(|candidate| matches!(
@@ -334,6 +348,7 @@ mod tests {
     #[test]
     fn detect_import_candidates_reads_claude_files() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let _lock = puffer_home_lock().lock().expect("lock");
         let claude_dir = temp.path().join(".claude");
         fs::create_dir_all(&claude_dir).expect("dir");
         fs::write(
@@ -362,14 +377,14 @@ mod tests {
             .to_string(),
         )
         .expect("write");
-        let old_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let old_home = std::env::var_os("PUFFER_HOME");
+        std::env::set_var("PUFFER_HOME", temp.path());
         let candidates =
             detect_import_candidates(ExternalImportFamily::Anthropic).expect("candidates");
         if let Some(value) = old_home {
-            std::env::set_var("HOME", value);
+            std::env::set_var("PUFFER_HOME", value);
         } else {
-            std::env::remove_var("HOME");
+            std::env::remove_var("PUFFER_HOME");
         }
         assert_eq!(candidates.len(), 2);
         assert!(candidates.iter().any(|candidate| matches!(

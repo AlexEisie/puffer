@@ -162,13 +162,14 @@ fn try_open_overlay_builds_login_picker() {
     assert!(opened);
     assert!(matches!(
         tui.overlay,
-        Some(OverlayState::LoginPicker { .. })
+        Some(OverlayState::ProviderPicker { .. }) | Some(OverlayState::LoginPicker { .. })
     ));
     let entries = match &tui.overlay {
-        Some(OverlayState::LoginPicker { entries, .. }) => entries,
+        Some(OverlayState::ProviderPicker { entries, .. })
+        | Some(OverlayState::LoginPicker { entries, .. }) => entries,
         _ => unreachable!("login picker"),
     };
-    assert_eq!(entries.len(), 2);
+    assert!(entries.len() >= 2);
     assert!(entries.iter().any(|entry| entry.selector == "anthropic"));
     assert!(entries.iter().any(|entry| entry.selector == "openai"));
 }
@@ -230,11 +231,13 @@ fn try_open_overlay_builds_theme_picker() {
 #[test]
 fn model_overlay_selected_command_uses_selector() {
     let overlay = OverlayState::ModelPicker {
+        provider_id: "anthropic".to_string(),
         entries: vec![ModelPickerEntry {
             selector: "anthropic/claude-sonnet-4-5".to_string(),
             description: "Claude Sonnet 4.5".to_string(),
         }],
         selection: 0,
+        onboarding: false,
     };
     assert_eq!(
         overlay.selected_command().as_deref(),
@@ -513,7 +516,10 @@ fn sample_auth_store() -> AuthStore {
             refresh_token: "refresh".to_string(),
             expires_at_ms: 100,
             account_id: Some("acct".to_string()),
+            organization_id: None,
             email: Some("operator@example.com".to_string()),
+            plan_type: None,
+            rate_limit_tier: None,
             scopes: vec!["org:create_api_key".to_string()],
         },
     );

@@ -1,5 +1,6 @@
 use crate::markdown::render_markdown;
 use crate::popup::popup_rows;
+use crate::state::AuthPickerEntry;
 use crate::{ModelPickerEntry, OverlayState};
 use puffer_core::{AppState, CommandSpec, MessageRole, RenderedMessage};
 use puffer_provider_registry::{AuthStore, StoredCredential};
@@ -39,8 +40,24 @@ pub(crate) fn render(
     commands: &[CommandSpec],
 ) {
     let tool_registry = ToolRegistry::from_resources(resources);
-    let header_height = if state.transcript.is_empty() { 0 } else { 1 };
-    let footer_height = if state.statusline_enabled { 4 } else { 3 };
+    let active_overlay = ACTIVE_OVERLAY.with(|value| value.borrow().clone());
+    let onboarding_active = active_overlay
+        .as_ref()
+        .map(OverlayState::is_onboarding)
+        .unwrap_or(false);
+    let header = if state.transcript.is_empty() || onboarding_active {
+        Vec::new()
+    } else {
+        header_lines(state, resources, auth_store, &tool_registry)
+    };
+    let header_height = header.len() as u16;
+    let footer_height = if onboarding_active {
+        2
+    } else if state.statusline_enabled {
+        4
+    } else {
+        3
+    };
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -52,18 +69,12 @@ pub(crate) fn render(
 
     if header_height > 0 {
         frame.render_widget(
-            Paragraph::new(Text::from(header_lines(
-                state,
-                resources,
-                auth_store,
-                &tool_registry,
-            )))
-            .style(Style::default().add_modifier(Modifier::DIM)),
+            Paragraph::new(Text::from(header)).style(Style::default().add_modifier(Modifier::DIM)),
             layout[0],
         );
     }
 
-    if state.transcript.is_empty() {
+    if state.transcript.is_empty() && !onboarding_active {
         render_empty_state(frame, layout[1], state);
     } else {
         frame.render_widget(
@@ -98,7 +109,7 @@ pub(crate) fn render(
         })
         .split(footer_area);
 
-    if state.statusline_enabled {
+    if state.statusline_enabled && !onboarding_active {
         frame.render_widget(
             Paragraph::new(status_primary_line(
                 state,
@@ -116,54 +127,62 @@ pub(crate) fn render(
         );
     }
 
-    let prompt_row = if state.statusline_enabled {
+    let prompt_row = if state.statusline_enabled && !onboarding_active {
         footer[2]
     } else {
         footer[0]
     };
-    let hint_row = if state.statusline_enabled {
+    let hint_row = if state.statusline_enabled && !onboarding_active {
         footer[3]
     } else {
         footer[1]
     };
-    let summary_row = if state.statusline_enabled {
+    let summary_row = if state.statusline_enabled && !onboarding_active {
         None
     } else {
         Some(footer[2])
     };
 
-    frame.render_widget(Paragraph::new(prompt_line(input)), prompt_row);
-    let max_cursor = usize::from(prompt_row.width.saturating_sub(3));
-    frame.set_cursor_position((
-        prompt_row.x + 2 + cursor.min(max_cursor) as u16,
-        prompt_row.y,
-    ));
-
-    frame.render_widget(
-        Paragraph::new(hint_line(input, commands)).style(Style::default().add_modifier(Modifier::DIM)),
-        hint_row,
-    );
-    if let Some(summary_row) = summary_row {
+    if onboarding_active {
+        frame.render_widget(Paragraph::new(""), prompt_row);
         frame.render_widget(
-            Paragraph::new(status_primary_line(
-                state,
-                resources,
-                auth_store,
-                &tool_registry,
-            ))
-            .style(Style::default().add_modifier(Modifier::DIM)),
-            summary_row,
+            Paragraph::new("Enter to continue · Esc to go back · Ctrl-C to exit")
+                .style(Style::default().add_modifier(Modifier::DIM)),
+            hint_row,
         );
+    } else {
+        frame.render_widget(Paragraph::new(prompt_line(input)), prompt_row);
+        let max_cursor = usize::from(prompt_row.width.saturating_sub(3));
+        frame.set_cursor_position((
+            prompt_row.x + 2 + cursor.min(max_cursor) as u16,
+            prompt_row.y,
+        ));
+
+        frame.render_widget(
+            Paragraph::new(hint_line(input, commands))
+                .style(Style::default().add_modifier(Modifier::DIM)),
+            hint_row,
+        );
+        if let Some(summary_row) = summary_row {
+            frame.render_widget(
+                Paragraph::new(status_primary_line(
+                    state,
+                    resources,
+                    auth_store,
+                    &tool_registry,
+                ))
+                .style(Style::default().add_modifier(Modifier::DIM)),
+                summary_row,
+            );
+        }
     }
 
-    if input.starts_with('/') {
+    if input.starts_with('/') && !onboarding_active {
         render_command_popup(frame, layout[1], prompt_row, input, slash_selection, commands);
     }
-    ACTIVE_OVERLAY.with(|value| {
-        if let Some(overlay) = value.borrow().as_ref() {
-            render_overlay(frame, layout[1], overlay);
-        }
-    });
+    if let Some(overlay) = active_overlay.as_ref() {
+        render_overlay(frame, layout[1], overlay);
+    }
 }
 
 fn transcript_text(state: &AppState) -> Text<'static> {
@@ -229,7 +248,11 @@ fn header_lines(
     if remote != "local" {
         line.push_str(&format!(" · {}", truncate(&remote, 18)));
     }
-    vec![Line::from(line)]
+    let mut lines = vec![Line::from(line)];
+    if let Some(account) = account_header_line(state, auth_store) {
+        lines.push(Line::from(account));
+    }
+    lines
 }
 
 fn render_empty_state(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -401,6 +424,50 @@ fn auth_status(state: &AppState, auth_store: &AuthStore) -> &'static str {
     }
 }
 
+fn account_header_line(state: &AppState, auth_store: &AuthStore) -> Option<String> {
+    let provider_id = state.current_provider.as_deref()?;
+    let StoredCredential::OAuth(credential) = auth_store.get(provider_id)? else {
+        return None;
+    };
+    let mut parts = Vec::new();
+    if let Some(email) = credential.email.as_deref() {
+        parts.push(email.to_string());
+    }
+    if let Some(plan_type) = credential.plan_type.as_deref() {
+        parts.push(format!("plan {}", format_metadata_value(plan_type)));
+    }
+    if let Some(organization_id) = credential.organization_id.as_deref() {
+        parts.push(format!("org {}", organization_id));
+    } else if let Some(account_id) = credential.account_id.as_deref() {
+        parts.push(format!("acct {}", account_id));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+fn format_metadata_value(value: &str) -> String {
+    value
+        .split(['-', '_'])
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            let mut chars = segment.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut word = String::new();
+                    word.extend(first.to_uppercase());
+                    word.push_str(chars.as_str());
+                    word
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn session_name(state: &AppState) -> String {
     state
         .session
@@ -570,6 +637,10 @@ fn render_command_popup(
 }
 
 fn render_overlay(frame: &mut Frame<'_>, viewport: Rect, overlay: &OverlayState) {
+    if is_onboarding_overlay(overlay) {
+        render_onboarding_overlay(frame, viewport, overlay);
+        return;
+    }
     let width = viewport.width.saturating_sub(8).min(72);
     let height = overlay_rows(overlay).len() as u16 + 2;
     let area = Rect {
@@ -607,9 +678,17 @@ fn overlay_title(overlay: &OverlayState) -> &'static str {
         OverlayState::SessionPicker { .. } => "Resume Session",
         OverlayState::AgentPicker { .. } => "Select Agent",
         OverlayState::ModelPicker { .. } => "Select Model",
-        OverlayState::LoginPicker { .. } => "Login Provider",
+        OverlayState::ProviderPicker { .. } => "Select Provider",
+        OverlayState::AuthPicker { .. } => "Select Login Method",
+        OverlayState::ApiKeyPrompt { .. } => "Enter API Key",
+        OverlayState::LoginPicker { .. } => "Select Provider",
         OverlayState::LogoutPicker { .. } => "Logout Provider",
         OverlayState::ThemePicker { .. } => "Select Theme",
+        OverlayState::OnboardingTheme { .. } => "Choose Theme",
+        OverlayState::OnboardingProvider { .. } => "Choose Provider",
+        OverlayState::OnboardingAuth { .. } => "Choose Sign-In",
+        OverlayState::OnboardingModel { .. } => "Choose Model",
+        OverlayState::OnboardingApiKey { .. } => "Enter API Key",
     }
 }
 
@@ -631,10 +710,18 @@ fn overlay_rows(overlay: &OverlayState) -> Vec<OverlayRow> {
             })
             .collect(),
         OverlayState::AgentPicker { entries, selection }
-        | OverlayState::ModelPicker { entries, selection }
+        | OverlayState::ModelPicker {
+            entries, selection, ..
+        }
+        | OverlayState::ProviderPicker {
+            entries, selection, ..
+        }
         | OverlayState::LoginPicker { entries, selection }
         | OverlayState::LogoutPicker { entries, selection }
-        | OverlayState::ThemePicker { entries, selection } => entries
+        | OverlayState::ThemePicker { entries, selection }
+        | OverlayState::OnboardingTheme { entries, selection }
+        | OverlayState::OnboardingProvider { entries, selection }
+        | OverlayState::OnboardingModel { entries, selection, .. } => entries
             .iter()
             .enumerate()
             .map(|(index, entry)| OverlayRow {
@@ -642,6 +729,33 @@ fn overlay_rows(overlay: &OverlayState) -> Vec<OverlayRow> {
                 text: render_model_entry(entry),
             })
             .collect(),
+        OverlayState::AuthPicker { entries, selection, .. } => entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| OverlayRow {
+                selected: index == *selection,
+                text: render_auth_entry(entry),
+            })
+            .collect(),
+        OverlayState::OnboardingAuth { entries, selection, .. } => entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| OverlayRow {
+                selected: index == *selection,
+                text: render_model_entry(entry),
+            })
+            .collect(),
+        OverlayState::ApiKeyPrompt { value, .. }
+        | OverlayState::OnboardingApiKey { input: value, .. } => vec![
+            OverlayRow {
+                selected: false,
+                text: "Paste an API key and press Enter.".to_string(),
+            },
+            OverlayRow {
+                selected: true,
+                text: format!("key  {}", masked_secret(value)),
+            },
+        ],
     }
 }
 
@@ -649,9 +763,174 @@ fn render_model_entry(entry: &ModelPickerEntry) -> String {
     format!("{}  {}", entry.selector, entry.description)
 }
 
+fn render_auth_entry(entry: &AuthPickerEntry) -> String {
+    format!("{}  {}", entry.label, entry.description)
+}
+
+fn masked_secret(value: &str) -> String {
+    if value.is_empty() {
+        return "<empty>".to_string();
+    }
+    "*".repeat(value.chars().count().min(32))
+}
+
 struct OverlayRow {
     text: String,
     selected: bool,
+}
+
+fn is_onboarding_overlay(overlay: &OverlayState) -> bool {
+    overlay.is_onboarding()
+}
+
+fn render_onboarding_overlay(frame: &mut Frame<'_>, viewport: Rect, overlay: &OverlayState) {
+    let body_lines = onboarding_body_lines(overlay);
+    let width = viewport.width.saturating_sub(12).min(76).max(34);
+    let height = (body_lines.len() as u16 + 2).min(viewport.height.saturating_sub(2));
+    let area = Rect {
+        x: viewport.x + viewport.width.saturating_sub(width) / 2,
+        y: viewport.y + viewport.height.saturating_sub(height) / 3,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(Text::from(body_lines))
+            .wrap(Wrap { trim: false })
+            .block(Block::default()),
+        area,
+    );
+    if let OverlayState::ApiKeyPrompt { value, cursor, .. } = overlay {
+        let cursor_x = area.x + 2 + (*cursor as u16).min(area.width.saturating_sub(4));
+        let cursor_y = area.y + height.saturating_sub(3);
+        frame.set_cursor_position((cursor_x, cursor_y));
+        if value.is_empty() && area.width > 6 {
+            frame.render_widget(
+                Paragraph::new("Paste code here if prompted >")
+                    .style(Style::default().add_modifier(Modifier::DIM)),
+                Rect {
+                    x: area.x + 2,
+                    y: cursor_y,
+                    width: area.width.saturating_sub(4),
+                    height: 1,
+                },
+            );
+        }
+    }
+}
+
+fn onboarding_body_lines(overlay: &OverlayState) -> Vec<Line<'static>> {
+    let (title, subtitle, note, rows, footer) = match overlay {
+        OverlayState::ThemePicker { .. } => (
+            "Let's get started.",
+            "Choose the text style that looks best with your terminal.",
+            Some("You can run /theme later."),
+            overlay_rows(overlay),
+            "Enter to continue",
+        ),
+        OverlayState::ProviderPicker { .. } => (
+            "Choose a provider.",
+            "Pick where Puffer should sign in and load models from.",
+            None,
+            overlay_rows(overlay),
+            "Enter to continue",
+        ),
+        OverlayState::AuthPicker { provider_id, .. } => (
+            "Select login method.",
+            "Choose how to connect your account for this provider.",
+            Some(provider_id.as_str()),
+            overlay_rows(overlay),
+            "Enter to continue · Esc to go back",
+        ),
+        OverlayState::ModelPicker {
+            provider_id,
+            onboarding: true,
+            ..
+        } => (
+            "Select model.",
+            "Only models from the selected provider are shown here.",
+            Some(provider_id.as_str()),
+            overlay_rows(overlay),
+            "Enter to confirm · Esc to go back",
+        ),
+        OverlayState::ApiKeyPrompt {
+            provider_id, value, ..
+        } => {
+            let key_line = format!("> {}", masked_secret(value));
+            return vec![
+                Line::from(Span::styled(
+                    "Let's get started.",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::default(),
+                Line::from("Paste an API key."),
+                Line::from(Span::styled(
+                    format!("{provider_id} will use this key for API requests."),
+                    Style::default().add_modifier(Modifier::DIM),
+                )),
+                Line::default(),
+                Line::from(key_line),
+                Line::default(),
+                Line::from(Span::styled(
+                    "Enter to continue · Esc to go back",
+                    Style::default().add_modifier(Modifier::DIM),
+                )),
+            ];
+        }
+        _ => return Vec::new(),
+    };
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Puffer Code",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::default(),
+        Line::from(Span::styled(
+            title.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            subtitle.to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+    ];
+    if let Some(note) = note {
+        lines.push(Line::from(Span::styled(
+            note.to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+    }
+    lines.push(Line::default());
+    for row in rows {
+        let marker = if row.selected { "› " } else { "  " };
+        lines.push(Line::from(vec![
+            Span::styled(
+                marker.to_string(),
+                if row.selected {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                },
+            ),
+            Span::styled(
+                row.text,
+                if row.selected {
+                    Style::default()
+                        .add_modifier(Modifier::BOLD)
+                        .add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                },
+            ),
+        ]));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        footer.to_string(),
+        Style::default().add_modifier(Modifier::DIM),
+    )));
+    lines
 }
 
 #[cfg(test)]

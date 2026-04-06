@@ -63,6 +63,28 @@ slash /re · 2 matches · best /review · Enter submits · Esc clears
 }
 
 #[test]
+fn header_snapshot_includes_oauth_identity_when_available() {
+    let mut state = sample_state();
+    state.current_provider = Some("openai".to_string());
+    state.current_model = Some("openai/gpt-5".to_string());
+    let resources = sample_resources();
+    let auth_store = sample_auth_store();
+    let registry = ToolRegistry::from_resources(&resources);
+    let snapshot = header_lines(&state, &resources, &auth_store, &registry)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_snapshot!(
+        snapshot,
+        @r"
+Puffer Code · Shipyard · openai/gpt-5 · auth oauth · tools 3/4 · dockyard@staging
+dev@example.com · plan Pro · acct acct-1
+"
+    );
+}
+
+#[test]
 fn render_draws_sparse_transcript_and_popup() {
     let backend = TestBackend::new(100, 28);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -252,7 +274,10 @@ fn sample_auth_store() -> AuthStore {
             refresh_token: "refresh".to_string(),
             expires_at_ms: 42,
             account_id: Some("acct-1".to_string()),
+            organization_id: None,
             email: Some("dev@example.com".to_string()),
+            plan_type: Some("pro".to_string()),
+            rate_limit_tier: None,
             scopes: vec!["openid".to_string()],
         },
     );

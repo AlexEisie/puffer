@@ -1,5 +1,5 @@
 
-Puffer Code · session-<id>... · <unset> · auth api-key ·
+Puffer Code · session-<id>... · anthropic/claude-sonnet-
 · Supported commands:
   /add-dir          Add a new working directory
   /agents           Manage agent configurations
@@ -14,8 +14,8 @@ contextuffer Code ────────────────────�
 session           Welcome to Puffer Code
   /compact          Summarize the conversation to preserve
 context budget         Clawd on duty
-  /config        /moOpen configspanelodel
-  /context          Show current context usage
+  /config       anthOpen configepanelet-4-5
+  /context          Show current c  t xt usage
   /copy             Copy the latest assistant output
   /cost─────────────Show─the─total─cost─and─duration─of the
 current session
@@ -41,7 +41,7 @@ configuration file
   /mcp              Manage MCP servers
   /memory           Edit memory files
 ──/model            Select the active model              ──
-an───────────────────────────────────────────────────────
-wothropic · <unset> · auth api-key · tools 8/8           rk
+an───────────────────────────────────────────────────────to
+wothropic · anthropic/claude-sonnet-4-5 · auth api-key · rk
 ? /helphortcuts · /help · /review · !pwd
 ? for shortcuts · /help · /review · !pwd

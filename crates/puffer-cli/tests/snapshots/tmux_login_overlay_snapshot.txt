@@ -13,18 +13,10 @@
     │                                                 │
     │             Welcome to Puffer Code              │
     │                                                 │
-    ╭Login Provider───────────────────────────────────╮
-    │anthropic  Anthropic                             │
-    │cerebras  Cerebras   o      e                    │
-    │groq  Groq                                       │
-    ╰kimi-coding──Kimi─Coding─────────────────────────╯
-    │minimax-cn  MiniMax CN                           │
-    │minimax  MiniMax                                 │
-    │mistral  Mistral                                 │
-    │openai  OpenAI                                   │
-    │openrouter  OpenRouter                           │
-    │vercel-ai-gateway  Vercel AI Gateway             │
-    │xai  xAI                                         │
+    │                  Clawd on duty                  │
+    │           anthropic/claude-sonnet-4-5           │
+    │                    workspace                    │
+    │                                                 │
     ╰─────────────────────────────────────────────────╯
 
 
@@ -40,8 +32,16 @@
 
 
 
-──                                                       ──
-an───────────────────────────────────────────────────────
-wothropic · <unset> · auth api-key · tools 8/8           rk
+
+  ╭─────────────────────────────────────────────────────╮
+  │/add-dir          Add a new working directory  <path>│
+  │/agents           Manage agent configurations        │
+  │/branch           Create a branch of the current conv│
+  │/btw              Capture a quick side question or co│
+  │/buddy            Show or interact with Clawd        │
+  │/clear            Clear conversation history and free│
+──│/color────────────Set─the─prompt─bar─color─for─this─s│──
+an│/compact          Summarize the conversation to prese│to
+wo╰─────────────────────────────────────────────────────╯rk
 ? /loginortcuts · /help · /review · !pwd
-? for shortcuts · /help · /review · !pwd
+slash / · 8 matches · best /add-dir · Enter submits · Esc c

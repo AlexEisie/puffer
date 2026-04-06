@@ -1,31 +1,35 @@
 mod markdown;
 mod popup;
 mod render;
+#[path = "onboarding/mod.rs"]
+mod onboarding;
+#[path = "state.rs"]
+mod state;
 
-use crate::popup::popup_rows;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use puffer_config::{ensure_workspace_dirs, ConfigPaths};
+use puffer_config::{save_user_config, ConfigPaths};
 use puffer_core::{
     dispatch_command, execute_user_turn, run_resource_hooks, supported_commands, AppState,
     CommandSpec, MessageRole, ToolInvocation,
 };
-use puffer_provider_registry::{AuthStore, ProviderRegistry};
+use puffer_provider_registry::{AuthStore, ProviderRegistry, StoredCredential};
 use puffer_resources::LoadedResources;
-use puffer_session_store::{SessionStore, SessionSummary, TranscriptEvent};
+use puffer_session_store::{SessionStore, TranscriptEvent};
 use puffer_tools::{ToolInput, ToolRegistry};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use serde::Deserialize;
-use std::fs;
 use std::io;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
+
+pub(crate) use state::{AuthPickerAction, ModelPickerEntry, OverlayState};
+use state::TuiState;
 
 /// Runs the interactive Puffer TUI until the user exits.
 pub fn run_app(
@@ -38,7 +42,25 @@ pub fn run_app(
     initial_prompt: Option<String>,
     no_alt_screen: bool,
 ) -> Result<()> {
-    if let Some(prompt) = initial_prompt {
+    let bypass_onboarding = initial_prompt
+        .as_deref()
+        .map(allow_prompt_before_onboarding)
+        .unwrap_or(false);
+    if !no_alt_screen {
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen)?;
+    }
+
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    let mut tui = TuiState::default();
+    tui.defer_prompt(
+        initial_prompt
+            .clone()
+            .filter(|prompt| !prompt.trim().is_empty())
+            .filter(|_| !bypass_onboarding),
+    );
+    let commands = supported_commands();
+    if let Some(prompt) = initial_prompt.filter(|prompt| allow_prompt_before_onboarding(prompt)) {
         handle_submit(
             state,
             resources,
@@ -50,15 +72,18 @@ pub fn run_app(
             no_alt_screen,
         )?;
     }
-
-    if !no_alt_screen {
-        enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen)?;
+    if !bypass_onboarding {
+        submit_queued_prompt_if_ready(
+            state,
+            resources,
+            providers,
+            auth_store,
+            auth_path,
+            session_store,
+            &mut tui,
+            no_alt_screen,
+        )?;
     }
-
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    let mut tui = TuiState::default();
-    let commands = supported_commands();
 
     loop {
         terminal.draw(|frame| {
@@ -217,14 +242,212 @@ fn handle_overlay_key(
         return Ok(false);
     };
 
+    if overlay.accepts_text_input() {
+        match key.code {
+            KeyCode::Esc => {
+                tui.overlay = onboarding::back_overlay(overlay, providers, auth_store)?;
+            }
+            KeyCode::Left => overlay.move_left(),
+            KeyCode::Right => overlay.move_right(),
+            KeyCode::Home => overlay.move_home(),
+            KeyCode::End => overlay.move_end(),
+            KeyCode::Backspace => overlay.backspace(),
+            KeyCode::Delete => overlay.delete(),
+            KeyCode::Enter => {
+                let Some(provider_id) = overlay.selected_provider().map(str::to_string) else {
+                    tui.overlay = None;
+                    return Ok(false);
+                };
+                let key_value = overlay.api_key_value().unwrap_or("").trim().to_string();
+                if key_value.is_empty() {
+                    tui.overlay = onboarding::back_overlay(overlay, providers, auth_store)?;
+                    emit_system_message(
+                        state,
+                        session_store,
+                        format!("No API key was entered for {provider_id}."),
+                    )?;
+                    return Ok(false);
+                }
+                auth_store.set_api_key(provider_id.clone(), key_value);
+                auth_store.save(auth_path)?;
+                tui.overlay =
+                    onboarding::provider_setup_overlay(providers, auth_store, &provider_id)?;
+                submit_queued_prompt_if_ready(
+                    state,
+                    resources,
+                    providers,
+                    auth_store,
+                    auth_path,
+                    session_store,
+                    tui,
+                    no_alt_screen,
+                )?;
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                state.should_exit = true;
+                return Ok(true);
+            }
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                overlay.insert_char(ch)
+            }
+            _ => {}
+        }
+        return Ok(false);
+    }
+
     match key.code {
-        KeyCode::Esc => tui.overlay = None,
+        KeyCode::Esc => {
+            tui.overlay = onboarding::back_overlay(overlay, providers, auth_store)?;
+        }
         KeyCode::Up => overlay.select_previous(),
         KeyCode::Down => overlay.select_next(),
         KeyCode::PageUp => overlay.page_up(),
         KeyCode::PageDown => overlay.page_down(),
         KeyCode::Enter => {
-            if let Some(command) = overlay.selected_command() {
+            if matches!(overlay, OverlayState::ThemePicker { .. })
+                && onboarding::initial_overlay(state, providers, auth_store)?
+                    .is_some()
+            {
+                let Some(command) = overlay.selected_command() else {
+                    tui.overlay = None;
+                    return Ok(false);
+                };
+                handle_submit(
+                    state,
+                    resources,
+                    providers,
+                    auth_store,
+                    auth_path,
+                    session_store,
+                    command,
+                    no_alt_screen,
+                )?;
+                tui.overlay = onboarding::initial_provider_overlay(providers);
+                submit_queued_prompt_if_ready(
+                    state,
+                    resources,
+                    providers,
+                    auth_store,
+                    auth_path,
+                    session_store,
+                    tui,
+                    no_alt_screen,
+                )?;
+                return Ok(false);
+            }
+            if let Some(provider_id) = overlay.selected_provider().map(str::to_string) {
+                match overlay {
+                    OverlayState::ProviderPicker { .. } | OverlayState::LoginPicker { .. } => {
+                        apply_selected_provider(state, &provider_id)?;
+                        tui.overlay =
+                            onboarding::provider_setup_overlay(providers, auth_store, &provider_id)?;
+                    }
+                    OverlayState::AuthPicker { .. } => {
+                        let Some(action) = overlay.selected_auth_action().cloned() else {
+                            tui.overlay = None;
+                            return Ok(false);
+                        };
+                        apply_selected_provider(state, &provider_id)?;
+                        match action {
+                            AuthPickerAction::OAuth => {
+                                match run_embedded_auth_login(
+                                    &provider_id,
+                                    auth_store,
+                                    auth_path,
+                                    no_alt_screen,
+                                ) {
+                                    Ok(()) => {
+                                        tui.overlay = onboarding::provider_setup_overlay(
+                                            providers,
+                                            auth_store,
+                                            &provider_id,
+                                        )?;
+                                    }
+                                    Err(error) => {
+                                        tui.overlay = onboarding::back_overlay(
+                                            overlay,
+                                            providers,
+                                            auth_store,
+                                        )?;
+                                        emit_system_message(
+                                            state,
+                                            session_store,
+                                            format!("Login failed for {provider_id}: {error}"),
+                                        )?;
+                                    }
+                                }
+                            }
+                            AuthPickerAction::ApiKey => {
+                                tui.overlay = Some(OverlayState::ApiKeyPrompt {
+                                    provider_id,
+                                    value: String::new(),
+                                    cursor: 0,
+                                    onboarding: overlay.is_onboarding(),
+                                });
+                            }
+                            AuthPickerAction::Import(candidate) => {
+                                match candidate.credential {
+                                    StoredCredential::ApiKey { key } => {
+                                        auth_store.set_api_key(provider_id.clone(), key);
+                                    }
+                                    StoredCredential::OAuth(credential) => {
+                                        auth_store.set_oauth(provider_id.clone(), credential);
+                                    }
+                                }
+                                auth_store.save(auth_path)?;
+                                tui.overlay = onboarding::provider_setup_overlay(
+                                    providers,
+                                    auth_store,
+                                    &provider_id,
+                                )?;
+                            }
+                            AuthPickerAction::UseStored | AuthPickerAction::NoneRequired => {
+                                tui.overlay = onboarding::provider_setup_overlay(
+                                    providers,
+                                    auth_store,
+                                    &provider_id,
+                                )?;
+                            }
+                        }
+                    }
+                    OverlayState::ModelPicker {
+                        onboarding: true, ..
+                    } => {
+                        let Some(model_id) = overlay.selected_model().map(str::to_string) else {
+                            tui.overlay = None;
+                            return Ok(false);
+                        };
+                        state.current_provider = Some(provider_id.clone());
+                        state.current_model = Some(format!("{provider_id}/{model_id}"));
+                        state.config.default_provider = Some(provider_id.clone());
+                        state.config.default_model = Some(format!("{provider_id}/{model_id}"));
+                        persist_user_config(state)?;
+                        emit_system_message(
+                            state,
+                            session_store,
+                            format!("Active model set to {provider_id}/{model_id}."),
+                        )?;
+                        tui.overlay = None;
+                    }
+                    _ => {
+                        if let Some(command) = overlay.selected_command() {
+                            tui.overlay = None;
+                            handle_submit(
+                                state,
+                                resources,
+                                providers,
+                                auth_store,
+                                auth_path,
+                                session_store,
+                                command,
+                                no_alt_screen,
+                            )?;
+                        } else {
+                            tui.overlay = None;
+                        }
+                    }
+                }
+            } else if let Some(command) = overlay.selected_command() {
                 tui.overlay = None;
                 handle_submit(
                     state,
@@ -239,6 +462,16 @@ fn handle_overlay_key(
             } else {
                 tui.overlay = None;
             }
+            submit_queued_prompt_if_ready(
+                state,
+                resources,
+                providers,
+                auth_store,
+                auth_path,
+                session_store,
+                tui,
+                no_alt_screen,
+            )?;
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             state.should_exit = true;
@@ -257,118 +490,15 @@ fn try_open_overlay(
     tui: &mut TuiState,
     submitted: &str,
 ) -> Result<bool> {
-    let without_slash = submitted.trim_start_matches('/');
-    let (name, args) = without_slash
-        .split_once(' ')
-        .map(|(name, args)| (name, args.trim()))
-        .unwrap_or((without_slash, ""));
-
-    let overlay = match name {
-        "resume" | "continue" if args.is_empty() => {
-            let sessions = session_store.list_sessions()?;
-            if sessions.is_empty() {
-                None
-            } else {
-                Some(OverlayState::SessionPicker {
-                    sessions,
-                    selection: 0,
-                })
-            }
-        }
-        "model" if args.is_empty() => {
-            let entries = providers
-                .models()
-                .map(|model| ModelPickerEntry {
-                    selector: format!("{}/{}", model.provider, model.id),
-                    description: model.display_name.clone(),
-                })
-                .collect::<Vec<_>>();
-            if entries.is_empty() {
-                None
-            } else {
-                Some(OverlayState::ModelPicker {
-                    entries,
-                    selection: 0,
-                })
-            }
-        }
-        "agents" if args.is_empty() => {
-            let entries = load_agent_picker_entries(&state.cwd, state.current_model.as_deref())?;
-            if entries.is_empty() {
-                None
-            } else {
-                Some(OverlayState::AgentPicker {
-                    entries,
-                    selection: 0,
-                })
-            }
-        }
-        "login" if args.is_empty() => {
-            let entries = providers
-                .providers()
-                .filter(|provider| !provider.auth_modes.is_empty())
-                .map(|provider| ModelPickerEntry {
-                    selector: provider.id.clone(),
-                    description: provider.display_name.clone(),
-                })
-                .collect::<Vec<_>>();
-            if entries.is_empty() {
-                None
-            } else {
-                Some(OverlayState::LoginPicker {
-                    entries,
-                    selection: 0,
-                })
-            }
-        }
-        "logout" if args.is_empty() => {
-            let entries = auth_store
-                .provider_ids()
-                .map(|provider_id| ModelPickerEntry {
-                    selector: provider_id.to_string(),
-                    description: providers
-                        .provider(provider_id)
-                        .map(|provider| provider.display_name.clone())
-                        .unwrap_or_else(|| provider_id.to_string()),
-                })
-                .collect::<Vec<_>>();
-            if entries.is_empty() {
-                None
-            } else {
-                Some(OverlayState::LogoutPicker {
-                    entries,
-                    selection: 0,
-                })
-            }
-        }
-        "theme" if args.is_empty() => Some(OverlayState::ThemePicker {
-            entries: vec![
-                ModelPickerEntry {
-                    selector: "puffer".to_string(),
-                    description: "Default Puffer theme".to_string(),
-                },
-                ModelPickerEntry {
-                    selector: "harbor".to_string(),
-                    description: "Harbor theme".to_string(),
-                },
-                ModelPickerEntry {
-                    selector: "sunrise".to_string(),
-                    description: "Warm light theme".to_string(),
-                },
-            ],
-            selection: 0,
-        }),
-        _ => None,
-    };
-
-    if let Some(overlay) = overlay {
+    if let Some(overlay) =
+        onboarding::overlay_from_command(state, providers, auth_store, session_store, submitted)?
+    {
         tui.overlay = Some(overlay);
         tui.input.clear();
         tui.cursor = 0;
         tui.slash_selection = 0;
         return Ok(true);
     }
-
     Ok(false)
 }
 
@@ -445,6 +575,81 @@ fn handle_submit(
         }
     }
 
+    Ok(())
+}
+
+fn apply_selected_provider(state: &mut AppState, provider_id: &str) -> Result<()> {
+    state.current_provider = Some(provider_id.to_string());
+    state.current_model = None;
+    state.config.default_provider = Some(provider_id.to_string());
+    state.config.default_model = None;
+    persist_user_config(state)
+}
+
+fn persist_user_config(state: &AppState) -> Result<()> {
+    let paths = ConfigPaths::discover(&state.cwd);
+    save_user_config(&paths, &state.config)
+}
+
+fn submit_queued_prompt_if_ready(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    providers: &mut ProviderRegistry,
+    auth_store: &mut AuthStore,
+    auth_path: &Path,
+    session_store: &SessionStore,
+    tui: &mut TuiState,
+    no_alt_screen: bool,
+) -> Result<()> {
+    if tui
+        .deferred_prompt
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|prompt| prompt == "/help" || prompt == "/?")
+    {
+        if let Some(prompt) = tui.take_deferred_prompt() {
+            handle_submit(
+                state,
+                resources,
+                providers,
+                auth_store,
+                auth_path,
+                session_store,
+                prompt,
+                no_alt_screen,
+            )?;
+        }
+        return Ok(());
+    }
+    if tui.overlay.is_some() {
+        return Ok(());
+    }
+    if let Some(overlay) = onboarding::initial_overlay(state, providers, auth_store)? {
+        tui.overlay = Some(overlay);
+        return Ok(());
+    }
+    if let Some(prompt) = tui.take_deferred_prompt() {
+        handle_submit(
+            state,
+            resources,
+            providers,
+            auth_store,
+            auth_path,
+            session_store,
+            prompt,
+            no_alt_screen,
+        )?;
+    }
+    Ok(())
+}
+
+fn emit_system_message(
+    state: &mut AppState,
+    session_store: &SessionStore,
+    text: String,
+) -> Result<()> {
+    state.push_message(MessageRole::System, text.clone());
+    session_store.append_event(state.session.id, TranscriptEvent::SystemMessage { text })?;
     Ok(())
 }
 
@@ -642,318 +847,11 @@ fn parse_shell_shortcut(input: &str) -> Option<&str> {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct TuiState {
-    input: String,
-    cursor: usize,
-    slash_selection: usize,
-    scroll_offset: u16,
-    overlay: Option<OverlayState>,
-}
-
-impl TuiState {
-    fn clear(&mut self, commands: &[CommandSpec]) {
-        self.input.clear();
-        self.cursor = 0;
-        self.slash_selection = 0;
-        self.sync(commands);
-    }
-
-    fn move_left(&mut self) {
-        self.cursor = previous_boundary(&self.input, self.cursor);
-    }
-
-    fn move_right(&mut self) {
-        self.cursor = next_boundary(&self.input, self.cursor);
-    }
-
-    fn move_home(&mut self) {
-        self.cursor = 0;
-    }
-
-    fn move_end(&mut self) {
-        self.cursor = self.input.len();
-    }
-
-    fn insert_char(&mut self, ch: char, commands: &[CommandSpec]) {
-        self.input.insert(self.cursor, ch);
-        self.cursor += ch.len_utf8();
-        self.sync(commands);
-    }
-
-    fn backspace(&mut self, commands: &[CommandSpec]) {
-        if self.cursor == 0 {
-            return;
-        }
-        let start = previous_boundary(&self.input, self.cursor);
-        self.input.drain(start..self.cursor);
-        self.cursor = start;
-        self.sync(commands);
-    }
-
-    fn delete(&mut self, commands: &[CommandSpec]) {
-        if self.cursor >= self.input.len() {
-            return;
-        }
-        let end = next_boundary(&self.input, self.cursor);
-        self.input.drain(self.cursor..end);
-        self.sync(commands);
-    }
-
-    fn select_previous(&mut self, commands: &[CommandSpec]) {
-        let count = self.matching_rows(commands).len();
-        if count == 0 {
-            return;
-        }
-        self.slash_selection = self.slash_selection.saturating_sub(1);
-    }
-
-    fn select_next(&mut self, commands: &[CommandSpec]) {
-        let count = self.matching_rows(commands).len();
-        if count == 0 {
-            return;
-        }
-        self.slash_selection = (self.slash_selection + 1).min(count.saturating_sub(1));
-    }
-
-    fn apply_selected_command(&mut self, commands: &[CommandSpec]) -> bool {
-        let rows = self.matching_rows(commands);
-        let Some(command) = rows.get(self.slash_selection).copied() else {
-            return false;
-        };
-        self.input = format!("/{}", command.name);
-        if command.argument_hint.is_some() {
-            self.input.push(' ');
-        }
-        self.cursor = self.input.len();
-        self.sync(commands);
-        true
-    }
-
-    fn complete_on_enter(&mut self, commands: &[CommandSpec]) -> bool {
-        if !self.input.starts_with('/') || self.input.contains(' ') {
-            return false;
-        }
-        let trimmed = self.input.trim_start_matches('/');
-        if trimmed.is_empty() {
-            return false;
-        }
-        let rows = self.matching_rows(commands);
-        let Some(command) = rows.get(self.slash_selection).copied() else {
-            return false;
-        };
-        if command.name == trimmed || command.aliases.contains(&trimmed) {
-            return false;
-        }
-        self.apply_selected_command(commands)
-    }
-
-    fn take_input(&mut self) -> String {
-        self.cursor = 0;
-        self.slash_selection = 0;
-        std::mem::take(&mut self.input)
-    }
-
-    fn matching_rows<'a>(&self, commands: &'a [CommandSpec]) -> Vec<&'a CommandSpec> {
-        if self.input.starts_with('/') {
-            popup_rows(&self.input, commands)
-        } else {
-            Vec::new()
-        }
-    }
-
-    fn sync(&mut self, commands: &[CommandSpec]) {
-        self.cursor = self.cursor.min(self.input.len());
-        let count = self.matching_rows(commands).len();
-        if count == 0 {
-            self.slash_selection = 0;
-        } else {
-            self.slash_selection = self.slash_selection.min(count - 1);
-        }
-    }
-
-    fn scroll_up(&mut self, amount: u16) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
-    }
-
-    fn scroll_down(&mut self, amount: u16, line_count: u16) {
-        let max_offset = line_count.saturating_sub(1);
-        self.scroll_offset = (self.scroll_offset + amount).min(max_offset);
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum OverlayState {
-    SessionPicker {
-        sessions: Vec<SessionSummary>,
-        selection: usize,
-    },
-    AgentPicker {
-        entries: Vec<ModelPickerEntry>,
-        selection: usize,
-    },
-    ModelPicker {
-        entries: Vec<ModelPickerEntry>,
-        selection: usize,
-    },
-    LoginPicker {
-        entries: Vec<ModelPickerEntry>,
-        selection: usize,
-    },
-    LogoutPicker {
-        entries: Vec<ModelPickerEntry>,
-        selection: usize,
-    },
-    ThemePicker {
-        entries: Vec<ModelPickerEntry>,
-        selection: usize,
-    },
-}
-
-impl OverlayState {
-    fn select_previous(&mut self) {
-        match self {
-            Self::SessionPicker { selection, .. }
-            | Self::AgentPicker { selection, .. }
-            | Self::ModelPicker { selection, .. }
-            | Self::LoginPicker { selection, .. }
-            | Self::LogoutPicker { selection, .. }
-            | Self::ThemePicker { selection, .. } => {
-                *selection = selection.saturating_sub(1);
-            }
-        }
-    }
-
-    fn select_next(&mut self) {
-        match self {
-            Self::SessionPicker {
-                sessions,
-                selection,
-            } => {
-                *selection = (*selection + 1).min(sessions.len().saturating_sub(1));
-            }
-            Self::AgentPicker { entries, selection } => {
-                *selection = (*selection + 1).min(entries.len().saturating_sub(1));
-            }
-            Self::ModelPicker { entries, selection } => {
-                *selection = (*selection + 1).min(entries.len().saturating_sub(1));
-            }
-            Self::LoginPicker { entries, selection } => {
-                *selection = (*selection + 1).min(entries.len().saturating_sub(1));
-            }
-            Self::LogoutPicker { entries, selection }
-            | Self::ThemePicker { entries, selection } => {
-                *selection = (*selection + 1).min(entries.len().saturating_sub(1));
-            }
-        }
-    }
-
-    fn page_up(&mut self) {
-        for _ in 0..10 {
-            self.select_previous();
-        }
-    }
-
-    fn page_down(&mut self) {
-        for _ in 0..10 {
-            self.select_next();
-        }
-    }
-
-    fn selected_command(&self) -> Option<String> {
-        match self {
-            Self::SessionPicker {
-                sessions,
-                selection,
-            } => sessions
-                .get(*selection)
-                .map(|session| format!("/resume {}", session.id)),
-            Self::AgentPicker { entries, selection } => entries
-                .get(*selection)
-                .map(|entry| format!("/agents use {}", entry.selector)),
-            Self::ModelPicker { entries, selection } => entries
-                .get(*selection)
-                .map(|entry| format!("/model {}", entry.selector)),
-            Self::LoginPicker { entries, selection } => entries
-                .get(*selection)
-                .map(|entry| format!("/login {}", entry.selector)),
-            Self::LogoutPicker { entries, selection } => entries
-                .get(*selection)
-                .map(|entry| format!("/logout {}", entry.selector)),
-            Self::ThemePicker { entries, selection } => entries
-                .get(*selection)
-                .map(|entry| format!("/theme {}", entry.selector)),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ModelPickerEntry {
-    pub selector: String,
-    pub description: String,
-}
-
-fn load_agent_picker_entries(
-    cwd: &Path,
-    current_model: Option<&str>,
-) -> Result<Vec<ModelPickerEntry>> {
-    let paths = ConfigPaths::discover(cwd);
-    ensure_workspace_dirs(&paths)?;
-    let agents_path = paths.workspace_config_dir.join("agents.yaml");
-    if !agents_path.exists() {
-        fs::write(&agents_path, default_agents_contents(current_model))?;
-    }
-    let raw = fs::read_to_string(&agents_path)?;
-    let parsed: AgentFile = serde_yaml::from_str(&raw)?;
-    Ok(parsed
-        .agents
-        .into_iter()
-        .map(|agent| ModelPickerEntry {
-            selector: agent.id,
-            description: format!("role={} model={}", agent.role, agent.model),
-        })
-        .collect())
-}
-
-fn default_agents_contents(model: Option<&str>) -> String {
-    format!(
-        "agents:\n  - id: default\n    role: coding\n    model: {}\n",
-        model.unwrap_or("anthropic/claude-sonnet-4-5")
+fn allow_prompt_before_onboarding(prompt: &str) -> bool {
+    matches!(
+        prompt.trim(),
+        "/help" | "/theme" | "/doctor" | "/status" | "/usage"
     )
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct AgentFile {
-    agents: Vec<AgentPickerRecord>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct AgentPickerRecord {
-    id: String,
-    role: String,
-    model: String,
-}
-
-fn previous_boundary(input: &str, cursor: usize) -> usize {
-    if cursor == 0 {
-        return 0;
-    }
-    let mut index = cursor - 1;
-    while index > 0 && !input.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}
-
-fn next_boundary(input: &str, cursor: usize) -> usize {
-    if cursor >= input.len() {
-        return input.len();
-    }
-    let mut index = cursor + 1;
-    while index < input.len() && !input.is_char_boundary(index) {
-        index += 1;
-    }
-    index.min(input.len())
 }
 
 #[cfg(test)]
