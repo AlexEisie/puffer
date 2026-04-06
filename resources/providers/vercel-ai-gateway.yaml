@@ -1,21 +1,28 @@
 id: vercel-ai-gateway
 display_name: Vercel AI Gateway
-base_url: https://ai-gateway.vercel.sh
-default_api: anthropic-messages
+base_url: https://ai-gateway.vercel.sh/v1
+default_api: openai-completions
 auth_modes:
   - api_key
+discovery:
+  path: /models
+  response: open_ai_models
+  api: openai-completions
+  context_window: 262144
+  max_output_tokens: 65536
+  supports_reasoning: true
 models:
   - id: anthropic/claude-opus-4.5
     display_name: Claude Opus 4.5
     provider: vercel-ai-gateway
-    api: anthropic-messages
+    api: openai-completions
     context_window: 200000
     max_output_tokens: 64000
     supports_reasoning: true
   - id: google/gemini-2.5-flash
     display_name: Gemini 2.5 Flash
     provider: vercel-ai-gateway
-    api: anthropic-messages
+    api: openai-completions
     context_window: 1000000
     max_output_tokens: 65536
     supports_reasoning: true

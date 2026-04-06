@@ -1,0 +1,12 @@
+id: llama-cpp
+display_name: llama.cpp
+base_url: http://127.0.0.1:8080/v1
+default_api: openai-completions
+auth_modes: []
+discovery:
+  path: /models
+  response: open_ai_models
+  api: openai-completions
+  context_window: 8192
+  max_output_tokens: 4096
+  supports_reasoning: false
