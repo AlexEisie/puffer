@@ -72,14 +72,18 @@ pub(crate) fn render(
     } else {
         5
     };
-    let header_height = top_panel_height(
-        state,
-        resources,
-        auth_store,
-        &tool_registry,
-        frame.area().width,
-    )
-        .min(frame.area().height.saturating_sub(footer_height + 1));
+    let header_height = if simplified_surface {
+        0
+    } else {
+        top_panel_height(
+            state,
+            resources,
+            auth_store,
+            &tool_registry,
+            frame.area().width,
+        )
+        .min(frame.area().height.saturating_sub(footer_height + 1))
+    };
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

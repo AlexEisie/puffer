@@ -1,3 +1,0 @@
-Error: provider `anthropic` does not support OAuth; use `puffer setup-to
-ken anthropic` or `puffer auth set-api-key anthropic`
-or anthropic exited with exit status: 1

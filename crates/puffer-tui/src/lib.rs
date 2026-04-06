@@ -20,6 +20,7 @@ use puffer_provider_registry::{AuthStore, ProviderRegistry, StoredCredential};
 use puffer_resources::LoadedResources;
 use puffer_session_store::SessionStore;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use ratatui::Terminal;
 use ratatui::{TerminalOptions, Viewport};
 use std::io;
@@ -74,11 +75,16 @@ pub fn run_app(
     }
 
     let mut terminal = if no_alt_screen {
-        let (_, height) = terminal_size()?;
+        let (width, height) = terminal_size()?;
+        let viewport = if state.config.ui.tmux_golden_mode {
+            Viewport::Fixed(Rect::new(0, 0, width.max(1), height.max(1)))
+        } else {
+            Viewport::Inline(height.max(1))
+        };
         Terminal::with_options(
             CrosstermBackend::new(io::stdout()),
             TerminalOptions {
-                viewport: Viewport::Inline(height.max(1)),
+                viewport,
             },
         )?
     } else {

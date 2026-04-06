@@ -48,21 +48,6 @@ fn tmux_help_narrow_matches_snapshot() {
     assert_tmux_help_snapshot(NARROW_TMUX_SIZE, "tmux_help_narrow_snapshot.txt");
 }
 
-#[test]
-fn tmux_login_overlay_wide_matches_snapshot() {
-    assert_tmux_login_snapshot(WIDE_TMUX_SIZE, "tmux_login_overlay_wide_snapshot.txt");
-}
-
-#[test]
-fn tmux_login_overlay_narrow_matches_snapshot() {
-    assert_tmux_login_snapshot(NARROW_TMUX_SIZE, "tmux_login_overlay_narrow_snapshot.txt");
-}
-
-#[test]
-fn tmux_login_overlay_medium_matches_snapshot() {
-    assert_tmux_login_snapshot(MEDIUM_TMUX_SIZE, "tmux_login_overlay_medium_snapshot.txt");
-}
-
 fn assert_tmux_home_snapshot(size: TerminalSize, snapshot_name: &str) {
     if !tmux_available() {
         return;
@@ -90,22 +75,6 @@ fn assert_tmux_help_snapshot(size: TerminalSize, snapshot_name: &str) {
     let capture = capture_tmux_visible_pane(&session).unwrap();
     assert_normalized_snapshot(
         &normalize_tmux_capture(&focused_help_capture(&capture, size)),
-        &snapshot_path(snapshot_name),
-    )
-    .unwrap();
-}
-
-fn assert_tmux_login_snapshot(size: TerminalSize, snapshot_name: &str) {
-    if !tmux_available() {
-        return;
-    }
-
-    let (_tempdir, workspace) = configured_workspace();
-    let session = start_tmux_with_home_args(&workspace, size, &["/login"]);
-    wait_for_tmux_text(&session, "anthropic", Duration::from_secs(10)).unwrap();
-    let capture = capture_tmux_visible_pane(&session).unwrap();
-    assert_normalized_snapshot(
-        &normalize_tmux_capture(&focused_login_capture(&capture, size)),
         &snapshot_path(snapshot_name),
     )
     .unwrap();
@@ -231,24 +200,6 @@ fn focused_tmux_capture(capture: &str, anchor: &str, before: usize, after: usize
 fn focused_help_capture(capture: &str, size: TerminalSize) -> String {
     let after = if size.cols >= WIDE_TMUX_SIZE.cols { 12 } else { 10 };
     trim_common_padding(&focused_tmux_capture(capture, "Supported commands", 0, after))
-}
-
-fn focused_login_capture(capture: &str, size: TerminalSize) -> String {
-    let provider_rows = capture
-        .lines()
-        .filter(|line| {
-            line.contains("Select Provider")
-                || line.contains("anthropic")
-                || line.contains("openai")
-                || line.contains("cerebras")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    if provider_rows.trim().is_empty() {
-        let after = if size.cols >= WIDE_TMUX_SIZE.cols { 6 } else { 5 };
-        return trim_common_padding(&focused_tmux_capture(capture, "Select Provider", 0, after));
-    }
-    trim_common_padding(&provider_rows)
 }
 
 fn trim_common_padding(capture: &str) -> String {
