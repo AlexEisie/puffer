@@ -36,19 +36,17 @@ struct PendingSubmitRenderState {
     loading_prompt: Option<String>,
     queued_prompts: Vec<String>,
 }
-
 thread_local! {
     static ACTIVE_OVERLAY: RefCell<Option<OverlayState>> = const { RefCell::new(None) };
-    static ACTIVE_PENDING_SUBMIT: RefCell<PendingSubmitRenderState> =
-        RefCell::new(PendingSubmitRenderState::default());
+    static ACTIVE_PENDING_SUBMIT: RefCell<PendingSubmitRenderState> = RefCell::new(PendingSubmitRenderState::default());
     static ACTIVE_TOOL_DETAILS_EXPANDED: RefCell<bool> = const { RefCell::new(false) };
+    static ACTIVE_FOLLOW_OUTPUT: RefCell<bool> = const { RefCell::new(true) };
+    static ACTIVE_TRANSCRIPT_VIEWPORT: RefCell<Option<Rect>> = const { RefCell::new(None) };
 }
 
 /// Sets the active overlay rendered by the TUI on the next draw.
 pub(crate) fn set_active_overlay(overlay: Option<OverlayState>) {
-    ACTIVE_OVERLAY.with(|value| {
-        *value.borrow_mut() = overlay;
-    });
+    ACTIVE_OVERLAY.with(|value| *value.borrow_mut() = overlay);
 }
 
 /// Sets the pending submit render state for the current frame.
@@ -66,11 +64,18 @@ pub(crate) fn set_pending_submit_state(
 
 /// Sets whether transcript tool messages should render their raw details.
 pub(crate) fn set_tool_details_expanded(expanded: bool) {
-    ACTIVE_TOOL_DETAILS_EXPANDED.with(|value| {
-        *value.borrow_mut() = expanded;
-    });
+    ACTIVE_TOOL_DETAILS_EXPANDED.with(|value| *value.borrow_mut() = expanded);
 }
 
+/// Sets whether the transcript should stay pinned to the latest output.
+pub(crate) fn set_follow_output(follow_output: bool) {
+    ACTIVE_FOLLOW_OUTPUT.with(|value| *value.borrow_mut() = follow_output);
+}
+
+/// Returns the current transcript viewport measured during the last draw.
+pub(crate) fn current_transcript_viewport() -> Rect {
+    ACTIVE_TRANSCRIPT_VIEWPORT.with(|value| value.borrow().unwrap_or_default())
+}
 /// Renders the current application frame.
 pub(crate) fn render(
     frame: &mut Frame<'_>,
@@ -126,6 +131,9 @@ pub(crate) fn render(
             Constraint::Length(footer_height),
         ])
         .split(frame.area());
+    ACTIVE_TRANSCRIPT_VIEWPORT.with(|value| {
+        *value.borrow_mut() = Some(layout[1]);
+    });
 
     if header_height > 0 && !simplified_surface {
         render_top_panel(
@@ -143,9 +151,16 @@ pub(crate) fn render(
     } else if home_active {
         render_empty_state(frame, layout[1], state);
     } else {
+        let follow_output = ACTIVE_FOLLOW_OUTPUT.with(|value| *value.borrow());
+        let body_scroll_offset = if follow_output {
+            transcript_line_count(state, pending_submit_state().loading_prompt.is_some())
+                .saturating_sub(layout[1].height.max(1))
+        } else {
+            scroll_offset
+        };
         frame.render_widget(
             Paragraph::new(transcript_text(state, pending_submit_state()))
-                .scroll((scroll_offset, 0))
+                .scroll((body_scroll_offset, 0))
                 .wrap(Wrap { trim: false }),
             layout[1],
         );
@@ -389,19 +404,16 @@ fn render_top_panel(
 }
 
 fn help_pane_active(state: &AppState, active_overlay: &Option<OverlayState>) -> bool {
-    if active_overlay.is_some() {
-        return false;
-    }
-    state.transcript.last().is_some_and(|message| {
-        message.role == MessageRole::System && message.text.starts_with("Supported commands:")
-    })
+    active_overlay.is_none()
+        && state.transcript.last().is_some_and(|message| {
+            message.role == MessageRole::System && message.text.starts_with("Supported commands:")
+        })
 }
 
 fn transcript_text(state: &AppState, pending_submit: PendingSubmitRenderState) -> Text<'static> {
     if state.transcript.is_empty() {
         return Text::default();
     }
-
     let mut lines = Vec::new();
     for (index, message) in state.transcript.iter().enumerate() {
         if index > 0 {
@@ -422,9 +434,9 @@ pub(crate) fn transcript_line_count(state: &AppState, pending_submit: bool) -> u
     } else {
         PendingSubmitRenderState::default()
     };
-    transcript_text(state, pending)
-        .lines
-        .len()
+    Paragraph::new(transcript_text(state, pending))
+        .wrap(Wrap { trim: false })
+        .line_count(current_transcript_viewport().width.max(1))
         .min(u16::MAX as usize) as u16
 }
 
