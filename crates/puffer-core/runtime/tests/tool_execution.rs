@@ -227,6 +227,58 @@ fn send_user_message_stores_resolved_attachment_paths() {
 }
 
 #[test]
+fn send_user_message_ignores_workspace_ask_permissions() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let permissions_dir = ConfigPaths::discover(&cwd).workspace_config_dir;
+    fs::create_dir_all(&permissions_dir).unwrap();
+    fs::write(
+        permissions_dir.join("permissions.toml"),
+        "[tools]\nsend_user_message = \"ask\"\nbrief = \"ask\"\n",
+    )
+    .unwrap();
+
+    let mut tool = loaded_tool(
+        "SendUserMessage",
+        "Send a message to the user",
+        "runtime:workflow:send_user_message",
+    );
+    tool.value.approval_policy = Some("auto".to_string());
+    tool.value.sandbox_policy = Some("read-only".to_string());
+    let resources = LoadedResources {
+        tools: vec![tool],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let mut providers = ProviderRegistry::new();
+    providers.register(openai_provider("http://127.0.0.1".to_string()));
+    let request_config = test_openai_request_config();
+
+    let result = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        "SendUserMessage",
+        json!({
+            "message": "hi",
+            "status": "normal"
+        }),
+    )
+    .unwrap();
+
+    assert!(result.success);
+    assert!(result.output.stdout.contains("\"message\": \"hi\""));
+}
+
+#[test]
 fn todo_write_rejects_multiple_in_progress_items() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();

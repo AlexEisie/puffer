@@ -1,20 +1,16 @@
 id: Brief
 name: Brief
 description: |-
-  Send a message the user will actually read.
+  Send a message the user will read. Text outside this tool is visible in the
+  detail view, but most won't open it — the answer lives here.
 
-  `message` supports markdown. `attachments` accepts file paths for images,
-  diffs, logs, and similar artifacts. `status` distinguishes a normal reply
-  from a proactive update you are initiating yourself.
+  `message` supports markdown. `attachments` takes file paths (absolute or
+  cwd-relative) for images, diffs, logs.
 
-  Text outside this tool is visible in the detail view, but most users will not
-  open it. Assume unread. Put the real answer here.
-
-  Use this tool for every user-visible reply. Even simple replies like "hi" or
-  "thanks" should go here. If you can answer immediately, send the answer. If
-  you need to investigate first, send a one-line acknowledgement here before
-  you work, then send the result. For longer work, use meaningful checkpoints
-  when something useful changed; skip filler.
+  `status` labels intent: 'normal' when replying to what they just asked;
+  'proactive' when you're initiating — a scheduled task finished, a blocker
+  surfaced during background work, you need input on something they haven't
+  asked about. Set it honestly; downstream routing uses it.
 handler: runtime:workflow:send_user_message
 approval_policy: auto
 sandbox_policy: read-only
@@ -26,7 +22,7 @@ input_schema:
       description: The message for the user. Supports markdown formatting.
     attachments:
       type: array
-      description: Optional file paths to attach.
+      description: Optional file paths (absolute or relative to cwd) to attach. Use for photos, screenshots, diffs, logs, or any file the user should see alongside your message.
       items:
         type: string
     status:
@@ -34,7 +30,7 @@ input_schema:
       enum:
         - normal
         - proactive
-      description: Labels intent for reply vs proactive user update.
+      description: Use proactive when you're surfacing something the user hasn't asked for and needs to see now — task completion while they're away, a blocker you hit, an unsolicited status update. Use normal when replying to something the user just said.
   required:
     - message
     - status

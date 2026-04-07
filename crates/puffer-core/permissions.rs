@@ -67,6 +67,9 @@ pub(crate) struct RuntimePermissionContext {
 impl RuntimePermissionContext {
     /// Returns true when the tool should stay visible in the provider tool list.
     pub(crate) fn tool_visible_to_model(&self, definition: &ToolDefinition) -> bool {
+        if tool_skips_permission_enforcement(definition) {
+            return true;
+        }
         self.decision_for_tool_call(definition, &Value::Null)
             .behavior
             != ToolPermissionBehavior::Deny
@@ -78,6 +81,12 @@ impl RuntimePermissionContext {
         definition: &ToolDefinition,
         input: &Value,
     ) -> ToolPermissionDecision {
+        if tool_skips_permission_enforcement(definition) {
+            return ToolPermissionDecision {
+                behavior: ToolPermissionBehavior::Allow,
+                reason: None,
+            };
+        }
         if definition
             .policy
             .approval_policy
@@ -316,6 +325,10 @@ fn tool_mutates_workspace(definition: &ToolDefinition) -> bool {
         || definition.policy.sandbox_policy.as_deref() == Some("workspace-write")
 }
 
+fn tool_skips_permission_enforcement(definition: &ToolDefinition) -> bool {
+    matches!(definition.id.as_str(), "SendUserMessage" | "Brief")
+}
+
 fn shell_requests_unsandboxed(definition: &ToolDefinition, input: &Value) -> bool {
     matches!(definition.id.as_str(), "Bash" | "PowerShell")
         && input
@@ -455,5 +468,50 @@ mod tests {
             plan_mode: false,
         };
         assert!(!context.tool_visible_to_model(&definition));
+    }
+
+    #[test]
+    fn send_user_message_ignores_workspace_ask_rules() {
+        let context = RuntimePermissionContext {
+            permissions: PermissionsSettings {
+                tools: BTreeMap::from([
+                    ("sendusermessage".to_string(), "ask".to_string()),
+                    ("brief".to_string(), "deny".to_string()),
+                ]),
+            },
+            sandbox: SandboxSettings::from_mode("workspace-write"),
+            plan_mode: true,
+        };
+        let send_user_message = ToolDefinition {
+            id: "SendUserMessage".to_string(),
+            name: "SendUserMessage".to_string(),
+            description: String::new(),
+            handler: "runtime:workflow:send_user_message".to_string(),
+            handler_args: Vec::new(),
+            kind: puffer_tools::ToolKind::Custom,
+            input_schema: puffer_tools::ToolInputSchema::default(),
+            metadata: puffer_tools::ToolMetadata::default(),
+            policy: puffer_tools::ToolPolicyHints {
+                approval_policy: Some("auto".to_string()),
+                sandbox_policy: Some("read-only".to_string()),
+            },
+            shared_lib: None,
+            enabled_if: None,
+            display: puffer_tools::ToolDisplayHints::default(),
+        };
+        let brief = ToolDefinition {
+            id: "Brief".to_string(),
+            ..send_user_message.clone()
+        };
+
+        let send_decision =
+            context.decision_for_tool_call(&send_user_message, &serde_json::json!({"message": "hi"}));
+        let brief_decision =
+            context.decision_for_tool_call(&brief, &serde_json::json!({"message": "hi"}));
+
+        assert_eq!(send_decision.behavior, ToolPermissionBehavior::Allow);
+        assert_eq!(brief_decision.behavior, ToolPermissionBehavior::Allow);
+        assert!(context.tool_visible_to_model(&send_user_message));
+        assert!(context.tool_visible_to_model(&brief));
     }
 }
