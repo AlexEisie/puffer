@@ -80,6 +80,8 @@
   $: pendingPermissionCount = timeline.filter((item) => item.kind === "permission").length;
   $: toolCount = timeline.filter((item) => item.kind === "tool").length;
   $: diffCount = timeline.filter((item) => item.kind === "diff").length;
+  $: latestDiffLineCount = sessionDetail?.latestDiff?.patch.split("\n").length ?? 0;
+  $: compactDiff = latestDiffLineCount > 0 && latestDiffLineCount <= 18;
   $: remoteConnection = {
     enabled:
       desktopPreferences.remoteEnabled && desktopPreferences.remoteTarget.trim().length > 0,
@@ -418,6 +420,7 @@
         class:loading={sessionLoading}
         class:has-diff={Boolean(sessionDetail?.latestDiff)}
         class:no-diff={!sessionDetail?.latestDiff}
+        class:compact-diff={compactDiff}
         class="content workspace-split"
       >
         <ConversationPane
