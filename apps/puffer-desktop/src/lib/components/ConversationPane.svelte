@@ -120,6 +120,10 @@
     return item.kind === "tool";
   }
 
+  function commandLabel(text: string): string {
+    return text.startsWith("/") ? text.slice(1) : text;
+  }
+
   $: transcriptItems = timeline.filter((item) => item.kind !== "permission" && item.kind !== "diff");
   $: {
     const next = new Set(collapsedIds);
@@ -231,7 +235,7 @@
             {#if item.kind === "command"}
               <div class="command-log">
                 <span class="command-prefix">/</span>
-                <code>{item.body}</code>
+                <code>{commandLabel(item.body)}</code>
               </div>
             {:else}
               <div class="markdown">
