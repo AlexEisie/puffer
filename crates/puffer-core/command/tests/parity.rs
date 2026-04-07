@@ -21,6 +21,16 @@ fn load_tool(relative_path: &str) -> ToolSpec {
     serde_yaml::from_str(&read_repo_file(relative_path)).unwrap()
 }
 
+fn render_prompt(relative_path: &str, variables: &[(&str, &str)]) -> String {
+    let prompt = load_prompt(relative_path);
+    prompt.render(
+        &variables
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect(),
+    )
+}
+
 fn extract_template_literal(contents: &str, marker: &str) -> String {
     let start = contents.find(marker).unwrap() + marker.len();
     let source = &contents[start..];
@@ -83,6 +93,20 @@ fn dedent(raw: &str) -> String {
         .join("\n")
 }
 
+fn strip_frontmatter(markdown: &str) -> String {
+    let trimmed = markdown.trim_start();
+    if !trimmed.starts_with("---\n") {
+        return trimmed.to_string();
+    }
+    let remainder = &trimmed[4..];
+    let end = remainder.find("\n---\n").unwrap();
+    remainder[end + 5..].trim_start_matches('\n').to_string()
+}
+
+fn fenced(output: &str) -> String {
+    format!("```\n{output}\n```")
+}
+
 #[test]
 fn init_prompt_matches_claude_reference() {
     let prompt = load_prompt("resources/prompts/init.yaml");
@@ -97,17 +121,108 @@ fn init_prompt_matches_claude_reference() {
 
 #[test]
 fn review_prompt_matches_claude_reference_when_rendered() {
-    let prompt = load_prompt("resources/prompts/review.yaml");
-    let rendered = prompt.render(&std::collections::BTreeMap::from([(
-        "ARGUMENTS".to_string(),
-        "123".to_string(),
-    )]));
+    let rendered = render_prompt("resources/prompts/review.yaml", &[("ARGUMENTS", "123")]);
     let reference = read_repo_file("references/claude-code/src/commands/review.ts");
     let expected = normalize_reference_template(&extract_template_literal(
         &reference,
         "const LOCAL_REVIEW_PROMPT = (args: string) => `",
     ))
     .replace("${args}", "123");
+
+    assert_eq!(rendered.trim_end(), expected.trim_end());
+}
+
+#[test]
+fn pr_comments_prompt_matches_claude_reference_when_rendered() {
+    let rendered = render_prompt(
+        "resources/prompts/pr-comments.yaml",
+        &[(
+            "ADDITIONAL_USER_INPUT_BLOCK",
+            "Additional user input: focus on unresolved threads",
+        )],
+    );
+    let reference = read_repo_file("references/claude-code/src/commands/pr_comments/index.ts");
+    let expected = normalize_reference_template(&extract_template_literal(&reference, "text: `"))
+        .replace(
+            "${args ? 'Additional user input: ' + args : ''}",
+            "Additional user input: focus on unresolved threads",
+        );
+
+    assert_eq!(rendered.trim_end(), expected.trim_end());
+}
+
+#[test]
+fn security_review_prompt_matches_claude_reference_when_rendered() {
+    let git_status = "On branch main\nnothing to commit, working tree clean";
+    let files_modified = "src/lib.rs";
+    let commits = "abc123 tighten prompt parity";
+    let diff_content = "diff --git a/src/lib.rs b/src/lib.rs";
+    let rendered = render_prompt(
+        "resources/prompts/security-review.yaml",
+        &[
+            ("GIT_STATUS", git_status),
+            ("FILES_MODIFIED", files_modified),
+            ("COMMITS", commits),
+            ("DIFF_CONTENT", diff_content),
+        ],
+    );
+    let reference = read_repo_file("references/claude-code/src/commands/security-review.ts");
+    let expected = strip_frontmatter(&normalize_reference_template(&extract_template_literal(
+        &reference,
+        "const SECURITY_REVIEW_MARKDOWN = `",
+    )))
+    .replace("```\n!`git status`\n```", &fenced(git_status))
+    .replace(
+        "```\n!`git diff --name-only origin/HEAD...`\n```",
+        &fenced(files_modified),
+    )
+    .replace(
+        "```\n!`git log --no-decorate origin/HEAD...`\n```",
+        &fenced(commits),
+    )
+    .replace(
+        "```\n!`git diff origin/HEAD...`\n```",
+        &fenced(diff_content),
+    );
+
+    assert_eq!(rendered.trim_end(), expected.trim_end());
+}
+
+#[test]
+fn statusline_prompt_matches_claude_reference_when_rendered() {
+    let rendered = render_prompt(
+        "resources/prompts/statusline.yaml",
+        &[("STATUSLINE_PROMPT_JSON", "\"Mirror my starship prompt\"")],
+    );
+    let reference = read_repo_file("references/claude-code/src/commands/statusline.tsx");
+    let expected = normalize_reference_template(&extract_template_literal(&reference, "text: `"))
+        .replace("${AGENT_TOOL_NAME}", "Agent")
+        .replace("${prompt}", "Mirror my starship prompt");
+
+    assert_eq!(rendered.trim_end(), expected.trim_end());
+}
+
+#[test]
+fn commit_prompt_matches_claude_reference_when_rendered() {
+    let prompt = load_prompt("resources/prompts/commit.yaml");
+    let rendered = prompt.render(&std::collections::BTreeMap::from([
+        ("GIT_STATUS".to_string(), "STATUS".to_string()),
+        ("GIT_DIFF".to_string(), "DIFF".to_string()),
+        ("CURRENT_BRANCH".to_string(), "BRANCH".to_string()),
+        ("RECENT_COMMITS".to_string(), "COMMITS".to_string()),
+        ("COMMIT_ATTRIBUTION_BLOCK".to_string(), String::new()),
+    ]));
+    let reference = read_repo_file("references/claude-code/src/commands/commit.ts");
+    let expected =
+        normalize_reference_template(&extract_template_literal(&reference, "return `${prefix}"))
+            .replace("!`git status`", "STATUS")
+            .replace("!`git diff HEAD`", "DIFF")
+            .replace("!`git branch --show-current`", "BRANCH")
+            .replace("!`git log --oneline -10`", "COMMITS")
+            .replace(
+                r#"${commitAttribution ? `\n\n${commitAttribution}` : ''}"#,
+                "",
+            );
 
     assert_eq!(rendered.trim_end(), expected.trim_end());
 }

@@ -1,3 +1,5 @@
+mod settings_catalog;
+
 use anyhow::Context;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -5,6 +7,12 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+pub use settings_catalog::{
+    config_setting_persists_to_workspace_file, config_setting_scope, config_setting_spec,
+    normalize_config_setting_key, parse_config_cli_value, supported_config_settings,
+    ConfigSettingScope, ConfigSettingSpec, ConfigSettingValueKind,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PufferConfig {
@@ -23,6 +31,8 @@ pub struct PufferConfig {
     pub fast_mode: bool,
     #[serde(default, alias = "effortLevel")]
     pub effort_level: Option<String>,
+    #[serde(default, alias = "copyFullResponse")]
+    pub copy_full_response: bool,
     pub mascot: MascotConfig,
     pub ui: UiConfig,
 }
@@ -62,6 +72,7 @@ impl Default for PufferConfig {
             editor_mode: default_editor_mode(),
             fast_mode: false,
             effort_level: None,
+            copy_full_response: false,
             mascot: MascotConfig {
                 id: "clawd".to_string(),
                 display_name: "Clawd".to_string(),
@@ -142,19 +153,30 @@ pub fn load_config(paths: &ConfigPaths) -> Result<PufferConfig> {
             config.editor_mode.clone(),
             config.fast_mode,
             config.effort_level.clone(),
+            config.copy_full_response,
         ));
     }
     if paths.workspace_config_file().exists() {
         merge_config_file(&mut config, &paths.workspace_config_file())?;
     }
     apply_claude_status_line_fallback(&mut config, paths);
-    if let Some((provider, model, theme, editor_mode, fast_mode, effort_level)) = user_selection {
+    if let Some((
+        provider,
+        model,
+        theme,
+        editor_mode,
+        fast_mode,
+        effort_level,
+        copy_full_response,
+    )) = user_selection
+    {
         config.default_provider = provider;
         config.default_model = model;
         config.theme = theme;
         config.editor_mode = editor_mode;
         config.fast_mode = fast_mode;
         config.effort_level = effort_level;
+        config.copy_full_response = copy_full_response;
     }
     Ok(config)
 }

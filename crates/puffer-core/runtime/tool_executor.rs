@@ -1,5 +1,6 @@
 use super::agents::execute_agent_tool;
 use super::claude_tools::{self, ProviderToolContext};
+use super::hook_support::{run_tool_end_hooks, run_tool_start_hooks};
 use super::permission_prompt::{
     build_permission_prompt_request, prompt_for_permission, PermissionPromptAction,
 };
@@ -97,10 +98,6 @@ pub(super) fn execute_tool_call(
             }
         },
     }
-    if definition.handler == "runtime:agent" {
-        let output = execute_agent_tool(state, resources, providers, auth_store, cwd, input)?;
-        return Ok(successful_runtime_tool(tool_id, output));
-    }
     let provider_context = match backend {
         ToolExecutionBackend::Anthropic {
             request_config,
@@ -119,15 +116,32 @@ pub(super) fn execute_tool_call(
             structured_output,
         },
     };
-    claude_tools::execute_tool(
-        state,
+    let hook_input = input.clone();
+    run_tool_start_hooks(resources, cwd, tool_id, &hook_input);
+    let result = if definition.handler == "runtime:agent" {
+        let output = execute_agent_tool(state, resources, providers, auth_store, cwd, input)?;
+        successful_runtime_tool(tool_id, output)
+    } else {
+        claude_tools::execute_tool(
+            state,
+            resources,
+            registry,
+            &definition,
+            cwd,
+            input,
+            provider_context,
+        )?
+    };
+    run_tool_end_hooks(
         resources,
-        registry,
-        &definition,
         cwd,
-        input,
-        provider_context,
-    )
+        tool_id,
+        &hook_input,
+        result.success,
+        &result.output.stdout,
+        &result.output.stderr,
+    );
+    Ok(result)
 }
 
 fn successful_runtime_tool(tool_id: &str, stdout: String) -> ToolExecutionResult {

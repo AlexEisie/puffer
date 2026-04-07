@@ -16,8 +16,13 @@ mod tasks;
 
 pub use actions::CommandActionEntry;
 pub(crate) use agents::handle_agents_command;
-pub(crate) use artifacts::{handle_copy_command, handle_export_command};
-pub(crate) use auth::{remove_provider_credentials, render_login_guidance};
+pub use artifacts::CopyActionEntry;
+pub(crate) use artifacts::{handle_copy_command, handle_export_command, render_copy_actions};
+#[cfg(test)]
+pub(crate) use auth::with_login_flow_handler;
+pub(crate) use auth::{
+    remove_provider_credentials, render_login_guidance, run_provider_login_flow, supports_auth_mode,
+};
 pub(crate) use branch::handle_branch_command;
 pub(crate) use common::{
     describe_context, describe_files_in_context, describe_git_diff, emit_system,
@@ -27,7 +32,7 @@ pub(crate) use common::{
 pub(crate) use config::{
     handle_config_command, handle_hooks_command, handle_keybindings_command,
     handle_permissions_command, handle_sandbox_command, persist_user_model_selection,
-    persist_user_settings, reload_config_from_disk, render_config_summary, render_hooks_summary,
+    persist_user_settings, reload_config_from_disk, render_config_summary,
     render_permissions_panel, render_sandbox_actions,
 };
 pub(crate) use doctor::{render_doctor_report, run_doctor};
@@ -43,7 +48,7 @@ pub use plugins::PluginActionEntry;
 pub(crate) use plugins::{
     handle_plugin_command, reload_plugins_summary, render_plugin_actions, render_plugin_summary,
 };
-pub(crate) use prompt::{handle_btw_command, handle_compact_command, handle_plan_command};
+pub(crate) use prompt::handle_plan_command;
 pub(crate) use resume::{handle_resume_command, resumable_sessions_for_picker};
 pub use session::SessionOverlayView;
 pub(crate) use session::{
@@ -53,3 +58,23 @@ pub(crate) use session::{
 };
 pub use tasks::TaskActionEntry;
 pub(crate) use tasks::{handle_tasks_command, render_task_actions, render_tasks_panel_text};
+
+use crate::AppState;
+use anyhow::Result;
+use puffer_resources::LoadedResources;
+
+/// Renders the hooks summary shown by `/hooks`.
+pub(crate) fn render_hooks_summary(
+    state: &AppState,
+    resources: &LoadedResources,
+) -> Result<String> {
+    config::render_hooks_summary(state, resources)
+}
+
+/// Builds the interactive `/hooks` action list used by the TUI picker.
+pub(crate) fn render_hooks_actions(
+    state: &AppState,
+    resources: &LoadedResources,
+) -> Result<Vec<CommandActionEntry>> {
+    config::render_hooks_actions(state, resources)
+}

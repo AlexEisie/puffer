@@ -1,6 +1,0 @@
-id: compact
-description: Summarize the conversation so work can continue with lower context usage.
-template: |
-  Summarize the conversation faithfully and preserve all implementation-critical details.
-  Custom summarization instruction: $ARGUMENTS
-

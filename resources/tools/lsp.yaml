@@ -1,28 +1,29 @@
 id: LSP
 name: LSP
 description: |-
-  Interact with Language Server Protocol (LSP) servers to get code-intelligence
+  Interact with Language Server Protocol (LSP) servers to get code intelligence
   features.
 
   Supported operations:
-  - `goToDefinition`: find where a symbol is defined
-  - `findReferences`: find all references to a symbol
-  - `hover`: get documentation or type information for a symbol
-  - `documentSymbol`: list symbols in a document
-  - `workspaceSymbol`: search for symbols across the workspace
-  - `goToImplementation`: find implementations of an interface or abstract method
-  - `prepareCallHierarchy`: get the call-hierarchy item at a position
-  - `incomingCalls`: find functions or methods that call the item at a position
-  - `outgoingCalls`: find functions or methods called by the item at a position
+  - `goToDefinition`: Find where a symbol is defined
+  - `findReferences`: Find all references to a symbol
+  - `diagnostics`: Get current diagnostics for a document
+  - `hover`: Get hover information (documentation, type info) for a symbol
+  - `documentSymbol`: Get all symbols (functions, classes, variables) in a document
+  - `workspaceSymbol`: Search for symbols across the entire workspace
+  - `goToImplementation`: Find implementations of an interface or abstract method
+  - `prepareCallHierarchy`: Get call hierarchy item at a position (functions/methods)
+  - `incomingCalls`: Find all functions/methods that call the function at a position
+  - `outgoingCalls`: Find all functions/methods called by the function at a position
 
   All operations require:
-  - `filePath`: the file to operate on
-  - `line`: the 1-based line number, as shown in editors
-  - `character`: the 1-based character offset, as shown in editors
+  - `filePath`: The file to operate on
+  - `line`: The line number (1-based, as shown in editors)
+  - `character`: The character offset (1-based, as shown in editors)
 
-  If no LSP server is configured or installed for the file type, the operation
-  returns an explanatory result. When a configured server binary is missing,
-  the result includes install guidance when available.
+  Note: LSP servers must be configured for the file type. If no server is
+  available, an error will be returned. When a configured server binary is
+  missing, the result includes install guidance when available.
 handler: runtime:workflow:lsp
 approval_policy: auto
 sandbox_policy: read-only

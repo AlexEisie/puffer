@@ -17,6 +17,19 @@ fn command_registry_contains_review_usage_and_resume_alias() {
 }
 
 #[test]
+fn btw_and_compact_match_claude_local_command_classification() {
+    let commands = supported_commands();
+    assert_eq!(
+        find_command(&commands, "btw").map(|command| command.kind),
+        Some(CommandKind::Local)
+    );
+    assert_eq!(
+        find_command(&commands, "compact").map(|command| command.kind),
+        Some(CommandKind::Local)
+    );
+}
+
+#[test]
 fn command_surface_includes_user_invocable_skills_and_skill_aliases() {
     let resources = LoadedResources {
         skills: vec![
@@ -69,6 +82,7 @@ fn app_state_defaults_expose_command_state() {
             editor_mode: "normal".to_string(),
             fast_mode: false,
             effort_level: None,
+            copy_full_response: false,
             mascot: MascotConfig {
                 id: "clawd".to_string(),
                 display_name: "Clawd".to_string(),

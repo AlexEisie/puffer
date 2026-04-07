@@ -9,7 +9,9 @@ anyhow.workspace = true
 libloading.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+puffer-config = { path = "../puffer-config" }
 puffer-resources = { path = "../puffer-resources" }
+time.workspace = true
 
 [dev-dependencies]
 serde_yaml.workspace = true

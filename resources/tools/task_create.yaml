@@ -40,7 +40,7 @@ description: |-
   - Create tasks with clear, specific subjects that describe the outcome
   - After creating tasks, use TaskUpdate to set up dependencies (blocks/blockedBy) if needed
   - Include enough detail in the description for another agent to understand and complete the task
-  - New tasks are created with status `pending` and no owner - use TaskUpdate with the `owner` parameter to assign them
+  - New tasks are created with status 'pending' and no owner - use TaskUpdate with the `owner` parameter to assign them
   - Check TaskList first to avoid creating duplicate tasks
 handler: runtime:workflow:task_create
 approval_policy: auto

@@ -1,22 +1,22 @@
 use crate::command_helpers::{
     append_tool_invocations, describe_context, describe_files_in_context, describe_git_diff,
     emit_system, execute_skill_command, handle_agents_command, handle_branch_command,
-    handle_btw_command, handle_compact_command, handle_config_command, handle_copy_command,
-    handle_effort_command, handle_export_command, handle_fast_command, handle_hooks_command,
-    handle_ide_command, handle_keybindings_command, handle_mcp_command, handle_memory_command,
-    handle_model_command, handle_permissions_command, handle_plan_command,
-    handle_plugin_command, handle_remote_control_command, handle_remote_env_command,
-    handle_resume_command, handle_sandbox_command, handle_session_command, handle_tag_command,
-    handle_tasks_command, list_skills, persist_user_settings, record_command_checkpoint,
-    reload_config_from_disk, remove_provider_credentials, render_login_guidance,
-    rewind_transcript, run_doctor, terminal_setup_advice,
+    handle_config_command, handle_copy_command, handle_effort_command, handle_export_command,
+    handle_fast_command, handle_hooks_command, handle_ide_command, handle_keybindings_command,
+    handle_mcp_command, handle_memory_command, handle_model_command, handle_permissions_command,
+    handle_plan_command, handle_plugin_command, handle_remote_control_command,
+    handle_remote_env_command, handle_resume_command, handle_sandbox_command,
+    handle_session_command, handle_tag_command, handle_tasks_command, list_skills,
+    persist_user_settings, record_command_checkpoint, reload_config_from_disk,
+    remove_provider_credentials, render_login_guidance, rewind_transcript, run_doctor,
+    run_provider_login_flow, supports_auth_mode, terminal_setup_advice,
 };
 use crate::{
     render_buddy_summary, render_cost_summary, render_status_summary, render_usage_summary,
     workspace_paths, AppState, MessageRole,
 };
 use anyhow::Result;
-use puffer_provider_registry::{AuthStore, ProviderRegistry};
+use puffer_provider_registry::{AuthMode, AuthStore, ProviderRegistry};
 use puffer_resources::{prompt_by_id, render_prompt_by_id, skill_by_name, LoadedResources};
 use puffer_session_store::{SessionStore, TranscriptEvent};
 use serde::Serialize;
@@ -747,14 +747,6 @@ fn execute_local_command(
             session_store,
             render_status_summary(state, resources, providers, auth_store),
         ),
-        "btw" => handle_btw_command(
-            state,
-            resources,
-            providers,
-            auth_store,
-            session_store,
-            args,
-        ),
         "usage" => emit_system(
             state,
             session_store,
@@ -765,9 +757,6 @@ fn execute_local_command(
             session_store.append_transcript_clear(state.session.id)?;
             state.apply_transcript_rewrite(&puffer_session_store::TranscriptRewrite::Clear);
             emit_system(state, session_store, "Transcript cleared.".to_string())
-        }
-        "compact" => {
-            handle_compact_command(state, resources, providers, auth_store, session_store, args)
         }
         "add-dir" => {
             let validation = workspace_paths::validate_directory_for_workspace(
@@ -902,6 +891,33 @@ fn execute_local_command(
                 args
             };
             let descriptor = providers.provider(provider);
+            if descriptor
+                .map(|provider_descriptor| provider_descriptor.auth_modes.is_empty())
+                .unwrap_or(false)
+            {
+                return emit_system(
+                    state,
+                    session_store,
+                    format!("{provider} does not require stored credentials."),
+                );
+            }
+            if supports_auth_mode(descriptor, AuthMode::OAuth) {
+                return match run_provider_login_flow(state, auth_store, provider) {
+                    Ok(message) => emit_system(state, session_store, message),
+                    Err(error) => emit_system(
+                        state,
+                        session_store,
+                        format!(
+                            "Login failed for {provider}: {error}\n\n{}",
+                            render_login_guidance(
+                                provider,
+                                descriptor,
+                                auth_store.has_auth(provider)
+                            )
+                        ),
+                    ),
+                };
+            }
             emit_system(
                 state,
                 session_store,
@@ -909,19 +925,26 @@ fn execute_local_command(
             )
         }
         "logout" => {
-            let provider = if args.is_empty() { "anthropic" } else { args };
+            let provider = if args.is_empty() {
+                state
+                    .current_provider
+                    .clone()
+                    .unwrap_or_else(|| "anthropic".to_string())
+            } else {
+                args.to_string()
+            };
             if providers
-                .provider(provider)
+                .provider(provider.as_str())
                 .map(|descriptor| descriptor.auth_modes.is_empty())
                 .unwrap_or(false)
             {
                 return emit_system(
                     state,
                     session_store,
-                    format!("{provider} does not use stored credentials."),
+                    format!("{} does not use stored credentials.", provider),
                 );
             }
-            let message = remove_provider_credentials(state, auth_store, provider)?;
+            let message = remove_provider_credentials(state, auth_store, provider.as_str())?;
             emit_system(state, session_store, message)
         }
         "session" => handle_session_command(state, session_store, args),

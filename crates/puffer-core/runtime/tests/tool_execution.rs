@@ -576,21 +576,40 @@ fn execute_anthropic_tool_calls_block_tools_outside_request_scope() {
 }
 
 #[test]
-fn tool_hooks_run_for_completed_tool_calls() {
+fn anthropic_tool_hooks_run_for_completed_tool_calls() {
     let temp = tempfile::tempdir().unwrap();
     let hook_output = temp.path().join("hook.txt");
     let resources = LoadedResources {
-        hooks: vec![LoadedItem {
-            value: puffer_resources::HookSpec {
-                id: "tool-end".to_string(),
-                event: "tool_end".to_string(),
-                command: format!("printf \"$PUFFER_TOOL_ID\" > {}", hook_output.display()),
+        hooks: vec![
+            LoadedItem {
+                value: puffer_resources::HookSpec {
+                    id: "tool-start".to_string(),
+                    event: "tool_start".to_string(),
+                    command: format!(
+                        "printf 'start:%s\\n' \"$PUFFER_TOOL_ID\" >> {}",
+                        hook_output.display()
+                    ),
+                },
+                source_info: SourceInfo {
+                    path: "hook_start.yaml".into(),
+                    kind: SourceKind::Builtin,
+                },
             },
-            source_info: SourceInfo {
-                path: "hook.yaml".into(),
-                kind: SourceKind::Builtin,
+            LoadedItem {
+                value: puffer_resources::HookSpec {
+                    id: "tool-end".to_string(),
+                    event: "tool_end".to_string(),
+                    command: format!(
+                        "printf 'end:%s:%s\\n' \"$PUFFER_TOOL_ID\" \"$PUFFER_TOOL_SUCCESS\" >> {}",
+                        hook_output.display()
+                    ),
+                },
+                source_info: SourceInfo {
+                    path: "hook_end.yaml".into(),
+                    kind: SourceKind::Builtin,
+                },
             },
-        }],
+        ],
         tools: vec![loaded_tool("bash", "Run shell", "bash")],
         ..LoadedResources::default()
     };
@@ -626,5 +645,78 @@ fn tool_hooks_run_for_completed_tool_calls() {
         None,
     )
     .unwrap();
-    assert_eq!(std::fs::read_to_string(hook_output).unwrap(), "bash");
+    assert_eq!(
+        std::fs::read_to_string(hook_output).unwrap(),
+        "start:bash\nend:bash:true\n"
+    );
+}
+
+#[test]
+fn openai_tool_hooks_run_for_completed_tool_calls() {
+    let temp = tempfile::tempdir().unwrap();
+    let hook_output = temp.path().join("hook.txt");
+    let resources = LoadedResources {
+        hooks: vec![
+            LoadedItem {
+                value: puffer_resources::HookSpec {
+                    id: "tool-start".to_string(),
+                    event: "tool_start".to_string(),
+                    command: format!(
+                        "printf 'start:%s\\n' \"$PUFFER_TOOL_ID\" >> {}",
+                        hook_output.display()
+                    ),
+                },
+                source_info: SourceInfo {
+                    path: "hook_start.yaml".into(),
+                    kind: SourceKind::Builtin,
+                },
+            },
+            LoadedItem {
+                value: puffer_resources::HookSpec {
+                    id: "tool-end".to_string(),
+                    event: "tool_end".to_string(),
+                    command: format!(
+                        "printf 'end:%s:%s\\n' \"$PUFFER_TOOL_ID\" \"$PUFFER_TOOL_SUCCESS\" >> {}",
+                        hook_output.display()
+                    ),
+                },
+                source_info: SourceInfo {
+                    path: "hook_end.yaml".into(),
+                    kind: SourceKind::Builtin,
+                },
+            },
+        ],
+        tools: vec![loaded_tool("bash", "Run shell", "bash")],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let mut providers = ProviderRegistry::new();
+    providers.register(openai_provider("http://127.0.0.1".to_string()));
+    let tool_calls = vec![OpenAIResponseToolCall {
+        item_id: Some("fc_1".to_string()),
+        status: Some("completed".to_string()),
+        call_id: "call_1".to_string(),
+        name: "bash".to_string(),
+        arguments: json!({ "command": "printf hi" }),
+    }];
+    let mut state = state();
+    let request_config = test_openai_request_config();
+    let _ = execute_openai_tool_calls(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &tool_calls,
+        &registry,
+        temp.path(),
+        &request_config,
+        "gpt-5",
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(hook_output).unwrap(),
+        "start:bash\nend:bash:true\n"
+    );
 }

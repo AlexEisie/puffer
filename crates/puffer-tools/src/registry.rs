@@ -1,3 +1,4 @@
+use crate::config_prompt::render_config_tool_description;
 use crate::external::{
     builtin_handler_name, execute_runtime, runtime_from_definition, ToolRuntime,
 };
@@ -10,6 +11,7 @@ use anyhow::{anyhow, Result};
 use puffer_resources::{plugin_mcp_servers, LoadedResources, ToolSpec};
 use std::collections::BTreeMap;
 use std::path::Path;
+use time::{Month, OffsetDateTime};
 
 /// One registered tool with its declarative metadata and runtime kind.
 pub struct RegisteredTool {
@@ -52,6 +54,9 @@ impl ToolRegistry {
         );
         registry.has_mcp_resource_servers =
             !resources.mcp_servers.is_empty() || !plugin_mcp_servers(resources).is_empty();
+        if let Some(tool) = registry.tools.get_mut("Config") {
+            tool.spec.description = render_config_tool_description(resources);
+        }
         registry
     }
 
@@ -167,7 +172,7 @@ fn definition_from_spec(spec: &ToolSpec) -> Option<ToolDefinition> {
         });
     definition.id = spec.id.clone();
     definition.name = spec.name.clone();
-    definition.description = spec.description.clone();
+    definition.description = render_tool_description(&spec.description);
     definition.handler = spec.handler.clone();
     definition.aliases = spec.aliases.clone();
     definition.handler_args = spec.handler_args.clone();
@@ -266,6 +271,32 @@ fn infer_schema_type(property: &serde_json::Value) -> ToolSchemaType {
             },
         )
         .unwrap_or(ToolSchemaType::String)
+}
+
+fn render_tool_description(description: &str) -> String {
+    description.replace("{{CURRENT_MONTH_YEAR}}", &current_month_year())
+}
+
+fn current_month_year() -> String {
+    let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+    format!("{} {}", month_name(now.month()), now.year())
+}
+
+fn month_name(month: Month) -> &'static str {
+    match month {
+        Month::January => "January",
+        Month::February => "February",
+        Month::March => "March",
+        Month::April => "April",
+        Month::May => "May",
+        Month::June => "June",
+        Month::July => "July",
+        Month::August => "August",
+        Month::September => "September",
+        Month::October => "October",
+        Month::November => "November",
+        Month::December => "December",
+    }
 }
 
 fn policy_value_disables_tool(value: &str) -> bool {
@@ -766,5 +797,44 @@ mod tests {
 
         assert_eq!(definition.id, "SendUserMessage");
         assert_eq!(definition.aliases, vec!["Brief".to_string()]);
+    }
+
+    #[test]
+    fn registry_interpolates_current_month_year_placeholders_in_descriptions() {
+        let resources = LoadedResources {
+            tools: vec![LoadedItem {
+                value: ToolSpec {
+                    id: "WebSearch".to_string(),
+                    name: "WebSearch".to_string(),
+                    description: "Month: {{CURRENT_MONTH_YEAR}}".to_string(),
+                    handler: "runtime:workflow:web_search".to_string(),
+                    aliases: Vec::new(),
+                    handler_args: Vec::new(),
+                    approval_policy: Some("auto".to_string()),
+                    sandbox_policy: Some("read-only".to_string()),
+                    shared_lib: None,
+                    enabled_if: None,
+                    input_schema: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string" }
+                        },
+                        "required": ["query"],
+                        "additionalProperties": false
+                    })),
+                    metadata: Default::default(),
+                    display: Default::default(),
+                },
+                source_info: SourceInfo {
+                    path: PathBuf::from("web_search.yaml"),
+                    kind: SourceKind::Builtin,
+                },
+            }],
+            ..LoadedResources::default()
+        };
+        let registry = ToolRegistry::from_resources(&resources);
+        let definition = registry.definition("WebSearch").expect("tool definition");
+        assert!(definition.description.starts_with("Month: "));
+        assert!(!definition.description.contains("{{CURRENT_MONTH_YEAR}}"));
     }
 }

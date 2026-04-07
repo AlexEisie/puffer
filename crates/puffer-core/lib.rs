@@ -2,6 +2,7 @@ mod agent_catalog;
 mod command;
 mod command_helpers;
 mod command_summary;
+mod config_settings;
 mod hooks;
 mod model_preferences;
 mod permissions;
@@ -17,6 +18,7 @@ pub use command::{
     command_surface, dispatch_command, find_command, supported_commands, CommandKind, CommandSpec,
 };
 pub use command_helpers::CommandActionEntry;
+pub use command_helpers::CopyActionEntry;
 pub use command_helpers::McpActionEntry;
 pub use command_helpers::PluginActionEntry;
 pub use command_helpers::SessionOverlayView;
@@ -87,6 +89,19 @@ pub fn render_permissions_panel(state: &AppState, resources: &LoadedResources) -
 /// Renders the current `/hooks` summary used by interactive overlays.
 pub fn render_hooks_summary(state: &AppState, resources: &LoadedResources) -> Result<String> {
     command_helpers::render_hooks_summary(state, resources)
+}
+
+/// Builds the interactive `/hooks` action list used by the TUI picker.
+pub fn render_hooks_actions(
+    state: &AppState,
+    resources: &LoadedResources,
+) -> Result<Vec<CommandActionEntry>> {
+    command_helpers::render_hooks_actions(state, resources)
+}
+
+/// Builds Claude-style interactive `/copy` picker entries for the current assistant response.
+pub fn render_copy_actions(state: &AppState, args: &str) -> Result<Option<Vec<CopyActionEntry>>> {
+    command_helpers::render_copy_actions(state, args)
 }
 
 /// Renders the grouped `/skills` summary used by the interactive overlay.
@@ -176,6 +191,15 @@ pub fn logout_provider_credentials(
     provider_id: &str,
 ) -> Result<String> {
     command_helpers::remove_provider_credentials(state, auth_store, provider_id)
+}
+
+/// Executes the interactive login flow for one provider and reloads stored credentials.
+pub fn login_provider_credentials(
+    state: &AppState,
+    auth_store: &mut AuthStore,
+    provider_id: &str,
+) -> Result<String> {
+    command_helpers::run_provider_login_flow(state, auth_store, provider_id)
 }
 
 /// Lists the sessions that should appear in the current `/resume` picker.

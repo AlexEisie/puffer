@@ -1,5 +1,5 @@
 use crate::AppState;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use puffer_config::{save_user_config, ConfigPaths};
 use puffer_provider_openai::{
     build_authorization_url as build_openai_authorization_url,
@@ -10,6 +10,20 @@ use puffer_transport_anthropic::{
     build_authorization_url as build_anthropic_authorization_url,
     generate_pkce as generate_anthropic_pkce, AnthropicOAuthConfig, CONSOLE_AUTHORIZE_URL,
 };
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::process::Command;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LoginFlowRequest {
+    pub provider_id: String,
+    pub auth_path: PathBuf,
+}
+
+thread_local! {
+    static LOGIN_FLOW_HANDLER: RefCell<Option<Box<dyn FnMut(LoginFlowRequest) -> Result<()>>>> =
+        const { RefCell::new(None) };
+}
 
 /// Returns whether a provider advertises the requested auth mode.
 pub(crate) fn supports_auth_mode(
@@ -150,6 +164,47 @@ pub(crate) fn render_login_guidance(
     )
 }
 
+/// Runs a closure while the current thread has an active login-flow test handler.
+#[cfg(test)]
+pub(crate) fn with_login_flow_handler<R>(
+    handler: impl FnMut(LoginFlowRequest) -> Result<()> + 'static,
+    run: impl FnOnce() -> R,
+) -> R {
+    LOGIN_FLOW_HANDLER.with(|slot| {
+        let previous = slot.borrow_mut().take();
+        *slot.borrow_mut() = Some(Box::new(handler));
+        let result = run();
+        let _ = slot.borrow_mut().take();
+        *slot.borrow_mut() = previous;
+        result
+    })
+}
+
+/// Executes the provider-specific interactive login flow and reloads stored credentials.
+pub(crate) fn run_provider_login_flow(
+    state: &AppState,
+    auth_store: &mut AuthStore,
+    provider_id: &str,
+) -> Result<String> {
+    let provider_id = provider_id.trim();
+    if provider_id.is_empty() {
+        bail!("provider id is required");
+    }
+
+    let auth_path = ConfigPaths::discover(&state.cwd)
+        .user_config_dir
+        .join("auth.json");
+    run_login_command(LoginFlowRequest {
+        provider_id: provider_id.to_string(),
+        auth_path: auth_path.clone(),
+    })?;
+    *auth_store = AuthStore::load(&auth_path)?;
+    if !auth_store.has_auth(provider_id) {
+        bail!("login flow for {provider_id} completed without storing credentials");
+    }
+    Ok(format!("Completed login flow for {provider_id}."))
+}
+
 /// Removes stored credentials for one provider and clears the active selection when needed.
 pub(crate) fn remove_provider_credentials(
     state: &mut AppState,
@@ -190,6 +245,29 @@ pub(crate) fn remove_provider_credentials(
         format!("No stored credentials exist for {provider_id}.")
     };
     Ok(message)
+}
+
+fn run_login_command(request: LoginFlowRequest) -> Result<()> {
+    if let Some(result) = LOGIN_FLOW_HANDLER.with(|slot| {
+        let mut borrowed = slot.borrow_mut();
+        borrowed.as_mut().map(|handler| handler(request.clone()))
+    }) {
+        return result;
+    }
+
+    let status = Command::new(std::env::current_exe()?)
+        .arg("auth")
+        .arg("login")
+        .arg(&request.provider_id)
+        .status()?;
+    if !status.success() {
+        bail!(
+            "login flow for {} exited with {}",
+            request.provider_id,
+            status
+        );
+    }
+    Ok(())
 }
 
 fn active_selection_uses_provider(state: &AppState, provider_id: &str) -> bool {

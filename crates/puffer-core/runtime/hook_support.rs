@@ -3,10 +3,31 @@ use puffer_resources::LoadedResources;
 use serde_json::Value;
 use std::path::Path;
 
-pub(super) fn run_tool_hooks(
+/// Runs `tool_start` hooks for one tool invocation.
+pub(super) fn run_tool_start_hooks(
     resources: &LoadedResources,
     cwd: &Path,
-    event: &str,
+    tool_id: &str,
+    input: &Value,
+) {
+    run_resource_hooks(
+        resources,
+        cwd,
+        "tool_start",
+        &[
+            ("PUFFER_TOOL_ID", tool_id.to_string()),
+            ("PUFFER_TOOL_INPUT", input.to_string()),
+            ("PUFFER_TOOL_SUCCESS", String::new()),
+            ("PUFFER_TOOL_STDOUT", String::new()),
+            ("PUFFER_TOOL_STDERR", String::new()),
+        ],
+    );
+}
+
+/// Runs `tool_end` hooks for one completed tool invocation.
+pub(super) fn run_tool_end_hooks(
+    resources: &LoadedResources,
+    cwd: &Path,
     tool_id: &str,
     input: &Value,
     success: bool,
@@ -16,7 +37,7 @@ pub(super) fn run_tool_hooks(
     run_resource_hooks(
         resources,
         cwd,
-        event,
+        "tool_end",
         &[
             ("PUFFER_TOOL_ID", tool_id.to_string()),
             ("PUFFER_TOOL_INPUT", input.to_string()),
@@ -30,7 +51,8 @@ pub(super) fn run_tool_hooks(
     );
 }
 
-pub(super) fn run_turn_hooks(
+/// Runs `turn_end` hooks after a provider response completes.
+pub(crate) fn run_turn_hooks(
     resources: &LoadedResources,
     cwd: &Path,
     text: &str,

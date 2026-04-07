@@ -1,16 +1,22 @@
 use super::common::open_text_file_in_editor;
 use super::emit_system;
 use super::CommandActionEntry;
+use crate::config_settings::{
+    config_setting_scope, parse_config_cli_value, persist_config_setting,
+    persist_user_settings as persist_user_config_settings, render_supported_config_key_list,
+    scope_label, set_config_value as set_state_config_value,
+};
 use crate::permissions::{
     load_or_initialize_permissions, load_or_initialize_sandbox_settings, normalize_tool_id,
     write_permissions, write_sandbox_settings, PermissionsSettings, SandboxSettings,
 };
 use crate::AppState;
 use anyhow::Result;
-use puffer_config::{ensure_workspace_dirs, load_config, save_user_config, ConfigPaths};
+use puffer_config::{ensure_workspace_dirs, load_config, ConfigPaths};
 use puffer_resources::{hook_by_id, LoadedResources};
 use puffer_session_store::SessionStore;
 use puffer_tools::ToolRegistry;
+use serde_json::json;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
@@ -56,23 +62,31 @@ pub(crate) fn describe_permissions(
 pub(crate) fn render_config_summary(state: &AppState) -> Result<String> {
     let paths = ConfigPaths::discover(&state.cwd);
     ensure_workspace_dirs(&paths)?;
-    let config_path = paths.workspace_config_file();
-    Ok(format!(
-        "Config summary:\npath={}\napp_name={}\ndefault_provider={}\ndefault_model={}\nopenai_base_url={}\ntheme={}\neditor_mode={}\nfast_mode={}\neffort_level={}\nprompt_color={}\nno_alt_screen={}\ntmux_golden_mode={}\nstatus_line_command={}\nstatus_line_padding={}",
-        config_path.display(),
-        state.config.app_name,
+    let mut text = String::new();
+    let _ = writeln!(
+        &mut text,
+        "Config summary\nuser_config_path={}\nworkspace_config_path={}\napp_name={}",
+        paths.user_config_file().display(),
+        paths.workspace_config_file().display(),
+        state.config.app_name
+    );
+    let _ = writeln!(
+        &mut text,
+        "\n[user]\ndefault_provider={}\ndefault_model={}\ntheme={}\neditor_mode={}\nfast_mode={}\ncopy_full_response={}\neffort_level={}",
         state.config.default_provider.as_deref().unwrap_or("<unset>"),
         state.config.default_model.as_deref().unwrap_or("<unset>"),
-        state.config.openai_base_url.as_deref().unwrap_or("<unset>"),
         state.config.theme,
         state.config.editor_mode.as_str(),
         state.config.fast_mode,
-        state
-            .config
-            .effort_level
-            .as_deref()
-            .unwrap_or("auto"),
-        state.prompt_color,
+        state.config.copy_full_response,
+        state.config.effort_level.as_deref().unwrap_or("auto"),
+    );
+    let _ = writeln!(
+        &mut text,
+        "\n[workspace]\nopenai_base_url={}\nopenai_headers={}\nopenai_query_params={}\nno_alt_screen={}\ntmux_golden_mode={}\nstatus_line_command={}\nstatus_line_padding={}",
+        state.config.openai_base_url.as_deref().unwrap_or("<unset>"),
+        serde_json::to_string(&json!(state.config.openai_headers)).unwrap_or_else(|_| "{}".to_string()),
+        serde_json::to_string(&json!(state.config.openai_query_params)).unwrap_or_else(|_| "{}".to_string()),
         state.config.ui.no_alt_screen,
         state.config.ui.tmux_golden_mode,
         state
@@ -89,7 +103,13 @@ pub(crate) fn render_config_summary(state: &AppState) -> Result<String> {
             .as_ref()
             .map(|status_line| status_line.padding.to_string())
             .unwrap_or_else(|| "<unset>".to_string()),
-    ))
+    );
+    let _ = writeln!(
+        &mut text,
+        "\n[session]\nprompt_color={}\nstatusline_enabled={}",
+        state.prompt_color, state.statusline_enabled,
+    );
+    Ok(text.trim_end().to_string())
 }
 
 /// Renders the current permissions file summary without mutating transcript state.
@@ -226,43 +246,18 @@ pub(crate) fn handle_config_command(
     }
 
     if matches!(trimmed, "help" | "list") {
-        return emit_system(
-            state,
-            session_store,
-            "Supported config keys:\n\
-theme\n\
-model\n\
-editorMode\n\
-fastMode\n\
-effortLevel\n\
-promptColor\n\
-default_provider\n\
-defaultProvider\n\
-default_model\n\
-defaultModel\n\
-openai_base_url\n\
-openaiBaseUrl\n\
-openai_headers\n\
-openaiHeaders\n\
-openai_query_params\n\
-openaiQueryParams\n\
-no_alt_screen\n\
-noAltScreen\n\
-tmux_golden_mode\n\
-tmuxGoldenMode\n\
-status_line_command\n\
-statusLineCommand\n\
-status_line_padding\n\
-statusLinePadding"
-                .to_string(),
-        );
+        return emit_system(state, session_store, render_supported_config_key_list());
     }
 
     if trimmed == "path" {
         return emit_system(
             state,
             session_store,
-            format!("Workspace config path: {}", config_path.display()),
+            format!(
+                "User config path: {}\nWorkspace config path: {}",
+                paths.user_config_file().display(),
+                config_path.display()
+            ),
         );
     }
 
@@ -271,7 +266,8 @@ statusLinePadding"
             state,
             session_store,
             format!(
-                "Open your workspace config file at {}.",
+                "Open your user config file at {} or your workspace config file at {}.",
+                paths.user_config_file().display(),
                 config_path.display()
             ),
         );
@@ -291,122 +287,32 @@ statusLinePadding"
             "Usage: /config set <key> <value>".to_string(),
         );
     };
-    let value = value.trim();
-    match normalize_config_key(key) {
-        "theme" => state.config.theme = value.to_string(),
-        "model" => {
-            state.current_model = match value {
-                "none" | "default" | "<unset>" => None,
-                _ => Some(value.to_string()),
-            };
-            state.config.default_model = state.current_model.clone();
-            state.current_provider = state
-                .current_model
-                .as_deref()
-                .and_then(|model| {
-                    model
-                        .split_once('/')
-                        .map(|(provider, _)| provider.to_string())
-                })
-                .or_else(|| state.current_provider.clone());
-        }
-        "editorMode" => {
-            state.vim_mode = matches!(value, "vim");
-            state.config.editor_mode = if state.vim_mode {
-                "vim".to_string()
-            } else {
-                "normal".to_string()
-            };
-        }
-        "fastMode" => {
-            let parsed = parse_bool(value)?;
-            state.fast_mode = parsed;
-            state.config.fast_mode = parsed;
-        }
-        "effortLevel" => match value {
-            "auto" | "unset" | "default" => {
-                state.effort_level = "auto".to_string();
-                state.config.effort_level = Some("auto".to_string());
-            }
-            _ => {
-                state.effort_level = value.to_string();
-                state.config.effort_level = Some(value.to_string());
-            }
-        },
-        "promptColor" => state.prompt_color = value.to_string(),
-        "default_provider" => state.config.default_provider = Some(value.to_string()),
-        "default_model" => state.config.default_model = Some(value.to_string()),
-        "openai_base_url" => {
-            state.config.openai_base_url = match value {
-                "none" | "default" | "<unset>" => None,
-                _ => Some(value.to_string()),
-            }
-        }
-        "no_alt_screen" => state.config.ui.no_alt_screen = parse_bool(value)?,
-        "tmux_golden_mode" => state.config.ui.tmux_golden_mode = parse_bool(value)?,
-        "status_line_command" => {
-            state.config.ui.status_line = match value {
-                "none" | "default" | "<unset>" => None,
-                _ => Some(puffer_config::StatusLineConfig {
-                    command: value.to_string(),
-                    padding: state
-                        .config
-                        .ui
-                        .status_line
-                        .as_ref()
-                        .map(|status_line| status_line.padding)
-                        .unwrap_or(0),
-                }),
-            }
-        }
-        "status_line_padding" => {
-            let padding = value.parse::<u16>()?;
-            let status_line =
-                state
-                    .config
-                    .ui
-                    .status_line
-                    .get_or_insert(puffer_config::StatusLineConfig {
-                        command: String::new(),
-                        padding: 0,
-                    });
-            status_line.padding = padding;
-        }
-        _ => {
-            return emit_system(
-                state,
-                session_store,
-                format!("Unsupported config key {key}."),
-            );
-        }
+    let parsed = match parse_config_cli_value(key, value.trim()) {
+        Ok(value) => value,
+        Err(error) => return emit_system(state, session_store, error.to_string()),
+    };
+    if let Err(error) = set_state_config_value(state, key, parsed) {
+        return emit_system(state, session_store, error.to_string());
     }
-    write_workspace_config(state, &config_path)?;
+    let path = match persist_config_setting(&paths, state, key) {
+        Ok(path) => path,
+        Err(error) => return emit_system(state, session_store, error.to_string()),
+    };
+    let scope = scope_label(config_setting_scope(key)?);
     emit_system(
         state,
         session_store,
-        format!("Updated {key} in {}.", config_path.display()),
+        match path {
+            Some(path) => format!("Updated {key} in {scope} config at {}.", path.display()),
+            None => format!("Updated {key} for this session."),
+        },
     )
-}
-
-fn normalize_config_key(key: &str) -> &str {
-    match key.trim() {
-        "defaultProvider" => "default_provider",
-        "defaultModel" => "default_model",
-        "openaiBaseUrl" => "openai_base_url",
-        "openaiHeaders" => "openai_headers",
-        "openaiQueryParams" => "openai_query_params",
-        "noAltScreen" => "no_alt_screen",
-        "tmuxGoldenMode" => "tmux_golden_mode",
-        "statusLineCommand" => "status_line_command",
-        "statusLinePadding" => "status_line_padding",
-        other => other,
-    }
 }
 
 /// Persists the current user-scoped settings to `~/.puffer/config.toml`.
 pub(crate) fn persist_user_settings(state: &AppState) -> Result<()> {
     let paths = ConfigPaths::discover(&state.cwd);
-    save_user_config(&paths, &state.config)
+    persist_user_config_settings(&paths, state)
 }
 
 /// Persists the currently selected provider and model to the user config file.
@@ -470,7 +376,10 @@ pub(crate) fn handle_hooks_command(
         return emit_system(
             state,
             session_store,
-            format!("Hooks directory: {}", hooks_dir.display()),
+            format!(
+                "Hooks directory: {}\nSupported events: tool_start, tool_end, turn_end",
+                hooks_dir.display()
+            ),
         );
     }
 
@@ -547,7 +456,7 @@ pub(crate) fn render_hooks_summary(
         fs::write(&hooks_path, default_hooks_contents())?;
     }
     Ok(format!(
-        "Hooks directory: {}\nloaded_hooks={}\n{}{}",
+        "Hooks directory: {}\nloaded_hooks={}\nsupported_events=tool_start, tool_end, turn_end\n{}{}",
         hooks_dir.display(),
         resources.hooks.len(),
         if resources.hooks.is_empty() {
@@ -565,6 +474,46 @@ pub(crate) fn render_hooks_summary(
         },
         fs::read_to_string(&hooks_path)?
     ))
+}
+
+/// Builds the interactive `/hooks` action list used by the TUI picker.
+pub(crate) fn render_hooks_actions(
+    state: &AppState,
+    resources: &LoadedResources,
+) -> Result<Vec<CommandActionEntry>> {
+    let paths = ConfigPaths::discover(&state.cwd);
+    ensure_workspace_dirs(&paths)?;
+    let hooks_dir = paths.workspace_config_dir.join("resources/hooks");
+    fs::create_dir_all(&hooks_dir)?;
+    let hooks_path = hooks_dir.join("tool_end.yaml");
+    if !hooks_path.exists() {
+        fs::write(&hooks_path, default_hooks_contents())?;
+    }
+
+    let mut actions = vec![
+        CommandActionEntry {
+            command: "/hooks open".to_string(),
+            description: format!("Open workspace hooks directory ({})", hooks_dir.display()),
+        },
+        CommandActionEntry {
+            command: "/hooks path".to_string(),
+            description: "Show hook resource paths and supported events".to_string(),
+        },
+        CommandActionEntry {
+            command: "/hooks list".to_string(),
+            description: format!("List {} loaded hook(s)", resources.hooks.len()),
+        },
+    ];
+    actions.extend(resources.hooks.iter().map(|hook| CommandActionEntry {
+        command: format!("/hooks show {}", hook.value.id),
+        description: format!(
+            "{} [{}] {}",
+            hook.value.id,
+            hook.value.event,
+            hook.source_info.path.display()
+        ),
+    }));
+    Ok(actions)
 }
 
 fn set_permission_level(settings: &mut PermissionsSettings, tool: &str, level: &str) {
@@ -803,11 +752,6 @@ fn open_sandbox_config(
             ),
         ),
     }
-}
-
-fn write_workspace_config(state: &AppState, path: &PathBuf) -> Result<()> {
-    fs::write(path, toml::to_string_pretty(&state.config)?)?;
-    Ok(())
 }
 
 fn default_keybindings_contents() -> &'static str {

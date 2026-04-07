@@ -1,6 +1,6 @@
 use super::{
-    execute_tool_call, parse_http_json_response, run_tool_hooks, run_turn_hooks,
-    send_http_request_raw, ToolExecutionBackend, ToolInvocation, TurnStreamEvent, APP_VERSION,
+    execute_tool_call, parse_http_json_response, run_turn_hooks, send_http_request_raw,
+    ToolExecutionBackend, ToolInvocation, TurnStreamEvent, APP_VERSION,
 };
 use crate::permissions::load_runtime_permission_context;
 mod support;
@@ -551,16 +551,6 @@ pub(super) fn execute_openai_tool_calls(
             &tool_call.name,
             tool_call.arguments.clone(),
         )?;
-        run_tool_hooks(
-            resources,
-            cwd,
-            "tool_end",
-            &tool_call.name,
-            &tool_call.arguments,
-            execution.success,
-            &execution.output.stdout,
-            &execution.output.stderr,
-        );
         let output = if execution.output.stderr.is_empty() {
             execution.output.stdout
         } else if execution.output.stdout.is_empty() {

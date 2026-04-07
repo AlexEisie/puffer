@@ -1,15 +1,20 @@
 mod manage;
+mod marketplace;
 mod support;
+mod validate;
 
 use self::manage::{
     disable_workspace_plugin, enable_workspace_plugin, install_workspace_plugin,
     uninstall_workspace_plugin, update_workspace_plugin,
 };
-use self::support::{
-    default_plugin_contents, format_plugin_counts, is_disabled_placeholder,
-    marketplace_management_request, plugin_description, plugin_help_text, plugin_status,
-    render_plugin_marketplace, source_kind_label,
+use self::marketplace::{
+    add_marketplace, remove_marketplace, render_plugin_marketplace, update_marketplaces,
 };
+use self::support::{
+    default_plugin_contents, format_plugin_counts, is_disabled_placeholder, plugin_description,
+    plugin_help_text, plugin_status, source_kind_label,
+};
+use self::validate::{validate_loaded_plugin, validate_manifest_target};
 use super::common::open_text_file_in_editor;
 use super::{emit_system, CommandActionEntry};
 use crate::AppState;
@@ -22,7 +27,7 @@ use puffer_resources::{
 use puffer_session_store::SessionStore;
 use std::fmt::Write as _;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Backward-compatible alias for plugin action picker rows.
 pub type PluginActionEntry = CommandActionEntry;
@@ -52,8 +57,13 @@ pub(crate) fn handle_plugin_command(
             session_store,
             render_plugin_summary(state, resources)?,
         ),
-        "marketplace" | "market" | "marketplace list" | "market list" => {
-            emit_system(state, session_store, render_plugin_marketplace(resources))
+        "marketplace" | "market" | "marketplace list" | "market list" => emit_system(
+            state,
+            session_store,
+            render_plugin_marketplace(resources, &paths)?,
+        ),
+        "marketplace update" | "market update" => {
+            emit_system(state, session_store, update_marketplaces(&paths, None)?)
         }
         "errors" => emit_system(
             state,
@@ -81,7 +91,7 @@ pub(crate) fn handle_plugin_command(
             format!(
                 "{}\n\n{}",
                 plugin_help_text(),
-                render_plugin_marketplace(resources)
+                render_plugin_marketplace(resources, &paths)?
             ),
         ),
         "uninstall" | "remove" | "update" => emit_system(state, session_store, plugin_help_text()),
@@ -117,13 +127,60 @@ pub(crate) fn handle_plugin_command(
             let plugin_id = trimmed.trim_start_matches("update ").trim();
             update_workspace_plugin(state, resources, session_store, &paths, plugin_id)
         }
-        _ if trimmed.starts_with("validate ") => {
-            let plugin_id = trimmed.trim_start_matches("validate ").trim();
+        _ if trimmed.starts_with("marketplace add ") || trimmed.starts_with("market add ") => {
+            let source = trimmed
+                .split_once(' ')
+                .and_then(|(_, rest)| rest.split_once(' '))
+                .map(|(_, value)| value.trim())
+                .unwrap_or_default();
+            emit_system(state, session_store, add_marketplace(&paths, source)?)
+        }
+        _ if trimmed.starts_with("marketplace remove ")
+            || trimmed.starts_with("market remove ")
+            || trimmed.starts_with("marketplace rm ")
+            || trimmed.starts_with("market rm ") =>
+        {
+            let name = trimmed
+                .rsplit_once(' ')
+                .map(|(_, value)| value.trim())
+                .unwrap_or_default();
+            emit_system(state, session_store, remove_marketplace(&paths, name)?)
+        }
+        _ if trimmed.starts_with("marketplace update ")
+            || trimmed.starts_with("market update ") =>
+        {
+            let name = trimmed
+                .rsplit_once(' ')
+                .map(|(_, value)| value.trim())
+                .unwrap_or_default();
             emit_system(
                 state,
                 session_store,
-                render_plugin_validation(&inventory, Some(plugin_id)),
+                update_marketplaces(&paths, Some(name))?,
             )
+        }
+        _ if trimmed.starts_with("validate ") => {
+            let selector = trimmed.trim_start_matches("validate ").trim();
+            if selector.is_empty() {
+                return emit_system(
+                    state,
+                    session_store,
+                    "Usage: /plugin validate <id|path>".to_string(),
+                );
+            }
+            if should_treat_plugin_validation_target_as_path(&state.cwd, selector) {
+                let text = match validate_manifest_target(&state.cwd, selector) {
+                    Ok(text) => text,
+                    Err(error) => format!("Plugin validation failed: {error}"),
+                };
+                emit_system(state, session_store, text)
+            } else {
+                emit_system(
+                    state,
+                    session_store,
+                    render_plugin_validation(&inventory, Some(selector)),
+                )
+            }
         }
         _ if trimmed.starts_with("open ") || trimmed.starts_with("edit ") => {
             let plugin_id = trimmed
@@ -140,14 +197,6 @@ pub(crate) fn handle_plugin_command(
             let plugin_id = trimmed.trim_start_matches("disable ").trim();
             disable_workspace_plugin(state, resources, session_store, &paths, plugin_id)
         }
-        _ if marketplace_management_request(trimmed) => emit_system(
-            state,
-            session_store,
-            format!(
-                "Custom plugin marketplaces are not implemented yet.\n\n{}",
-                render_plugin_marketplace(resources)
-            ),
-        ),
         _ if inventory.iter().any(|plugin| plugin.value.id == trimmed) => {
             describe_plugin(state, session_store, &inventory, trimmed)
         }
@@ -187,7 +236,7 @@ pub(crate) fn render_plugin_summary(
     }
     let inventory = plugin_inventory(&paths, resources)?;
     Ok(format!(
-        "Plugins directory: {}\nworkspace_plugin_manifest={}\nloaded_plugins={}\n{}\nUse `/plugin marketplace`, `/plugin install <id|path>`, `/plugin update <id>`, `/plugin uninstall <id>`, `/plugin enable <id>`, `/plugin disable <id>`, `/plugin open <id>`, `/plugin validate [id]`, `/plugin errors`, or `/reload-plugins`.\n\n{}",
+        "Plugins directory: {}\nworkspace_plugin_manifest={}\nloaded_plugins={}\n{}\nUse `/plugin marketplace`, `/plugin marketplace add <path|url>`, `/plugin marketplace remove <name>`, `/plugin marketplace update [name]`, `/plugin install <id|id@marketplace|path>`, `/plugin update <id|id@marketplace>`, `/plugin uninstall <id>`, `/plugin enable <id>`, `/plugin disable <id>`, `/plugin open <id>`, `/plugin validate [id|path]`, `/plugin errors`, or `/reload-plugins`.\n\n{}",
         plugins_dir.display(),
         plugin_path.display(),
         inventory.iter().filter(|plugin| !is_disabled_placeholder(&plugin.value)).count(),
@@ -206,7 +255,7 @@ pub(crate) fn render_plugin_actions(
     let mut actions = vec![
         PluginActionEntry {
             command: "/plugin marketplace".to_string(),
-            description: "Browse builtin plugins that can be installed here".to_string(),
+            description: "Browse builtin and custom plugin marketplaces".to_string(),
         },
         PluginActionEntry {
             command: "/plugin open".to_string(),
@@ -228,7 +277,7 @@ pub(crate) fn render_plugin_actions(
         },
         PluginActionEntry {
             command: "/plugin validate".to_string(),
-            description: "Validate loaded plugin manifests".to_string(),
+            description: "Validate loaded plugin manifests or one manifest path".to_string(),
         },
     ];
     for plugin in &inventory {
@@ -338,31 +387,48 @@ fn render_plugin_validation(
     };
     let mut text = String::from("Plugin validation\n");
     for plugin in selected {
-        let issues = validate_plugin(plugin);
-        let status = if issues.is_empty() { "ok" } else { "issues" };
+        let report = validate_loaded_plugin(plugin);
+        let status = if report.issues.is_empty() {
+            "ok"
+        } else {
+            "issues"
+        };
         let _ = writeln!(
             &mut text,
             "- {} [{}] path={}",
-            plugin.value.id,
+            report.plugin_id,
             status,
-            plugin.source_info.path.display()
+            report.path.display()
         );
-        if issues.is_empty() {
+        if report.issues.is_empty() {
             let _ = writeln!(
                 &mut text,
                 "  commands={} skills={} mcp_servers={} lsp_servers={}",
-                plugin.value.commands.len(),
-                plugin.value.skills.len(),
-                plugin.value.mcp_servers.len(),
-                plugin.value.lsp_servers.len()
+                report.commands, report.skills, report.mcp_servers, report.lsp_servers
             );
         } else {
-            for issue in issues {
+            for issue in report.issues {
                 let _ = writeln!(&mut text, "  issue: {issue}");
             }
         }
     }
     text.trim_end().to_string()
+}
+
+fn should_treat_plugin_validation_target_as_path(cwd: &Path, selector: &str) -> bool {
+    let candidate = if Path::new(selector).is_absolute() {
+        PathBuf::from(selector)
+    } else {
+        cwd.join(selector)
+    };
+    candidate.exists()
+        || selector == "."
+        || selector == ".."
+        || selector.contains(std::path::MAIN_SEPARATOR)
+        || selector.contains('/')
+        || selector.contains('\\')
+        || selector.ends_with(".yaml")
+        || selector.ends_with(".yml")
 }
 
 fn plugin_inventory(
@@ -491,87 +557,6 @@ fn render_plugin_listing(inventory: &[LoadedItem<PluginSpec>]) -> String {
         );
     }
     text
-}
-
-fn validate_plugin(plugin: &LoadedItem<PluginSpec>) -> Vec<String> {
-    let mut issues = Vec::new();
-    if plugin.value.id.trim().is_empty() {
-        issues.push("plugin id must not be empty".to_string());
-    }
-    if plugin.value.display_name.trim().is_empty() {
-        issues.push("display_name must not be empty".to_string());
-    }
-    collect_duplicates(
-        plugin
-            .value
-            .commands
-            .iter()
-            .map(|command| command.name.as_str()),
-        "command",
-        &mut issues,
-    );
-    collect_duplicates(
-        plugin.value.skills.iter().map(|skill| skill.as_str()),
-        "skill",
-        &mut issues,
-    );
-    collect_duplicates(
-        plugin.value.agents.iter().map(|agent| agent.id.as_str()),
-        "agent",
-        &mut issues,
-    );
-    collect_duplicates(
-        plugin
-            .value
-            .mcp_servers
-            .iter()
-            .map(|server| server.id.as_str()),
-        "mcp server",
-        &mut issues,
-    );
-    collect_duplicates(
-        plugin
-            .value
-            .lsp_servers
-            .iter()
-            .map(|server| server.id.as_str()),
-        "lsp server",
-        &mut issues,
-    );
-    if is_disabled_placeholder(&plugin.value)
-        && (!plugin.value.commands.is_empty()
-            || !plugin.value.skills.is_empty()
-            || !plugin.value.agents.is_empty()
-            || !plugin.value.mcp_servers.is_empty()
-            || !plugin.value.lsp_servers.is_empty())
-    {
-        issues.push(
-            "disabled placeholder should not retain commands, skills, agents, MCP servers, or LSP servers"
-                .to_string(),
-        );
-    }
-    issues
-}
-
-fn collect_duplicates<'a, I>(values: I, label: &str, issues: &mut Vec<String>)
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    let mut seen = std::collections::BTreeSet::new();
-    let mut duplicates = std::collections::BTreeSet::new();
-    for value in values {
-        let normalized = value.trim();
-        if normalized.is_empty() {
-            duplicates.insert("<empty>".to_string());
-            continue;
-        }
-        if !seen.insert(normalized.to_string()) {
-            duplicates.insert(normalized.to_string());
-        }
-    }
-    for duplicate in duplicates {
-        issues.push(format!("duplicate {label} `{duplicate}`"));
-    }
 }
 
 fn open_named_plugin_file(

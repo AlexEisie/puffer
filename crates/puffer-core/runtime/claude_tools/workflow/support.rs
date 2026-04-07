@@ -1,17 +1,21 @@
 use super::store::{
-    agents_path, append_agent_message, detect_powershell_binary, get_config_value, git_ahead_count,
-    git_dirty, git_head_commit, git_toplevel, is_git_repo, load_store, messages_path, next_task_id,
-    now_ms, resolve_recipients, save_store, set_config_value, task_output_path, tasks_path,
-    teams_path, todos_path, validate_ask_user_questions, workflow_root, worktrees_path, AgentInput,
-    AgentStore, AskUserQuestionInput, ConfigInput, EnterWorktreeInput, ExitWorktreeInput,
-    MessageStore, PowerShellInput, SendMessageInput, StoredAgent, StoredMessage, StoredTask,
-    StoredTeam, StoredTodo, StoredWorktree, TaskStore, TeamCreateInput, TeamStore, TodoStore,
-    TodoWriteInput, WorktreeStore,
+    agents_path, append_agent_message, detect_powershell_binary, git_ahead_count, git_dirty,
+    git_head_commit, git_toplevel, is_git_repo, load_store, messages_path, next_task_id, now_ms,
+    resolve_recipients, save_store, task_output_path, tasks_path, teams_path, todos_path,
+    validate_ask_user_questions, workflow_root, worktrees_path, AgentInput, AgentStore,
+    AskUserQuestionInput, ConfigInput, EnterWorktreeInput, ExitWorktreeInput, MessageStore,
+    PowerShellInput, SendMessageInput, StoredAgent, StoredMessage, StoredTask, StoredTeam,
+    StoredTodo, StoredWorktree, TaskStore, TeamCreateInput, TeamStore, TodoStore, TodoWriteInput,
+    WorktreeStore,
 };
 use super::task_runtime::{terminal_task_status, validate_todos, wait_for_child_output};
+use crate::config_settings::{
+    config_setting_path, config_setting_scope, get_config_value, persist_config_setting,
+    scope_label, set_config_value,
+};
 use crate::AppState;
 use anyhow::{anyhow, bail, Context, Result};
-use puffer_config::{ensure_workspace_dirs, save_workspace_config, ConfigPaths};
+use puffer_config::{ensure_workspace_dirs, ConfigPaths};
 use serde_json::{json, Value};
 use std::fs;
 use std::fs::OpenOptions;
@@ -466,28 +470,28 @@ pub(super) fn execute_config(state: &mut AppState, cwd: &Path, input: Value) -> 
     ensure_workspace_dirs(&paths)?;
     let previous = get_config_value(state, &parsed.setting)?;
     let operation = if has_value { "set" } else { "get" };
+    let scope = config_setting_scope(&parsed.setting)?;
+    let storage_path = config_setting_path(&paths, &parsed.setting)?;
     if has_value {
         let value = parsed.value.unwrap_or(Value::Null);
         set_config_value(state, &parsed.setting, value)?;
-        if super::store::config_setting_persists_to_workspace_file(&parsed.setting) {
-            save_workspace_config(&paths, &state.config)?;
-        }
+        let _ = persist_config_setting(&paths, state, &parsed.setting)?;
     }
     let current = get_config_value(state, &parsed.setting)?;
-    let persisted = super::store::config_setting_persists_to_workspace_file(&parsed.setting);
+    let path_value = storage_path
+        .as_ref()
+        .map(|path: &PathBuf| Value::String(path.display().to_string()))
+        .unwrap_or(Value::Null);
     Ok(serde_json::to_string_pretty(&json!({
         "success": true,
         "operation": operation,
+        "scope": scope_label(scope),
         "setting": parsed.setting,
         "value": current,
         "previousValue": previous,
         "newValue": if operation == "set" { current.clone() } else { Value::Null },
-        "persisted": persisted,
-        "path": if persisted {
-            Value::String(paths.workspace_config_file().display().to_string())
-        } else {
-            Value::Null
-        }
+        "persisted": storage_path.is_some(),
+        "path": path_value
     }))?)
 }
 

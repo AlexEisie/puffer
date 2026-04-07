@@ -1,4 +1,5 @@
 mod builtins;
+mod config_prompt;
 mod external;
 mod model;
 #[cfg(test)]

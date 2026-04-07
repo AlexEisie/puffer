@@ -82,7 +82,18 @@ fn try_open_overlay_builds_permissions_panel() {
 
 #[test]
 fn try_open_overlay_builds_hooks_panel() {
-    assert!(matches!(open_panel("/hooks"), OverlayState::Text(..)));
+    let (title, entries, selection) = open_command_picker_panel("/hooks");
+
+    assert_eq!(title, "Hooks");
+    assert_eq!(selection, 0);
+    assert_eq!(
+        picker_entry(&entries, "/hooks path").description,
+        "Show hook resource paths and supported events"
+    );
+
+    let open = picker_entry(&entries, "/hooks open");
+    assert!(open.description.contains("workspace hooks directory"));
+    assert!(open.description.contains("resources/hooks"));
 }
 
 #[test]
@@ -115,7 +126,7 @@ fn try_open_overlay_builds_plugin_picker_with_management_actions() {
     );
     assert_eq!(
         picker_entry(&entries, "/plugin validate").description,
-        "Validate loaded plugin manifests"
+        "Validate loaded plugin manifests or one manifest path"
     );
 }
 
@@ -214,6 +225,86 @@ fn try_open_overlay_builds_memory_panel() {
         open_panel("/memory"),
         OverlayState::CommandPicker { .. }
     ));
+}
+
+#[test]
+fn try_open_overlay_builds_copy_picker_for_code_blocks() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+
+    let mut state = sample_state();
+    state.cwd = tempdir.path().to_path_buf();
+    state.session.cwd = tempdir.path().to_path_buf();
+    state.transcript.clear();
+    state.push_message(
+        MessageRole::Assistant,
+        "```rs\nfn main() {}\n```\n```json\n{\"ok\":true}\n```",
+    );
+    let resources = sample_resources();
+    let mut providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let mut tui = TuiState::default();
+    let opened = try_open_overlay(
+        &state,
+        &resources,
+        &mut providers,
+        &auth_store,
+        &session_store,
+        &mut tui,
+        "/copy",
+    )
+    .unwrap();
+
+    assert!(opened);
+    match tui.overlay {
+        Some(OverlayState::CommandPicker {
+            title,
+            entries,
+            selection,
+        }) => {
+            assert_eq!(title, "Copy");
+            assert_eq!(selection, 0);
+            assert_eq!(entries[0].selector, "Full response");
+            assert_eq!(entries[0].command.as_deref(), Some("/copy --full 0"));
+            assert_eq!(entries[1].selector, "fn main() {}");
+            assert_eq!(entries[1].command.as_deref(), Some("/copy --code 0 0"));
+        }
+        other => panic!("expected copy picker, got {other:?}"),
+    }
+}
+
+#[test]
+fn try_open_overlay_skips_copy_picker_when_preference_is_enabled() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+
+    let mut state = sample_state();
+    state.cwd = tempdir.path().to_path_buf();
+    state.session.cwd = tempdir.path().to_path_buf();
+    state.config.copy_full_response = true;
+    state.transcript.clear();
+    state.push_message(MessageRole::Assistant, "```rs\nfn main() {}\n```");
+    let resources = sample_resources();
+    let mut providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let mut tui = TuiState::default();
+    let opened = try_open_overlay(
+        &state,
+        &resources,
+        &mut providers,
+        &auth_store,
+        &session_store,
+        &mut tui,
+        "/copy",
+    )
+    .unwrap();
+
+    assert!(!opened);
+    assert!(tui.overlay.is_none());
 }
 
 #[test]

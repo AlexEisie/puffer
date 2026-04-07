@@ -1,6 +1,8 @@
 use super::super::emit_system;
+use super::marketplace::resolve_marketplace_plugin;
 use super::support::{
-    disabled_placeholder_for, is_disabled_placeholder, plugin_help_text, render_plugin_marketplace,
+    disabled_placeholder_for, is_disabled_placeholder, plugin_help_text,
+    render_builtin_plugin_marketplace,
 };
 use crate::AppState;
 use anyhow::Result;
@@ -26,14 +28,17 @@ pub(super) fn install_workspace_plugin(
             format!(
                 "{}\n\n{}",
                 plugin_help_text(),
-                render_plugin_marketplace(resources)
+                render_builtin_plugin_marketplace(resources)
             ),
         );
     }
 
     let plugins_dir = paths.workspace_config_dir.join("resources/plugins");
     fs::create_dir_all(&plugins_dir)?;
-    let (plugin, raw) = resolve_plugin_install_source(resources, plugin_ref)?;
+    let resolved = resolve_plugin_install_source(resources, paths, plugin_ref)?;
+    let plugin = resolved.plugin;
+    let raw = resolved.raw;
+    let source_display = resolved.source_display;
     let enabled_path = plugin_manifest_path(&plugins_dir, &plugin.id);
     let disabled_path = disabled_variant(&enabled_path);
     fs::write(&enabled_path, raw)?;
@@ -43,9 +48,10 @@ pub(super) fn install_workspace_plugin(
         state,
         session_store,
         format!(
-            "Installed plugin `{}` into {}.",
+            "Installed plugin `{}` into {}.\nsource={}",
             plugin.id,
-            enabled_path.display()
+            enabled_path.display(),
+            source_display
         ),
     )
 }
@@ -130,30 +136,33 @@ pub(super) fn update_workspace_plugin(
         return emit_system(state, session_store, plugin_help_text());
     }
 
-    let Some((source_path, raw)) = resolve_plugin_update_source(resources, plugin_id)? else {
+    let Some(source) = resolve_plugin_update_source(resources, paths, plugin_id)? else {
         return emit_system(
             state,
             session_store,
-            format!("No builtin or user plugin source is available for `{plugin_id}`."),
+            format!(
+                "No builtin, user, or marketplace plugin source is available for `{plugin_id}`."
+            ),
         );
     };
+    let target_plugin_id = source.plugin.id.clone();
     let plugins_dir = paths.workspace_config_dir.join("resources/plugins");
     fs::create_dir_all(&plugins_dir)?;
-    let enabled_path = plugin_manifest_path(&plugins_dir, plugin_id);
+    let enabled_path = plugin_manifest_path(&plugins_dir, &target_plugin_id);
     let disabled_path = disabled_variant(&enabled_path);
 
     if enabled_path.exists() {
         let plugin: PluginSpec = serde_yaml::from_str(&fs::read_to_string(&enabled_path)?)?;
         if is_disabled_placeholder(&plugin) {
             if disabled_path.exists() {
-                fs::write(&disabled_path, raw)?;
+                fs::write(&disabled_path, &source.raw)?;
                 state.reload_resources_requested = true;
                 return emit_system(
                     state,
                     session_store,
                     format!(
                         "Updated disabled plugin `{plugin_id}` from {}.",
-                        source_path.display()
+                        source.source_display
                     ),
                 );
             }
@@ -162,33 +171,33 @@ pub(super) fn update_workspace_plugin(
                 session_store,
                 format!(
                     "Plugin `{plugin_id}` remains disabled; no local copy required refreshing from {}.",
-                    source_path.display()
+                    source.source_display
                 ),
             );
         }
     }
 
     if disabled_path.exists() {
-        fs::write(&disabled_path, raw)?;
+        fs::write(&disabled_path, &source.raw)?;
         state.reload_resources_requested = true;
         return emit_system(
             state,
             session_store,
             format!(
                 "Updated disabled plugin `{plugin_id}` from {}.",
-                source_path.display()
+                source.source_display
             ),
         );
     }
 
-    fs::write(&enabled_path, raw)?;
+    fs::write(&enabled_path, &source.raw)?;
     state.reload_resources_requested = true;
     emit_system(
         state,
         session_store,
         format!(
             "Updated plugin `{plugin_id}` from {}.",
-            source_path.display()
+            source.source_display
         ),
     )
 }
@@ -338,13 +347,27 @@ pub(super) fn enable_workspace_plugin(
 
 fn resolve_plugin_install_source(
     resources: &LoadedResources,
+    paths: &ConfigPaths,
     plugin_ref: &str,
-) -> Result<(PluginSpec, String)> {
+) -> Result<ResolvedPluginSource> {
     let path = Path::new(plugin_ref);
     if path.exists() {
         let raw = fs::read_to_string(path)?;
         let plugin: PluginSpec = serde_yaml::from_str(&raw)?;
-        return Ok((plugin, raw));
+        return Ok(ResolvedPluginSource {
+            plugin,
+            raw,
+            source_display: path.display().to_string(),
+        });
+    }
+    if plugin_ref.contains('@') {
+        if let Some(marketplace_plugin) = resolve_marketplace_plugin(paths, plugin_ref)? {
+            return Ok(ResolvedPluginSource {
+                plugin: marketplace_plugin.plugin,
+                raw: marketplace_plugin.raw,
+                source_display: marketplace_plugin.source_display,
+            });
+        }
     }
     let plugin = resources
         .plugins
@@ -359,13 +382,27 @@ fn resolve_plugin_install_source(
         .unwrap_or_else(|_| serde_yaml::to_string(&plugin.value).unwrap_or_default());
     let resolved =
         serde_yaml::from_str::<PluginSpec>(&raw).unwrap_or_else(|_| plugin.value.clone());
-    Ok((resolved, raw))
+    Ok(ResolvedPluginSource {
+        plugin: resolved,
+        raw,
+        source_display: plugin.source_info.path.display().to_string(),
+    })
 }
 
 fn resolve_plugin_update_source(
     resources: &LoadedResources,
+    paths: &ConfigPaths,
     plugin_id: &str,
-) -> Result<Option<(PathBuf, String)>> {
+) -> Result<Option<ResolvedPluginSource>> {
+    if plugin_id.contains('@') {
+        if let Some(marketplace_plugin) = resolve_marketplace_plugin(paths, plugin_id)? {
+            return Ok(Some(ResolvedPluginSource {
+                plugin: marketplace_plugin.plugin,
+                raw: marketplace_plugin.raw,
+                source_display: marketplace_plugin.source_display,
+            }));
+        }
+    }
     let source = resources
         .plugins
         .iter()
@@ -383,9 +420,19 @@ fn resolve_plugin_update_source(
         .map(|plugin| {
             let raw = fs::read_to_string(&plugin.source_info.path)
                 .unwrap_or_else(|_| serde_yaml::to_string(&plugin.value).unwrap_or_default());
-            Ok((plugin.source_info.path.clone(), raw))
+            Ok(ResolvedPluginSource {
+                plugin: plugin.value.clone(),
+                raw,
+                source_display: plugin.source_info.path.display().to_string(),
+            })
         })
         .transpose()
+}
+
+struct ResolvedPluginSource {
+    plugin: PluginSpec,
+    raw: String,
+    source_display: String,
 }
 
 fn plugin_manifest_path(dir: &Path, plugin_id: &str) -> PathBuf {

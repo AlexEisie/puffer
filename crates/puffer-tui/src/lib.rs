@@ -17,6 +17,15 @@ mod statusline;
 mod task_panels;
 mod text_overlay;
 mod usage;
+use crate::flow::{
+    allow_prompt_before_onboarding, apply_selected_provider, builtin_openai_base_url,
+    builtin_openai_headers, builtin_openai_query_params, cancel_pending_submit,
+    emit_system_message, handle_prompt_submit, handle_submit, persist_user_config,
+    poll_pending_submit, run_embedded_auth_login, set_overlay_state, submit_next_queued_prompt,
+    submit_queued_prompt_if_ready, try_open_overlay,
+};
+use crate::permission_prompt_flow::handle_permission_prompt_key;
+use crate::statusline::refresh_status_line;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
@@ -33,20 +42,11 @@ use puffer_resources::LoadedResources;
 use puffer_session_store::SessionStore;
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, TerminalOptions, Viewport};
+use state::TuiState;
+pub(crate) use state::{AuthPickerAction, ModelPickerEntry, OverlayState};
 use std::io::{self, IsTerminal};
 use std::path::Path;
 use std::time::Duration;
-use crate::flow::{
-    allow_prompt_before_onboarding, apply_selected_provider, builtin_openai_base_url,
-    builtin_openai_headers, builtin_openai_query_params, cancel_pending_submit,
-    emit_system_message, handle_prompt_submit, handle_submit, persist_user_config,
-    poll_pending_submit, run_embedded_auth_login, set_overlay_state, submit_next_queued_prompt,
-    submit_queued_prompt_if_ready, try_open_overlay,
-};
-use crate::permission_prompt_flow::handle_permission_prompt_key;
-use crate::statusline::refresh_status_line;
-use state::TuiState;
-pub(crate) use state::{AuthPickerAction, ModelPickerEntry, OverlayState};
 /// Runs the interactive Puffer TUI until the user exits.
 pub fn run_app(
     state: &mut AppState,
@@ -715,18 +715,19 @@ fn handle_overlay_key(
                         match action {
                             AuthPickerAction::OAuth => {
                                 match run_embedded_auth_login(
+                                    state,
                                     &provider_id,
                                     auth_store,
-                                    auth_path,
                                     no_alt_screen,
                                 ) {
-                                    Ok(()) => {
+                                    Ok(message) => {
                                         let next = onboarding::provider_setup_overlay(
                                             providers,
                                             auth_store,
                                             &provider_id,
                                         )?;
                                         set_overlay_state(tui, next);
+                                        emit_system_message(state, session_store, message)?;
                                     }
                                     Err(error) => {
                                         let next = onboarding::back_overlay(

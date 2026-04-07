@@ -6,11 +6,11 @@ const DISABLED_PLUGIN_PLACEHOLDER_PREFIX: &str =
 
 /// Returns the user-facing `/plugin` help text.
 pub(super) fn plugin_help_text() -> String {
-    "Usage: /plugin [show|manage|help|list|marketplace|marketplace list|install <id|path>|uninstall <id>|update <id>|errors|validate [id]|path|open [id]|edit [id]|enable <id>|disable <id>|reload]".to_string()
+    "Usage: /plugin [show|manage|help|list|marketplace|marketplace list|marketplace add <path|url>|marketplace remove <name>|marketplace update [name]|install <id|id@marketplace|path>|uninstall <id>|update <id|id@marketplace>|errors|validate [id|path]|path|open [id]|edit [id]|enable <id>|disable <id>|reload]".to_string()
 }
 
-/// Renders the builtin plugin marketplace summary.
-pub(super) fn render_plugin_marketplace(resources: &LoadedResources) -> String {
+/// Renders the builtin-only plugin marketplace summary.
+pub(super) fn render_builtin_plugin_marketplace(resources: &LoadedResources) -> String {
     let mut plugins = resources
         .plugins
         .iter()
@@ -40,21 +40,6 @@ pub(super) fn render_plugin_marketplace(resources: &LoadedResources) -> String {
         );
     }
     text.trim_end().to_string()
-}
-
-/// Returns true when the request targets marketplace-management commands.
-pub(super) fn marketplace_management_request(trimmed: &str) -> bool {
-    matches!(
-        trimmed,
-        value if value.starts_with("marketplace add ")
-            || value.starts_with("market add ")
-            || value.starts_with("marketplace remove ")
-            || value.starts_with("market remove ")
-            || value.starts_with("marketplace rm ")
-            || value.starts_with("market rm ")
-            || value.starts_with("marketplace update ")
-            || value.starts_with("market update ")
-    )
 }
 
 /// Returns the enabled or disabled status label for one plugin.
@@ -121,7 +106,7 @@ description: Customize plugin commands for this workspace.\n"
 }
 
 /// Returns the short label for one plugin source kind.
-pub(super) fn source_kind_label(kind: SourceKind) -> &'static str {
+pub(crate) fn source_kind_label(kind: SourceKind) -> &'static str {
     match kind {
         SourceKind::Builtin => "builtin",
         SourceKind::User => "user",

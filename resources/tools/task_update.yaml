@@ -41,7 +41,7 @@ description: |-
 
   ## Status Workflow
 
-  Status progresses: `pending` -> `in_progress` -> `completed`
+  Status progresses: `pending` → `in_progress` → `completed`
 
   Use `deleted` to permanently remove a task.
 

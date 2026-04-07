@@ -20,6 +20,7 @@ const READ_MCP_RESOURCE_TOOL_ID: &str = "ReadMcpResourceTool";
 const WEB_SEARCH_TOOL_ID: &str = "WebSearch";
 const WEB_SEARCH_CURRENT_YEAR_LINE: &str =
     "- You MUST use the current year when searching for recent information, documentation, or current events.";
+const WEB_SEARCH_CURRENT_MONTH_PREFIX: &str = "- The current month is ";
 
 /// Describes one request-scoped structured output contract for a model turn.
 #[derive(Debug, Clone, PartialEq)]
@@ -334,6 +335,19 @@ fn rendered_tool_description(definition: &ToolDefinition) -> String {
 
 fn render_web_search_description(description: &str) -> String {
     let current_month_year = current_month_year();
+    if let Some(existing_line) = description.lines().find(|line| {
+        line.trim_start()
+            .starts_with(WEB_SEARCH_CURRENT_MONTH_PREFIX)
+    }) {
+        let indent = existing_line
+            .chars()
+            .take_while(|ch| ch.is_whitespace())
+            .collect::<String>();
+        let specific_line = format!(
+            "{indent}- The current month is {current_month_year}. You MUST use this year when searching for recent information, documentation, or current events."
+        );
+        return description.replacen(existing_line, &specific_line, 1);
+    }
     let specific_line = format!(
         "- The current month is {current_month_year}. You MUST use this year when searching for recent information, documentation, or current events."
     );

@@ -5,10 +5,10 @@ use puffer_config::{save_user_config, ConfigPaths};
 use puffer_core::{
     command_surface, dispatch_command, execute_user_turn,
     execute_user_turn_streaming_with_permissions, reload_runtime_resources, render_config_summary,
-    render_context_panel, render_doctor_report, render_hooks_summary, render_ide_actions,
-    render_mcp_actions, render_permissions_panel, render_plugin_actions, render_sandbox_actions,
-    render_skills_panel, render_task_actions, run_resource_hooks, AppState, MessageRole,
-    PermissionPromptAction, PermissionPromptRequest, ToolInvocation, TurnStreamEvent,
+    render_context_panel, render_copy_actions, render_doctor_report, render_hooks_actions,
+    render_ide_actions, render_mcp_actions, render_permissions_panel, render_plugin_actions,
+    render_sandbox_actions, render_skills_panel, render_task_actions, run_resource_hooks, AppState,
+    MessageRole, PermissionPromptAction, PermissionPromptRequest, ToolInvocation, TurnStreamEvent,
 };
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
@@ -81,6 +81,21 @@ pub(crate) fn try_open_overlay(
             return Ok(true);
         }
     }
+    if name == "copy" {
+        if let Ok(Some(actions)) = render_copy_actions(state, args) {
+            let entries = actions
+                .into_iter()
+                .map(|entry| crate::ModelPickerEntry {
+                    selector: entry.label,
+                    description: entry.description,
+                    command: Some(entry.command),
+                })
+                .collect::<Vec<_>>();
+            if flow_pickers::open_command_picker(tui, "Copy", entries) {
+                return Ok(true);
+            }
+        }
+    }
     let text_overlay = match (name, args.is_empty()) {
         ("config", true) => Some(TextOverlay::open("Config", render_config_summary(state)?)),
         ("context", true) => Some(TextOverlay::open(
@@ -94,10 +109,6 @@ pub(crate) fn try_open_overlay(
         ("permissions", true) | ("allowed-tools", true) => Some(TextOverlay::open(
             "Permissions",
             render_permissions_panel(state, resources)?,
-        )),
-        ("hooks", true) => Some(TextOverlay::open(
-            "Hooks",
-            render_hooks_summary(state, resources)?,
         )),
         ("skills", true) => Some(TextOverlay::open("Skills", render_skills_panel(resources))),
         _ => None,
@@ -131,6 +142,12 @@ pub(crate) fn try_open_overlay(
     if matches!((name, args.is_empty()), ("ide", true)) {
         let entries = flow_pickers::command_picker_entries(render_ide_actions(state, resources)?);
         if flow_pickers::open_command_picker(tui, "IDE", entries) {
+            return Ok(true);
+        }
+    }
+    if matches!((name, args.is_empty()), ("hooks", true)) {
+        let entries = flow_pickers::command_picker_entries(render_hooks_actions(state, resources)?);
+        if flow_pickers::open_command_picker(tui, "Hooks", entries) {
             return Ok(true);
         }
     }
@@ -790,6 +807,21 @@ pub(crate) fn execute_shell_shortcut(
     )?;
 
     let registry = ToolRegistry::from_resources(resources);
+    run_resource_hooks(
+        resources,
+        &state.cwd,
+        "tool_start",
+        &[
+            ("PUFFER_TOOL_ID", "bash".to_string()),
+            (
+                "PUFFER_TOOL_INPUT",
+                format!("{{\"command\":\"{}\"}}", shell_command.replace('"', "\\\"")),
+            ),
+            ("PUFFER_TOOL_SUCCESS", String::new()),
+            ("PUFFER_TOOL_STDOUT", String::new()),
+            ("PUFFER_TOOL_STDERR", String::new()),
+        ],
+    );
     let result = registry.execute(
         "bash",
         &state.cwd,

@@ -1,4 +1,3 @@
-use crate::hooks::run_resource_hooks;
 use crate::permissions::load_runtime_permission_context;
 use crate::AppState;
 use anyhow::{anyhow, bail, Context, Result};
@@ -20,6 +19,7 @@ mod agent_runtime_tests;
 mod agents;
 pub(crate) mod claude_tools;
 mod context_usage;
+mod hook_support;
 mod local_mcp_resources;
 mod local_tools;
 mod openai;
@@ -32,6 +32,7 @@ mod system_prompt;
 mod tool_executor;
 
 pub(crate) use self::context_usage::render_context_usage_summary;
+pub(crate) use self::hook_support::run_turn_hooks;
 #[cfg(test)]
 use self::openai::{
     build_codex_openai_request_body, execute_openai_tool_calls, openai_tool_definitions,
@@ -749,16 +750,6 @@ fn execute_anthropic_tool_calls(
             tool_id,
             input.clone(),
         )?;
-        run_tool_hooks(
-            resources,
-            cwd,
-            "tool_end",
-            tool_id,
-            input,
-            execution.success,
-            &execution.output.stdout,
-            &execution.output.stderr,
-        );
         let output_text = if execution.output.stderr.is_empty() {
             execution.output.stdout
         } else if execution.output.stdout.is_empty() {
@@ -793,49 +784,6 @@ fn execute_anthropic_tool_calls(
 struct AnthropicToolResults {
     results: Value,
     invocations: Vec<ToolInvocation>,
-}
-
-fn run_tool_hooks(
-    resources: &LoadedResources,
-    cwd: &std::path::Path,
-    event: &str,
-    tool_id: &str,
-    input: &Value,
-    success: bool,
-    stdout: &str,
-    stderr: &str,
-) {
-    run_resource_hooks(
-        resources,
-        cwd,
-        event,
-        &[
-            ("PUFFER_TOOL_ID", tool_id.to_string()),
-            ("PUFFER_TOOL_INPUT", input.to_string()),
-            (
-                "PUFFER_TOOL_SUCCESS",
-                if success { "true" } else { "false" }.to_string(),
-            ),
-            ("PUFFER_TOOL_STDOUT", stdout.to_string()),
-            ("PUFFER_TOOL_STDERR", stderr.to_string()),
-        ],
-    );
-}
-fn run_turn_hooks(
-    resources: &LoadedResources,
-    cwd: &std::path::Path,
-    text: &str,
-    tool_count: usize,
-) {
-    run_resource_hooks(
-        resources,
-        cwd,
-        "turn_end",
-        &[
-            ("PUFFER_TURN_TEXT", text.to_string()),
-            ("PUFFER_TURN_TOOL_COUNT", tool_count.to_string()),
-        ],
-    );
 }
 fn transcript_to_anthropic_messages(state: &AppState, input: &str) -> Vec<Value> {
     let mut messages = state

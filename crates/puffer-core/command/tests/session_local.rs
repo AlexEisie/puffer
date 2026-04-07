@@ -181,8 +181,41 @@ fn memory_command_updates_session_metadata() {
 }
 
 #[test]
-fn config_command_writes_workspace_config() {
+fn config_command_routes_theme_to_user_config() {
     let tempdir = tempdir().unwrap();
+    let _lock = lock_puffer_home();
+    let home = tempdir.path().join("home");
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    let _home = ScopedPufferHome::set(&home);
+    let paths = ConfigPaths::discover(&workspace);
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store.create_session(workspace.clone()).unwrap();
+    let mut state = AppState::new(PufferConfig::default(), workspace, session);
+
+    dispatch_command(
+        &mut state,
+        &supported_commands(),
+        &LoadedResources::default(),
+        &mut ProviderRegistry::new(),
+        &mut AuthStore::default(),
+        &session_store,
+        "/config set theme harbor",
+    )
+    .unwrap();
+
+    let config_text = std::fs::read_to_string(paths.user_config_file()).unwrap();
+    assert!(config_text.contains("theme = \"harbor\""));
+    assert!(!paths.workspace_config_file().exists());
+}
+
+#[test]
+fn config_command_accepts_json_object_values_for_workspace_settings() {
+    let tempdir = tempdir().unwrap();
+    let _lock = lock_puffer_home();
+    let _home = ScopedPufferHome::set(tempdir.path());
     let paths = ConfigPaths::discover(tempdir.path());
     ensure_workspace_dirs(&paths).unwrap();
     let session_store = SessionStore::from_paths(&paths).unwrap();
@@ -202,12 +235,13 @@ fn config_command_writes_workspace_config() {
         &mut ProviderRegistry::new(),
         &mut AuthStore::default(),
         &session_store,
-        "/config set theme harbor",
+        r#"/config set openai_headers {"x-test":"one","x-extra":"two"}"#,
     )
     .unwrap();
 
     let config_text = std::fs::read_to_string(paths.workspace_config_file()).unwrap();
-    assert!(config_text.contains("theme = \"harbor\""));
+    assert!(config_text.contains("x-test = \"one\""));
+    assert!(config_text.contains("x-extra = \"two\""));
 }
 
 #[test]

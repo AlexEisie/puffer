@@ -1,7 +1,13 @@
 use super::*;
 use puffer_config::ConfigPaths;
 use std::fs;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+fn puffer_home_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[test]
 fn todo_write_rejects_multiple_in_progress_items() {
@@ -61,6 +67,14 @@ fn config_tool_supports_openai_map_settings() {
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["success"], true);
     assert_eq!(parsed["operation"], "set");
+    assert_eq!(parsed["persisted"], true);
+    assert_eq!(
+        parsed["path"],
+        json!(ConfigPaths::discover(&cwd)
+            .workspace_config_file()
+            .display()
+            .to_string())
+    );
     assert_eq!(parsed["value"]["x-test"], "one");
     assert_eq!(parsed["newValue"]["x-another"], "two");
     assert_eq!(
@@ -112,6 +126,7 @@ fn config_tool_supports_camel_case_aliases_and_status_line_settings() {
     .unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["success"], true);
+    assert_eq!(parsed["scope"], "workspace");
     assert_eq!(parsed["persisted"], true);
     assert_eq!(parsed["value"], "echo status");
     assert_eq!(
@@ -126,7 +141,34 @@ fn config_tool_supports_camel_case_aliases_and_status_line_settings() {
 }
 
 #[test]
-fn config_tool_supports_session_only_settings_without_persisting() {
+fn config_tool_supports_copy_full_response_alias() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let output = crate::runtime::claude_tools::workflow::config::execute_config(
+        &mut state,
+        &cwd,
+        json!({
+            "setting": "copyFullResponse",
+            "value": true
+        }),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(parsed["success"], true);
+    assert_eq!(parsed["scope"], "user");
+    assert_eq!(parsed["persisted"], true);
+    assert_eq!(parsed["value"], true);
+    assert!(state.config.copy_full_response);
+}
+
+#[test]
+fn config_tool_persists_user_settings_to_user_config() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let _lock = puffer_home_lock().lock().unwrap();
+    let old_home = std::env::var_os("PUFFER_HOME");
+    let home = tempdir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("PUFFER_HOME", &home);
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let output = crate::runtime::claude_tools::workflow::config::execute_config(
@@ -140,13 +182,93 @@ fn config_tool_supports_session_only_settings_without_persisting() {
     .unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["success"], true);
+    assert_eq!(parsed["scope"], "user");
+    assert_eq!(parsed["persisted"], true);
+    assert_eq!(
+        parsed["path"],
+        json!(ConfigPaths::discover(&cwd)
+            .user_config_file()
+            .display()
+            .to_string())
+    );
+    assert!(state.fast_mode);
+    assert!(
+        fs::read_to_string(ConfigPaths::discover(&cwd).user_config_file())
+            .unwrap()
+            .contains("fast_mode = true")
+    );
+    if let Some(value) = old_home {
+        std::env::set_var("PUFFER_HOME", value);
+    } else {
+        std::env::remove_var("PUFFER_HOME");
+    }
+}
+
+#[test]
+fn config_tool_supports_session_only_settings_without_persisting() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let output = crate::runtime::claude_tools::workflow::config::execute_config(
+        &mut state,
+        &cwd,
+        json!({
+            "setting": "promptColor",
+            "value": "amber"
+        }),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(parsed["success"], true);
+    assert_eq!(parsed["scope"], "session");
     assert_eq!(parsed["persisted"], false);
     assert_eq!(parsed["path"], Value::Null);
-    assert!(state.fast_mode);
+    assert_eq!(state.prompt_color, "amber");
+}
+
+#[test]
+fn config_tool_supports_integer_status_line_padding() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let output = crate::runtime::claude_tools::workflow::config::execute_config(
+        &mut state,
+        &cwd,
+        json!({
+            "setting": "statusLinePadding",
+            "value": 2
+        }),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(parsed["success"], true);
+    assert_eq!(parsed["scope"], "workspace");
+    assert_eq!(parsed["persisted"], true);
+    assert_eq!(parsed["value"], 2);
+    assert_eq!(
+        parsed["path"],
+        json!(ConfigPaths::discover(&cwd)
+            .workspace_config_file()
+            .display()
+            .to_string())
+    );
+    assert_eq!(
+        state
+            .config
+            .ui
+            .status_line
+            .as_ref()
+            .map(|status_line| status_line.padding),
+        Some(2)
+    );
 }
 
 #[test]
 fn config_tool_allows_null_to_clear_model_override() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let _lock = puffer_home_lock().lock().unwrap();
+    let old_home = std::env::var_os("PUFFER_HOME");
+    let home = tempdir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("PUFFER_HOME", &home);
     let mut state = temp_state();
     state.current_model = Some("openai/gpt-5".to_string());
     state.current_provider = Some("openai".to_string());
@@ -164,37 +286,43 @@ fn config_tool_allows_null_to_clear_model_override() {
     assert_eq!(parsed["success"], true);
     assert_eq!(parsed["value"], Value::Null);
     assert_eq!(state.current_model, None);
+    if let Some(value) = old_home {
+        std::env::set_var("PUFFER_HOME", value);
+    } else {
+        std::env::remove_var("PUFFER_HOME");
+    }
 }
 
 #[test]
 fn ask_user_question_rejects_duplicate_question_text() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
-    let error = crate::runtime::claude_tools::workflow::ask_user_question::execute_ask_user_question(
-        &mut state,
-        &cwd,
-        json!({
-            "questions": [
-                {
-                    "question": "Pick one",
-                    "header": "choice",
-                    "options": [
-                        {"label": "A", "description": "A"},
-                        {"label": "B", "description": "B"}
-                    ]
-                },
-                {
-                    "question": "Pick one",
-                    "header": "second",
-                    "options": [
-                        {"label": "C", "description": "C"},
-                        {"label": "D", "description": "D"}
-                    ]
-                }
-            ]
-        }),
-    )
-    .unwrap_err();
+    let error =
+        crate::runtime::claude_tools::workflow::ask_user_question::execute_ask_user_question(
+            &mut state,
+            &cwd,
+            json!({
+                "questions": [
+                    {
+                        "question": "Pick one",
+                        "header": "choice",
+                        "options": [
+                            {"label": "A", "description": "A"},
+                            {"label": "B", "description": "B"}
+                        ]
+                    },
+                    {
+                        "question": "Pick one",
+                        "header": "second",
+                        "options": [
+                            {"label": "C", "description": "C"},
+                            {"label": "D", "description": "D"}
+                        ]
+                    }
+                ]
+            }),
+        )
+        .unwrap_err();
     assert!(error.to_string().contains("question texts must be unique"));
 }
 

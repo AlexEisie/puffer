@@ -46,8 +46,9 @@ pub(crate) fn prepare_prompt_command_specialization(
             session_store,
             args,
         )?)),
+        "commit" => Ok(Some(prepare_commit_prompt_command(state)?)),
         "pr-comments" => Ok(Some(prepare_pr_comments_prompt_command(args))),
-        "security-review" => Ok(Some(prepare_security_review_prompt_command(state, args)?)),
+        "security-review" => Ok(Some(prepare_security_review_prompt_command(state)?)),
         "statusline" => Ok(Some(prepare_statusline_prompt_command(args)?)),
         _ => Ok(None),
     }
@@ -87,6 +88,13 @@ pub(crate) fn prepare_compact_prompt_command(
     }
     Ok(PromptCommandPreparation::PromptOverride(
         build_compact_prompt_override(state, args),
+    ))
+}
+
+/// Computes git-aware context variables for `/commit`.
+pub(crate) fn prepare_commit_prompt_command(state: &AppState) -> Result<PromptCommandPreparation> {
+    Ok(PromptCommandPreparation::VariableOverrides(
+        build_commit_prompt_variables(&state.cwd)?,
     ))
 }
 
@@ -183,10 +191,9 @@ pub(crate) fn prepare_pr_comments_prompt_command(args: &str) -> PromptCommandPre
 /// Computes git-aware context variables for `/security-review`.
 pub(crate) fn prepare_security_review_prompt_command(
     state: &AppState,
-    args: &str,
 ) -> Result<PromptCommandPreparation> {
     Ok(PromptCommandPreparation::VariableOverrides(
-        build_security_review_prompt_variables(&state.cwd, args),
+        build_security_review_prompt_variables(&state.cwd),
     ))
 }
 
@@ -344,6 +351,30 @@ fn build_pr_comments_prompt_variables(args: &str) -> BTreeMap<String, String> {
     )])
 }
 
+fn build_commit_prompt_variables(cwd: &Path) -> Result<BTreeMap<String, String>> {
+    Ok(BTreeMap::from([
+        (
+            "GIT_STATUS".to_string(),
+            run_git_command_for_prompt(cwd, &["status"]).map_err(anyhow::Error::msg)?,
+        ),
+        (
+            "GIT_DIFF".to_string(),
+            run_git_command_for_prompt(cwd, &["diff", "HEAD"]).map_err(anyhow::Error::msg)?,
+        ),
+        (
+            "CURRENT_BRANCH".to_string(),
+            run_git_command_for_prompt(cwd, &["branch", "--show-current"])
+                .map_err(anyhow::Error::msg)?,
+        ),
+        (
+            "RECENT_COMMITS".to_string(),
+            run_git_command_for_prompt(cwd, &["log", "--oneline", "-10"])
+                .map_err(anyhow::Error::msg)?,
+        ),
+        ("COMMIT_ATTRIBUTION_BLOCK".to_string(), String::new()),
+    ]))
+}
+
 fn build_statusline_prompt_variables(args: &str) -> Result<BTreeMap<String, String>> {
     let prompt = if args.trim().is_empty() {
         "Configure my statusLine from my shell PS1 configuration".to_string()
@@ -356,8 +387,7 @@ fn build_statusline_prompt_variables(args: &str) -> Result<BTreeMap<String, Stri
     )]))
 }
 
-fn build_security_review_prompt_variables(cwd: &Path, args: &str) -> BTreeMap<String, String> {
-    let trimmed = args.trim();
+fn build_security_review_prompt_variables(cwd: &Path) -> BTreeMap<String, String> {
     BTreeMap::from([
         (
             "GIT_STATUS".to_string(),
@@ -387,14 +417,6 @@ fn build_security_review_prompt_variables(cwd: &Path, args: &str) -> BTreeMap<St
             "DIFF_CONTENT".to_string(),
             run_git_with_fallbacks(cwd, &[&["diff", "origin/HEAD..."], &["diff"]]),
         ),
-        (
-            "ADDITIONAL_USER_INPUT_BLOCK".to_string(),
-            if trimmed.is_empty() {
-                String::new()
-            } else {
-                format!("Additional user input: {trimmed}")
-            },
-        ),
     ])
 }
 
@@ -407,6 +429,29 @@ fn run_git_with_fallbacks(cwd: &Path, candidates: &[&[&str]]) -> String {
         }
     }
     last_failure
+}
+
+fn run_git_command_for_prompt(cwd: &Path, args: &[&str]) -> std::result::Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .map_err(|error| format!("Failed to run `git {}`: {error}", args.join(" ")))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if output.status.success() {
+        return Ok(format_prompt_shell_output(&stdout, &stderr));
+    }
+
+    let rendered = format_prompt_shell_output(&stdout, &stderr);
+    let detail = if rendered.is_empty() {
+        "<no output>".to_string()
+    } else {
+        rendered
+    };
+    Err(format!("Command `git {}` failed: {detail}", args.join(" ")))
 }
 
 fn run_git_command(cwd: &Path, args: &[&str]) -> std::result::Result<String, String> {
@@ -447,6 +492,17 @@ fn run_git_command(cwd: &Path, args: &[&str]) -> std::result::Result<String, Str
             }
         ))
     }
+}
+
+fn format_prompt_shell_output(stdout: &str, stderr: &str) -> String {
+    let mut parts = Vec::new();
+    if !stdout.is_empty() {
+        parts.push(stdout.to_string());
+    }
+    if !stderr.is_empty() {
+        parts.push(format!("[stderr]\n{stderr}"));
+    }
+    parts.join("\n")
 }
 
 fn single_line_excerpt(text: &str) -> String {
@@ -509,422 +565,5 @@ fn configured_editor_display_name() -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        handle_plan_command, plan_mode_context_message, prepare_btw_prompt_command,
-        prepare_compact_prompt_command, prepare_plan_prompt_command,
-        prepare_pr_comments_prompt_command, prepare_prompt_command_specialization,
-        prepare_security_review_prompt_command, prepare_statusline_prompt_command,
-        PromptCommandPreparation,
-    };
-    use crate::plans::{ensure_plan_file, persist_plan_output, plan_file_path};
-    use crate::{AppState, MessageRole};
-    use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
-    use puffer_provider_registry::{AuthStore, ProviderRegistry};
-    use puffer_resources::LoadedResources;
-    use puffer_session_store::SessionStore;
-    use tempfile::tempdir;
-    use tempfile::TempDir;
-
-    #[test]
-    fn compact_specialization_returns_prompt_override() {
-        let fixture = sample_state();
-        let mut state = fixture.state;
-        let session_store = fixture.session_store;
-        state.push_message(MessageRole::User, "Ship this change.");
-        state.push_message(MessageRole::Assistant, "Implemented and tested.");
-
-        let outcome =
-            prepare_compact_prompt_command(&mut state, &session_store, "focus on tests").unwrap();
-
-        match outcome {
-            PromptCommandPreparation::PromptOverride(prompt) => {
-                assert!(prompt.contains("Summarize the current conversation"));
-                assert!(prompt.contains("custom_instruction: focus on tests"));
-            }
-            PromptCommandPreparation::DirectPrompt(_)
-            | PromptCommandPreparation::HandledLocally
-            | PromptCommandPreparation::SideQuestion(_)
-            | PromptCommandPreparation::VariableOverrides(_) => {
-                panic!("expected compact prompt override")
-            }
-        }
-    }
-
-    #[test]
-    fn btw_specialization_requires_a_question() {
-        let fixture = sample_state();
-        let mut state = fixture.state;
-        let session_store = fixture.session_store;
-
-        let outcome = prepare_btw_prompt_command(&mut state, &session_store, "").unwrap();
-
-        assert_eq!(outcome, PromptCommandPreparation::HandledLocally);
-        assert!(state
-            .transcript
-            .last()
-            .unwrap()
-            .text
-            .contains("Usage: /btw <your question>"));
-    }
-
-    #[test]
-    fn btw_specialization_uses_side_question_variant() {
-        let fixture = sample_state();
-        let mut state = fixture.state;
-        let session_store = fixture.session_store;
-
-        let outcome =
-            prepare_btw_prompt_command(&mut state, &session_store, "what changed?").unwrap();
-
-        assert_eq!(
-            outcome,
-            PromptCommandPreparation::SideQuestion("what changed?".to_string())
-        );
-    }
-
-    #[test]
-    fn plan_specialization_enables_mode_without_creating_a_plan_file() {
-        let fixture = sample_state();
-        let mut state = fixture.state;
-        let session_store = fixture.session_store;
-        let plan_path = plan_file_path(&state).unwrap();
-
-        let show_outcome = prepare_plan_prompt_command(&mut state, &session_store, "").unwrap();
-        assert_eq!(show_outcome, PromptCommandPreparation::HandledLocally);
-        assert!(state.plan_mode);
-        assert!(!plan_path.exists());
-        assert!(state
-            .transcript
-            .last()
-            .unwrap()
-            .text
-            .contains("Enabled plan mode"));
-    }
-
-    #[test]
-    fn plan_specialization_with_description_submits_raw_prompt_after_enabling_mode() {
-        let fixture = sample_state();
-        let mut state = fixture.state;
-        let session_store = fixture.session_store;
-        let plan_path = plan_file_path(&state).unwrap();
-        let outcome = prepare_plan_prompt_command(
-            &mut state,
-            &session_store,
-            "stabilize slash-command parity",
-        )
-        .unwrap();
-
-        match outcome {
-            PromptCommandPreparation::DirectPrompt(prompt) => {
-                assert_eq!(prompt, "stabilize slash-command parity");
-                assert!(state.plan_mode);
-                assert!(!plan_path.exists());
-                assert!(state
-                    .transcript
-                    .last()
-                    .unwrap()
-                    .text
-                    .contains("Enabled plan mode"));
-            }
-            PromptCommandPreparation::PromptOverride(_)
-            | PromptCommandPreparation::HandledLocally
-            | PromptCommandPreparation::SideQuestion(_)
-            | PromptCommandPreparation::VariableOverrides(_) => {
-                panic!("expected direct prompt for non-empty plan arguments")
-            }
-        }
-    }
-
-    #[test]
-    fn plan_specialization_shows_existing_plan_when_already_active() {
-        let fixture = sample_state();
-        let mut state = fixture.state;
-        let session_store = fixture.session_store;
-        state.plan_mode = true;
-        persist_plan_output(&state, "# Current Plan\n\n1. Verify tooling\n").unwrap();
-
-        let outcome =
-            prepare_plan_prompt_command(&mut state, &session_store, "next-step ignored").unwrap();
-
-        assert_eq!(outcome, PromptCommandPreparation::HandledLocally);
-        assert!(state
-            .transcript
-            .last()
-            .unwrap()
-            .text
-            .contains("Current Plan"));
-        assert!(state
-            .transcript
-            .last()
-            .unwrap()
-            .text
-            .contains("Verify tooling"));
-    }
-
-    #[test]
-    fn plan_open_reports_missing_plan_when_no_plan_exists() {
-        let fixture = sample_state();
-        let mut state = fixture.state;
-        let session_store = fixture.session_store;
-        state.plan_mode = true;
-
-        let outcome = prepare_plan_prompt_command(&mut state, &session_store, "open").unwrap();
-
-        assert_eq!(outcome, PromptCommandPreparation::HandledLocally);
-        assert!(!plan_file_path(&state).unwrap().exists());
-        assert!(state
-            .transcript
-            .last()
-            .unwrap()
-            .text
-            .contains("Already in plan mode. No plan written yet."));
-    }
-
-    #[test]
-    fn plan_specialization_reports_missing_plan_when_already_active() {
-        let fixture = sample_state();
-        let mut state = fixture.state;
-        let session_store = fixture.session_store;
-        state.plan_mode = true;
-
-        let outcome = prepare_plan_prompt_command(&mut state, &session_store, "").unwrap();
-
-        assert_eq!(outcome, PromptCommandPreparation::HandledLocally);
-        assert!(state
-            .transcript
-            .last()
-            .unwrap()
-            .text
-            .contains("Already in plan mode. No plan written yet."));
-    }
-
-    #[test]
-    fn plan_specialization_treats_default_scaffold_as_missing_plan() {
-        let fixture = sample_state();
-        let mut state = fixture.state;
-        let session_store = fixture.session_store;
-        state.plan_mode = true;
-        ensure_plan_file(&state).unwrap();
-
-        let outcome = prepare_plan_prompt_command(&mut state, &session_store, "").unwrap();
-
-        assert_eq!(outcome, PromptCommandPreparation::HandledLocally);
-        assert!(state
-            .transcript
-            .last()
-            .unwrap()
-            .text
-            .contains("Already in plan mode. No plan written yet."));
-    }
-
-    #[test]
-    fn handle_plan_command_executes_direct_prompt_after_entering_plan_mode() {
-        let fixture = sample_state();
-        let mut state = fixture.state;
-        let session_store = fixture.session_store;
-
-        handle_plan_command(
-            &mut state,
-            &LoadedResources::default(),
-            &ProviderRegistry::new(),
-            &mut AuthStore::default(),
-            &session_store,
-            "stabilize slash-command parity",
-        )
-        .unwrap();
-
-        assert!(state.plan_mode);
-        assert!(state
-            .transcript
-            .iter()
-            .any(|message| message.text == "Enabled plan mode"));
-        assert!(state.transcript.iter().any(|message| {
-            message.role == MessageRole::User && message.text == "stabilize slash-command parity"
-        }));
-        assert!(
-            state
-                .transcript
-                .iter()
-                .any(|message| message.text.starts_with("Plan mode query failed:")),
-            "{:?}",
-            state.transcript
-        );
-    }
-
-    #[test]
-    fn pr_comments_specialization_supplies_optional_input_block() {
-        let empty = prepare_pr_comments_prompt_command("");
-        let targeted = prepare_pr_comments_prompt_command("123");
-
-        match empty {
-            PromptCommandPreparation::VariableOverrides(variables) => {
-                assert_eq!(
-                    variables.get("ADDITIONAL_USER_INPUT_BLOCK"),
-                    Some(&String::new())
-                );
-            }
-            PromptCommandPreparation::DirectPrompt(_)
-            | PromptCommandPreparation::HandledLocally
-            | PromptCommandPreparation::SideQuestion(_)
-            | PromptCommandPreparation::PromptOverride(_) => {
-                panic!("expected variable overrides")
-            }
-        }
-        match targeted {
-            PromptCommandPreparation::VariableOverrides(variables) => {
-                assert_eq!(
-                    variables.get("ADDITIONAL_USER_INPUT_BLOCK"),
-                    Some(&"Additional user input: 123".to_string())
-                );
-            }
-            PromptCommandPreparation::DirectPrompt(_)
-            | PromptCommandPreparation::HandledLocally
-            | PromptCommandPreparation::SideQuestion(_)
-            | PromptCommandPreparation::PromptOverride(_) => {
-                panic!("expected variable overrides")
-            }
-        }
-    }
-
-    #[test]
-    fn security_review_specialization_collects_git_context() {
-        let fixture = sample_state();
-        let state = fixture.state;
-        let outcome = prepare_security_review_prompt_command(&state, "").unwrap();
-
-        match outcome {
-            PromptCommandPreparation::VariableOverrides(variables) => {
-                assert!(variables.contains_key("GIT_STATUS"));
-                assert!(variables.contains_key("FILES_MODIFIED"));
-                assert!(variables.contains_key("COMMITS"));
-                assert!(variables.contains_key("DIFF_CONTENT"));
-            }
-            PromptCommandPreparation::DirectPrompt(_)
-            | PromptCommandPreparation::HandledLocally
-            | PromptCommandPreparation::SideQuestion(_)
-            | PromptCommandPreparation::PromptOverride(_) => {
-                panic!("expected variable overrides")
-            }
-        }
-    }
-
-    #[test]
-    fn statusline_specialization_uses_agent_setup_prompt() {
-        let outcome = prepare_statusline_prompt_command("").unwrap();
-        match outcome {
-            PromptCommandPreparation::VariableOverrides(variables) => {
-                assert_eq!(
-                    variables.get("STATUSLINE_PROMPT_JSON"),
-                    Some(
-                        &"\"Configure my statusLine from my shell PS1 configuration\"".to_string()
-                    )
-                );
-            }
-            PromptCommandPreparation::DirectPrompt(_)
-            | PromptCommandPreparation::HandledLocally
-            | PromptCommandPreparation::SideQuestion(_)
-            | PromptCommandPreparation::PromptOverride(_) => panic!("expected variable overrides"),
-        }
-    }
-
-    #[test]
-    fn dispatcher_helper_routes_known_prompt_specializations() {
-        let fixture = sample_state();
-        let mut state = fixture.state;
-        let session_store = fixture.session_store;
-        state.push_message(MessageRole::User, "summarize this");
-        let compact =
-            prepare_prompt_command_specialization(&mut state, &session_store, "compact", "")
-                .unwrap();
-        match compact {
-            Some(PromptCommandPreparation::PromptOverride(prompt)) => {
-                assert!(prompt.contains("Summarize the current conversation"));
-            }
-            _ => panic!("expected compact prompt override"),
-        }
-
-        let pr_comments =
-            prepare_prompt_command_specialization(&mut state, &session_store, "pr-comments", "")
-                .unwrap();
-        match pr_comments {
-            Some(PromptCommandPreparation::VariableOverrides(variables)) => {
-                assert!(variables.contains_key("ADDITIONAL_USER_INPUT_BLOCK"));
-            }
-            _ => panic!("expected pr-comments prompt variable overrides"),
-        }
-
-        let statusline =
-            prepare_prompt_command_specialization(&mut state, &session_store, "statusline", "")
-                .unwrap();
-        match statusline {
-            Some(PromptCommandPreparation::VariableOverrides(variables)) => {
-                assert!(variables.contains_key("STATUSLINE_PROMPT_JSON"));
-            }
-            _ => panic!("expected statusline prompt variable overrides"),
-        }
-
-        let security_review = prepare_prompt_command_specialization(
-            &mut state,
-            &session_store,
-            "security-review",
-            "",
-        )
-        .unwrap();
-        match security_review {
-            Some(PromptCommandPreparation::VariableOverrides(variables)) => {
-                assert!(variables.contains_key("DIFF_CONTENT"));
-            }
-            _ => panic!("expected security-review variable overrides"),
-        }
-
-        let plan =
-            prepare_prompt_command_specialization(&mut state, &session_store, "plan", "").unwrap();
-        assert!(plan.is_none());
-
-        let none = prepare_prompt_command_specialization(&mut state, &session_store, "review", "")
-            .unwrap();
-        assert!(none.is_none());
-    }
-
-    #[test]
-    fn plan_mode_context_does_not_create_a_default_plan_file() {
-        let fixture = sample_state();
-        let mut state = fixture.state;
-        state.plan_mode = true;
-
-        let context = plan_mode_context_message(&state)
-            .unwrap()
-            .expect("plan mode context");
-
-        assert!(context.contains("Current plan contents:\n<empty>"));
-        assert!(!plan_file_path(&state).unwrap().exists());
-    }
-
-    struct TestFixture {
-        #[allow(dead_code)]
-        tempdir: TempDir,
-        state: AppState,
-        session_store: SessionStore,
-    }
-
-    fn sample_state() -> TestFixture {
-        let tempdir = tempdir().unwrap();
-        let paths = ConfigPaths::discover(tempdir.path());
-        ensure_workspace_dirs(&paths).unwrap();
-        let session_store = SessionStore::from_paths(&paths).unwrap();
-        let session = session_store
-            .create_session(tempdir.path().to_path_buf())
-            .unwrap();
-        let state = AppState::new(
-            PufferConfig::default(),
-            tempdir.path().to_path_buf(),
-            session,
-        );
-        TestFixture {
-            tempdir,
-            state,
-            session_store,
-        }
-    }
-}
+#[path = "prompt_tests.rs"]
+mod tests;
