@@ -1,5 +1,10 @@
 <script lang="ts">
-  import type { DesktopPreferences, InspectorTab, SettingsSnapshot } from "../types";
+  import type {
+    DesktopPreferences,
+    InspectorTab,
+    RemoteOperation,
+    SettingsSnapshot
+  } from "../types";
 
   export let snapshot: SettingsSnapshot | null = null;
   export let loading = false;
@@ -11,6 +16,18 @@
   export let onResetPreferences: () => void = () => {};
   export let onRefresh: () => void = () => {};
   export let onLogout: (providerId: string) => void = () => {};
+  export let remoteEnabled = false;
+  export let remotePassword = "";
+  export let onRemotePasswordChange: (value: string) => void = () => {};
+  export let remoteBusy = false;
+  export let remoteResult: RemoteOperation | null = null;
+  export let onRunRemoteBash: (command: string) => void = () => {};
+  export let onReadRemoteFile: (path: string) => void = () => {};
+  export let onWriteRemoteFile: (path: string, contents: string) => void = () => {};
+
+  let remoteCommand = "pwd && ls";
+  let remoteFilePath = "";
+  let remoteFileContents = "";
 
   const dateFormatter = new Intl.DateTimeFormat(undefined, {
     month: "short",
@@ -128,6 +145,122 @@
 
     <article class="section">
       <div class="section-title">
+        <p class="eyebrow">Remote</p>
+        <h3>SSH connection</h3>
+      </div>
+
+      <label class="toggle-row">
+        <div>
+          <strong>Enable remote mode</strong>
+          <span>Load sessions and repository actions from a remote host over SSH.</span>
+        </div>
+        <input
+          type="checkbox"
+          checked={preferences.remoteEnabled}
+          on:change={(event) =>
+            onPreferenceChange("remoteEnabled", (event.currentTarget as HTMLInputElement).checked)}
+        />
+      </label>
+
+      <label class="field">
+        <span>SSH target</span>
+        <input
+          type="text"
+          value={preferences.remoteTarget}
+          placeholder="user@hostname"
+          on:input={(event) =>
+            onPreferenceChange("remoteTarget", (event.currentTarget as HTMLInputElement).value)}
+        />
+      </label>
+
+      <label class="field">
+        <span>Remote workspace cwd</span>
+        <input
+          type="text"
+          value={preferences.remoteCwd}
+          placeholder="/home/user/project"
+          on:input={(event) =>
+            onPreferenceChange("remoteCwd", (event.currentTarget as HTMLInputElement).value)}
+        />
+      </label>
+
+      <label class="field">
+        <span>SSH password</span>
+        <input
+          type="password"
+          value={remotePassword}
+          placeholder="Optional session-only password"
+          on:input={(event) =>
+            onRemotePasswordChange((event.currentTarget as HTMLInputElement).value)}
+        />
+      </label>
+
+      <p class="helper-copy">
+        Password is kept only in local desktop memory. Remote mode tunnels session lists, repo
+        status, PR actions, and settings snapshot calls through `ssh`.
+      </p>
+    </article>
+
+    <article class="section wide">
+      <div class="section-title">
+        <p class="eyebrow">Remote tools</p>
+        <h3>Remote bash and file editing</h3>
+      </div>
+
+      {#if remoteEnabled}
+        <label class="field">
+          <span>Shell command</span>
+          <textarea bind:value={remoteCommand} rows="4"></textarea>
+        </label>
+        <button class="secondary" disabled={remoteBusy} on:click={() => onRunRemoteBash(remoteCommand)}>
+          Run remote bash
+        </button>
+
+        <label class="field">
+          <span>Remote file path</span>
+          <input type="text" bind:value={remoteFilePath} placeholder="src/main.rs" />
+        </label>
+        <div class="inline-actions">
+          <button class="secondary" disabled={remoteBusy} on:click={() => onReadRemoteFile(remoteFilePath)}>
+            Read file
+          </button>
+          <button
+            class="secondary"
+            disabled={remoteBusy}
+            on:click={() => onWriteRemoteFile(remoteFilePath, remoteFileContents)}
+          >
+            Write file
+          </button>
+        </div>
+        <label class="field">
+          <span>File contents</span>
+          <textarea bind:value={remoteFileContents} rows="10"></textarea>
+        </label>
+
+        {#if remoteResult}
+          <div class:failure={!remoteResult.success} class="remote-result">
+            <strong>{remoteResult.success ? "Remote operation succeeded" : "Remote operation failed"}</strong>
+            {#if remoteResult.stdout}
+              <div>
+                <span>stdout</span>
+                <pre>{remoteResult.stdout}</pre>
+              </div>
+            {/if}
+            {#if remoteResult.stderr}
+              <div>
+                <span>stderr</span>
+                <pre>{remoteResult.stderr}</pre>
+              </div>
+            {/if}
+          </div>
+        {/if}
+      {:else}
+        <div class="empty-card">Enable remote mode above to use the remote bash and file-edit scratchpad.</div>
+      {/if}
+    </article>
+
+    <article class="section">
+      <div class="section-title">
         <p class="eyebrow">Runtime</p>
         <h3>Configuration snapshot</h3>
       </div>
@@ -175,7 +308,31 @@
         <p class="eyebrow">Auth</p>
         <h3>Stored credentials</h3>
       </div>
-      {#if snapshot?.auth.length}
+      {#if remoteEnabled && snapshot?.auth.length}
+        <div class="stack">
+          <div class="empty-card">
+            Remote auth is active for this SSH target. Logout below removes credentials on the remote host.
+          </div>
+          {#each snapshot.auth as auth}
+            <div class="card-row">
+              <div>
+                <strong>{auth.providerId}</strong>
+                <span>{auth.kind}{auth.email ? ` · ${auth.email}` : ""}</span>
+              </div>
+              <div class="right-copy">
+                <strong>{auth.planType ?? "n/a"}</strong>
+                <span>{authSummary(auth.expiresAtMs)}</span>
+              </div>
+              <button class="logout" on:click={() => onLogout(auth.providerId)}>Logout</button>
+            </div>
+          {/each}
+        </div>
+      {:else if remoteEnabled}
+        <div class="empty-card">
+          Remote auth is empty for this SSH target. Use the login page to store an API key or OAuth
+          credential on the remote host, or use the remote TUI / `puffer auth ...` over SSH.
+        </div>
+      {:else if snapshot?.auth.length}
         <div class="stack">
           {#each snapshot.auth as auth}
             <div class="card-row">
@@ -352,11 +509,26 @@
   }
 
   select,
-  input[type="range"] {
+  input[type="range"],
+  input[type="text"],
+  input[type="password"] {
     width: 100%;
   }
 
-  select {
+  textarea {
+    width: 100%;
+    border: 1px solid rgba(111, 101, 89, 0.18);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.84);
+    color: var(--text);
+    padding: 0.76rem 0.9rem;
+    resize: vertical;
+    font: inherit;
+  }
+
+  select,
+  input[type="text"],
+  input[type="password"] {
     border: 1px solid rgba(111, 101, 89, 0.18);
     border-radius: 14px;
     background: rgba(255, 255, 255, 0.84);
@@ -368,6 +540,12 @@
     display: flex;
     gap: 0.8rem;
     align-items: center;
+  }
+
+  .inline-actions {
+    display: flex;
+    gap: 0.65rem;
+    flex-wrap: wrap;
   }
 
   .meta-list {
@@ -432,6 +610,48 @@
     background: rgba(255, 252, 246, 0.72);
     border: 1px dashed rgba(111, 101, 89, 0.24);
     color: var(--text-muted);
+  }
+
+  .helper-copy {
+    margin: 0;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+
+  .remote-result {
+    display: grid;
+    gap: 0.7rem;
+    padding: 0.95rem;
+    border-radius: 18px;
+    background: rgba(255, 252, 246, 0.84);
+    border: 1px solid rgba(111, 101, 89, 0.14);
+  }
+
+  .remote-result.failure {
+    background: rgba(247, 225, 220, 0.58);
+    border-color: rgba(157, 58, 43, 0.14);
+  }
+
+  .remote-result span {
+    display: block;
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 0.28rem;
+  }
+
+  pre {
+    margin: 0;
+    padding: 0.85rem 0.95rem;
+    border-radius: 16px;
+    background: rgba(247, 243, 235, 0.82);
+    border: 1px solid rgba(111, 101, 89, 0.14);
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+    font-size: 0.8rem;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow: auto;
   }
 
   code {

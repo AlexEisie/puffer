@@ -121,7 +121,11 @@ impl RuntimePermissionContext {
             return decision;
         }
 
-        let policy = definition.policy.approval_policy.as_deref().unwrap_or("auto");
+        let policy = definition
+            .policy
+            .approval_policy
+            .as_deref()
+            .unwrap_or("auto");
         self.policy_decision(definition, input, policy)
     }
 
@@ -582,8 +586,8 @@ mod tests {
             plan_mode: false,
         };
         let send = tool_definition("SendMessage", "auto");
-        let local =
-            context.decision_for_tool_call(&send, &serde_json::json!({"to":"alice","message":"hi"}));
+        let local = context
+            .decision_for_tool_call(&send, &serde_json::json!({"to":"alice","message":"hi"}));
         let bridge = context.decision_for_tool_call(
             &send,
             &serde_json::json!({"to":"bridge:session-123","message":"hi"}),
@@ -659,8 +663,8 @@ mod tests {
             ..send_user_message.clone()
         };
 
-        let send_decision =
-            context.decision_for_tool_call(&send_user_message, &serde_json::json!({"message": "hi"}));
+        let send_decision = context
+            .decision_for_tool_call(&send_user_message, &serde_json::json!({"message": "hi"}));
         let brief_decision =
             context.decision_for_tool_call(&brief, &serde_json::json!({"message": "hi"}));
 

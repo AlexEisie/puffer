@@ -15,8 +15,8 @@ use std::process::Command;
 use std::sync::mpsc::{self, TryRecvError};
 use std::thread;
 
-use crate::onboarding;
 use crate::approval_overlay::ApprovalOverlay;
+use crate::onboarding;
 use crate::state::{
     PendingPermissionRequest, PendingSubmit, PendingSubmitEvent, PendingSubmitResult,
 };
@@ -127,10 +127,8 @@ pub(crate) fn handle_prompt_submit(
             },
             move |request: PermissionPromptRequest| {
                 let (response_tx, response_rx) = mpsc::channel();
-                let _ = permission_sender.send(PendingSubmitEvent::PermissionRequest(
-                    request,
-                    response_tx,
-                ));
+                let _ = permission_sender
+                    .send(PendingSubmitEvent::PermissionRequest(request, response_tx));
                 response_rx.recv().unwrap_or(PermissionPromptAction::Deny)
             },
         )

@@ -1,10 +1,9 @@
 mod overlay_list;
 mod panes;
 mod summary;
-mod top_panel;
 mod tool_messages;
+mod top_panel;
 
-use crate::approval_overlay::render_permission_overlay;
 use self::overlay_list::{onboarding_fixed_line_count, overlay_selection, visible_overlay_rows};
 use self::panes::{render_empty_state, render_help_pane};
 #[cfg(test)]
@@ -12,8 +11,9 @@ use self::summary::{footer_lines, header_lines, session_lines};
 use self::summary::{
     hint_line, status_compact_line, status_primary_line, status_secondary_line, top_panel_height,
 };
-use self::top_panel::{render_fixed_top_panel, scrollable_top_panel_lines};
 use self::tool_messages::render_tool_message;
+use self::top_panel::{render_fixed_top_panel, scrollable_top_panel_lines};
+use crate::approval_overlay::render_permission_overlay;
 use crate::markdown::render_markdown;
 use crate::popup::popup_rows;
 use crate::state::AuthPickerEntry;
@@ -161,9 +161,10 @@ pub(crate) fn render(
                 state,
                 resources,
                 auth_store,
-                pending_submit.loading_prompt.is_some() || !pending_submit.queued_prompts.is_empty(),
+                pending_submit.loading_prompt.is_some()
+                    || !pending_submit.queued_prompts.is_empty(),
             )
-                .saturating_sub(layout[1].height.max(1))
+            .saturating_sub(layout[1].height.max(1))
         } else {
             scroll_offset
         };
@@ -176,8 +177,8 @@ pub(crate) fn render(
                 &tool_registry,
                 pending_submit,
             ))
-                .scroll((body_scroll_offset, 0))
-                .wrap(Wrap { trim: false }),
+            .scroll((body_scroll_offset, 0))
+            .wrap(Wrap { trim: false }),
             layout[1],
         );
     }
@@ -416,9 +417,9 @@ pub(crate) fn transcript_line_count(
         &tool_registry,
         pending,
     ))
-        .wrap(Wrap { trim: false })
-        .line_count(width)
-        .min(u16::MAX as usize) as u16
+    .wrap(Wrap { trim: false })
+    .line_count(width)
+    .min(u16::MAX as usize) as u16
 }
 
 fn render_transcript_message(message: &RenderedMessage) -> Vec<Line<'static>> {

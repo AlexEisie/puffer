@@ -335,7 +335,9 @@ pub(crate) enum OverlayState {
         entries: Vec<ModelPickerEntry>,
         selection: usize,
     },
-    PermissionPrompt { overlay: ApprovalOverlay },
+    PermissionPrompt {
+        overlay: ApprovalOverlay,
+    },
     Usage(UsageOverlay),
     OnboardingTheme {
         entries: Vec<ModelPickerEntry>,
@@ -621,9 +623,7 @@ impl OverlayState {
                     *selection = index;
                 }
             }
-            Self::ApiKeyPrompt { .. }
-            | Self::Usage(..)
-            | Self::OnboardingApiKey { .. } => {}
+            Self::ApiKeyPrompt { .. } | Self::Usage(..) | Self::OnboardingApiKey { .. } => {}
         }
     }
 

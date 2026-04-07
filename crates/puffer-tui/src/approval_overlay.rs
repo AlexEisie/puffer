@@ -140,17 +140,15 @@ impl ApprovalOverlay {
         );
         frame.render_widget(List::new(option_lines), sections[1]);
         frame.render_widget(
-            Paragraph::new(self.footer_hint())
-                .style(Style::default().add_modifier(Modifier::DIM)),
+            Paragraph::new(self.footer_hint()).style(Style::default().add_modifier(Modifier::DIM)),
             sections[2],
         );
     }
 
     fn body_lines(&self) -> Vec<Line<'static>> {
         let mut lines = vec![
-            Line::from("Would you like to grant these permissions?").style(
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
+            Line::from("Would you like to grant these permissions?")
+                .style(Style::default().add_modifier(Modifier::BOLD)),
             Line::from(""),
             Line::from(vec![
                 Span::styled("Action: ", Style::default().add_modifier(Modifier::DIM)),

@@ -3,6 +3,7 @@
 
   export let snapshot: SettingsSnapshot | null = null;
   export let loading = false;
+  export let remoteEnabled = false;
   export let busyProviderId: string | null = null;
   export let errorMessage: string | null = null;
   export let onLoginOauth: (providerId: string) => void = () => {};
@@ -31,6 +32,12 @@
     <p class="subcopy">
       The desktop shell needs provider credentials before it can open sessions, run agents, or create pull requests.
     </p>
+    {#if remoteEnabled}
+      <p class="subcopy">
+        Remote mode is active. API keys are stored on the remote host, and OAuth opens in your local
+        browser before the credential is written back to the remote host over SSH.
+      </p>
+    {/if}
     <button class="refresh" on:click={onRefresh}>Refresh auth state</button>
   </div>
 
@@ -63,7 +70,11 @@
                 disabled={busyProviderId === provider.id}
                 on:click={() => onLoginOauth(provider.id)}
               >
-                {busyProviderId === provider.id ? "Opening browser..." : "Login with OAuth"}
+                {busyProviderId === provider.id
+                  ? "Opening browser..."
+                  : remoteEnabled
+                    ? "Login with OAuth (store remote)"
+                    : "Login with OAuth"}
               </button>
             {/if}
 

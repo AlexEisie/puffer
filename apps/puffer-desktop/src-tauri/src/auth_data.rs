@@ -38,9 +38,25 @@ pub(crate) fn login_with_oauth(provider_id: &str) -> Result<SettingsSnapshotDto>
     if !provider.auth_modes.contains(&AuthMode::OAuth) {
         return Err(anyhow!("provider `{provider_id}` does not support OAuth"));
     }
+    let credential = acquire_oauth_credential(provider_id, &provider.default_api)?;
+    store_credential(&mut auth_store, provider_id, credential);
+    auth_store.save(&auth_path)?;
 
+    let _ = ensure_workspace_dirs(&paths);
+    load_settings_snapshot()
+}
+
+/// Performs the local browser/callback OAuth flow and returns the resulting credential.
+pub(crate) fn acquire_oauth_credential(
+    provider_id: &str,
+    provider_default_api: &str,
+) -> Result<StoredCredential> {
     let callback_listener = CallbackListener::bind_localhost("/callback")?;
-    let bundle = oauth_login_bundle(&providers, provider_id, callback_listener.redirect_uri())?;
+    let bundle = oauth_login_bundle(
+        provider_id,
+        provider_default_api,
+        callback_listener.redirect_uri(),
+    )?;
     let launch_url = bundle
         .automatic_authorization_url
         .as_deref()
@@ -54,12 +70,7 @@ pub(crate) fn login_with_oauth(provider_id: &str) -> Result<SettingsSnapshotDto>
     let callback = callback_listener
         .wait_for_callback_url(Duration::from_secs(180))?
         .ok_or_else(|| anyhow!("timed out waiting for OAuth callback"))?;
-    let credential = exchange_oauth_credential(provider_id, &providers, &bundle, &callback)?;
-    store_credential(&mut auth_store, provider_id, credential);
-    auth_store.save(&auth_path)?;
-
-    let _ = ensure_workspace_dirs(&paths);
-    load_settings_snapshot()
+    exchange_oauth_credential(provider_id, provider_default_api, &bundle, &callback)
 }
 
 /// Stores an API key credential and returns the updated settings snapshot.
@@ -137,14 +148,11 @@ fn load_auth_context() -> Result<DesktopAuthContext> {
 }
 
 fn oauth_login_bundle(
-    providers: &ProviderRegistry,
     provider_id: &str,
+    provider_default_api: &str,
     redirect_uri: &str,
 ) -> Result<OauthStartBundle> {
-    let Some(provider) = providers.provider(provider_id) else {
-        return Err(anyhow!("unknown provider `{provider_id}`"));
-    };
-    match provider.default_api.as_str() {
+    match provider_default_api {
         "openai-responses"
         | "openai-completions"
         | "azure-openai-responses"
@@ -191,14 +199,11 @@ fn oauth_login_bundle(
 
 fn exchange_oauth_credential(
     provider_id: &str,
-    providers: &ProviderRegistry,
+    provider_default_api: &str,
     bundle: &OauthStartBundle,
     callback: &str,
 ) -> Result<StoredCredential> {
-    let Some(provider) = providers.provider(provider_id) else {
-        return Err(anyhow!("unknown provider `{provider_id}`"));
-    };
-    match provider.default_api.as_str() {
+    match provider_default_api {
         "openai-responses"
         | "openai-completions"
         | "azure-openai-responses"

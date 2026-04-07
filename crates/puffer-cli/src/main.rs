@@ -3,6 +3,8 @@ mod auth_provider;
 mod authflow;
 mod cli_args;
 mod command_surface;
+mod desktop_api;
+mod desktop_api_types;
 mod resource_fs;
 
 use anyhow::Result;
@@ -171,6 +173,14 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Some(Command::DesktopApi { command }) => desktop_api::run_desktop_api(
+            command,
+            &paths,
+            &config,
+            &resources,
+            &providers,
+            &mut auth_store,
+        ),
         Some(Command::AnthropicRequestFixture) => {
             let request = build_messages_request(
                 &AnthropicRequestConfig {
@@ -218,6 +228,17 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(Command::Tool { command }) => run_tool_command(command, &resources, &cwd),
+        Some(Command::Remote {
+            target,
+            cwd,
+            no_alt_screen,
+            prompt,
+        }) => run_remote_tui(
+            &target,
+            cwd.as_deref(),
+            (!prompt.is_empty()).then(|| prompt.join(" ")),
+            cli.no_alt_screen || no_alt_screen || config.ui.no_alt_screen,
+        ),
         Some(Command::Resume { session_id }) => {
             let session_store = SessionStore::from_paths(&paths)?;
             let session =
@@ -791,6 +812,68 @@ fn read_line_with_prompt(prompt: &str) -> Result<String> {
         anyhow::bail!("no input received");
     }
     Ok(trimmed)
+}
+
+fn run_remote_tui(
+    target: &str,
+    remote_cwd: Option<&str>,
+    prompt: Option<String>,
+    no_alt_screen: bool,
+) -> Result<()> {
+    let mut remote_command = String::new();
+    if let Some(remote_cwd) = remote_cwd.filter(|value| !value.trim().is_empty()) {
+        remote_command.push_str("cd ");
+        remote_command.push_str(&shell_quote(remote_cwd));
+        remote_command.push_str(" && ");
+    }
+    let mut invocation = String::new();
+    if no_alt_screen {
+        invocation.push_str(" --no-alt-screen");
+    }
+    if let Some(prompt) = prompt.as_deref().filter(|value| !value.trim().is_empty()) {
+        invocation.push(' ');
+        invocation.push_str(&shell_quote(prompt));
+    }
+    remote_command.push_str("if command -v puffer >/dev/null 2>&1; then exec puffer");
+    remote_command.push_str(&invocation);
+    remote_command.push_str(
+        " ; elif [ -x \"$HOME/.cargo/bin/puffer\" ]; then exec \"$HOME/.cargo/bin/puffer\"",
+    );
+    remote_command.push_str(&invocation);
+    remote_command
+        .push_str(" ; elif [ -x \"./target/debug/puffer\" ]; then exec \"./target/debug/puffer\"");
+    remote_command.push_str(&invocation);
+    remote_command.push_str(
+        " ; elif [ -x \"$HOME/.cargo/bin/cargo\" ]; then exec \"$HOME/.cargo/bin/cargo\" run -q -p puffer-cli --",
+    );
+    remote_command.push_str(&invocation);
+    remote_command.push_str(
+        " ; elif command -v cargo >/dev/null 2>&1; then exec cargo run -q -p puffer-cli --",
+    );
+    remote_command.push_str(&invocation);
+    remote_command.push_str(" ; else echo 'remote puffer command not found' >&2; exit 127; fi");
+
+    let status = std::process::Command::new("ssh")
+        .args([
+            "-tt",
+            "-o",
+            "BatchMode=no",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "ConnectTimeout=15",
+            target,
+            &remote_command,
+        ])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("remote ssh session exited with {}", status);
+    }
+    Ok(())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'"'"'"#))
 }
 
 fn resolve_session_query(session_store: &SessionStore, query: &str) -> Result<Uuid> {

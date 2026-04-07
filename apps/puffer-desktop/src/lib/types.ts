@@ -149,6 +149,22 @@ export type DesktopPreferences = {
   launchInspectorOpen: boolean;
   defaultInspectorTab: InspectorTab;
   defaultInspectorWidth: number;
+  remoteEnabled: boolean;
+  remoteTarget: string;
+  remoteCwd: string;
+};
+
+export type RemoteConnection = {
+  enabled: boolean;
+  target: string;
+  cwd: string;
+  password: string;
+};
+
+export type RemoteOperation = {
+  success: boolean;
+  stdout: string;
+  stderr: string;
 };
 
 export type SettingsConfig = {

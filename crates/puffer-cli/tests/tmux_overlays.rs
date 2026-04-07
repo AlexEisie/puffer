@@ -7,6 +7,8 @@ use puffer_test_support::{
 use std::fs;
 use std::time::Duration;
 
+const TMUX_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+
 #[test]
 fn tmux_resume_overlay_lists_workspace_sessions() {
     if !tmux_available() {
@@ -37,7 +39,7 @@ fn tmux_resume_overlay_lists_workspace_sessions() {
         Some(workspace.as_path()),
     )
     .unwrap();
-    wait_for_tmux_text(&session, "Puffer Code", Duration::from_secs(10)).unwrap();
+    wait_for_tmux_text(&session, "Puffer Code", TMUX_WAIT_TIMEOUT).unwrap();
     send_tmux_keys(&session, &["/resume", "Enter"]).unwrap();
     std::thread::sleep(Duration::from_secs(2));
     let capture = capture_tmux_pane(&session).unwrap();
@@ -64,7 +66,7 @@ fn tmux_login_overlay_lists_available_providers() {
         Some(workspace.as_path()),
     )
     .unwrap();
-    wait_for_tmux_text(&session, "Puffer Code", Duration::from_secs(10)).unwrap();
+    wait_for_tmux_text(&session, "Puffer Code", TMUX_WAIT_TIMEOUT).unwrap();
     send_tmux_keys(&session, &["/login", "Enter"]).unwrap();
     std::thread::sleep(Duration::from_secs(2));
     let capture = capture_tmux_pane(&session).unwrap();

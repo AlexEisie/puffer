@@ -1,6 +1,6 @@
-use std::cell::RefCell;
 use puffer_tools::ToolDefinition;
 use serde_json::Value;
+use std::cell::RefCell;
 
 /// Describes one runtime permission request that may need user approval.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -100,12 +100,71 @@ pub(crate) enum Command {
         /// The session UUID to resume.
         session_id: String,
     },
+    /// Launch Puffer on a remote host over SSH.
+    Remote {
+        /// Hostname or SSH connection string, for example `user@buildbox`.
+        target: String,
+        /// Optional remote working directory before launching Puffer.
+        #[arg(long = "cwd")]
+        cwd: Option<String>,
+        /// Disable alternate-screen mode for the remote TUI session.
+        #[arg(long = "no-alt-screen", default_value_t = false)]
+        no_alt_screen: bool,
+        /// Optional prompt to submit on the remote side.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        prompt: Vec<String>,
+    },
     /// Fork a stored session into the current working directory.
     #[command(hide = true)]
     Fork {
         /// The session UUID to fork and open.
         session_id: String,
     },
+    /// Internal JSON commands used by the desktop app and remote bridges.
+    #[command(hide = true)]
+    DesktopApi {
+        #[command(subcommand)]
+        command: DesktopApiCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum DesktopApiCommand {
+    SessionGroups,
+    SessionDetail {
+        session_id: String,
+    },
+    RepoStatus {
+        session_id: String,
+    },
+    CreatePullRequest {
+        session_id: String,
+        #[arg(long = "title")]
+        title: Option<String>,
+        #[arg(long = "body")]
+        body: Option<String>,
+    },
+    MergePullRequest {
+        session_id: String,
+        #[arg(long = "pull-request-number")]
+        pull_request_number: Option<u64>,
+        #[arg(long = "merge-method")]
+        merge_method: Option<String>,
+    },
+    LoginApiKey {
+        provider: String,
+        #[arg(long = "api-key")]
+        api_key: String,
+    },
+    StoreCredential {
+        provider: String,
+        #[arg(long = "credential-json")]
+        credential_json: String,
+    },
+    Logout {
+        provider: String,
+    },
+    SettingsSnapshot,
 }
 
 #[derive(Debug, Subcommand)]
@@ -419,4 +478,37 @@ pub(crate) enum McpTransport {
     Stdio,
     Sse,
     Http,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Command};
+    use clap::Parser;
+
+    #[test]
+    fn remote_prompt_collects_trailing_words() {
+        let cli = Cli::parse_from([
+            "puffer",
+            "remote",
+            "c@localhost",
+            "--cwd",
+            "/tmp/demo",
+            "hello",
+            "from",
+            "remote",
+        ]);
+        let Some(Command::Remote {
+            target,
+            cwd,
+            no_alt_screen,
+            prompt,
+        }) = cli.subcommand
+        else {
+            panic!("expected remote command");
+        };
+        assert_eq!(target, "c@localhost");
+        assert_eq!(cwd.as_deref(), Some("/tmp/demo"));
+        assert!(!no_alt_screen);
+        assert_eq!(prompt, ["hello", "from", "remote"]);
+    }
 }

@@ -1,8 +1,8 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Describes one session row rendered in the desktop sidebar.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SessionListItemDto {
     pub session_id: String,
@@ -20,7 +20,7 @@ pub(crate) struct SessionListItemDto {
 }
 
 /// Describes one grouped folder section in the desktop sidebar.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FolderGroupDto {
     pub folder_id: String,
@@ -31,7 +31,7 @@ pub(crate) struct FolderGroupDto {
 }
 
 /// Describes one captured diff snapshot for the inspector pane.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DiffSummaryDto {
     pub id: String,
@@ -44,7 +44,7 @@ pub(crate) struct DiffSummaryDto {
 }
 
 /// Describes one open pull request related to the selected session repo.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RepoPullRequestDto {
     pub number: u64,
@@ -58,7 +58,7 @@ pub(crate) struct RepoPullRequestDto {
 }
 
 /// Describes the repository state and action readiness for one session.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RepoStatusDto {
     pub session_id: String,
@@ -79,7 +79,7 @@ pub(crate) struct RepoStatusDto {
 }
 
 /// Describes the outcome of one repo action initiated from the desktop shell.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RepoActionResultDto {
     pub ok: bool,
@@ -90,7 +90,7 @@ pub(crate) struct RepoActionResultDto {
 }
 
 /// Describes one normalized timeline item rendered in the conversation pane.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum TimelineItemDto {
     UserMessage {
@@ -134,7 +134,7 @@ pub(crate) enum TimelineItemDto {
 }
 
 /// Describes the full desktop session view returned for one selected session.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SessionDetailDto {
     pub session_id: String,
@@ -155,7 +155,7 @@ pub(crate) struct SessionDetailDto {
 }
 
 /// Describes the loaded runtime configuration snapshot for the desktop settings page.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SettingsSnapshotDto {
     pub workspace_root: String,
@@ -171,7 +171,7 @@ pub(crate) struct SettingsSnapshotDto {
 }
 
 /// Describes the effective loaded Puffer config values.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SettingsConfigDto {
     pub app_name: String,
@@ -187,7 +187,7 @@ pub(crate) struct SettingsConfigDto {
 }
 
 /// Describes aggregate loaded resource counts.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ResourceCountsDto {
     pub providers: usize,
@@ -203,7 +203,7 @@ pub(crate) struct ResourceCountsDto {
 }
 
 /// Describes session inventory summary for the settings page.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SettingsSessionSummaryDto {
     pub total_sessions: usize,
@@ -211,7 +211,7 @@ pub(crate) struct SettingsSessionSummaryDto {
 }
 
 /// Describes one provider auth status in the settings page.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AuthProviderStatusDto {
     pub provider_id: String,
@@ -224,7 +224,7 @@ pub(crate) struct AuthProviderStatusDto {
 }
 
 /// Describes one registered provider summary in the settings page.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProviderSummaryDto {
     pub id: String,
@@ -235,4 +235,13 @@ pub(crate) struct ProviderSummaryDto {
     pub auth_modes: Vec<String>,
     pub source_kind: String,
     pub source_path: Option<String>,
+}
+
+/// Describes one remote command or file operation result for the desktop scratchpad.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemoteOperationDto {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
 }

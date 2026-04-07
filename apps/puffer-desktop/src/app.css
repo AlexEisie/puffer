@@ -65,6 +65,10 @@ a {
   grid-template-columns: 320px minmax(0, 1fr);
 }
 
+.shell.single-column {
+  grid-template-columns: 1fr;
+}
+
 .workspace {
   min-width: 0;
   display: grid;

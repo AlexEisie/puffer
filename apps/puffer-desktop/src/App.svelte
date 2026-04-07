@@ -16,13 +16,18 @@
     loadSessionDetail,
     mergePullRequest,
     logoutProvider,
-    refreshRepoStatus
+    readRemoteFile,
+    refreshRepoStatus,
+    runRemoteBash,
+    writeRemoteFile
   } from "./lib/api/desktop";
   import type {
     AppView,
     DesktopPreferences,
     FolderGroup,
     InspectorTab,
+    RemoteConnection,
+    RemoteOperation,
     SessionDetail,
     SessionListItem,
     SettingsSnapshot,
@@ -45,7 +50,10 @@
   let actionBusy = false;
   let authBusyProviderId: string | null = null;
   let authError: string | null = null;
+  let remoteOperation: RemoteOperation | null = null;
+  let remoteBusy = false;
   let preferredSessionId: string | null = null;
+  let remotePassword = "";
   let contentElement: HTMLDivElement | null = null;
   let isResizingInspector = false;
 
@@ -54,7 +62,10 @@
     rememberInspectorLayout: true,
     launchInspectorOpen: true,
     defaultInspectorTab: "latest-diff",
-    defaultInspectorWidth: 50
+    defaultInspectorWidth: 50,
+    remoteEnabled: false,
+    remoteTarget: "",
+    remoteCwd: ""
   };
   let desktopPreferences: DesktopPreferences = { ...defaultDesktopPreferences };
 
@@ -71,6 +82,13 @@
   $: toolCount = timeline.filter((item) => item.kind === "tool").length;
   $: diffCount = timeline.filter((item) => item.kind === "diff").length;
   $: selectedLabel = selectedItem ? `${selectedItem.kind}: ${selectedItem.title}` : "No focused item";
+  $: remoteConnection = {
+    enabled:
+      desktopPreferences.remoteEnabled && desktopPreferences.remoteTarget.trim().length > 0,
+    target: desktopPreferences.remoteTarget.trim(),
+    cwd: desktopPreferences.remoteCwd.trim(),
+    password: remotePassword
+  } satisfies RemoteConnection;
 
   function syncInspectorForItem(item: TimelineItem | null) {
     selectedItem = item;
@@ -220,9 +238,11 @@
   async function refreshSettings() {
     settingsLoading = true;
     try {
-      settingsSnapshot = await loadSettingsSnapshot();
+      settingsSnapshot = await loadSettingsSnapshot(remoteConnection);
       if ((settingsSnapshot.auth?.length ?? 0) === 0) {
         view = "login";
+      } else if (view === "login") {
+        view = "workspace";
       }
       statusMessage = "Settings snapshot refreshed.";
     } catch (error) {
@@ -236,7 +256,7 @@
     authBusyProviderId = providerId;
     authError = null;
     try {
-      settingsSnapshot = await loginWithOauth(providerId);
+      settingsSnapshot = await loginWithOauth(providerId, remoteConnection);
       view = "workspace";
       statusMessage = `Logged in to ${providerId}.`;
       await refreshGroups(preferredSessionId ?? undefined);
@@ -252,7 +272,7 @@
     authBusyProviderId = providerId;
     authError = null;
     try {
-      settingsSnapshot = await loginWithApiKey(providerId, apiKey);
+      settingsSnapshot = await loginWithApiKey(providerId, apiKey, remoteConnection);
       view = "workspace";
       statusMessage = `Stored API key for ${providerId}.`;
       await refreshGroups(preferredSessionId ?? undefined);
@@ -268,9 +288,13 @@
     authBusyProviderId = providerId;
     authError = null;
     try {
-      settingsSnapshot = await logoutProvider(providerId);
+      settingsSnapshot = await logoutProvider(providerId, remoteConnection);
       statusMessage = `Logged out from ${providerId}.`;
       if ((settingsSnapshot.auth?.length ?? 0) === 0) {
+        groups = [];
+        selectedSession = null;
+        sessionDetail = null;
+        selectedItem = null;
         view = "login";
       }
     } catch (error) {
@@ -278,6 +302,54 @@
       statusMessage = authError;
     } finally {
       authBusyProviderId = null;
+    }
+  }
+
+  async function handleRemoteBash(command: string) {
+    if (!remoteConnection.enabled) {
+      return;
+    }
+    remoteBusy = true;
+    try {
+      remoteOperation = await runRemoteBash(remoteConnection, command);
+      statusMessage = remoteOperation.success ? "Remote bash finished." : "Remote bash failed.";
+    } catch (error) {
+      statusMessage = String(error);
+      remoteOperation = { success: false, stdout: "", stderr: String(error) };
+    } finally {
+      remoteBusy = false;
+    }
+  }
+
+  async function handleRemoteRead(path: string) {
+    if (!remoteConnection.enabled) {
+      return;
+    }
+    remoteBusy = true;
+    try {
+      remoteOperation = await readRemoteFile(remoteConnection, path);
+      statusMessage = remoteOperation.success ? `Read remote file ${path}.` : `Reading ${path} failed.`;
+    } catch (error) {
+      statusMessage = String(error);
+      remoteOperation = { success: false, stdout: "", stderr: String(error) };
+    } finally {
+      remoteBusy = false;
+    }
+  }
+
+  async function handleRemoteWrite(path: string, contents: string) {
+    if (!remoteConnection.enabled) {
+      return;
+    }
+    remoteBusy = true;
+    try {
+      remoteOperation = await writeRemoteFile(remoteConnection, path, contents);
+      statusMessage = remoteOperation.success ? `Wrote remote file ${path}.` : `Writing ${path} failed.`;
+    } catch (error) {
+      statusMessage = String(error);
+      remoteOperation = { success: false, stdout: "", stderr: String(error) };
+    } finally {
+      remoteBusy = false;
     }
   }
 
@@ -321,7 +393,7 @@
   async function openSession(session: SessionListItem) {
     sessionLoading = true;
     try {
-      const detail = await loadSessionDetail(session.id);
+      const detail = await loadSessionDetail(session.id, remoteConnection);
       selectedSession = detail.session;
       sessionDetail = detail;
       syncInspectorForItem(chooseDefaultItem(detail.timeline));
@@ -336,7 +408,7 @@
   async function refreshGroups(preferredSessionId?: string) {
     groupsLoading = true;
     try {
-      groups = await listGroupedSessions();
+      groups = await listGroupedSessions(remoteConnection);
       const allSessions = groups.flatMap((group) => group.sessions);
       const selectedSessionId = selectedSession?.id ?? null;
       const nextSession =
@@ -369,7 +441,7 @@
     }
     actionBusy = true;
     try {
-      const repoStatus = await refreshRepoStatus(selectedSession.id);
+      const repoStatus = await refreshRepoStatus(selectedSession.id, remoteConnection);
       sessionDetail = { ...sessionDetail, repoStatus };
       statusMessage = "Repository status refreshed.";
     } catch (error) {
@@ -388,14 +460,20 @@
     try {
       if (action === "create") {
         const defaults = buildPrDefaults(selectedSession);
-        const result = await createPullRequest(selectedSession.id, defaults.title, defaults.body);
+        const result = await createPullRequest(
+          selectedSession.id,
+          defaults.title,
+          defaults.body,
+          remoteConnection
+        );
         sessionDetail = { ...sessionDetail, repoStatus: result.repoStatus };
         statusMessage = result.message;
       } else {
         const result = await mergePullRequest(
           selectedSession.id,
           sessionDetail.repoStatus.pullRequest?.number,
-          "merge"
+          "merge",
+          remoteConnection
         );
         sessionDetail = { ...sessionDetail, repoStatus: result.repoStatus };
         statusMessage = result.message;
@@ -442,19 +520,22 @@
   $: persistDesktopState();
 </script>
 
-<div class="shell">
-  <SessionSidebar
-    groups={groups}
-    activeSessionId={selectedSession?.id ?? null}
-    loading={groupsLoading}
-    onSelect={(session) => void openSession(session)}
-  />
+<div class:single-column={view !== "workspace"} class="shell">
+  {#if view === "workspace"}
+    <SessionSidebar
+      groups={groups}
+      activeSessionId={selectedSession?.id ?? null}
+      loading={groupsLoading}
+      onSelect={(session) => void openSession(session)}
+    />
+  {/if}
 
   <main class="workspace">
     <HeaderBar
       session={selectedSession}
       repoStatus={sessionDetail?.repoStatus ?? null}
       {view}
+      remoteLabel={remoteConnection.enabled ? remoteConnection.target : null}
       busy={actionBusy || sessionLoading}
       statusMessage={statusMessage}
       onRefresh={() => (view === "workspace" ? void refreshSelectedRepo() : void refreshSettings())}
@@ -541,15 +622,24 @@
         snapshot={settingsSnapshot}
         loading={settingsLoading}
         preferences={desktopPreferences}
+        remoteEnabled={remoteConnection.enabled}
+        remotePassword={remotePassword}
+        remoteBusy={remoteBusy}
+        remoteResult={remoteOperation}
         onPreferenceChange={updateDesktopPreference}
+        onRemotePasswordChange={(value) => (remotePassword = value)}
         onResetPreferences={resetDesktopPreferences}
         onRefresh={() => void refreshSettings()}
         onLogout={(providerId) => void handleLogout(providerId)}
+        onRunRemoteBash={(command) => void handleRemoteBash(command)}
+        onReadRemoteFile={(path) => void handleRemoteRead(path)}
+        onWriteRemoteFile={(path, contents) => void handleRemoteWrite(path, contents)}
       />
     {:else}
       <LoginView
         snapshot={settingsSnapshot}
         loading={settingsLoading}
+        remoteEnabled={remoteConnection.enabled}
         busyProviderId={authBusyProviderId}
         errorMessage={authError}
         onLoginOauth={(providerId) => void handleOauthLogin(providerId)}

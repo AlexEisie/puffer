@@ -276,7 +276,10 @@ export const mockDesktopPreferences: DesktopPreferences = {
   rememberInspectorLayout: true,
   launchInspectorOpen: true,
   defaultInspectorTab: "latest-diff",
-  defaultInspectorWidth: 50
+  defaultInspectorWidth: 50,
+  remoteEnabled: false,
+  remoteTarget: "",
+  remoteCwd: ""
 };
 
 const mockAuth: AuthProviderStatus[] = [

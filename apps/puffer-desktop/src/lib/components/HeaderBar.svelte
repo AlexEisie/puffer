@@ -4,6 +4,7 @@
   export let session: SessionListItem | null = null;
   export let repoStatus: RepoStatus | null = null;
   export let view: AppView = "workspace";
+  export let remoteLabel: string | null = null;
   export let busy = false;
   export let statusMessage = "";
   export let onRefresh: () => void = () => {};
@@ -98,6 +99,9 @@
 
     {#if view !== "login"}
       <div class="repo-pills">
+        {#if remoteLabel}
+          <span class="pill remote">Remote {remoteLabel}</span>
+        {/if}
         <span class="pill neutral">{repoStatus?.branch ?? "No branch"}</span>
         <span class:warning={repoStatus?.hasUncommittedChanges} class="pill neutral">
           {repoStatus?.hasUncommittedChanges ? "Uncommitted changes" : "Working tree clean"}
@@ -247,6 +251,12 @@
 
   .pill.tag {
     background: rgba(255, 248, 234, 0.92);
+  }
+
+  .pill.remote {
+    background: rgba(232, 239, 250, 0.9);
+    color: #35598a;
+    border-color: rgba(53, 89, 138, 0.14);
   }
 
   .actions {

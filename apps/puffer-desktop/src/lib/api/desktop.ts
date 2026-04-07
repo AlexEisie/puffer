@@ -5,6 +5,8 @@ import type {
   FolderGroup,
   ProviderSummary,
   PullRequest,
+  RemoteConnection,
+  RemoteOperation,
   RepoActionResult,
   RepoStatus,
   SessionDetail,
@@ -124,6 +126,17 @@ type BackendSessionDetail = BackendSessionListItem & {
   repoStatus: BackendRepoStatus;
 };
 
+function remoteArgs(remote?: RemoteConnection): Record<string, unknown> {
+  if (!remote || !remote.enabled || !remote.target.trim()) {
+    return {};
+  }
+  return {
+    remoteTarget: remote.target,
+    remoteCwd: remote.cwd || null,
+    remotePassword: remote.password || null
+  };
+}
+
 type BackendSettingsConfig = SettingsSnapshot["config"];
 type BackendResourceCounts = SettingsSnapshot["resources"];
 type BackendSettingsSessionSummary = SettingsSnapshot["sessions"];
@@ -142,6 +155,8 @@ type BackendSettingsSnapshot = {
   auth: BackendAuthProviderStatus[];
   providers: BackendProviderSummary[];
 };
+
+type BackendRemoteOperation = RemoteOperation;
 
 function canInvokeTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -318,11 +333,11 @@ function normalizeSessionDetail(value: BackendSessionDetail): SessionDetail {
   };
 }
 
-export async function listGroupedSessions(): Promise<FolderGroup[]> {
+export async function listGroupedSessions(remote?: RemoteConnection): Promise<FolderGroup[]> {
   if (!canInvokeTauri()) {
     return mockFolders;
   }
-  const response = await invoke<BackendFolderGroup[]>("list_grouped_sessions");
+  const response = await invoke<BackendFolderGroup[]>("list_grouped_sessions", remoteArgs(remote));
   return response.map((group) => ({
     id: group.folderId,
     label: group.folderLabel,
@@ -332,26 +347,39 @@ export async function listGroupedSessions(): Promise<FolderGroup[]> {
   }));
 }
 
-export async function loadSessionDetail(sessionId: string): Promise<SessionDetail> {
+export async function loadSessionDetail(
+  sessionId: string,
+  remote?: RemoteConnection
+): Promise<SessionDetail> {
   if (!canInvokeTauri()) {
     return mockSessionDetail;
   }
-  const response = await invoke<BackendSessionDetail>("load_session_detail", { sessionId });
+  const response = await invoke<BackendSessionDetail>("load_session_detail", {
+    sessionId,
+    ...remoteArgs(remote)
+  });
   return normalizeSessionDetail(response);
 }
 
-export async function refreshRepoStatus(sessionId: string): Promise<RepoStatus> {
+export async function refreshRepoStatus(
+  sessionId: string,
+  remote?: RemoteConnection
+): Promise<RepoStatus> {
   if (!canInvokeTauri()) {
     return mockRepoStatus;
   }
-  const response = await invoke<BackendRepoStatus>("refresh_repo_status", { sessionId });
+  const response = await invoke<BackendRepoStatus>("refresh_repo_status", {
+    sessionId,
+    ...remoteArgs(remote)
+  });
   return normalizeRepoStatus(response);
 }
 
 export async function createPullRequest(
   sessionId: string,
   title?: string,
-  body?: string
+  body?: string,
+  remote?: RemoteConnection
 ): Promise<RepoActionResult> {
   if (!canInvokeTauri()) {
     return mockCreatePrResult();
@@ -359,7 +387,8 @@ export async function createPullRequest(
   const response = await invoke<BackendRepoActionResult>("create_pull_request", {
     sessionId,
     title: title ?? null,
-    body: body ?? null
+    body: body ?? null,
+    ...remoteArgs(remote)
   });
   return {
     ok: response.ok,
@@ -373,7 +402,8 @@ export async function createPullRequest(
 export async function mergePullRequest(
   sessionId: string,
   pullRequestNumber?: number,
-  mergeMethod?: string
+  mergeMethod?: string,
+  remote?: RemoteConnection
 ): Promise<RepoActionResult> {
   if (!canInvokeTauri()) {
     return mockMergePrResult();
@@ -381,7 +411,8 @@ export async function mergePullRequest(
   const response = await invoke<BackendRepoActionResult>("merge_pull_request", {
     sessionId,
     pullRequestNumber: pullRequestNumber ?? null,
-    mergeMethod: mergeMethod ?? null
+    mergeMethod: mergeMethod ?? null,
+    ...remoteArgs(remote)
   });
   return {
     ok: response.ok,
@@ -392,33 +423,97 @@ export async function mergePullRequest(
   };
 }
 
-export async function loadSettingsSnapshot(): Promise<SettingsSnapshot> {
+export async function loadSettingsSnapshot(remote?: RemoteConnection): Promise<SettingsSnapshot> {
   if (!canInvokeTauri()) {
     return mockSettingsSnapshot;
   }
-  return invoke<BackendSettingsSnapshot>("load_settings_snapshot");
+  return invoke<BackendSettingsSnapshot>("load_settings_snapshot", remoteArgs(remote));
 }
 
-export async function loginWithOauth(providerId: string): Promise<SettingsSnapshot> {
-  if (!canInvokeTauri()) {
-    return mockSettingsSnapshot;
-  }
-  return invoke<BackendSettingsSnapshot>("login_with_oauth", { providerId });
-}
-
-export async function loginWithApiKey(
+export async function loginWithOauth(
   providerId: string,
-  apiKey: string
+  remote?: RemoteConnection
 ): Promise<SettingsSnapshot> {
   if (!canInvokeTauri()) {
     return mockSettingsSnapshot;
   }
-  return invoke<BackendSettingsSnapshot>("login_with_api_key", { providerId, apiKey });
+  return invoke<BackendSettingsSnapshot>("login_with_oauth", {
+    providerId,
+    ...remoteArgs(remote)
+  });
 }
 
-export async function logoutProvider(providerId: string): Promise<SettingsSnapshot> {
+export async function loginWithApiKey(
+  providerId: string,
+  apiKey: string,
+  remote?: RemoteConnection
+): Promise<SettingsSnapshot> {
   if (!canInvokeTauri()) {
     return mockSettingsSnapshot;
   }
-  return invoke<BackendSettingsSnapshot>("logout_provider", { providerId });
+  return invoke<BackendSettingsSnapshot>("login_with_api_key", {
+    providerId,
+    apiKey,
+    ...remoteArgs(remote)
+  });
+}
+
+export async function logoutProvider(
+  providerId: string,
+  remote?: RemoteConnection
+): Promise<SettingsSnapshot> {
+  if (!canInvokeTauri()) {
+    return mockSettingsSnapshot;
+  }
+  return invoke<BackendSettingsSnapshot>("logout_provider", {
+    providerId,
+    ...remoteArgs(remote)
+  });
+}
+
+export async function runRemoteBash(
+  remote: RemoteConnection,
+  command: string
+): Promise<RemoteOperation> {
+  if (!canInvokeTauri()) {
+    return { success: true, stdout: "mock remote bash\n", stderr: "" };
+  }
+  return invoke<BackendRemoteOperation>("run_remote_bash", {
+    remoteTarget: remote.target,
+    remoteCwd: remote.cwd || null,
+    remotePassword: remote.password || null,
+    command
+  });
+}
+
+export async function readRemoteFile(
+  remote: RemoteConnection,
+  path: string
+): Promise<RemoteOperation> {
+  if (!canInvokeTauri()) {
+    return { success: true, stdout: "mock remote file\n", stderr: "" };
+  }
+  return invoke<BackendRemoteOperation>("read_remote_file", {
+    remoteTarget: remote.target,
+    remoteCwd: remote.cwd || null,
+    remotePassword: remote.password || null,
+    path
+  });
+}
+
+export async function writeRemoteFile(
+  remote: RemoteConnection,
+  path: string,
+  contents: string
+): Promise<RemoteOperation> {
+  if (!canInvokeTauri()) {
+    return { success: true, stdout: "", stderr: "" };
+  }
+  return invoke<BackendRemoteOperation>("write_remote_file", {
+    remoteTarget: remote.target,
+    remoteCwd: remote.cwd || null,
+    remotePassword: remote.password || null,
+    path,
+    contentsBase64: btoa(unescape(encodeURIComponent(contents)))
+  });
 }

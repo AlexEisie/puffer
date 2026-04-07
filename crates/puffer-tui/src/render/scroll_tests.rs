@@ -11,7 +11,9 @@ fn render_scrolls_top_panel_with_transcript() {
     for index in 0..18 {
         state.push_message(
             MessageRole::Assistant,
-            &format!("assistant line {index}\nthis line keeps the transcript tall enough to scroll"),
+            &format!(
+                "assistant line {index}\nthis line keeps the transcript tall enough to scroll"
+            ),
         );
     }
     let resources = tests::sample_resources();

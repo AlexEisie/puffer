@@ -1,4 +1,5 @@
 use puffer_config::{ensure_workspace_dirs, ConfigPaths};
+use puffer_provider_registry::{OAuthCredential, StoredCredential};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -81,6 +82,109 @@ fn resume_help_mentions_the_tui() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Resume a stored session in the TUI"));
+}
+
+#[test]
+fn remote_help_mentions_ssh_launch() {
+    let (_tempdir, workspace, puffer_home) = configured_workspace();
+    let output = run_puffer(&workspace, &puffer_home, &["remote", "--help"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Launch Puffer on a remote host over SSH"));
+    assert!(stdout.contains("<TARGET>"));
+    assert!(stdout.contains("--cwd"));
+}
+
+#[test]
+fn desktop_api_help_is_hidden_but_available() {
+    let (_tempdir, workspace, puffer_home) = configured_workspace();
+    let output = run_puffer(&workspace, &puffer_home, &["desktop-api", "--help"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("login-api-key"));
+    assert!(stdout.contains("logout"));
+    assert!(stdout.contains("session-groups"));
+    assert!(stdout.contains("session-detail"));
+    assert!(stdout.contains("settings-snapshot"));
+}
+
+#[test]
+fn desktop_api_auth_round_trip_updates_snapshot() {
+    let (_tempdir, workspace, puffer_home) = configured_workspace();
+
+    let before = run_puffer(
+        &workspace,
+        &puffer_home,
+        &["desktop-api", "settings-snapshot"],
+    );
+    assert!(before.status.success(), "{before:?}");
+    let before_text = String::from_utf8_lossy(&before.stdout);
+    assert!(before_text.contains("\"auth\": []"), "{before_text}");
+
+    let login = run_puffer(
+        &workspace,
+        &puffer_home,
+        &[
+            "desktop-api",
+            "login-api-key",
+            "anthropic",
+            "--api-key",
+            "sk-test-desktop-api",
+        ],
+    );
+    assert!(login.status.success(), "{login:?}");
+    let login_text = String::from_utf8_lossy(&login.stdout);
+    assert!(
+        login_text.contains("\"providerId\": \"anthropic\""),
+        "{login_text}"
+    );
+    assert!(login_text.contains("\"kind\": \"api_key\""), "{login_text}");
+
+    let logout = run_puffer(
+        &workspace,
+        &puffer_home,
+        &["desktop-api", "logout", "anthropic"],
+    );
+    assert!(logout.status.success(), "{logout:?}");
+    let logout_text = String::from_utf8_lossy(&logout.stdout);
+    assert!(logout_text.contains("\"auth\": []"), "{logout_text}");
+}
+
+#[test]
+fn desktop_api_store_oauth_credential_updates_snapshot() {
+    let (_tempdir, workspace, puffer_home) = configured_workspace();
+    let credential_json = serde_json::to_string(&StoredCredential::OAuth(OAuthCredential {
+        access_token: "access-token".to_string(),
+        refresh_token: "refresh-token".to_string(),
+        expires_at_ms: 1_700_000_000_000,
+        email: Some("remote@example.com".to_string()),
+        scopes: vec!["openid".to_string()],
+        ..OAuthCredential::default()
+    }))
+    .expect("serialize oauth credential");
+
+    let store = run_puffer(
+        &workspace,
+        &puffer_home,
+        &[
+            "desktop-api",
+            "store-credential",
+            "openai",
+            "--credential-json",
+            &credential_json,
+        ],
+    );
+    assert!(store.status.success(), "{store:?}");
+    let store_text = String::from_utf8_lossy(&store.stdout);
+    assert!(
+        store_text.contains("\"providerId\": \"openai\""),
+        "{store_text}"
+    );
+    assert!(store_text.contains("\"kind\": \"oauth\""), "{store_text}");
+    assert!(
+        store_text.contains("\"email\": \"remote@example.com\""),
+        "{store_text}"
+    );
 }
 
 #[test]
