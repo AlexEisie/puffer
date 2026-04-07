@@ -33,6 +33,10 @@ use crate::{
 };
 use crate::{OverlayState, TuiState};
 pub(crate) use flow_auth::{handle_auth_command, run_embedded_auth_login};
+#[path = "flow_loop.rs"]
+mod flow_loop;
+pub(crate) use flow_loop::{advance_loop_after_turn, check_loop_interval};
+use flow_loop::try_handle_loop_command;
 
 /// Opens a TUI overlay for slash commands that map to picker UI.
 pub(crate) fn try_open_overlay(
@@ -224,6 +228,9 @@ pub(crate) fn handle_prompt_submit(
 ) -> Result<()> {
     let submitted = submitted.trim().to_string();
     if submitted.is_empty() {
+        return Ok(());
+    }
+    if try_handle_loop_command(state, session_store, tui, &submitted)? {
         return Ok(());
     }
     if tui.has_pending_submit() && is_provider_prompt_input(&submitted) {
