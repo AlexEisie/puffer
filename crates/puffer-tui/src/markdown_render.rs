@@ -1,8 +1,13 @@
 use pulldown_cmark::{
     CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
 };
+use dirs::home_dir;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
+use regex_lite::Regex;
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+use url::Url;
 
 #[derive(Clone, Copy)]
 struct MarkdownStyles {
@@ -62,12 +67,39 @@ impl IndentContext {
     }
 }
 
+#[derive(Clone, Debug)]
+struct LinkState {
+    destination: String,
+    show_destination: bool,
+    local_target_display: Option<String>,
+}
+
+pub(crate) static COLON_LOCATION_SUFFIX_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r":\d+(?::\d+)?(?:[-–]\d+(?::\d+)?)?$").expect("valid regex"));
+pub(crate) static HASH_LOCATION_SUFFIX_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^L\d+(?:C\d+)?(?:-L\d+(?:C\d+)?)?$").expect("valid regex"));
+
 /// Renders markdown into styled text using the same event-driven structure Codex uses.
 pub(crate) fn render_markdown_text(input: &str) -> Text<'static> {
+    render_markdown_text_with_width(input, None)
+}
+
+/// Renders markdown into styled text with an optional wrap width.
+pub(crate) fn render_markdown_text_with_width(input: &str, width: Option<usize>) -> Text<'static> {
+    let cwd = std::env::current_dir().ok();
+    render_markdown_text_with_width_and_cwd(input, width, cwd.as_deref())
+}
+
+/// Renders markdown into styled text with explicit wrap width and working directory context.
+pub(crate) fn render_markdown_text_with_width_and_cwd(
+    input: &str,
+    _width: Option<usize>,
+    cwd: Option<&Path>,
+) -> Text<'static> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     let parser = Parser::new_ext(input, options);
-    let mut writer = Writer::new(parser);
+    let mut writer = Writer::new(parser, cwd);
     writer.run();
     writer.text
 }
@@ -82,7 +114,7 @@ where
     inline_styles: Vec<Style>,
     indent_stack: Vec<IndentContext>,
     list_indices: Vec<Option<u64>>,
-    link_destination: Option<String>,
+    link: Option<LinkState>,
     needs_newline: bool,
     pending_marker_line: bool,
     in_code_block: bool,
@@ -91,13 +123,14 @@ where
     current_line_content: Option<Line<'static>>,
     current_initial_indent: Vec<Span<'static>>,
     current_line_style: Style,
+    cwd: Option<PathBuf>,
 }
 
 impl<'a, I> Writer<'a, I>
 where
     I: Iterator<Item = Event<'a>>,
 {
-    fn new(iter: I) -> Self {
+    fn new(iter: I, cwd: Option<&Path>) -> Self {
         Self {
             iter,
             text: Text::default(),
@@ -105,7 +138,7 @@ where
             inline_styles: Vec::new(),
             indent_stack: Vec::new(),
             list_indices: Vec::new(),
-            link_destination: None,
+            link: None,
             needs_newline: false,
             pending_marker_line: false,
             in_code_block: false,
@@ -114,6 +147,7 @@ where
             current_line_content: None,
             current_initial_indent: Vec::new(),
             current_line_style: Style::default(),
+            cwd: cwd.map(Path::to_path_buf),
         }
     }
 
@@ -163,7 +197,7 @@ where
             Tag::Emphasis => self.push_inline_style(self.styles.emphasis),
             Tag::Strong => self.push_inline_style(self.styles.strong),
             Tag::Strikethrough => self.push_inline_style(self.styles.strikethrough),
-            Tag::Link { dest_url, .. } => self.link_destination = Some(dest_url.to_string()),
+            Tag::Link { dest_url, .. } => self.push_link(dest_url.to_string()),
             Tag::HtmlBlock
             | Tag::FootnoteDefinition(_)
             | Tag::Table(_)
@@ -347,6 +381,9 @@ where
     }
 
     fn text(&mut self, text: CowStr<'a>) {
+        if self.suppressing_local_link_label() {
+            return;
+        }
         if self.in_code_block {
             self.code_block_buffer.push_str(&text);
             return;
@@ -373,6 +410,9 @@ where
     }
 
     fn code(&mut self, code: CowStr<'a>) {
+        if self.suppressing_local_link_label() {
+            return;
+        }
         if self.pending_marker_line {
             self.push_line(Line::default());
             self.pending_marker_line = false;
@@ -381,6 +421,9 @@ where
     }
 
     fn html(&mut self, html: CowStr<'a>) {
+        if self.suppressing_local_link_label() {
+            return;
+        }
         if self.pending_marker_line {
             self.push_line(Line::default());
             self.pending_marker_line = false;
@@ -423,11 +466,35 @@ where
     }
 
     fn pop_link(&mut self) {
-        if let Some(destination) = self.link_destination.take() {
-            self.push_span(Span::raw(" ("));
-            self.push_span(Span::styled(destination, self.styles.link));
-            self.push_span(Span::raw(")"));
+        if let Some(link) = self.link.take() {
+            if link.show_destination {
+                self.push_span(Span::raw(" ("));
+                self.push_span(Span::styled(link.destination, self.styles.link));
+                self.push_span(Span::raw(")"));
+            } else if let Some(local_target_display) = link.local_target_display {
+                self.push_span(Span::styled(local_target_display, self.styles.code));
+            }
         }
+    }
+
+    fn push_link(&mut self, destination: String) {
+        let is_local = is_local_path_like_link(&destination);
+        self.link = Some(LinkState {
+            show_destination: !is_local,
+            local_target_display: if is_local {
+                render_local_link_target(&destination, self.cwd.as_deref())
+            } else {
+                None
+            },
+            destination,
+        });
+    }
+
+    fn suppressing_local_link_label(&self) -> bool {
+        self.link
+            .as_ref()
+            .and_then(|link| link.local_target_display.as_ref())
+            .is_some()
     }
 
     fn flush_current_line(&mut self) {
@@ -510,6 +577,94 @@ where
 
         prefix
     }
+}
+
+fn is_local_path_like_link(destination: &str) -> bool {
+    destination.starts_with("file://")
+        || destination.starts_with('/')
+        || destination.starts_with("~/")
+        || destination.starts_with("./")
+        || destination.starts_with("../")
+        || matches!(
+            destination.as_bytes(),
+            [drive, b':', separator, ..]
+                if drive.is_ascii_alphabetic() && matches!(separator, b'/' | b'\\')
+        )
+}
+
+fn render_local_link_target(destination: &str, cwd: Option<&Path>) -> Option<String> {
+    if !is_local_path_like_link(destination) {
+        return None;
+    }
+    let (path_text, suffix) = parse_local_link_target(destination)?;
+    let mut rendered = display_local_link_path(&path_text, cwd);
+    if let Some(suffix) = suffix {
+        rendered.push_str(&suffix);
+    }
+    Some(rendered)
+}
+
+fn parse_local_link_target(destination: &str) -> Option<(String, Option<String>)> {
+    if destination.starts_with("file://") {
+        let url = Url::parse(destination).ok()?;
+        let mut path_text = url.to_file_path().ok()?.to_string_lossy().to_string();
+        path_text = normalize_local_link_path_text(&path_text);
+        let suffix = url
+            .fragment()
+            .filter(|fragment| HASH_LOCATION_SUFFIX_RE.is_match(fragment))
+            .map(|fragment| format!("#{fragment}"));
+        return Some((path_text, suffix));
+    }
+
+    let mut path_text = destination;
+    let mut suffix = None;
+    if let Some((candidate, fragment)) = destination.rsplit_once('#') {
+        if HASH_LOCATION_SUFFIX_RE.is_match(fragment) {
+            path_text = candidate;
+            suffix = Some(format!("#{fragment}"));
+        }
+    }
+    if suffix.is_none() {
+        if let Some(found) = COLON_LOCATION_SUFFIX_RE.find(path_text) {
+            if found.end() == path_text.len() {
+                suffix = Some(found.as_str().to_string());
+                path_text = &path_text[..found.start()];
+            }
+        }
+    }
+
+    Some((expand_local_link_path(path_text), suffix))
+}
+
+fn expand_local_link_path(path_text: &str) -> String {
+    if let Some(rest) = path_text.strip_prefix("~/") {
+        if let Some(home) = home_dir() {
+            return normalize_local_link_path_text(&home.join(rest).to_string_lossy());
+        }
+    }
+    normalize_local_link_path_text(path_text)
+}
+
+fn normalize_local_link_path_text(path_text: &str) -> String {
+    if let Some(rest) = path_text.strip_prefix("\\\\") {
+        format!("//{}", rest.replace('\\', "/").trim_start_matches('/'))
+    } else {
+        path_text.replace('\\', "/")
+    }
+}
+
+fn display_local_link_path(path_text: &str, cwd: Option<&Path>) -> String {
+    if let Some(cwd) = cwd {
+        let cwd_text = normalize_local_link_path_text(&cwd.to_string_lossy());
+        let cwd_prefix = cwd_text.trim_end_matches('/');
+        if let Some(stripped) = path_text.strip_prefix(cwd_prefix) {
+            let stripped = stripped.trim_start_matches('/');
+            if !stripped.is_empty() {
+                return stripped.to_string();
+            }
+        }
+    }
+    path_text.to_string()
 }
 
 fn extract_code_lang(lang: &str) -> Option<String> {

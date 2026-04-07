@@ -1,8 +1,21 @@
-use ratatui::text::Text;
+use ratatui::text::{Line, Text};
+use std::path::Path;
 
 /// Renders markdown into styled `ratatui::Text`.
 pub(crate) fn render_markdown(input: &str) -> Text<'static> {
     crate::markdown_render::render_markdown_text(input)
+}
+
+/// Appends rendered markdown lines while resolving local file-link display relative to `cwd`.
+pub(crate) fn append_markdown(
+    markdown_source: &str,
+    width: Option<usize>,
+    cwd: Option<&Path>,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let rendered =
+        crate::markdown_render::render_markdown_text_with_width_and_cwd(markdown_source, width, cwd);
+    lines.extend(rendered.lines);
 }
 
 #[cfg(test)]
