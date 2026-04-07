@@ -132,6 +132,12 @@
     justify-content: space-between;
     gap: 1rem;
     align-items: start;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    padding-bottom: 0.65rem;
+    background:
+      linear-gradient(180deg, rgba(250, 246, 240, 0.98), rgba(250, 246, 240, 0.92));
   }
 
   h3 {
@@ -193,6 +199,9 @@
     box-shadow: 0 0 0 1px #d0d7de inset;
     color: #57606a;
     font-size: 0.84rem;
+    position: sticky;
+    top: 3.9rem;
+    z-index: 2;
   }
 
   .file-path {

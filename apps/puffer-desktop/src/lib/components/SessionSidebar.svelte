@@ -29,15 +29,31 @@
     return activeSessionId !== null && group.sessions.some((session) => session.id === activeSessionId);
   }
 
+  function sortSessions(sessions: SessionListItem[]): SessionListItem[] {
+    return sessions.slice().sort((left, right) => {
+      const leftActive = left.id === activeSessionId;
+      const rightActive = right.id === activeSessionId;
+      if (leftActive !== rightActive) {
+        return leftActive ? -1 : 1;
+      }
+      return right.updatedAtMs - left.updatedAtMs;
+    });
+  }
+
   $: visibleGroups = groups
-    .slice()
+    .map((group) => ({
+      ...group,
+      sessions: sortSessions(group.sessions)
+    }))
     .sort((left, right) => {
       const leftActive = groupContainsActiveSession(left);
       const rightActive = groupContainsActiveSession(right);
       if (leftActive !== rightActive) {
         return leftActive ? -1 : 1;
       }
-      return left.label.localeCompare(right.label);
+      const leftLatest = Math.max(...left.sessions.map((session) => session.updatedAtMs));
+      const rightLatest = Math.max(...right.sessions.map((session) => session.updatedAtMs));
+      return rightLatest - leftLatest;
     });
   $: totalSessions = groups.reduce((count, group) => count + group.sessions.length, 0);
   $: {

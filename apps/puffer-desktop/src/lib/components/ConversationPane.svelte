@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import type {
     PermissionTimelineItem,
     SessionListItem,
@@ -16,6 +17,8 @@
 
   let draft = "";
   let collapsedIds = new Set<string>();
+  let threadElement: HTMLDivElement | null = null;
+  let previousSessionId: string | null = null;
 
   function transcriptText(item: TimelineItem): string {
     switch (item.kind) {
@@ -80,13 +83,15 @@
     collapsedIds = next;
   }
 
-  function submitDraft() {
+  async function submitDraft() {
     const trimmed = draft.trim();
     if (!trimmed) {
       return;
     }
     onSubmitMessage(trimmed);
     draft = "";
+    await tick();
+    threadElement?.scrollTo({ top: threadElement.scrollHeight, behavior: "smooth" });
   }
 
   function handleComposerKeydown(event: KeyboardEvent) {
@@ -125,6 +130,12 @@
     }
     collapsedIds = next;
   }
+  $: if (session?.id !== previousSessionId) {
+    previousSessionId = session?.id ?? null;
+    void tick().then(() => {
+      threadElement?.scrollTo({ top: 0, behavior: "auto" });
+    });
+  }
 </script>
 
 <section class="conversation">
@@ -139,7 +150,7 @@
     </p>
   </header>
 
-  <div class="thread">
+  <div bind:this={threadElement} class="thread">
     {#if loading}
       <p class="state">Loading conversation...</p>
     {:else if !transcriptItems.length}
