@@ -1,4 +1,5 @@
 mod helpers;
+pub(crate) mod loop_status;
 mod overlay_content;
 mod overlay_list;
 mod panes;
@@ -52,6 +53,7 @@ thread_local! {
     static ACTIVE_TOOL_DETAILS_EXPANDED: RefCell<bool> = const { RefCell::new(false) };
     static ACTIVE_FOLLOW_OUTPUT: RefCell<bool> = const { RefCell::new(true) };
     static ACTIVE_TRANSCRIPT_VIEWPORT: RefCell<Option<Rect>> = const { RefCell::new(None) };
+    static ACTIVE_LOOP_STATE: RefCell<Option<crate::state::LoopState>> = RefCell::new(None);
 }
 
 /// Sets the active overlay rendered by the TUI on the next draw.
@@ -80,6 +82,11 @@ pub(crate) fn set_tool_details_expanded(expanded: bool) {
 /// Sets whether the transcript should stay pinned to the latest output.
 pub(crate) fn set_follow_output(follow_output: bool) {
     ACTIVE_FOLLOW_OUTPUT.with(|value| *value.borrow_mut() = follow_output);
+}
+
+/// Sets the active loop state for the current frame.
+pub(crate) fn set_active_loop_state(loop_state: Option<crate::state::LoopState>) {
+    ACTIVE_LOOP_STATE.with(|value| *value.borrow_mut() = loop_state);
 }
 
 /// Returns the current transcript viewport measured during the last draw.
@@ -141,11 +148,14 @@ pub(crate) fn render(
         )
         .min(frame.area().height.saturating_sub(footer_height + 1))
     };
+    let loop_box_height =
+        ACTIVE_LOOP_STATE.with(|value| loop_status::loop_status_height(&value.borrow()));
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(header_height),
             Constraint::Min(8),
+            Constraint::Length(loop_box_height),
             Constraint::Length(footer_height),
         ])
         .split(frame.area());
@@ -236,10 +246,19 @@ pub(crate) fn render(
             ]
             .as_ref()
         })
-        .split(layout[2]);
+        .split(layout[3]);
+
+    // Render the loop status box when an active loop is present.
+    if loop_box_height > 0 {
+        ACTIVE_LOOP_STATE.with(|value| {
+            if let Some(ref ls) = *value.borrow() {
+                loop_status::render_loop_status_box(frame, layout[2], ls);
+            }
+        });
+    }
 
     frame.render_widget(
-        Paragraph::new(separator_line(layout[2].width))
+        Paragraph::new(separator_line(layout[3].width))
             .style(Style::default().add_modifier(Modifier::DIM)),
         footer[0],
     );
