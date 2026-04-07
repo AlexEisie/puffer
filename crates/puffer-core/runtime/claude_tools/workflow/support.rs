@@ -1,12 +1,14 @@
 use super::store::{
-    agents_path, append_agent_message, detect_powershell_binary, git_ahead_count, git_dirty,
-    git_head_commit, git_toplevel, is_git_repo, load_store, messages_path, next_task_id, now_ms,
-    resolve_recipients, save_store, task_output_path, tasks_path, teams_path, todos_path,
-    validate_ask_user_questions, workflow_root, worktrees_path, AgentInput, AgentStore,
-    AskUserQuestionInput, ConfigInput, EnterWorktreeInput, ExitWorktreeInput, MessageStore,
-    PowerShellInput, SendMessageInput, StoredAgent, StoredMessage, StoredTask, StoredTeam,
-    StoredTodo, StoredWorktree, TaskStore, TeamCreateInput, TeamStore, TodoStore, TodoWriteInput,
-    WorktreeStore,
+    agents_path, append_agent_message, claude_task_dir, detect_powershell_binary,
+    find_team_for_session, git_ahead_count, git_dirty, git_head_commit, git_toplevel, is_git_repo,
+    load_store, messages_path, next_task_id, now_ms, register_team_member,
+    remove_claude_team_artifacts, resolve_recipients, save_store, task_output_path, tasks_path,
+    team_lead_agent_id, teams_path, todos_path, validate_ask_user_questions, workflow_root,
+    worktrees_path, write_claude_team_file, AgentInput, AgentStore, AskUserQuestionInput,
+    ClaudeTeamFile, ClaudeTeamMember, ConfigInput, EnterWorktreeInput, ExitWorktreeInput,
+    MessageStore, PowerShellInput, SendMessageInput, StoredAgent, StoredMessage, StoredTask,
+    StoredTeam, StoredTodo, StoredWorktree, TaskStore, TeamCreateInput, TeamStore, TodoStore,
+    TodoWriteInput, WorktreeStore,
 };
 use super::task_runtime::{terminal_task_status, validate_todos, wait_for_child_output};
 use crate::config_settings::{
@@ -22,6 +24,28 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use uuid::Uuid;
+
+fn current_team_name(state: &AppState) -> Option<&str> {
+    state
+        .active_team_name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+}
+
+fn unique_team_name(teams: &TeamStore, requested: &str) -> String {
+    let trimmed = requested.trim();
+    if !teams.teams.iter().any(|team| team.team_name == trimmed) {
+        return trimmed.to_string();
+    }
+    let mut suffix = 2_u64;
+    loop {
+        let candidate = format!("{trimmed}-{suffix}");
+        if !teams.teams.iter().any(|team| team.team_name == candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
 
 /// Executes the live `Agent` workflow tool.
 pub(super) fn execute_agent(state: &mut AppState, _cwd: &Path, input: Value) -> Result<String> {
@@ -61,17 +85,21 @@ pub(super) fn execute_agent(state: &mut AppState, _cwd: &Path, input: Value) -> 
     save_store(&agents_path(store_cwd), &agents)?;
 
     if let Some(team_name) = parsed.team_name.as_deref() {
-        let mut teams = load_store::<TeamStore>(&teams_path(store_cwd))?;
-        if let Some(team) = teams
-            .teams
-            .iter_mut()
-            .find(|team| team.team_name == team_name)
-        {
-            if !team.members.iter().any(|member| member == &agent_id) {
-                team.members.push(agent_id.clone());
-            }
-            save_store(&teams_path(store_cwd), &teams)?;
-        }
+        let member = ClaudeTeamMember {
+            agent_id: agent_id.clone(),
+            name: parsed.name.clone().unwrap_or_else(|| agent_id.clone()),
+            agent_type: parsed
+                .subagent_type
+                .clone()
+                .unwrap_or_else(|| "general-purpose".to_string()),
+            joined_at: now_ms(),
+            model: parsed.model.clone(),
+            cwd: parsed
+                .cwd
+                .clone()
+                .unwrap_or_else(|| store_cwd.display().to_string()),
+        };
+        register_team_member(store_cwd, team_name, member)?;
     }
 
     state.record_task("Agent", parsed.description.clone(), true);
@@ -105,7 +133,7 @@ pub(super) fn execute_send_message(
         bail!("SendMessage plain-text messages must not be empty");
     }
     let store_cwd = state.session.cwd.as_path();
-    let recipients = resolve_recipients(store_cwd, &parsed.to)?;
+    let recipients = resolve_recipients(store_cwd, state.active_team_name.as_deref(), &parsed.to)?;
     if recipients.is_empty() {
         bail!("SendMessage could not resolve recipient `{}`", parsed.to);
     }
@@ -146,84 +174,155 @@ pub(super) fn execute_send_message(
 /// Executes the live `TeamCreate` workflow tool.
 pub(super) fn execute_team_create(
     state: &mut AppState,
-    cwd: &Path,
+    _cwd: &Path,
     input: Value,
 ) -> Result<String> {
-    let _ = cwd;
     let parsed: TeamCreateInput =
         serde_json::from_value(input).context("invalid TeamCreate input")?;
-    let mut teams = load_store::<TeamStore>(&teams_path(state.session.cwd.as_path()))?;
-    if teams
-        .teams
-        .iter()
-        .any(|team| team.team_name == parsed.team_name)
-    {
-        bail!("team `{}` already exists", parsed.team_name);
+    let requested_team_name = parsed.team_name.trim();
+    if requested_team_name.is_empty() {
+        bail!("team_name is required for TeamCreate");
     }
-    let workflow = workflow_root(state.session.cwd.as_path())?;
-    let team_dir = workflow.join("teams").join(&parsed.team_name);
-    let task_dir = workflow.join("team_tasks").join(&parsed.team_name);
+    let store_cwd = state.session.cwd.as_path();
+    if let Some(existing_team_name) = current_team_name(state).map(str::to_string).or_else(|| {
+        find_team_for_session(store_cwd, &state.session.id.to_string())
+            .ok()
+            .flatten()
+            .map(|team| team.team_name)
+    }) {
+        bail!(
+            "Already leading team \"{existing_team_name}\". A leader can only manage one team at a time. Use TeamDelete to end the current team before creating a new one."
+        );
+    }
+    let mut teams = load_store::<TeamStore>(&teams_path(store_cwd))?;
+    let team_name = unique_team_name(&teams, requested_team_name);
+    let workflow = workflow_root(store_cwd)?;
+    let team_dir = workflow.join("teams").join(&team_name);
+    let task_dir = workflow.join("team_tasks").join(&team_name);
     fs::create_dir_all(&team_dir)?;
     fs::create_dir_all(&task_dir)?;
-    teams.teams.push(StoredTeam {
-        team_name: parsed.team_name.clone(),
+    let lead_agent_id = team_lead_agent_id(&team_name);
+    let lead_agent_type = parsed
+        .agent_type
+        .clone()
+        .unwrap_or_else(|| "team-lead".to_string());
+    let team_file = ClaudeTeamFile {
+        name: team_name.clone(),
         description: parsed.description.clone(),
-        agent_type: parsed.agent_type.clone(),
-        members: Vec::new(),
+        created_at: now_ms(),
+        lead_agent_id: lead_agent_id.clone(),
+        lead_session_id: state.session.id.to_string(),
+        members: vec![ClaudeTeamMember {
+            agent_id: lead_agent_id.clone(),
+            name: "team-lead".to_string(),
+            agent_type: lead_agent_type.clone(),
+            joined_at: now_ms(),
+            model: state.current_model.clone(),
+            cwd: store_cwd.display().to_string(),
+        }],
+    };
+    let team_file_path = write_claude_team_file(store_cwd, &team_file)?;
+    let _ = claude_task_dir(store_cwd, &team_name)?;
+    teams.teams.push(StoredTeam {
+        team_name: team_name.clone(),
+        description: parsed.description.clone(),
+        agent_type: Some(lead_agent_type),
+        members: vec![lead_agent_id.clone()],
+        lead_session_id: Some(state.session.id.to_string()),
+        lead_agent_id: Some(lead_agent_id.clone()),
     });
-    save_store(&teams_path(state.session.cwd.as_path()), &teams)?;
+    save_store(&teams_path(store_cwd), &teams)?;
+    state.active_team_name = Some(team_name.clone());
     Ok(serde_json::to_string_pretty(&json!({
-        "team_name": parsed.team_name,
-        "description": parsed.description,
-        "agent_type": parsed.agent_type,
-        "members": [],
-        "teamDir": team_dir.display().to_string(),
-        "taskDir": task_dir.display().to_string(),
+        "team_name": team_name,
+        "team_file_path": team_file_path.display().to_string(),
+        "lead_agent_id": lead_agent_id,
     }))?)
 }
 
 /// Executes the live `TeamDelete` workflow tool.
 pub(super) fn execute_team_delete(
     state: &mut AppState,
-    cwd: &Path,
+    _cwd: &Path,
     _input: Value,
 ) -> Result<String> {
-    let _ = cwd;
-    let mut teams = load_store::<TeamStore>(&teams_path(state.session.cwd.as_path()))?;
-    let agents = load_store::<AgentStore>(&agents_path(state.session.cwd.as_path()))?;
-    let teams_with_active_members = teams
+    let store_cwd = state.session.cwd.as_path();
+    let team_name = current_team_name(state).map(str::to_string).or_else(|| {
+        find_team_for_session(store_cwd, &state.session.id.to_string())
+            .ok()
+            .flatten()
+            .map(|team| team.team_name)
+    });
+    let Some(team_name) = team_name else {
+        state.active_team_name = None;
+        return Ok(serde_json::to_string_pretty(&json!({
+            "success": true,
+            "message": "No team name found, nothing to clean up",
+            "team_name": Value::Null,
+        }))?);
+    };
+    let mut teams = load_store::<TeamStore>(&teams_path(store_cwd))?;
+    let Some(index) = teams
         .teams
         .iter()
-        .filter(|team| {
-            team.members.iter().any(|member| {
-                agents
-                    .agents
-                    .iter()
-                    .find(|agent| &agent.agent_id == member)
-                    .is_some_and(|agent| !terminal_task_status(&agent.status))
-            })
+        .position(|team| team.team_name == team_name)
+    else {
+        state.active_team_name = None;
+        return Ok(serde_json::to_string_pretty(&json!({
+            "success": true,
+            "message": format!("No stored team named \"{team_name}\" was found"),
+            "team_name": team_name,
+        }))?);
+    };
+    let team = teams.teams[index].clone();
+    let agents = load_store::<AgentStore>(&agents_path(store_cwd))?;
+    let lead_agent_id = team
+        .lead_agent_id
+        .clone()
+        .unwrap_or_else(|| team_lead_agent_id(&team.team_name));
+    let active_members = team
+        .members
+        .iter()
+        .filter(|member| member.as_str() != lead_agent_id)
+        .filter_map(|member| {
+            agents
+                .agents
+                .iter()
+                .find(|agent| &agent.agent_id == member)
+                .filter(|agent| !terminal_task_status(&agent.status))
+                .map(|agent| agent.name.clone().unwrap_or_else(|| agent.agent_id.clone()))
         })
-        .map(|team| team.team_name.clone())
         .collect::<Vec<_>>();
-    if !teams_with_active_members.is_empty() {
-        bail!(
-            "cannot delete teams with active members: {}",
-            teams_with_active_members.join(", ")
-        );
+    if !active_members.is_empty() {
+        return Ok(serde_json::to_string_pretty(&json!({
+            "success": false,
+            "message": format!(
+                "Cannot cleanup team with {} active member(s): {}. Use requestShutdown to gracefully terminate teammates first.",
+                active_members.len(),
+                active_members.join(", "),
+            ),
+            "team_name": team.team_name,
+        }))?);
     }
-    let deleted = teams
-        .teams
-        .drain(..)
-        .map(|team| team.team_name)
-        .collect::<Vec<_>>();
-    save_store(&teams_path(state.session.cwd.as_path()), &teams)?;
-    let workflow = workflow_root(state.session.cwd.as_path())?;
-    for name in &deleted {
-        let _ = fs::remove_dir_all(workflow.join("teams").join(name));
-        let _ = fs::remove_dir_all(workflow.join("team_tasks").join(name));
-    }
+
+    teams.teams.remove(index);
+    save_store(&teams_path(store_cwd), &teams)?;
+    let mut agents = agents;
+    agents
+        .agents
+        .retain(|agent| agent.team_name.as_deref() != Some(team.team_name.as_str()));
+    save_store(&agents_path(store_cwd), &agents)?;
+
+    let workflow = workflow_root(store_cwd)?;
+    let _ = fs::remove_dir_all(workflow.join("teams").join(&team.team_name));
+    let _ = fs::remove_dir_all(workflow.join("team_tasks").join(&team.team_name));
+    remove_claude_team_artifacts(store_cwd, &team.team_name)?;
+    state.active_team_name = None;
+
     Ok(serde_json::to_string_pretty(&json!({
-        "deleted": deleted
+        "success": true,
+        "message": format!("Cleaned up directories and worktrees for team \"{}\"", team.team_name),
+        "team_name": team.team_name,
     }))?)
 }
 

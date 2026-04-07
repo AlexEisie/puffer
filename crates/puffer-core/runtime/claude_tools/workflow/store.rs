@@ -73,6 +73,38 @@ pub(super) struct StoredTeam {
     pub(super) description: Option<String>,
     pub(super) agent_type: Option<String>,
     pub(super) members: Vec<String>,
+    #[serde(default)]
+    pub(super) lead_session_id: Option<String>,
+    #[serde(default)]
+    pub(super) lead_agent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub(crate) struct ClaudeTeamFile {
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) description: Option<String>,
+    #[serde(rename = "createdAt")]
+    pub(crate) created_at: u64,
+    #[serde(rename = "leadAgentId")]
+    pub(crate) lead_agent_id: String,
+    #[serde(rename = "leadSessionId")]
+    pub(crate) lead_session_id: String,
+    pub(crate) members: Vec<ClaudeTeamMember>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ClaudeTeamMember {
+    #[serde(rename = "agentId")]
+    pub(crate) agent_id: String,
+    pub(crate) name: String,
+    #[serde(rename = "agentType")]
+    pub(crate) agent_type: String,
+    #[serde(rename = "joinedAt")]
+    pub(crate) joined_at: u64,
+    #[serde(default)]
+    pub(crate) model: Option<String>,
+    pub(crate) cwd: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -340,12 +372,26 @@ pub(super) fn append_agent_message(output_file: &Path, message: &Value) -> Resul
         .with_context(|| format!("failed to write {}", output_file.display()))
 }
 
-pub(super) fn resolve_recipients(cwd: &Path, target: &str) -> Result<Vec<String>> {
+pub(super) fn resolve_recipients(
+    cwd: &Path,
+    active_team_name: Option<&str>,
+    target: &str,
+) -> Result<Vec<String>> {
     let target = target.trim();
     if target.is_empty() {
         return Ok(Vec::new());
     }
     if target == "*" {
+        if let Some(team_name) = active_team_name {
+            let teams = load_store::<TeamStore>(&teams_path(cwd))?;
+            if let Some(team) = teams
+                .teams
+                .iter()
+                .find(|team| team.team_name.eq_ignore_ascii_case(team_name))
+            {
+                return Ok(team.members.clone());
+            }
+        }
         let agents = load_store::<AgentStore>(&agents_path(cwd))?;
         return Ok(agents
             .agents
@@ -418,6 +464,14 @@ where
     fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))
 }
 
+fn home_root(paths: &ConfigPaths) -> PathBuf {
+    paths
+        .user_config_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| paths.user_config_dir.clone())
+}
+
 pub(super) fn workflow_root(cwd: &Path) -> Result<PathBuf> {
     let paths = ConfigPaths::discover(cwd);
     ensure_workspace_dirs(&paths)?;
@@ -426,8 +480,154 @@ pub(super) fn workflow_root(cwd: &Path) -> Result<PathBuf> {
     Ok(root)
 }
 
+pub(crate) fn team_lead_agent_id(team_name: &str) -> String {
+    format!("team-lead@{team_name}")
+}
+
+pub(crate) fn claude_dir(cwd: &Path) -> Result<PathBuf> {
+    let paths = ConfigPaths::discover(cwd);
+    ensure_workspace_dirs(&paths)?;
+    let root = home_root(&paths).join(".claude");
+    fs::create_dir_all(&root)?;
+    Ok(root)
+}
+
+pub(crate) fn claude_team_dir(cwd: &Path, team_name: &str) -> Result<PathBuf> {
+    let dir = claude_dir(cwd)?.join("teams").join(team_name);
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+pub(crate) fn claude_team_file_path(cwd: &Path, team_name: &str) -> Result<PathBuf> {
+    Ok(claude_team_dir(cwd, team_name)?.join("config.json"))
+}
+
+pub(crate) fn claude_task_dir(cwd: &Path, team_name: &str) -> Result<PathBuf> {
+    let dir = claude_dir(cwd)?.join("tasks").join(team_name);
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+pub(crate) fn write_claude_team_file(cwd: &Path, team_file: &ClaudeTeamFile) -> Result<PathBuf> {
+    let path = claude_team_file_path(cwd, &team_file.name)?;
+    save_store(&path, team_file)?;
+    Ok(path)
+}
+
+pub(crate) fn load_claude_team_file(cwd: &Path, team_name: &str) -> Result<Option<ClaudeTeamFile>> {
+    let path = claude_team_file_path(cwd, team_name)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(load_store::<ClaudeTeamFile>(&path)?))
+}
+
+pub(crate) fn remove_claude_team_artifacts(cwd: &Path, team_name: &str) -> Result<()> {
+    let claude_root = claude_dir(cwd)?;
+    let team_dir = claude_root.join("teams").join(team_name);
+    if team_dir.exists() {
+        fs::remove_dir_all(&team_dir)
+            .with_context(|| format!("failed to remove {}", team_dir.display()))?;
+    }
+    let task_dir = claude_root.join("tasks").join(team_name);
+    if task_dir.exists() {
+        fs::remove_dir_all(&task_dir)
+            .with_context(|| format!("failed to remove {}", task_dir.display()))?;
+    }
+    Ok(())
+}
+
+pub(super) fn find_team_for_session(cwd: &Path, session_id: &str) -> Result<Option<StoredTeam>> {
+    let teams = load_store::<TeamStore>(&teams_path(cwd))?;
+    Ok(teams
+        .teams
+        .into_iter()
+        .find(|team| team.lead_session_id.as_deref() == Some(session_id)))
+}
+
+pub(crate) fn register_team_member(
+    cwd: &Path,
+    team_name: &str,
+    member: ClaudeTeamMember,
+) -> Result<()> {
+    let mut teams = load_store::<TeamStore>(&teams_path(cwd))?;
+    let Some(team_index) = teams
+        .teams
+        .iter()
+        .position(|team| team.team_name == team_name)
+    else {
+        bail!("unknown team `{team_name}`");
+    };
+    let (team_changed, lead_agent_id, lead_session_id, team_description) = {
+        let team = &mut teams.teams[team_index];
+        let mut changed = false;
+        if !team
+            .members
+            .iter()
+            .any(|existing| existing == &member.agent_id)
+        {
+            team.members.push(member.agent_id.clone());
+            changed = true;
+        }
+        (
+            changed,
+            team.lead_agent_id
+                .clone()
+                .unwrap_or_else(|| team_lead_agent_id(team_name)),
+            team.lead_session_id.clone().unwrap_or_default(),
+            team.description.clone(),
+        )
+    };
+    if team_changed {
+        save_store(&teams_path(cwd), &teams)?;
+    }
+
+    let mut team_file = load_claude_team_file(cwd, team_name)?.unwrap_or(ClaudeTeamFile {
+        name: team_name.to_string(),
+        description: team_description,
+        created_at: now_ms(),
+        lead_agent_id,
+        lead_session_id,
+        members: Vec::new(),
+    });
+    if !team_file
+        .members
+        .iter()
+        .any(|existing| existing.agent_id == member.agent_id)
+    {
+        team_file.members.push(member);
+        let _ = write_claude_team_file(cwd, &team_file)?;
+    }
+    Ok(())
+}
+
 pub(super) fn tasks_path(cwd: &Path) -> PathBuf {
     workflow_root(cwd).unwrap().join("tasks.json")
+}
+
+/// Returns the directory used to persist one team's structured task list.
+pub(super) fn team_tasks_dir(cwd: &Path, team_name: &str) -> Result<PathBuf> {
+    let dir = workflow_root(cwd)?
+        .join("team_tasks")
+        .join(team_name.trim());
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Returns the path used to persist one team's structured task list.
+pub(super) fn team_tasks_path(cwd: &Path, team_name: &str) -> Result<PathBuf> {
+    Ok(team_tasks_dir(cwd, team_name)?.join("tasks.json"))
+}
+
+/// Returns the structured task store path for the active team when present.
+pub(super) fn structured_tasks_path(cwd: &Path, active_team_name: Option<&str>) -> Result<PathBuf> {
+    match active_team_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        Some(team_name) => team_tasks_path(cwd, team_name),
+        None => Ok(tasks_path(cwd)),
+    }
 }
 
 pub(super) fn todos_path(cwd: &Path) -> PathBuf {

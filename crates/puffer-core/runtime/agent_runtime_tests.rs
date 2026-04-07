@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::tests::refresh_env_lock;
 use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
 use puffer_provider_registry::{AuthMode, AuthStore, ProviderDescriptor, ProviderRegistry};
 use puffer_resources::{AgentSpec, LoadedItem, LoadedResources, SourceInfo, SourceKind};
@@ -163,7 +164,26 @@ fn execute_agent_tool_background_returns_async_payload_and_output_file() {
     let payload: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(payload["status"], "async_launched");
     let output_file = payload["outputFile"].as_str().unwrap();
+    let agent_id = payload["agentId"].as_str().unwrap().to_string();
     assert!(Path::new(output_file).exists());
+
+    let actions = crate::render_task_actions(&mut state).unwrap();
+    assert!(actions
+        .iter()
+        .any(|entry| entry.command == format!("/tasks show {agent_id}")));
+    assert!(actions
+        .iter()
+        .any(|entry| entry.command == format!("/tasks output {agent_id}")));
+    assert!(!actions
+        .iter()
+        .any(|entry| entry.command == format!("/tasks stop {agent_id}")));
+
+    let agents_panel = crate::render_tasks_panel_text(&mut state, "agents")
+        .unwrap()
+        .expect("agents panel");
+    assert!(agents_panel.contains("Background agents:"));
+    assert!(agents_panel.contains(&agent_id));
+    assert!(agents_panel.contains("Background request"));
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
@@ -185,6 +205,11 @@ fn execute_agent_tool_background_returns_async_payload_and_output_file() {
 #[test]
 fn execute_agent_tool_sync_reports_worktree_isolation_metadata() {
     let temp = tempfile::tempdir().unwrap();
+    let _guard = refresh_env_lock().lock().unwrap();
+    let old_home = std::env::var_os("PUFFER_HOME");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("PUFFER_HOME", &home);
     init_git_repo(temp.path());
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -232,6 +257,15 @@ fn execute_agent_tool_sync_reports_worktree_isolation_metadata() {
     let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), session);
     state.current_provider = Some("local-anthropic".to_string());
     state.current_model = Some("local-anthropic/claude-sonnet-4-5".to_string());
+    super::claude_tools::workflow::team_create::execute_team_create(
+        &mut state,
+        temp.path(),
+        json!({
+            "team_name": "alpha",
+            "description": "Coordination team"
+        }),
+    )
+    .unwrap();
 
     let resources = LoadedResources {
         agents: vec![loaded_agent(
@@ -253,6 +287,7 @@ fn execute_agent_tool_sync_reports_worktree_isolation_metadata() {
             "prompt": "Do the thing",
             "isolation": "worktree",
             "team_name": "alpha",
+            "name": "researcher",
             "mode": "plan"
         }),
     )
@@ -264,6 +299,18 @@ fn execute_agent_tool_sync_reports_worktree_isolation_metadata() {
     assert_eq!(payload["mode"], "plan");
     assert!(payload["worktreePath"].as_str().is_some());
     assert!(payload["worktreeBranch"].as_str().is_some());
+    let team_file: Value = serde_json::from_str(
+        &std::fs::read_to_string(home.join(".claude/teams/alpha/config.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(team_file["members"]
+        .as_array()
+        .is_some_and(|members| members.iter().any(|member| member["name"] == "researcher")));
+    if let Some(value) = old_home {
+        std::env::set_var("PUFFER_HOME", value);
+    } else {
+        std::env::remove_var("PUFFER_HOME");
+    }
     server.join().unwrap();
 }
 

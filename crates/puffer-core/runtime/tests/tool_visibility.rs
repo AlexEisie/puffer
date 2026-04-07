@@ -5,30 +5,27 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use time::{format_description, OffsetDateTime};
 
-const SLEEP_TOOL_DESCRIPTION: &str =
-    "Wait for a specified duration. The user can interrupt the sleep at any time.\n\nUse this when the user tells you to sleep or rest, when you have nothing to do, or when you're waiting for something.\n\nYou may receive <tick> prompts — these are periodic check-ins. Look for useful work to do before sleeping.\n\nYou can call this concurrently with other tools — it won't interfere with them.\n\nPrefer this over `Bash(sleep ...)` — it doesn't hold a shell process.\n\nEach wake-up costs an API call, but the prompt cache expires after 5 minutes of inactivity — balance accordingly.";
 const NOTEBOOK_EDIT_DESCRIPTION: &str =
     "Completely replaces the contents of a specific cell in a Jupyter notebook\n(.ipynb file) with new source.\n\nJupyter notebooks combine code, text, and visualizations for data analysis\nand scientific computing.\n\nUsage:\n- `notebook_path` must be an absolute path.\n- Read the notebook with `Read` before editing it. This tool fails if the\n  notebook has not been fully read or if it changed after it was read.\n- `cell_id` identifies the target cell. Existing cell ids and `cell-N` or\n  numeric index fallbacks are accepted.\n- Use `edit_mode: \"insert\"` to add a new cell after `cell_id`, or at the\n  beginning if `cell_id` is omitted.\n- Use `edit_mode: \"delete\"` to remove the target cell.\n- `cell_type` is required when inserting and may be `code` or `markdown`.";
 const CONFIG_TOOL_SNIPPETS: &[&str] = &[
     "Get or set Claude Code configuration settings.",
-    "### User Settings",
+    "### Global Settings",
     "copy_full_response",
-    "### Workspace Settings",
+    "### Project Settings",
     "openai_headers",
     "### Session Settings",
     "statuslineEnabled",
 ];
-const LSP_TOOL_SNIPPETS: &[&str] = &[
-    "Language Server Protocol (LSP) servers",
-    "code intelligence",
-    "- `diagnostics`: Get current diagnostics for a document",
-    "Note: LSP servers must be configured for the file type.",
-];
-const POWERSHELL_TOOL_SNIPPETS: &[&str] = &[
-    "IMPORTANT: This tool is for terminal operations via PowerShell",
-    "PowerShell edition: unknown - assume Windows PowerShell 5.1 for compatibility",
-    "run_in_background",
-    "Do NOT prefix commands with `cd` or `Set-Location`",
+const AGENT_TOOL_SNIPPETS: &[&str] = &[
+    "Launch a new agent to handle complex, multi-step tasks autonomously.",
+    "Available agent types and the tools they have access to:",
+    "- general-purpose:",
+    "- Explore:",
+    "Launch multiple agents concurrently whenever possible",
+    "To continue a previously spawned agent, use SendMessage",
+    "`isolation: \"worktree\"`",
+    "## Writing the prompt",
+    "Never delegate understanding.",
 ];
 const ASK_USER_QUESTION_DESCRIPTION: &str = "Use this tool when you need to ask the user questions during execution. This allows you to:\n1. Gather user preferences or requirements\n2. Clarify ambiguous instructions\n3. Get decisions on implementation choices as you work\n4. Offer choices to the user about what direction to take.\n\nUsage notes:\n- Users will always be able to select \"Other\" to provide custom text input\n- Use multiSelect: true to allow multiple answers to be selected for a question\n- If you recommend a specific option, make that the first option in the list and add \"(Recommended)\" at the end of the label\n\nPlan mode note: In plan mode, use this tool to clarify requirements or choose between approaches BEFORE finalizing your plan. Do NOT use this tool to ask \"Is my plan ready?\" or \"Should I proceed?\" - use ExitPlanMode for plan approval. IMPORTANT: Do not reference \"the plan\" in your questions (e.g., \"Do you have feedback about the plan?\", \"Does the plan look good?\") because the user cannot see the plan in the UI until you call ExitPlanMode. If you need plan approval, use ExitPlanMode instead.\nPreview feature:\nUse the optional `preview` field on options when presenting concrete artifacts that users need to visually compare:\n- ASCII mockups of UI layouts or components\n- Code snippets showing different implementations\n- Diagram variations\n- Configuration examples\n\nPreview content is rendered as markdown in a monospace box. Multi-line text with newlines is supported. When any option has a preview, the UI switches to a side-by-side layout with a vertical option list on the left and preview on the right. Do not use previews for simple preference questions where labels and descriptions suffice. Note: previews are only supported for single-select questions (not multiSelect).";
 const ENTER_PLAN_MODE_DESCRIPTION: &str = "Use this tool proactively when you're about to start a non-trivial implementation task. Getting user sign-off on your approach before writing code prevents wasted effort and ensures alignment. This tool transitions you into plan mode where you can explore the codebase and design an implementation approach for user approval.\n\n## When to Use This Tool\n\n**Prefer using EnterPlanMode** for implementation tasks unless they're simple. Use it when ANY of these conditions apply:\n\n1. **New Feature Implementation**: Adding meaningful new functionality\n   - Example: \"Add a logout button\" - where should it go? What should happen on click?\n   - Example: \"Add form validation\" - what rules? What error messages?\n\n2. **Multiple Valid Approaches**: The task can be solved in several different ways\n   - Example: \"Add caching to the API\" - could use Redis, in-memory, file-based, etc.\n   - Example: \"Improve performance\" - many optimization strategies possible\n\n3. **Code Modifications**: Changes that affect existing behavior or structure\n   - Example: \"Update the login flow\" - what exactly should change?\n   - Example: \"Refactor this component\" - what's the target architecture?\n\n4. **Architectural Decisions**: The task requires choosing between patterns or technologies\n   - Example: \"Add real-time updates\" - WebSockets vs SSE vs polling\n   - Example: \"Implement state management\" - Redux vs Context vs custom solution\n\n5. **Multi-File Changes**: The task will likely touch more than 2-3 files\n   - Example: \"Refactor the authentication system\"\n   - Example: \"Add a new API endpoint with tests\"\n\n6. **Unclear Requirements**: You need to explore before understanding the full scope\n   - Example: \"Make the app faster\" - need to profile and identify bottlenecks\n   - Example: \"Fix the bug in checkout\" - need to investigate root cause\n\n7. **User Preferences Matter**: The implementation could reasonably go multiple ways\n   - If you would use AskUserQuestion to clarify the approach, use EnterPlanMode instead\n   - Plan mode lets you explore first, then present options with context\n\n## When NOT to Use This Tool\n\nOnly skip EnterPlanMode for simple tasks:\n- Single-line or few-line fixes (typos, obvious bugs, small tweaks)\n- Adding a single function with clear requirements\n- Tasks where the user has given very specific, detailed instructions\n- Pure research/exploration tasks (use the Agent tool with explore agent instead)\n\n## What Happens in Plan Mode\n\nIn plan mode, you'll:\n1. Thoroughly explore the codebase using Glob, Grep, and Read tools\n2. Understand existing patterns and architecture\n3. Design an implementation approach\n4. Present your plan to the user for approval\n5. Use AskUserQuestion if you need to clarify approaches\n6. Exit plan mode with ExitPlanMode when ready to implement\n\n## Examples\n\n### GOOD - Use EnterPlanMode:\nUser: \"Add user authentication to the app\"\n- Requires architectural decisions (session vs JWT, where to store tokens, middleware structure)\n\nUser: \"Optimize the database queries\"\n- Multiple approaches possible, need to profile first, significant impact\n\nUser: \"Implement dark mode\"\n- Architectural decision on theme system, affects many components\n\nUser: \"Add a delete button to the user profile\"\n- Seems simple but involves: where to place it, confirmation dialog, API call, error handling, state updates\n\nUser: \"Update the error handling in the API\"\n- Affects multiple files, user should approve the approach\n\n### BAD - Don't use EnterPlanMode:\nUser: \"Fix the typo in the README\"\n- Straightforward, no planning needed\n\nUser: \"Add a console.log to debug this function\"\n- Simple, obvious implementation\n\nUser: \"What files handle routing?\"\n- Research task, not implementation planning\n\n## Important Notes\n\n- This tool REQUIRES user approval - they must consent to entering plan mode\n- If unsure whether to use it, err on the side of planning - it's better to get alignment upfront than to redo work\n- Users appreciate being consulted before significant changes are made to their codebase";
@@ -39,16 +36,14 @@ const TODO_WRITE_DESCRIPTION: &str = "Use this tool to create and manage a struc
 fn sleep_tool_is_visible_to_anthropic_and_openai_tool_builders() {
     let resources = bundled_resources();
     let registry = ToolRegistry::from_resources(&resources);
+    let expected = reference_sleep_prompt();
 
     let anthropic = anthropic_tool_definitions(&registry, None).unwrap();
     let anthropic_sleep = anthropic
         .iter()
         .find(|definition| definition["name"] == json!("Sleep"))
         .expect("Sleep tool definition");
-    assert_eq!(
-        anthropic_sleep["description"],
-        json!(SLEEP_TOOL_DESCRIPTION)
-    );
+    assert_eq!(anthropic_sleep["description"], json!(expected.clone()));
     assert_eq!(
         anthropic_sleep["input_schema"]["required"],
         json!(["duration_ms"])
@@ -59,7 +54,7 @@ fn sleep_tool_is_visible_to_anthropic_and_openai_tool_builders() {
         .iter()
         .find(|definition| definition.name == "Sleep")
         .expect("Sleep tool definition");
-    assert_eq!(openai_sleep.description, SLEEP_TOOL_DESCRIPTION);
+    assert_eq!(openai_sleep.description, expected);
     assert_eq!(openai_sleep.parameters["required"], json!(["duration_ms"]));
 }
 
@@ -70,7 +65,7 @@ fn bundled_resources_register_sleep_tool() {
     let definition = registry.definition("Sleep").expect("Sleep tool definition");
 
     assert_eq!(definition.handler, "runtime:sleep");
-    assert_eq!(definition.description, SLEEP_TOOL_DESCRIPTION);
+    assert_eq!(definition.description, reference_sleep_prompt());
 }
 
 #[test]
@@ -164,6 +159,41 @@ fn workflow_tool_descriptions_match_claude_reference_for_anthropic_and_openai() 
 }
 
 #[test]
+fn agent_tool_description_is_rendered_for_anthropic_and_openai() {
+    let resources = bundled_resources();
+    let registry = ToolRegistry::from_resources(&resources);
+    let description = registry
+        .definition("Agent")
+        .expect("Agent tool definition")
+        .description
+        .clone();
+
+    for snippet in AGENT_TOOL_SNIPPETS {
+        assert!(
+            description.contains(snippet),
+            "Agent description missing snippet: {snippet}"
+        );
+    }
+
+    let anthropic = anthropic_tool_definitions(&registry, None).unwrap();
+    let anthropic_definition = anthropic
+        .iter()
+        .find(|item| item["name"] == json!("Agent"))
+        .expect("anthropic Agent tool definition");
+    assert_eq!(
+        anthropic_definition["description"],
+        json!(description.clone())
+    );
+
+    let openai = openai_tool_definitions(&registry, None, false).unwrap();
+    let openai_definition = openai
+        .iter()
+        .find(|item| item.name == "Agent")
+        .expect("openai Agent tool definition");
+    assert_eq!(openai_definition.description, description);
+}
+
+#[test]
 fn config_tool_description_is_rendered_for_anthropic_and_openai() {
     let resources = bundled_resources();
     let registry = ToolRegistry::from_resources(&resources);
@@ -173,9 +203,9 @@ fn config_tool_description_is_rendered_for_anthropic_and_openai() {
         .description
         .clone();
 
-    assert!(description.contains("### User Settings"));
+    assert!(description.contains("### Global Settings"));
     assert!(description.contains("copy_full_response"));
-    assert!(description.contains("### Workspace Settings"));
+    assert!(description.contains("### Project Settings"));
     assert!(description.contains("openai_headers"));
     assert!(description.contains("### Session Settings"));
     assert!(description.contains("statuslineEnabled"));
@@ -207,44 +237,44 @@ fn config_tool_description_is_rendered_for_anthropic_and_openai() {
 }
 
 #[test]
-fn config_lsp_and_powershell_descriptions_are_visible_to_both_providers() {
+fn lsp_tool_description_matches_claude_reference_for_anthropic_and_openai() {
+    let resources = bundled_resources();
+    let registry = ToolRegistry::from_resources(&resources);
+    assert_tool_description_matches_expected(&registry, "LSP", reference_lsp_prompt().as_str());
+}
+
+#[test]
+fn powershell_tool_description_matches_claude_reference_for_anthropic_and_openai() {
     let resources = bundled_resources();
     let registry = ToolRegistry::from_resources(&resources);
 
-    for (tool_id, snippets) in [
-        ("Config", CONFIG_TOOL_SNIPPETS),
-        ("LSP", LSP_TOOL_SNIPPETS),
-        ("PowerShell", POWERSHELL_TOOL_SNIPPETS),
-    ] {
-        let description = registry
-            .definition(tool_id)
-            .expect("tool definition")
-            .description
-            .clone();
-        for snippet in snippets {
-            assert!(
-                description.contains(snippet),
-                "{tool_id} description missing snippet: {snippet}"
-            );
-        }
+    assert_tool_description_matches_expected(
+        &registry,
+        "PowerShell",
+        reference_powershell_prompt().as_str(),
+    );
 
-        let anthropic = anthropic_tool_definitions(&registry, None).unwrap();
-        let anthropic_definition = anthropic
-            .iter()
-            .find(|item| item["name"] == json!(tool_id))
-            .expect("anthropic tool definition");
-        assert_eq!(
-            anthropic_definition["description"],
-            json!(description.clone())
-        );
-
-        let openai = openai_tool_definitions(&registry, None, false).unwrap();
-        let openai_definition = openai
-            .iter()
-            .find(|item| item.name == tool_id)
-            .expect("openai tool definition");
-        assert_eq!(openai_definition.description, description);
-    }
+    let openai = openai_tool_definitions(&registry, None, false).unwrap();
+    let openai_definition = openai
+        .iter()
+        .find(|definition| definition.name == "PowerShell")
+        .expect("PowerShell openai tool definition");
+    assert_eq!(
+        openai_definition.parameters["properties"]["timeout"]["description"],
+        json!("Optional timeout in milliseconds (max 600000)")
+    );
+    assert_eq!(
+        openai_definition.parameters["properties"]["run_in_background"]["description"],
+        json!(
+            "Set to true to run this command in the background. Use Read to read the output later."
+        )
+    );
+    assert_eq!(
+        openai_definition.parameters["properties"]["dangerouslyDisableSandbox"]["description"],
+        json!(
+            "Set this to true to dangerously override sandbox mode and run commands without sandboxing."
+        )
+    );
 }
 
 #[test]
@@ -281,6 +311,8 @@ fn selected_tool_prompts_match_claude_reference_for_anthropic_and_openai() {
     for (tool_id, expected) in [
         ("TaskCreate", reference_task_create_prompt()),
         ("TaskUpdate", reference_task_update_prompt()),
+        ("TeamCreate", reference_team_create_prompt()),
+        ("TeamDelete", reference_team_delete_prompt()),
         ("EnterWorktree", reference_enter_worktree_prompt()),
         ("ExitWorktree", reference_exit_worktree_prompt()),
         (
@@ -303,8 +335,11 @@ fn selected_tool_prompts_match_claude_reference_for_anthropic_and_openai() {
             .find(|item| item["name"] == json!(tool_id))
             .expect("anthropic tool definition");
         assert_eq!(
-            anthropic_definition["description"],
-            json!(expected.clone()),
+            anthropic_definition["description"]
+                .as_str()
+                .expect("anthropic description")
+                .trim_end(),
+            expected.trim_end(),
             "anthropic description for {tool_id}"
         );
 
@@ -316,6 +351,125 @@ fn selected_tool_prompts_match_claude_reference_for_anthropic_and_openai() {
             openai_definition.description.trim_end(),
             expected.trim_end(),
             "openai description for {tool_id}"
+        );
+    }
+}
+
+#[test]
+fn built_in_agent_resources_match_claude_reference_prompts() {
+    let resources = bundled_resources();
+
+    for (agent_id, expected_description, expected_prompt) in [
+        (
+            "Explore",
+            reference_explore_agent_description(),
+            reference_explore_agent_prompt(),
+        ),
+        (
+            "general-purpose",
+            reference_general_purpose_agent_description(),
+            reference_general_purpose_agent_prompt(),
+        ),
+        (
+            "Plan",
+            reference_plan_agent_description(),
+            reference_plan_agent_prompt(),
+        ),
+        (
+            "statusline-setup",
+            reference_statusline_setup_agent_description(),
+            reference_statusline_setup_agent_prompt(),
+        ),
+        (
+            "verification",
+            reference_verification_agent_description(),
+            reference_verification_agent_prompt(),
+        ),
+    ] {
+        let agent = resources
+            .agents
+            .iter()
+            .find(|item| item.value.id == agent_id)
+            .unwrap_or_else(|| panic!("missing builtin agent {agent_id}"));
+
+        assert_eq!(
+            normalize_inline_whitespace(&agent.value.description),
+            normalize_inline_whitespace(&expected_description),
+            "description for {agent_id}"
+        );
+        assert_eq!(
+            trim_line_trailing_whitespace(&agent.value.prompt),
+            trim_line_trailing_whitespace(&expected_prompt),
+            "prompt for {agent_id}"
+        );
+    }
+}
+
+#[test]
+fn file_tool_prompts_and_schemas_match_claude_reference_for_anthropic_and_openai() {
+    let resources = bundled_resources();
+    let registry = ToolRegistry::from_resources(&resources);
+    let anthropic = anthropic_tool_definitions(&registry, None).unwrap();
+    let openai = openai_tool_definitions(&registry, None, false).unwrap();
+
+    for (tool_id, expected_prompt, expected_schema) in [
+        (
+            "Read",
+            reference_file_read_prompt(),
+            reference_file_read_schema(),
+        ),
+        (
+            "Edit",
+            reference_file_edit_prompt(),
+            reference_file_edit_schema(),
+        ),
+        (
+            "Write",
+            reference_file_write_prompt(),
+            reference_file_write_schema(),
+        ),
+    ] {
+        let definition = registry.definition(tool_id).expect("tool definition");
+        assert_eq!(
+            definition.description.trim_end(),
+            expected_prompt.trim_end(),
+            "registry description for {tool_id}"
+        );
+        assert_eq!(
+            definition.input_schema.as_json_schema(),
+            expected_schema,
+            "registry schema for {tool_id}"
+        );
+
+        let anthropic_definition = anthropic
+            .iter()
+            .find(|item| item["name"] == json!(tool_id))
+            .expect("anthropic tool definition");
+        assert_eq!(
+            anthropic_definition["description"]
+                .as_str()
+                .expect("anthropic description")
+                .trim_end(),
+            expected_prompt.trim_end(),
+            "anthropic description for {tool_id}"
+        );
+        assert_eq!(
+            anthropic_definition["input_schema"], expected_schema,
+            "anthropic schema for {tool_id}"
+        );
+
+        let openai_definition = openai
+            .iter()
+            .find(|item| item.name == tool_id)
+            .expect("openai tool definition");
+        assert_eq!(
+            openai_definition.description.trim_end(),
+            expected_prompt.trim_end(),
+            "openai description for {tool_id}"
+        );
+        assert_eq!(
+            openai_definition.parameters, expected_schema,
+            "openai schema for {tool_id}"
         );
     }
 }
@@ -427,6 +581,38 @@ fn normalize_reference_template(raw: &str) -> String {
     dedent(trimmed)
 }
 
+fn decode_js_template_escapes(raw: &str) -> String {
+    let mut output = String::new();
+    let mut chars = raw.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('\\') => output.push('\\'),
+            Some('n') => output.push('\n'),
+            Some('r') => output.push('\r'),
+            Some('t') => output.push('\t'),
+            Some('"') => output.push('"'),
+            Some('`') => output.push('`'),
+            Some(other) => {
+                output.push('\\');
+                output.push(other);
+            }
+            None => output.push('\\'),
+        }
+    }
+    output
+}
+
+fn trim_line_trailing_whitespace(raw: &str) -> String {
+    raw.lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn dedent(raw: &str) -> String {
     let indent = raw
         .lines()
@@ -447,6 +633,112 @@ fn current_month_year() -> String {
     now.format(&format).unwrap()
 }
 
+fn assert_tool_description_matches_expected(
+    registry: &ToolRegistry,
+    tool_id: &str,
+    expected: &str,
+) {
+    let description = registry
+        .definition(tool_id)
+        .expect("tool definition")
+        .description
+        .clone();
+    assert_eq!(description.trim_end(), expected.trim_end());
+
+    let anthropic = anthropic_tool_definitions(registry, None).unwrap();
+    let anthropic_definition = anthropic
+        .iter()
+        .find(|item| item["name"] == json!(tool_id))
+        .expect("anthropic tool definition");
+    assert_eq!(
+        anthropic_definition["description"],
+        json!(expected),
+        "anthropic description for {tool_id}"
+    );
+
+    let openai = openai_tool_definitions(registry, None, false).unwrap();
+    let openai_definition = openai
+        .iter()
+        .find(|item| item.name == tool_id)
+        .expect("openai tool definition");
+    assert_eq!(
+        openai_definition.description.trim_end(),
+        expected.trim_end(),
+        "openai description for {tool_id}"
+    );
+}
+
+fn reference_sleep_prompt() -> String {
+    let reference = read_repo_file("references/claude-code/src/tools/SleepTool/prompt.ts");
+    normalize_reference_template(&extract_template_literal(
+        &reference,
+        "export const SLEEP_TOOL_PROMPT = `",
+    ))
+    .replace("${TICK_TAG}", "tick")
+}
+
+fn reference_lsp_prompt() -> String {
+    let reference = read_repo_file("references/claude-code/src/tools/LSPTool/prompt.ts");
+    normalize_reference_template(&extract_template_literal(
+        &reference,
+        "export const DESCRIPTION = `",
+    ))
+}
+
+fn reference_powershell_prompt() -> String {
+    let reference = read_repo_file("references/claude-code/src/tools/PowerShellTool/prompt.ts");
+    let prompt = normalize_reference_template(&extract_template_literal(
+        reference
+            .split("export async function getPrompt(): Promise<string> {")
+            .nth(1)
+            .expect("PowerShell prompt section"),
+        "  return `",
+    ));
+    let background = normalize_reference_template(&extract_template_literal(
+        reference
+            .split("function getBackgroundUsageNote(): string | null {")
+            .nth(1)
+            .expect("PowerShell background section"),
+        "  return `",
+    ));
+    let sleep = normalize_reference_template(&extract_template_literal(
+        reference
+            .split("function getSleepGuidance(): string | null {")
+            .nth(1)
+            .expect("PowerShell sleep section"),
+        "  return `",
+    ));
+    let edition = normalize_reference_template(&extract_template_literal(
+        reference
+            .split("// Detection not yet resolved (first prompt build before any tool call) or")
+            .nth(1)
+            .expect("PowerShell unknown edition section"),
+        "  return `",
+    ));
+
+    prompt
+        .replace("${getEditionSection(edition)}", &edition)
+        .replace("${getMaxTimeoutMs()}", "600000")
+        .replace("${getMaxTimeoutMs() / 60000}", "10")
+        .replace("${getDefaultTimeoutMs()}", "120000")
+        .replace("${getDefaultTimeoutMs() / 60000}", "2")
+        .replace("${getMaxOutputLength()}", "30000")
+        .replace(
+            "${backgroundNote ? backgroundNote + '\\n' : ''}\\",
+            &(background + "\n"),
+        )
+        .replace(
+            "${sleepGuidance ? sleepGuidance + '\\n' : ''}\\",
+            &(sleep + "\n"),
+        )
+        .replace("${GLOB_TOOL_NAME}", "Glob")
+        .replace("${GREP_TOOL_NAME}", "Grep")
+        .replace("${FILE_READ_TOOL_NAME}", "Read")
+        .replace("${FILE_EDIT_TOOL_NAME}", "Edit")
+        .replace("${FILE_WRITE_TOOL_NAME}", "Write")
+        .replace("${POWERSHELL_TOOL_NAME}", "PowerShell")
+}
+
 fn reference_task_create_prompt() -> String {
     let reference = read_repo_file("references/claude-code/src/tools/TaskCreateTool/prompt.ts");
     normalize_reference_template(&extract_template_literal(&reference, "  return `"))
@@ -463,6 +755,16 @@ fn reference_task_update_prompt() -> String {
         &reference,
         "export const PROMPT = `",
     ))
+}
+
+fn reference_team_create_prompt() -> String {
+    let reference = read_repo_file("references/claude-code/src/tools/TeamCreateTool/prompt.ts");
+    normalize_reference_template(&extract_template_literal(&reference, "  return `"))
+}
+
+fn reference_team_delete_prompt() -> String {
+    let reference = read_repo_file("references/claude-code/src/tools/TeamDeleteTool/prompt.ts");
+    normalize_reference_template(&extract_template_literal(&reference, "  return `"))
 }
 
 fn reference_enter_worktree_prompt() -> String {
@@ -520,4 +822,351 @@ fn reference_web_fetch_prompt() -> String {
         .expect("WebFetch prompt function")..];
     normalize_reference_template(&extract_template_literal(prompt_section, "    return `"))
         .replace("${DESCRIPTION}", &description)
+}
+
+fn reference_file_read_prompt() -> String {
+    let reference = read_repo_file("references/claude-code/src/tools/FileReadTool/prompt.ts");
+    let template =
+        normalize_reference_template(&extract_template_literal(&reference, "  return `"));
+    let line_format =
+        extract_quoted_literal(&reference, "export const LINE_FORMAT_INSTRUCTION =\n  ");
+    let offset_instruction =
+        extract_quoted_literal(&reference, "export const OFFSET_INSTRUCTION_DEFAULT =\n  ");
+    let pdf_instruction = extract_quoted_literal(&reference, "      ? ");
+    render_reference_template_literal(&template, |expr| match expr.trim() {
+        "MAX_LINES_TO_READ" => "2000".to_string(),
+        "maxSizeInstruction" => String::new(),
+        "offsetInstruction" => offset_instruction.clone(),
+        "lineFormat" => line_format.clone(),
+        "BASH_TOOL_NAME" => "Bash".to_string(),
+        expr if expr.contains("isPDFSupported()") => pdf_instruction.clone(),
+        other => panic!("unexpected Read template expression: {other}"),
+    })
+}
+
+fn reference_file_edit_prompt() -> String {
+    let reference = read_repo_file("references/claude-code/src/tools/FileEditTool/prompt.ts");
+    let pre_read_section = reference
+        .split("function getPreReadInstruction(): string {")
+        .nth(1)
+        .expect("Read pre-instruction section");
+    let pre_read_template =
+        normalize_reference_template(&extract_template_literal(pre_read_section, "  return `"));
+    let pre_read =
+        render_reference_template_literal(&pre_read_template, |expr| match expr.trim() {
+            "FILE_READ_TOOL_NAME" => "Read".to_string(),
+            other => panic!("unexpected Edit pre-read expression: {other}"),
+        });
+
+    let description_section = reference
+        .split("function getDefaultEditDescription(): string {")
+        .nth(1)
+        .expect("Edit description section");
+    let description_template =
+        normalize_reference_template(&extract_template_literal(description_section, "  return `"));
+    render_reference_template_literal(&description_template, |expr| match expr.trim() {
+        "getPreReadInstruction()" => pre_read.clone(),
+        "prefixFormat" => "line number + tab".to_string(),
+        "minimalUniquenessHint" => String::new(),
+        other => panic!("unexpected Edit template expression: {other}"),
+    })
+}
+
+fn reference_file_write_prompt() -> String {
+    let reference = read_repo_file("references/claude-code/src/tools/FileWriteTool/prompt.ts");
+    let pre_read_section = reference
+        .split("function getPreReadInstruction(): string {")
+        .nth(1)
+        .expect("Write pre-instruction section");
+    let pre_read_template =
+        normalize_reference_template(&extract_template_literal(pre_read_section, "  return `"));
+    let pre_read =
+        render_reference_template_literal(&pre_read_template, |expr| match expr.trim() {
+            "FILE_READ_TOOL_NAME" => "Read".to_string(),
+            other => panic!("unexpected Write pre-read expression: {other}"),
+        });
+
+    let description_section = reference
+        .split("export function getWriteToolDescription(): string {")
+        .nth(1)
+        .expect("Write description section");
+    let description_template =
+        normalize_reference_template(&extract_template_literal(description_section, "  return `"));
+    render_reference_template_literal(&description_template, |expr| match expr.trim() {
+        "getPreReadInstruction()" => pre_read.clone(),
+        other => panic!("unexpected Write template expression: {other}"),
+    })
+}
+
+fn reference_file_read_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "The absolute path to the file to read"
+            },
+            "offset": {
+                "type": "integer",
+                "description": "The line number to start reading from. Only provide if the file is too large to read at once",
+                "minimum": 0
+            },
+            "limit": {
+                "type": "integer",
+                "description": "The number of lines to read. Only provide if the file is too large to read at once.",
+                "minimum": 1
+            },
+            "pages": {
+                "type": "string",
+                "description": "Page range for PDF files (e.g., \"1-5\", \"3\", \"10-20\"). Only applicable to PDF files. Maximum 20 pages per request."
+            }
+        },
+        "required": ["file_path"],
+        "additionalProperties": false
+    })
+}
+
+fn reference_file_edit_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "The absolute path to the file to modify"
+            },
+            "old_string": {
+                "type": "string",
+                "description": "The text to replace"
+            },
+            "new_string": {
+                "type": "string",
+                "description": "The text to replace it with (must be different from old_string)"
+            },
+            "replace_all": {
+                "type": "boolean",
+                "description": "Replace all occurrences of old_string (default false)"
+            }
+        },
+        "required": ["file_path", "old_string", "new_string"],
+        "additionalProperties": false
+    })
+}
+
+fn reference_file_write_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "The absolute path to the file to write (must be absolute, not relative)"
+            },
+            "content": {
+                "type": "string",
+                "description": "The content to write to the file"
+            }
+        },
+        "required": ["file_path", "content"],
+        "additionalProperties": false
+    })
+}
+
+fn extract_quoted_literal(contents: &str, marker: &str) -> String {
+    let start = contents.find(marker).unwrap() + marker.len();
+    let source = &contents[start..];
+    let quote = source.chars().next().unwrap();
+    assert!(quote == '\'' || quote == '"');
+    let mut end = None;
+    let mut index = quote.len_utf8();
+    let mut escaped = false;
+
+    while index < source.len() {
+        let ch = source[index..].chars().next().unwrap();
+        let width = ch.len_utf8();
+        if escaped {
+            escaped = false;
+            index += width;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            index += width;
+            continue;
+        }
+        if ch == quote {
+            end = Some(index);
+            break;
+        }
+        index += width;
+    }
+
+    decode_js_escapes(&source[quote.len_utf8()..end.unwrap()])
+}
+
+fn render_reference_template_literal(
+    template: &str,
+    mut replacer: impl FnMut(&str) -> String,
+) -> String {
+    let mut rendered = String::new();
+    let mut index = 0usize;
+
+    while index < template.len() {
+        if template[index..].starts_with("${") {
+            let expression_start = index + 2;
+            let mut cursor = expression_start;
+            let mut depth = 1usize;
+            while cursor < template.len() {
+                let ch = template[cursor..].chars().next().unwrap();
+                let width = ch.len_utf8();
+                if template[cursor..].starts_with("${") {
+                    depth += 1;
+                    cursor += 2;
+                    continue;
+                }
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            let expression = &template[expression_start..cursor];
+                            rendered.push_str(&replacer(expression));
+                            cursor += width;
+                            index = cursor;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                cursor += width;
+            }
+            continue;
+        }
+
+        let ch = template[index..].chars().next().unwrap();
+        rendered.push(ch);
+        index += ch.len_utf8();
+    }
+
+    decode_js_escapes(&rendered)
+}
+
+fn decode_js_escapes(raw: &str) -> String {
+    let mut decoded = String::new();
+    let mut chars = raw.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            decoded.push(ch);
+            continue;
+        }
+
+        match chars.next() {
+            Some('n') => decoded.push('\n'),
+            Some('r') => decoded.push('\r'),
+            Some('t') => decoded.push('\t'),
+            Some('\'') => decoded.push('\''),
+            Some('"') => decoded.push('"'),
+            Some('`') => decoded.push('`'),
+            Some('\\') => decoded.push('\\'),
+            Some('u') => {
+                let mut code = String::new();
+                for _ in 0..4 {
+                    code.push(chars.next().expect("unicode escape"));
+                }
+                let scalar = u32::from_str_radix(&code, 16).expect("valid unicode escape");
+                decoded.push(char::from_u32(scalar).expect("unicode scalar"));
+            }
+            Some(other) => {
+                decoded.push('\\');
+                decoded.push(other);
+            }
+            None => decoded.push('\\'),
+        }
+    }
+
+    decoded
+}
+
+fn normalize_inline_whitespace(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn reference_explore_agent_description() -> String {
+    "Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. \"src/components/**/*.tsx\"), search code for keywords (eg. \"API endpoints\"), or answer questions about the codebase (eg. \"how do API endpoints work?\"). When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"very thorough\" for comprehensive analysis across multiple locations and naming conventions.".to_string()
+}
+
+fn reference_explore_agent_prompt() -> String {
+    let reference =
+        read_repo_file("references/claude-code/src/tools/AgentTool/built-in/exploreAgent.ts");
+    normalize_reference_template(&extract_template_literal(&reference, "  return `"))
+        .replace("${BASH_TOOL_NAME}", "Bash")
+        .replace("${FILE_READ_TOOL_NAME}", "Read")
+        .replace(
+            "${globGuidance}",
+            "- Use `Glob` for broad file pattern matching",
+        )
+        .replace(
+            "${grepGuidance}",
+            "- Use `Grep` for searching file contents with regex",
+        )
+        .replace("${embedded ? ', grep' : ''}", "")
+}
+
+fn reference_general_purpose_agent_description() -> String {
+    "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.".to_string()
+}
+
+fn reference_general_purpose_agent_prompt() -> String {
+    let reference = read_repo_file(
+        "references/claude-code/src/tools/AgentTool/built-in/generalPurposeAgent.ts",
+    );
+    let prefix = normalize_reference_template(&extract_template_literal(
+        &reference,
+        "const SHARED_PREFIX = `",
+    ));
+    let guidelines = normalize_reference_template(&extract_template_literal(
+        &reference,
+        "const SHARED_GUIDELINES = `",
+    ));
+    format!(
+        "{prefix} When you complete the task, respond with a concise report covering what was done and any key findings — the caller will relay this to the user, so it only needs the essentials.\n\n{guidelines}"
+    )
+}
+
+fn reference_plan_agent_description() -> String {
+    "Software architect agent for designing implementation plans. Use this when you need to plan the implementation strategy for a task. Returns step-by-step plans, identifies critical files, and considers architectural trade-offs.".to_string()
+}
+
+fn reference_plan_agent_prompt() -> String {
+    let reference =
+        read_repo_file("references/claude-code/src/tools/AgentTool/built-in/planAgent.ts");
+    normalize_reference_template(&extract_template_literal(&reference, "  return `"))
+        .replace("${searchToolsHint}", "Glob, Grep, and Read")
+        .replace("${BASH_TOOL_NAME}", "Bash")
+        .replace("${hasEmbeddedSearchTools() ? ', grep' : ''}", "")
+}
+
+fn reference_statusline_setup_agent_description() -> String {
+    "Use this agent to configure the user's Claude Code status line setting.".to_string()
+}
+
+fn reference_statusline_setup_agent_prompt() -> String {
+    let reference =
+        read_repo_file("references/claude-code/src/tools/AgentTool/built-in/statuslineSetup.ts");
+    trim_line_trailing_whitespace(&decode_js_template_escapes(&normalize_reference_template(
+        &extract_template_literal(&reference, "const STATUSLINE_SYSTEM_PROMPT = `"),
+    )))
+}
+
+fn reference_verification_agent_description() -> String {
+    "Use this agent to verify that implementation work is correct before reporting completion. Invoke after non-trivial tasks (3+ file edits, backend/API changes, infrastructure changes). Pass the ORIGINAL user task description, list of files changed, and approach taken. The agent runs builds, tests, linters, and checks to produce a PASS/FAIL/PARTIAL verdict with evidence.".to_string()
+}
+
+fn reference_verification_agent_prompt() -> String {
+    let reference =
+        read_repo_file("references/claude-code/src/tools/AgentTool/built-in/verificationAgent.ts");
+    trim_line_trailing_whitespace(&decode_js_template_escapes(&normalize_reference_template(
+        &extract_template_literal(&reference, "const VERIFICATION_SYSTEM_PROMPT = `"),
+    )))
+    .replace("${BASH_TOOL_NAME}", "Bash")
+    .replace("${WEB_FETCH_TOOL_NAME}", "WebFetch")
 }

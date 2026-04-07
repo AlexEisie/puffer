@@ -328,6 +328,12 @@ fn ask_user_question_rejects_duplicate_question_text() {
 
 #[test]
 fn team_create_makes_dirs_and_team_delete_removes_them() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let _lock = puffer_home_lock().lock().unwrap();
+    let old_home = std::env::var_os("PUFFER_HOME");
+    let home = tempdir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("PUFFER_HOME", &home);
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let created = crate::runtime::claude_tools::workflow::team_create::execute_team_create(
@@ -340,10 +346,17 @@ fn team_create_makes_dirs_and_team_delete_removes_them() {
     )
     .unwrap();
     let created: Value = serde_json::from_str(&created).unwrap();
-    let team_dir = created["teamDir"].as_str().unwrap();
-    let task_dir = created["taskDir"].as_str().unwrap();
-    assert!(std::path::Path::new(team_dir).exists());
-    assert!(std::path::Path::new(task_dir).exists());
+    let team_file_path = created["team_file_path"].as_str().unwrap();
+    let task_dir = home.join(".claude/tasks/alpha");
+    assert_eq!(created["lead_agent_id"], "team-lead@alpha");
+    assert!(std::path::Path::new(team_file_path).exists());
+    assert!(task_dir.exists());
+    let team_file: Value =
+        serde_json::from_str(&fs::read_to_string(team_file_path).unwrap()).unwrap();
+    assert_eq!(team_file["name"], "alpha");
+    assert_eq!(team_file["leadAgentId"], "team-lead@alpha");
+    assert_eq!(team_file["members"][0]["name"], "team-lead");
+    assert_eq!(state.active_team_name.as_deref(), Some("alpha"));
 
     let deleted = crate::runtime::claude_tools::workflow::team_delete::execute_team_delete(
         &mut state,
@@ -352,9 +365,62 @@ fn team_create_makes_dirs_and_team_delete_removes_them() {
     )
     .unwrap();
     let deleted: Value = serde_json::from_str(&deleted).unwrap();
-    assert_eq!(deleted["deleted"][0], "alpha");
-    assert!(!std::path::Path::new(team_dir).exists());
-    assert!(!std::path::Path::new(task_dir).exists());
+    assert_eq!(deleted["success"], true);
+    assert_eq!(deleted["team_name"], "alpha");
+    assert!(!std::path::Path::new(team_file_path).exists());
+    assert!(!task_dir.exists());
+    assert!(state.active_team_name.is_none());
+    if let Some(value) = old_home {
+        std::env::set_var("PUFFER_HOME", value);
+    } else {
+        std::env::remove_var("PUFFER_HOME");
+    }
+}
+
+#[test]
+fn team_delete_only_removes_the_current_session_team() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let _lock = puffer_home_lock().lock().unwrap();
+    let old_home = std::env::var_os("PUFFER_HOME");
+    let home = tempdir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("PUFFER_HOME", &home);
+    let mut first = temp_state();
+    let mut second = temp_state();
+    second.cwd = first.cwd.clone();
+    second.session.cwd = first.session.cwd.clone();
+    let cwd = first.cwd.clone();
+
+    crate::runtime::claude_tools::workflow::team_create::execute_team_create(
+        &mut first,
+        &cwd,
+        json!({ "team_name": "alpha" }),
+    )
+    .unwrap();
+    crate::runtime::claude_tools::workflow::team_create::execute_team_create(
+        &mut second,
+        &cwd,
+        json!({ "team_name": "beta" }),
+    )
+    .unwrap();
+
+    let deleted = crate::runtime::claude_tools::workflow::team_delete::execute_team_delete(
+        &mut first,
+        &cwd,
+        json!({}),
+    )
+    .unwrap();
+    let deleted: Value = serde_json::from_str(&deleted).unwrap();
+    assert_eq!(deleted["success"], true);
+    assert_eq!(deleted["team_name"], "alpha");
+    assert!(!home.join(".claude/teams/alpha").exists());
+    assert!(home.join(".claude/teams/beta").exists());
+
+    if let Some(value) = old_home {
+        std::env::set_var("PUFFER_HOME", value);
+    } else {
+        std::env::remove_var("PUFFER_HOME");
+    }
 }
 
 #[test]

@@ -25,7 +25,7 @@ pub mod team_create;
 pub mod team_delete;
 pub mod todo_write;
 
-mod store;
+pub(crate) mod store;
 mod support;
 mod task_runtime;
 mod task_tools;

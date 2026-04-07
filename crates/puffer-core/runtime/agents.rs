@@ -1,4 +1,5 @@
 use crate::agent_catalog::load_agent_resources;
+use crate::runtime::claude_tools::workflow::store::{register_team_member, ClaudeTeamMember};
 use crate::tool_names::tool_spec_matches_selector;
 use crate::{AppState, MessageRole};
 use anyhow::{anyhow, bail, Context, Result};
@@ -219,6 +220,23 @@ pub(super) fn execute_agent_tool(
     if prepared.nested_state.current_provider.is_none() && providers.providers().next().is_none() {
         bail!("no providers are registered");
     }
+    if let Some(team_name) = prepared.team_name.as_deref() {
+        register_team_member(
+            state.session.cwd.as_path(),
+            team_name,
+            ClaudeTeamMember {
+                agent_id: prepared.agent_id.clone(),
+                name: prepared
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| prepared.agent_id.clone()),
+                agent_type: prepared.agent_type.clone(),
+                joined_at: 0,
+                model: prepared.resolved_model.clone(),
+                cwd: prepared.nested_cwd.display().to_string(),
+            },
+        )?;
+    }
 
     if prepared.run_in_background {
         return launch_background_agent(prepared, providers.clone(), auth_store.clone());
@@ -310,6 +328,12 @@ fn prepare_agent_execution(
     if effective_mode == Some("plan") {
         nested_state.plan_mode = true;
     }
+    nested_state.active_team_name = input
+        .team_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     if let Some(effort) = input
         .effort
         .as_ref()
