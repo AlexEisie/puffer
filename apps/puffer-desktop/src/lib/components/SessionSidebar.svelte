@@ -221,7 +221,7 @@
   .session-link.selected {
     border-left-color: #87c9ac;
     color: #f8f3ea;
-    background: rgba(255, 255, 255, 0.05);
+    background: rgba(255, 255, 255, 0.07);
     box-shadow:
       0 0 0 1px rgba(135, 201, 172, 0.16) inset,
       3px 0 0 rgba(135, 201, 172, 0.9) inset;
@@ -239,6 +239,10 @@
     color: var(--sidebar-muted);
     font-size: 0.76rem;
     line-height: 1.45;
+  }
+
+  .session-link.selected .session-meta {
+    color: #bcd4c8;
   }
 
   .session-note {
