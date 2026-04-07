@@ -19,11 +19,11 @@ mod task_panels;
 mod text_overlay;
 mod usage;
 use crate::flow::{
-    allow_prompt_before_onboarding, apply_selected_provider, builtin_openai_base_url,
-    builtin_openai_headers, builtin_openai_query_params, cancel_pending_submit,
-    emit_system_message, handle_prompt_submit, handle_submit, persist_user_config,
-    poll_pending_submit, run_embedded_auth_login, set_overlay_state, submit_next_queued_prompt,
-    submit_queued_prompt_if_ready, try_open_overlay,
+    advance_loop_after_turn, allow_prompt_before_onboarding, apply_selected_provider,
+    builtin_openai_base_url, builtin_openai_headers, builtin_openai_query_params,
+    cancel_pending_submit, check_loop_interval, emit_system_message, handle_prompt_submit,
+    handle_submit, persist_user_config, poll_pending_submit, run_embedded_auth_login,
+    set_overlay_state, submit_next_queued_prompt, submit_queued_prompt_if_ready, try_open_overlay,
 };
 use crate::permission_prompt_flow::handle_permission_prompt_key;
 use crate::statusline::refresh_status_line;
@@ -141,6 +141,7 @@ pub fn run_app(
 
     loop {
         if poll_pending_submit(state, auth_store, auth_path, session_store, &mut tui)? {
+            advance_loop_after_turn(state, session_store, &mut tui)?;
             submit_queued_prompt_if_ready(
                 state,
                 resources,
@@ -162,6 +163,7 @@ pub fn run_app(
                 no_alt_screen,
             )?;
         }
+        check_loop_interval(&mut tui);
         refresh_status_line(state)?;
         terminal.draw(|frame| {
             render::set_active_overlay(tui.overlay.clone());
@@ -173,6 +175,7 @@ pub fn run_app(
             );
             render::set_tool_details_expanded(tui.tool_details_expanded);
             render::set_follow_output(tui.follow_output);
+            render::set_active_loop_state(tui.active_loop.clone());
             render::render(
                 frame,
                 state,
@@ -975,8 +978,15 @@ fn handle_overlay_key(
             )?;
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            state.should_exit = true;
-            return Ok(true);
+            if tui.active_loop.is_some() {
+                cancel_pending_submit(state, session_store, tui)?;
+                tui.active_loop = None;
+                tui.queued_prompts.clear();
+                emit_system_message(state, session_store, "Loop stopped.".to_string())?;
+            } else {
+                state.should_exit = true;
+                return Ok(true);
+            }
         }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             if ch == '/' && tui.input.is_empty() {

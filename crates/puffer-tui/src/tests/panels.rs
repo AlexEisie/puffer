@@ -1,4 +1,5 @@
 use super::*;
+use crate::state::{LoopKind, LoopState, LoopStatus};
 
 fn open_panel(command: &str) -> OverlayState {
     let tempdir = tempdir().unwrap();
@@ -370,4 +371,53 @@ fn try_open_overlay_builds_rewind_picker() {
         tui.overlay,
         Some(OverlayState::CommandPicker { .. })
     ));
+}
+
+#[test]
+fn render_shows_loop_status_box_when_active() {
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+
+    render::set_active_loop_state(Some(LoopState {
+        kind: LoopKind::Maximize("accuracy".to_string()),
+        prompt: "improve tests".to_string(),
+        iteration: 3,
+        max_iterations: 50,
+        interval: None,
+        next_fire: None,
+        target_history: vec![0.72, 0.85, 0.91],
+        status: LoopStatus::Running,
+    }));
+    terminal
+        .draw(|frame| {
+            render::set_active_overlay(None);
+            render::set_pending_submit_state(None, vec![]);
+            render::set_tool_details_expanded(false);
+            render::set_follow_output(true);
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "",
+                0,
+                0,
+                0,
+                &supported_commands(),
+            )
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(rendered.contains("Optimize"), "should show Optimize title");
+    assert!(rendered.contains("accuracy"), "should show metric name");
+    assert!(rendered.contains("iter 3/50"), "should show iteration");
+    assert!(rendered.contains("Running"), "should show running status");
+
+    // Clean up thread-local state.
+    render::set_active_loop_state(None);
 }

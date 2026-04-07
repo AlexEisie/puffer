@@ -1,4 +1,6 @@
+use super::flow_loop::*;
 use super::*;
+use crate::state::{LoopKind, LoopState};
 use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
 use puffer_session_store::SessionMetadata;
 use tempfile::tempdir;
@@ -188,4 +190,143 @@ fn cancel_pending_submit_records_interrupt_and_starts_next_queued_prompt() {
         .transcript
         .iter()
         .any(|message| { message.role == MessageRole::User && message.text == "second" }));
+}
+
+// ---------------------------------------------------------------------------
+// Loop / Maximize / Minimize tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_loop_args_extracts_interval_and_prompt() {
+    let (d, p) = parse_loop_args("5m check deploy");
+    assert_eq!(d, std::time::Duration::from_secs(300));
+    assert_eq!(p, "check deploy");
+
+    let (d, p) = parse_loop_args("30s ping server");
+    assert_eq!(d, std::time::Duration::from_secs(30));
+    assert_eq!(p, "ping server");
+
+    let (d, p) = parse_loop_args("2h run maintenance");
+    assert_eq!(d, std::time::Duration::from_secs(7200));
+    assert_eq!(p, "run maintenance");
+
+    // No interval → defaults to 10 minutes, whole input is prompt.
+    let (d, p) = parse_loop_args("check deploy");
+    assert_eq!(d, std::time::Duration::from_secs(600));
+    assert_eq!(p, "check deploy");
+}
+
+#[test]
+fn parse_duration_handles_all_suffixes() {
+    assert_eq!(parse_duration("10s"), Some(std::time::Duration::from_secs(10)));
+    assert_eq!(parse_duration("5m"), Some(std::time::Duration::from_secs(300)));
+    assert_eq!(parse_duration("1h"), Some(std::time::Duration::from_secs(3600)));
+    assert_eq!(parse_duration("2d"), Some(std::time::Duration::from_secs(172800)));
+    assert_eq!(parse_duration("abc"), None);
+    assert_eq!(parse_duration(""), None);
+}
+
+#[test]
+fn extract_metric_value_parses_marker() {
+    let text = "I improved the test suite.\n[[METRIC:accuracy=0.85]]\nDone.";
+    assert_eq!(extract_metric_value(text, "accuracy"), Some(0.85));
+
+    let text = "[[METRIC:latency = 12.5 ]]";
+    assert_eq!(extract_metric_value(text, "latency"), Some(12.5));
+
+    let text = "No metric here";
+    assert_eq!(extract_metric_value(text, "accuracy"), None);
+}
+
+#[test]
+fn has_converged_detects_plateau() {
+    assert!(!has_converged(&[]));
+    assert!(!has_converged(&[1.0, 2.0]));
+    assert!(!has_converged(&[1.0, 2.0, 3.0]));
+    assert!(has_converged(&[3.0, 3.0, 3.0]));
+    assert!(has_converged(&[1.0, 2.0, 3.0, 3.0, 3.0]));
+}
+
+#[test]
+fn build_optimization_prompt_includes_context() {
+    let prompt = build_optimization_prompt("fix tests", "accuracy", true, 3, &[0.5, 0.7]);
+    assert!(prompt.contains("MAXIMIZE"));
+    assert!(prompt.contains("accuracy"));
+    assert!(prompt.contains("iteration 3/"));
+    assert!(prompt.contains("0.5000"));
+    assert!(prompt.contains("0.7000"));
+    assert!(prompt.contains("fix tests"));
+    assert!(prompt.contains("[[METRIC:accuracy="));
+}
+
+#[test]
+fn try_handle_loop_command_creates_loop_state() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let mut tui = TuiState::default();
+
+    // Non-loop command returns false.
+    assert!(!try_handle_loop_command(&mut state, &session_store, &mut tui, "/help").unwrap());
+
+    // Loop command creates state and enqueues prompt.
+    assert!(
+        try_handle_loop_command(&mut state, &session_store, &mut tui, "/loop 10s echo hi").unwrap()
+    );
+    assert!(tui.active_loop.is_some());
+    let ls = tui.active_loop.as_ref().unwrap();
+    assert!(matches!(ls.kind, LoopKind::Loop));
+    assert_eq!(ls.prompt, "echo hi");
+    assert_eq!(ls.interval, Some(std::time::Duration::from_secs(10)));
+    assert_eq!(tui.queued_prompts.len(), 1);
+}
+
+#[test]
+fn try_handle_loop_command_creates_maximize_state() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let mut tui = TuiState::default();
+
+    assert!(
+        try_handle_loop_command(&mut state, &session_store, &mut tui, "/maximize accuracy run bench")
+            .unwrap()
+    );
+    assert!(tui.active_loop.is_some());
+    let ls = tui.active_loop.as_ref().unwrap();
+    assert!(matches!(ls.kind, LoopKind::Maximize(ref m) if m == "accuracy"));
+    assert_eq!(ls.prompt, "run bench");
+    assert_eq!(tui.queued_prompts.len(), 1);
+    let enqueued = &tui.queued_prompts[0];
+    assert!(enqueued.contains("MAXIMIZE"));
+    assert!(enqueued.contains("[[METRIC:accuracy="));
+}
+
+#[test]
+fn stop_command_clears_active_loop() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let mut tui = TuiState::default();
+
+    try_handle_loop_command(&mut state, &session_store, &mut tui, "/loop 10s echo hi").unwrap();
+    assert!(tui.active_loop.is_some());
+
+    try_handle_loop_command(&mut state, &session_store, &mut tui, "/loop stop").unwrap();
+    assert!(tui.active_loop.is_none());
 }
