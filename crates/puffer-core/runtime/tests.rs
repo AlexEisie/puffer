@@ -4,7 +4,7 @@ use base64::Engine as _;
 use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
 use puffer_provider_openai::{OpenAIAuth, OpenAIRequestConfig, OpenAIResponseToolCall};
 use puffer_provider_registry::{AuthMode, OAuthCredential, ProviderDescriptor, StoredCredential};
-use puffer_resources::{LoadedItem, LoadedResources, SourceInfo, SourceKind, ToolSpec};
+use puffer_resources::{AgentSpec, LoadedItem, LoadedResources, SourceInfo, SourceKind, ToolSpec};
 use puffer_session_store::SessionMetadata;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -95,6 +95,27 @@ fn loaded_tool(id: &str, description: &str, handler: &str) -> LoadedItem<ToolSpe
             input_schema: None,
             metadata: Default::default(),
             display: Default::default(),
+        },
+        source_info: SourceInfo {
+            path: format!("{id}.yaml").into(),
+            kind: SourceKind::Builtin,
+        },
+    }
+}
+
+fn loaded_agent(
+    id: &str,
+    description: &str,
+    prompt: &str,
+    tools: &[&str],
+) -> LoadedItem<AgentSpec> {
+    LoadedItem {
+        value: AgentSpec {
+            id: id.to_string(),
+            description: description.to_string(),
+            prompt: prompt.to_string(),
+            tools: tools.iter().map(|tool| tool.to_string()).collect(),
+            model: None,
         },
         source_info: SourceInfo {
             path: format!("{id}.yaml").into(),
@@ -296,6 +317,9 @@ fn execute_anthropic_tool_calls_runs_registered_tools() {
         ..LoadedResources::default()
     };
     let registry = ToolRegistry::from_resources(&resources);
+    let mut providers = ProviderRegistry::new();
+    let provider = provider();
+    providers.register(provider.clone());
     let response = json!({
         "content": [
             {
@@ -313,6 +337,8 @@ fn execute_anthropic_tool_calls_runs_registered_tools() {
     let result = execute_anthropic_tool_calls(
         &mut state,
         &resources,
+        &providers,
+        &mut AuthStore::default(),
         &response,
         &registry,
         std::env::current_dir().unwrap().as_path(),
@@ -670,6 +696,9 @@ fn execute_openai_tool_calls_serializes_outputs() {
         ..LoadedResources::default()
     };
     let registry = ToolRegistry::from_resources(&resources);
+    let mut providers = ProviderRegistry::new();
+    let provider = openai_provider("http://127.0.0.1".to_string());
+    providers.register(provider);
     let tool_calls = vec![OpenAIResponseToolCall {
         item_id: Some("fc_1".to_string()),
         status: Some("completed".to_string()),
@@ -682,6 +711,8 @@ fn execute_openai_tool_calls_serializes_outputs() {
     let result = execute_openai_tool_calls(
         &mut state,
         &resources,
+        &providers,
+        &mut AuthStore::default(),
         &tool_calls,
         &registry,
         std::env::current_dir().unwrap().as_path(),
@@ -715,6 +746,9 @@ fn tool_hooks_run_for_completed_tool_calls() {
         ..LoadedResources::default()
     };
     let registry = ToolRegistry::from_resources(&resources);
+    let mut providers = ProviderRegistry::new();
+    let provider = provider();
+    providers.register(provider.clone());
     let response = json!({
         "content": [
             {
@@ -732,6 +766,8 @@ fn tool_hooks_run_for_completed_tool_calls() {
     let _ = execute_anthropic_tool_calls(
         &mut state,
         &resources,
+        &providers,
+        &mut AuthStore::default(),
         &response,
         &registry,
         temp.path(),
@@ -740,6 +776,149 @@ fn tool_hooks_run_for_completed_tool_calls() {
     )
     .unwrap();
     assert_eq!(std::fs::read_to_string(hook_output).unwrap(), "bash");
+}
+
+#[test]
+fn execute_anthropic_tool_calls_runs_agent_runtime_tool() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let request_log = Arc::clone(&requests);
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0_u8; 8192];
+        let bytes = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+        request_log.lock().unwrap().push(request);
+        let body = json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": "nested ok"
+                }
+            ]
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let mut provider = provider();
+    provider.id = "local-anthropic".to_string();
+    provider.base_url = format!("http://{address}");
+    provider.auth_modes.clear();
+    provider.models[0].provider = "local-anthropic".to_string();
+
+    let mut providers = ProviderRegistry::new();
+    providers.register(provider.clone());
+
+    let mut state = state();
+    state.current_provider = Some("local-anthropic".to_string());
+    state.current_model = Some("local-anthropic/claude-sonnet-4-5".to_string());
+
+    let resources = LoadedResources {
+        agents: vec![loaded_agent(
+            "Explore",
+            "Read-only agent",
+            "You are a read-only subagent.",
+            &["read_file"],
+        )],
+        tools: vec![
+            loaded_tool("Agent", "Delegate work", "runtime:agent"),
+            loaded_tool("read_file", "Read files", "read_file"),
+            loaded_tool("write_file", "Write files", "write_file"),
+        ],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let response = json!({
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "toolu_agent",
+                "name": "Agent",
+                "input": {
+                    "description": "Inspect one file",
+                    "prompt": "Read Cargo.toml and summarize it.",
+                    "subagent_type": "Explore"
+                }
+            }
+        ]
+    });
+
+    let request_config = AnthropicRequestConfig {
+        base_url: provider.base_url.clone(),
+        session_id: state.session.id.to_string(),
+        custom_headers: Default::default(),
+        remote_container_id: None,
+        remote_session_id: None,
+        client_app: None,
+        entrypoint: "cli".to_string(),
+        user_type: "external".to_string(),
+        version: APP_VERSION.to_string(),
+        workload: None,
+        additional_protection: false,
+        cch_enabled: true,
+        auth: AnthropicAuth::None,
+        beta_header: None,
+        client_request_id: None,
+    };
+    let result = execute_anthropic_tool_calls(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &response,
+        &registry,
+        std::env::current_dir().unwrap().as_path(),
+        &request_config,
+        "claude-sonnet-4-5",
+    )
+    .unwrap()
+    .unwrap();
+    server.join().unwrap();
+
+    assert_eq!(result.invocations.len(), 1);
+    assert_eq!(result.invocations[0].tool_id, "Agent");
+    assert!(result.invocations[0].output.contains("nested ok"));
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("\"name\":\"read_file\""));
+    assert!(!requests[0].contains("\"name\":\"write_file\""));
+}
+
+#[test]
+fn execute_agent_tool_rejects_background_requests() {
+    let resources = LoadedResources {
+        agents: vec![loaded_agent(
+            "general-purpose",
+            "Default agent",
+            "You are a coding subagent.",
+            &["read_file"],
+        )],
+        ..LoadedResources::default()
+    };
+    let error = super::agents::execute_agent_tool(
+        &state(),
+        &resources,
+        &ProviderRegistry::new(),
+        &mut AuthStore::default(),
+        std::env::current_dir().unwrap().as_path(),
+        json!({
+            "description": "Background request",
+            "prompt": "Do the thing",
+            "run_in_background": true
+        }),
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("background agent execution is not implemented"));
 }
 
 #[test]

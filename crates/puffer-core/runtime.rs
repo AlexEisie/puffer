@@ -14,8 +14,10 @@ use serde_json::{json, Value};
 
 mod openai;
 mod openai_sse;
+mod agents;
 mod claude_tools;
 mod local_tools;
+mod tool_executor;
 
 use self::openai::{execute_openai, execute_openai_completions, is_event_stream, parse_openai_sse_response};
 #[cfg(test)]
@@ -24,6 +26,7 @@ use self::openai::{
     parse_openai_sse_response_streaming, resolve_openai_execution_config, transcript_to_openai_chat_messages,
     transcript_to_openai_input,
 };
+use self::tool_executor::{execute_tool_call, ToolExecutionBackend};
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OPENAI_CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
@@ -68,13 +71,29 @@ pub fn execute_user_prompt(
     let (provider, model_id) = resolve_provider_and_model(state, providers)?;
     match resolve_model_api(state, providers, provider, &model_id).as_str() {
         "anthropic-messages" => {
-            execute_anthropic(state, resources, provider, model_id, auth_store, input)
+            execute_anthropic(state, resources, providers, provider, model_id, auth_store, input)
         }
         "openai-responses" | "azure-openai-responses" | "openai-codex-responses" => {
-            execute_openai(state, resources, provider, model_id, auth_store, input)
+            execute_openai(
+                state,
+                resources,
+                providers,
+                provider,
+                model_id,
+                auth_store,
+                input,
+            )
         }
         "openai-completions" => {
-            execute_openai_completions(state, resources, provider, model_id, auth_store, input)
+            execute_openai_completions(
+                state,
+                resources,
+                providers,
+                provider,
+                model_id,
+                auth_store,
+                input,
+            )
         }
         other => bail!(
             "provider {} with api {other} is not executable yet",
@@ -174,9 +193,10 @@ fn resolve_model_api(
 fn execute_anthropic(
     state: &mut AppState,
     resources: &LoadedResources,
+    providers: &ProviderRegistry,
     provider: &ProviderDescriptor,
     model_id: String,
-    auth_store: &AuthStore,
+    auth_store: &mut AuthStore,
     input: &str,
 ) -> Result<TurnExecution> {
     let auth = anthropic_auth_for_provider(auth_store, provider)?;
@@ -228,17 +248,17 @@ fn execute_anthropic(
 
         let response = send_http_request(&request.url, &request.headers, &body.to_string(), true)?;
         let cwd = state.cwd.clone();
-        if let Some(tool_results) =
-            execute_anthropic_tool_calls(
-                state,
-                resources,
-                &response,
-                &registry,
-                &cwd,
-                &request_config,
-                &model_id,
-            )?
-        {
+        if let Some(tool_results) = execute_anthropic_tool_calls(
+            state,
+            resources,
+            providers,
+            auth_store,
+            &response,
+            &registry,
+            &cwd,
+            &request_config,
+            &model_id,
+        )? {
             invocations.extend(tool_results.invocations);
             messages.push(json!({
                 "role": "assistant",
@@ -442,6 +462,8 @@ fn anthropic_tool_schema(handler: &str) -> Value {
 fn execute_anthropic_tool_calls(
     state: &mut AppState,
     resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
     response: &Value,
     registry: &ToolRegistry,
     cwd: &std::path::Path,
@@ -469,20 +491,17 @@ fn execute_anthropic_tool_calls(
         let input = item
             .get("input")
             .ok_or_else(|| anyhow!("anthropic tool_use block missing input"))?;
-        let definition = registry
-            .definition(tool_id)
-            .ok_or_else(|| anyhow!("unknown tool {tool_id}"))?;
-        let execution = claude_tools::execute_tool(
+        let execution = execute_tool_call(
             state,
             resources,
+            providers,
+            auth_store,
             registry,
-            definition,
+            model_id,
             cwd,
+            ToolExecutionBackend::Anthropic { request_config },
+            tool_id,
             input.clone(),
-            claude_tools::ProviderToolContext::Anthropic {
-                request_config,
-                model_id,
-            },
         )?;
         run_tool_hooks(
             resources,

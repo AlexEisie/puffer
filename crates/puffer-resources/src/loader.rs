@@ -1,6 +1,6 @@
 use crate::model::{
-    HookSpec, IdeSpec, LoadedItem, LoadedResources, MascotSpec, McpServerSpec, PluginSpec,
-    PromptTemplate, ProviderPack, SkillSpec, SourceInfo, SourceKind, ToolSpec,
+    AgentSpec, HookSpec, IdeSpec, LoadedItem, LoadedResources, MascotSpec, McpServerSpec,
+    PluginSpec, PromptTemplate, ProviderPack, SkillSpec, SourceInfo, SourceKind, ToolSpec,
 };
 use anyhow::{Context, Result};
 use indexmap::IndexMap;
@@ -28,6 +28,13 @@ pub fn load_resources(paths: &ConfigPaths) -> Result<LoadedResources> {
             load_yaml_dir::<ToolSpec>(&root.join("tools"), kind)?,
             |item| item.value.id.clone(),
             "tool",
+            &mut loaded.diagnostics,
+        );
+        merge_by_id(
+            &mut loaded.agents,
+            load_yaml_dir::<AgentSpec>(&root.join("agents"), kind)?,
+            |item| item.value.id.clone(),
+            "agent",
             &mut loaded.diagnostics,
         );
         merge_by_id(
@@ -92,6 +99,14 @@ pub fn prompt_by_id<'a>(
         .prompts
         .iter()
         .find(|prompt| prompt.value.id == id)
+}
+
+/// Looks up an agent definition by id.
+pub fn agent_by_id<'a>(
+    resources: &'a LoadedResources,
+    id: &str,
+) -> Option<&'a LoadedItem<AgentSpec>> {
+    resources.agents.iter().find(|agent| agent.value.id == id)
 }
 
 /// Looks up a hook specification by id.
@@ -415,10 +430,16 @@ mod tests {
         let temp = tempdir().unwrap();
         let root = temp.path().join("workspace");
         let resources_dir = root.join("resources");
+        fs::create_dir_all(resources_dir.join("agents")).unwrap();
         fs::create_dir_all(resources_dir.join("prompts")).unwrap();
         fs::create_dir_all(resources_dir.join("hooks")).unwrap();
         fs::create_dir_all(resources_dir.join("skills/reviewer")).unwrap();
         fs::create_dir_all(resources_dir.join("plugins")).unwrap();
+        fs::write(
+            resources_dir.join("agents/default.yaml"),
+            "id: default\ndescription: Default agent\nprompt: You are the default agent.\n",
+        )
+        .unwrap();
         fs::write(
             resources_dir.join("prompts/plan.yaml"),
             "id: plan\ndescription: Plan\ntemplate: body\n",
@@ -442,10 +463,12 @@ mod tests {
 
         let paths = ConfigPaths::discover(&root);
         let loaded = load_resources(&paths).unwrap();
+        assert_eq!(loaded.agents.len(), 1);
         assert_eq!(loaded.prompts.len(), 1);
         assert_eq!(loaded.hooks.len(), 1);
         assert_eq!(loaded.skills.len(), 1);
         assert_eq!(loaded.plugins.len(), 1);
+        assert_eq!(loaded.agents[0].value.id, "default");
         assert_eq!(loaded.skills[0].value.name, "reviewer");
         assert_eq!(loaded.plugins[0].value.id, "example");
     }

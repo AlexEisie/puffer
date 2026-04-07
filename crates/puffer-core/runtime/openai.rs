@@ -1,6 +1,7 @@
 use super::{
-    parse_http_json_response, run_tool_hooks, run_turn_hooks, send_http_request_raw,
-    ToolInvocation, TurnStreamEvent, APP_VERSION, OPENAI_CHATGPT_BASE_URL,
+    execute_tool_call, parse_http_json_response, run_tool_hooks, run_turn_hooks,
+    send_http_request_raw, ToolExecutionBackend, ToolInvocation, TurnStreamEvent, APP_VERSION,
+    OPENAI_CHATGPT_BASE_URL,
 };
 use crate::AppState;
 use anyhow::{anyhow, bail, Context, Result};
@@ -15,7 +16,9 @@ use puffer_provider_openai::{
     OpenAIResponsesResponse, OpenAIResponsesTool, OpenAIResponsesToolChoice,
     OpenAIResponsesToolChoiceMode, OpenAIResponsesToolRequest,
 };
-use puffer_provider_registry::{AuthStore, OAuthCredential, ProviderDescriptor, StoredCredential};
+use puffer_provider_registry::{
+    AuthStore, OAuthCredential, ProviderDescriptor, ProviderRegistry, StoredCredential,
+};
 use puffer_resources::LoadedResources;
 use puffer_tools::ToolRegistry;
 use reqwest::blocking::{Client, Response};
@@ -45,6 +48,7 @@ pub(super) struct OpenAIToolResults {
 pub(super) fn execute_openai(
     state: &mut AppState,
     resources: &LoadedResources,
+    providers: &ProviderRegistry,
     provider: &ProviderDescriptor,
     model_id: String,
     auth_store: &mut AuthStore,
@@ -129,6 +133,8 @@ pub(super) fn execute_openai(
         let tool_results = execute_openai_tool_calls(
             state,
             resources,
+            providers,
+            auth_store,
             &tool_calls,
             &registry,
             &cwd,
@@ -146,6 +152,7 @@ pub(super) fn execute_openai(
 pub(super) fn execute_openai_streaming<F>(
     state: &mut AppState,
     resources: &LoadedResources,
+    providers: &ProviderRegistry,
     provider: &ProviderDescriptor,
     model_id: String,
     auth_store: &mut AuthStore,
@@ -157,7 +164,9 @@ where
 {
     let mut execution = resolve_openai_execution_config(state, auth_store, provider)?;
     if !execution.codex_style {
-        return execute_openai(state, resources, provider, model_id, auth_store, input);
+        return execute_openai(
+            state, resources, providers, provider, model_id, auth_store, input,
+        );
     }
 
     let registry = ToolRegistry::from_resources(resources);
@@ -208,6 +217,8 @@ where
         let tool_results = execute_openai_tool_calls(
             state,
             resources,
+            providers,
+            auth_store,
             &tool_calls,
             &registry,
             &cwd,
@@ -230,6 +241,7 @@ where
 pub(super) fn execute_openai_completions(
     state: &mut AppState,
     resources: &LoadedResources,
+    providers: &ProviderRegistry,
     provider: &ProviderDescriptor,
     model_id: String,
     auth_store: &mut AuthStore,
@@ -283,6 +295,8 @@ pub(super) fn execute_openai_completions(
         let tool_results = execute_openai_tool_calls(
             state,
             resources,
+            providers,
+            auth_store,
             &tool_calls,
             &registry,
             &cwd,
@@ -385,6 +399,8 @@ fn openai_compatible_schema(schema: Value) -> Value {
 pub(super) fn execute_openai_tool_calls(
     state: &mut AppState,
     resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
     tool_calls: &[OpenAIResponseToolCall],
     registry: &ToolRegistry,
     cwd: &std::path::Path,
@@ -394,20 +410,17 @@ pub(super) fn execute_openai_tool_calls(
     let mut outputs = Vec::new();
     let mut invocations = Vec::new();
     for tool_call in tool_calls {
-        let definition = registry
-            .definition(&tool_call.name)
-            .ok_or_else(|| anyhow!("unknown tool {}", tool_call.name))?;
-        let execution = super::claude_tools::execute_tool(
+        let execution = execute_tool_call(
             state,
             resources,
+            providers,
+            auth_store,
             registry,
-            definition,
+            model_id,
             cwd,
+            ToolExecutionBackend::OpenAi { request_config },
+            &tool_call.name,
             tool_call.arguments.clone(),
-            super::claude_tools::ProviderToolContext::OpenAI {
-                request_config,
-                model_id,
-            },
         )?;
         run_tool_hooks(
             resources,

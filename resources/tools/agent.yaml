@@ -1,7 +1,7 @@
 id: Agent
 name: Agent
-description: Launch a new agent.
-handler: runtime:workflow:agent
+description: Delegate a focused task to a specialized subagent and return its result.
+handler: runtime:agent
 approval_policy: auto
 sandbox_policy: workspace-write
 input_schema:
@@ -9,41 +9,28 @@ input_schema:
   properties:
     description:
       type: string
-      description: A short (3-5 word) description of the task.
+      description: Short description of the delegated task.
     prompt:
       type: string
-      description: The task for the agent to perform.
+      description: Full task instructions for the subagent.
     subagent_type:
       type: string
-      description: The type of specialized agent to use for this task.
+      description: Optional agent id to run. Defaults to general-purpose.
     model:
       type: string
-      enum:
-        - sonnet
-        - opus
-        - haiku
-      description: Optional model override for this agent.
+      description: Optional fully-qualified model override for the subagent.
     run_in_background:
       type: boolean
-      description: Set to true to run this agent in the background.
-    name:
-      type: string
-      description: Optional name for the spawned agent.
-    team_name:
-      type: string
-      description: Optional team name for spawning.
-    mode:
-      type: string
-      description: Optional permission mode for the spawned teammate.
-    isolation:
-      type: string
-      enum:
-        - worktree
-        - remote
-      description: Optional isolation mode for the agent.
+      description: When true, request background execution.
     cwd:
       type: string
-      description: Optional absolute working directory override for the agent.
+      description: Optional working directory override for the subagent.
+    isolation:
+      type: string
+      description: Optional isolation mode. Only worktree is recognized.
+    name:
+      type: string
+      description: Optional label for the subagent invocation.
   required:
     - description
     - prompt

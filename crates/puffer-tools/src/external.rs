@@ -200,7 +200,8 @@ pub(crate) fn builtin_handler_name(handler: &str) -> String {
 fn is_runtime_local_handler(handler: &str) -> bool {
     matches!(
         handler,
-        "runtime:skill"
+        "runtime:agent"
+            | "runtime:skill"
             | "runtime:tool_search"
             | "runtime:glob"
             | "runtime:notebook_edit"

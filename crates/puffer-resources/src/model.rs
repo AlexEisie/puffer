@@ -86,6 +86,18 @@ pub struct PromptTemplate {
     pub chained_from: Vec<String>,
 }
 
+/// Declares a YAML-editable subagent definition.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSpec {
+    pub id: String,
+    pub description: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 impl PromptTemplate {
     /// Renders the prompt template using the provided variables and prompt defaults.
     pub fn render(&self, variables: &std::collections::BTreeMap<String, String>) -> String {
@@ -254,6 +266,7 @@ impl ProviderPack {
 pub struct LoadedResources {
     pub providers: Vec<LoadedItem<ProviderPack>>,
     pub tools: Vec<LoadedItem<ToolSpec>>,
+    pub agents: Vec<LoadedItem<AgentSpec>>,
     pub prompts: Vec<LoadedItem<PromptTemplate>>,
     pub hooks: Vec<LoadedItem<HookSpec>>,
     pub skills: Vec<LoadedItem<SkillSpec>>,
