@@ -252,29 +252,31 @@
               <pre>{diffPreview(item.diff.patch)}</pre>
             </div>
           {:else}
-            <div class="entry-meta">
-              {#if item.kind === "assistant"}
-                <span>Assistant</span>
-              {:else if item.kind === "system"}
-                <span>System</span>
-              {/if}
+            {#if item.kind === "system" || shouldCollapse(item)}
+              <div class="entry-meta">
+                {#if item.kind === "system"}
+                  <span>System</span>
+                {:else}
+                  <span></span>
+                {/if}
 
-              {#if shouldCollapse(item)}
-                <button class="collapse-toggle" on:click={() => toggleCollapsed(item)}>
-                  <svg viewBox="0 0 16 16" aria-hidden="true">
-                    <path
-                      d={isCollapsed(item) ? "M6 4l4 4-4 4" : "M4 6l4 4 4-4"}
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="1.4"
-                    />
-                  </svg>
-                  <span>{isCollapsed(item) ? "Expand" : "Collapse"}</span>
-                </button>
-              {/if}
-            </div>
+                {#if shouldCollapse(item)}
+                  <button class="collapse-toggle" on:click={() => toggleCollapsed(item)}>
+                    <svg viewBox="0 0 16 16" aria-hidden="true">
+                      <path
+                        d={isCollapsed(item) ? "M6 4l4 4-4 4" : "M4 6l4 4 4-4"}
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="1.4"
+                      />
+                    </svg>
+                    <span>{isCollapsed(item) ? "Expand" : "Collapse"}</span>
+                  </button>
+                {/if}
+              </div>
+            {/if}
 
             <div class="markdown">
               {#if isCollapsed(item)}
