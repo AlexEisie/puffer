@@ -6,9 +6,10 @@ use super::store::{
     team_lead_agent_id, teams_path, todos_path, validate_ask_user_questions, workflow_root,
     worktrees_path, write_claude_team_file, AgentInput, AgentStore, AskUserQuestionInput,
     ClaudeTeamFile, ClaudeTeamMember, ConfigInput, EnterWorktreeInput, ExitWorktreeInput,
-    MessageStore, PowerShellInput, SendMessageInput, StoredAgent, StoredMessage, StoredTask,
-    StoredTeam, StoredTodo, StoredWorktree, TaskStore, TeamCreateInput, TeamStore, TodoStore,
-    TodoWriteInput, WorktreeStore,
+    MessageStore, PendingShutdownRequest, PowerShellInput, SendMessageInput, ShutdownRequestStore,
+    StoredAgent, StoredMessage, StoredTask, StoredTeam, StoredTodo, StoredWorktree, TaskStore,
+    TeamCreateInput, TeamStore, TodoStore, TodoWriteInput, WorktreeStore,
+    shutdown_requests_path,
 };
 use super::task_runtime::{terminal_task_status, validate_todos, wait_for_child_output};
 use crate::config_settings::{
@@ -178,6 +179,27 @@ pub(super) fn execute_send_message(
         bail!("SendMessage could not resolve recipient `{to}`");
     }
 
+    // --- Structured message routing ---
+    let message_type = parsed
+        .message
+        .get("type")
+        .and_then(Value::as_str)
+        .map(String::from);
+
+    match message_type.as_deref() {
+        Some("shutdown_request") => {
+            return handle_shutdown_request(store_cwd, &from, &recipients, &parsed);
+        }
+        Some("shutdown_response") => {
+            return handle_shutdown_response(store_cwd, &from, &parsed);
+        }
+        Some("plan_approval_response") => {
+            return handle_plan_approval_response(store_cwd, &from, &recipients, &parsed);
+        }
+        _ => {}
+    }
+
+    // --- Default delivery ---
     let mut messages = load_store::<MessageStore>(&messages_path(store_cwd))?;
     let mut agents = load_store::<AgentStore>(&agents_path(store_cwd))?;
     let mut message_ids = Vec::new();
@@ -197,14 +219,6 @@ pub(super) fn execute_send_message(
             agent.agent_id == *recipient || agent.name.as_deref() == Some(recipient.as_str())
         }) {
             append_agent_message(Path::new(&agent.output_file), &parsed.message)?;
-            if parsed
-                .message
-                .get("type")
-                .and_then(Value::as_str)
-                .is_some_and(|kind| kind == "shutdown_request")
-            {
-                agent.status = "stopped".to_string();
-            }
         }
     }
     save_store(&messages_path(store_cwd), &messages)?;
@@ -215,6 +229,208 @@ pub(super) fn execute_send_message(
         "messageIds": message_ids,
         "summary": parsed.summary,
         "message": parsed.message
+    }))?)
+}
+
+fn handle_shutdown_request(
+    store_cwd: &Path,
+    from: &str,
+    recipients: &[String],
+    parsed: &SendMessageInput,
+) -> Result<String> {
+    let request_id = format!("shutdown-{}", Uuid::new_v4().simple());
+    let reason = parsed
+        .message
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(String::from);
+
+    let mut store =
+        load_store::<ShutdownRequestStore>(&shutdown_requests_path(store_cwd))?;
+    for recipient in recipients {
+        store.requests.push(PendingShutdownRequest {
+            request_id: request_id.clone(),
+            from: from.to_string(),
+            to: recipient.clone(),
+            reason: reason.clone(),
+            created_at_ms: now_ms(),
+        });
+    }
+    save_store(&shutdown_requests_path(store_cwd), &store)?;
+
+    // Deliver the request message with the generated request_id to each recipient.
+    let enriched = json!({
+        "type": "shutdown_request",
+        "request_id": request_id,
+        "from": from,
+        "reason": reason,
+    });
+    let mut messages = load_store::<MessageStore>(&messages_path(store_cwd))?;
+    let agents = load_store::<AgentStore>(&agents_path(store_cwd))?;
+    for recipient in recipients {
+        messages.messages.push(StoredMessage {
+            id: format!("msg-{}", Uuid::new_v4().simple()),
+            to: recipient.clone(),
+            from: from.to_string(),
+            read: false,
+            summary: Some("shutdown request".to_string()),
+            message: enriched.clone(),
+            created_at_ms: now_ms(),
+        });
+        if let Some(agent) = agents.agents.iter().find(|a| {
+            a.agent_id == *recipient || a.name.as_deref() == Some(recipient.as_str())
+        }) {
+            append_agent_message(Path::new(&agent.output_file), &enriched)?;
+        }
+    }
+    save_store(&messages_path(store_cwd), &messages)?;
+
+    Ok(serde_json::to_string_pretty(&json!({
+        "success": true,
+        "message": format!("Shutdown request sent. Request ID: {request_id}"),
+        "request_id": request_id,
+        "targets": recipients,
+    }))?)
+}
+
+fn handle_shutdown_response(
+    store_cwd: &Path,
+    from: &str,
+    parsed: &SendMessageInput,
+) -> Result<String> {
+    let request_id = parsed
+        .message
+        .get("request_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("shutdown_response requires request_id"))?;
+    let approve = parsed
+        .message
+        .get("approve")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let reason = parsed
+        .message
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(String::from);
+
+    if !approve && reason.as_ref().map_or(true, |r| r.trim().is_empty()) {
+        bail!("reason is required when rejecting a shutdown request");
+    }
+
+    // Validate request_id exists.
+    let store =
+        load_store::<ShutdownRequestStore>(&shutdown_requests_path(store_cwd))?;
+    if !store
+        .requests
+        .iter()
+        .any(|r| r.request_id == request_id)
+    {
+        bail!("unknown shutdown request_id `{request_id}`");
+    }
+
+    if approve {
+        // Set the responding agent's status to stopped.
+        let mut agents = load_store::<AgentStore>(&agents_path(store_cwd))?;
+        if let Some(agent) = agents.agents.iter_mut().find(|a| {
+            a.agent_id == from || a.name.as_deref() == Some(from)
+        }) {
+            agent.status = "stopped".to_string();
+        }
+        save_store(&agents_path(store_cwd), &agents)?;
+    }
+
+    // Deliver response to team-lead mailbox.
+    let response_msg = json!({
+        "type": "shutdown_response",
+        "request_id": request_id,
+        "from": from,
+        "approve": approve,
+        "reason": reason,
+    });
+    let mut messages = load_store::<MessageStore>(&messages_path(store_cwd))?;
+    messages.messages.push(StoredMessage {
+        id: format!("msg-{}", Uuid::new_v4().simple()),
+        to: "team-lead".to_string(),
+        from: from.to_string(),
+        read: false,
+        summary: Some(if approve {
+            "shutdown approved".to_string()
+        } else {
+            "shutdown rejected".to_string()
+        }),
+        message: response_msg,
+        created_at_ms: now_ms(),
+    });
+    save_store(&messages_path(store_cwd), &messages)?;
+
+    let status = if approve { "approved" } else { "rejected" };
+    Ok(serde_json::to_string_pretty(&json!({
+        "success": true,
+        "message": format!("Shutdown {status}. Sent confirmation to team-lead."),
+        "request_id": request_id,
+    }))?)
+}
+
+fn handle_plan_approval_response(
+    store_cwd: &Path,
+    from: &str,
+    recipients: &[String],
+    parsed: &SendMessageInput,
+) -> Result<String> {
+    let request_id = parsed
+        .message
+        .get("request_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("plan_approval_response requires request_id"))?;
+    let approve = parsed
+        .message
+        .get("approve")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let feedback = parsed
+        .message
+        .get("feedback")
+        .and_then(Value::as_str)
+        .map(String::from);
+
+    let response_msg = json!({
+        "type": "plan_approval_response",
+        "request_id": request_id,
+        "from": from,
+        "approve": approve,
+        "feedback": feedback,
+    });
+
+    let mut messages = load_store::<MessageStore>(&messages_path(store_cwd))?;
+    let agents = load_store::<AgentStore>(&agents_path(store_cwd))?;
+    for recipient in recipients {
+        messages.messages.push(StoredMessage {
+            id: format!("msg-{}", Uuid::new_v4().simple()),
+            to: recipient.clone(),
+            from: from.to_string(),
+            read: false,
+            summary: Some(if approve {
+                "plan approved".to_string()
+            } else {
+                format!("plan rejected: {}", feedback.as_deref().unwrap_or(""))
+            }),
+            message: response_msg.clone(),
+            created_at_ms: now_ms(),
+        });
+        if let Some(agent) = agents.agents.iter().find(|a| {
+            a.agent_id == *recipient || a.name.as_deref() == Some(recipient.as_str())
+        }) {
+            append_agent_message(Path::new(&agent.output_file), &response_msg)?;
+        }
+    }
+    save_store(&messages_path(store_cwd), &messages)?;
+
+    let action = if approve { "approved" } else { "rejected" };
+    Ok(serde_json::to_string_pretty(&json!({
+        "success": true,
+        "message": format!("Plan {action} for {}", recipients.join(", ")),
+        "request_id": request_id,
     }))?)
 }
 

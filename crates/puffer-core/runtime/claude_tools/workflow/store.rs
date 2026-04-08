@@ -169,6 +169,20 @@ pub(super) struct MessageStore {
     pub(super) messages: Vec<StoredMessage>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct PendingShutdownRequest {
+    pub(super) request_id: String,
+    pub(super) from: String,
+    pub(super) to: String,
+    pub(super) reason: Option<String>,
+    pub(super) created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(super) struct ShutdownRequestStore {
+    pub(super) requests: Vec<PendingShutdownRequest>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub(super) struct WorktreeStore {
     pub(super) worktrees: Vec<StoredWorktree>,
@@ -652,6 +666,10 @@ pub(super) fn crons_path(cwd: &Path) -> PathBuf {
 
 pub(super) fn messages_path(cwd: &Path) -> PathBuf {
     workflow_root(cwd).unwrap().join("messages.json")
+}
+
+pub(super) fn shutdown_requests_path(cwd: &Path) -> PathBuf {
+    workflow_root(cwd).unwrap().join("shutdown_requests.json")
 }
 
 pub(super) fn worktrees_path(cwd: &Path) -> PathBuf {
