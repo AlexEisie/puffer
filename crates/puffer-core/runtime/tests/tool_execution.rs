@@ -186,7 +186,7 @@ fn execute_openai_tool_calls_enforce_working_directory_access_for_claude_file_to
     let request_config = test_openai_request_config();
     let cwd = state.cwd.clone();
 
-    let error = execute_openai_tool_calls(
+    let result = execute_openai_tool_calls(
         &mut state,
         &resources,
         &providers,
@@ -199,11 +199,10 @@ fn execute_openai_tool_calls_enforce_working_directory_access_for_claude_file_to
         None,
         None,
     )
-    .err()
-    .unwrap()
-    .to_string();
+    .unwrap();
 
-    assert!(error.contains("working director"));
+    assert!(!result.invocations[0].success);
+    assert!(result.outputs[0].output.contains("working director"));
 }
 
 #[test]
