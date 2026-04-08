@@ -609,19 +609,19 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 0.9rem;
-    padding: 1.05rem 1.7rem 1.15rem;
-    background: rgba(246, 239, 229, 0.92);
-    box-shadow: 0 -1px 0 rgba(120, 99, 72, 0.08) inset;
+    padding: 0.85rem 1.7rem 0.95rem;
+    background: rgba(244, 236, 226, 0.78);
+    box-shadow: 0 -1px 0 rgba(120, 99, 72, 0.05) inset;
   }
 
   textarea {
     resize: vertical;
     min-height: 4rem;
     max-height: 12rem;
-    padding: 1rem 1.05rem;
+    padding: 0.9rem 0.95rem;
     border: 0;
     border-radius: 0;
-    background: rgba(255, 255, 255, 0.82);
+    background: rgba(255, 255, 255, 0.68);
     color: var(--text);
     font: inherit;
     box-shadow: 0 1px 0 rgba(255, 255, 255, 0.55) inset;
@@ -654,9 +654,9 @@
 
   .composer button {
     align-self: end;
-    background: rgba(255, 255, 255, 0.92);
+    background: rgba(255, 255, 255, 0.72);
     color: var(--text);
-    padding-inline: 1.05rem;
+    padding-inline: 0.9rem;
   }
 
   .composer::after {
