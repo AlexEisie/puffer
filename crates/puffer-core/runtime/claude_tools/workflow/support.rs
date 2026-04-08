@@ -122,8 +122,14 @@ pub(super) fn execute_send_message(
     let _ = cwd;
     let parsed: SendMessageInput =
         serde_json::from_value(input).context("invalid SendMessage input")?;
-    if parsed.to.trim().is_empty() {
+
+    // --- Validation ---
+    let to = parsed.to.trim().to_string();
+    if to.is_empty() {
         bail!("SendMessage requires a non-empty recipient");
+    }
+    if to.contains('@') && to != "*" {
+        bail!("to must be a bare teammate name or \"*\" — do not include @");
     }
     if parsed
         .message
@@ -132,18 +138,57 @@ pub(super) fn execute_send_message(
     {
         bail!("SendMessage plain-text messages must not be empty");
     }
+    let is_structured = parsed
+        .message
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some();
+    if parsed.message.is_string()
+        && parsed
+            .summary
+            .as_ref()
+            .map_or(true, |s| s.trim().is_empty())
+    {
+        bail!("summary is required when message is a string");
+    }
+    if to == "*" && is_structured {
+        bail!("structured messages cannot be broadcast (to: \"*\")");
+    }
+    if parsed
+        .message
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t == "shutdown_response")
+        && to != "team-lead"
+    {
+        bail!("shutdown_response must be sent to \"team-lead\"");
+    }
+
+    // --- Sender identity ---
+    let from = if let Some(ref team_name) = state.active_team_name {
+        team_lead_agent_id(team_name)
+    } else {
+        "user".to_string()
+    };
+
     let store_cwd = state.session.cwd.as_path();
-    let recipients = resolve_recipients(store_cwd, state.active_team_name.as_deref(), &parsed.to)?;
+    let recipients =
+        resolve_recipients(store_cwd, state.active_team_name.as_deref(), &to)?;
     if recipients.is_empty() {
-        bail!("SendMessage could not resolve recipient `{}`", parsed.to);
+        bail!("SendMessage could not resolve recipient `{to}`");
     }
 
     let mut messages = load_store::<MessageStore>(&messages_path(store_cwd))?;
     let mut agents = load_store::<AgentStore>(&agents_path(store_cwd))?;
+    let mut message_ids = Vec::new();
     for recipient in &recipients {
+        let msg_id = format!("msg-{}", Uuid::new_v4().simple());
+        message_ids.push(msg_id.clone());
         messages.messages.push(StoredMessage {
-            id: format!("msg-{}", Uuid::new_v4().simple()),
+            id: msg_id,
             to: recipient.clone(),
+            from: from.clone(),
+            read: false,
             summary: parsed.summary.clone(),
             message: parsed.message.clone(),
             created_at_ms: now_ms(),
@@ -166,6 +211,8 @@ pub(super) fn execute_send_message(
     save_store(&agents_path(store_cwd), &agents)?;
     Ok(serde_json::to_string_pretty(&json!({
         "delivered": recipients,
+        "from": from,
+        "messageIds": message_ids,
         "summary": parsed.summary,
         "message": parsed.message
     }))?)

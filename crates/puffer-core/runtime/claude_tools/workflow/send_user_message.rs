@@ -37,6 +37,8 @@ pub fn execute_send_user_message(state: &mut AppState, cwd: &Path, input: Value)
     messages.messages.push(StoredMessage {
         id: format!("user-msg-{}", Uuid::new_v4().simple()),
         to: "user".to_string(),
+        from: "assistant".to_string(),
+        read: false,
         summary: Some(parsed.status.clone()),
         message: json!({
             "message": parsed.message,

@@ -120,6 +120,10 @@ pub(super) struct StoredCronJob {
 pub(super) struct StoredMessage {
     pub(super) id: String,
     pub(super) to: String,
+    #[serde(default)]
+    pub(super) from: String,
+    #[serde(default)]
+    pub(super) read: bool,
     pub(super) summary: Option<String>,
     pub(super) message: Value,
     pub(super) created_at_ms: u64,
