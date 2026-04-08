@@ -164,6 +164,18 @@ pub fn run_app(
             )?;
         }
         check_loop_interval(&mut tui);
+        if !tui.has_pending_submit() && !tui.queued_prompts.is_empty() {
+            submit_next_queued_prompt(
+                state,
+                resources,
+                providers,
+                auth_store,
+                auth_path,
+                session_store,
+                &mut tui,
+                no_alt_screen,
+            )?;
+        }
         refresh_status_line(state)?;
         terminal.draw(|frame| {
             render::set_active_overlay(tui.overlay.clone());
