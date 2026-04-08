@@ -60,7 +60,16 @@
   }
 
   function shouldCollapse(item: TimelineItem): boolean {
-    return item.kind !== "user" && lineCount(item) > 12;
+    if (item.kind === "user") {
+      return false;
+    }
+    if (item.kind === "tool" || item.kind === "diff") {
+      return lineCount(item) > 8;
+    }
+    if (item.kind === "assistant") {
+      return lineCount(item) > 10;
+    }
+    return lineCount(item) > 12;
   }
 
   function previewText(item: TimelineItem): string {
@@ -153,6 +162,11 @@
   $: transcriptItems = timeline.filter((item) => item.kind !== "permission");
   $: {
     const next = new Set(collapsedIds);
+    for (const item of transcriptItems) {
+      if (shouldCollapse(item)) {
+        next.add(item.id);
+      }
+    }
     for (const id of Array.from(next)) {
       if (!transcriptItems.some((item) => item.id === id && shouldCollapse(item))) {
         next.delete(id);
