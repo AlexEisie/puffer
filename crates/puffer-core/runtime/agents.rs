@@ -407,13 +407,38 @@ fn run_agent_synchronously(
     providers: &ProviderRegistry,
     auth_store: &mut AuthStore,
 ) -> Result<String> {
-    let turn = super::execute_user_prompt(
-        &mut prepared.nested_state,
-        &prepared.nested_resources,
-        providers,
-        auth_store,
-        &prepared.prompt,
-    )?;
+    let max_outer_turns = prepared.max_turns.unwrap_or(DEFAULT_AGENT_MAX_TURNS);
+    let mut total_tool_uses = 0usize;
+    let mut last_text = String::new();
+
+    // Outer loop: each iteration calls execute_user_prompt which itself
+    // runs up to 8 internal tool-use rounds. We re-invoke when the model
+    // used tools in the previous turn (it may need more rounds).
+    for outer in 0..max_outer_turns {
+        let prompt = if outer == 0 {
+            prepared.prompt.clone()
+        } else {
+            // Subsequent turns: feed the previous assistant output back so
+            // the model can continue its chain of thought.
+            format!("[Continue from previous turn]\n{last_text}")
+        };
+        let turn = super::execute_user_prompt(
+            &mut prepared.nested_state,
+            &prepared.nested_resources,
+            providers,
+            auth_store,
+            &prompt,
+        )?;
+        total_tool_uses += turn.tool_invocations.len();
+        last_text = turn.assistant_text.trim().to_string();
+
+        // Stop when the model finished without calling any tools — it has
+        // nothing more to do.
+        if turn.tool_invocations.is_empty() {
+            break;
+        }
+    }
+
     let payload = AgentCompletedOutput {
         status: "completed",
         agent_id: prepared.agent_id,
@@ -436,14 +461,16 @@ fn run_agent_synchronously(
             .worktree
             .as_ref()
             .map(|worktree| worktree.branch.clone()),
-        tool_uses: turn.tool_invocations.len(),
-        result: turn.assistant_text.trim().to_string(),
+        tool_uses: total_tool_uses,
+        result: last_text,
     };
     if let Some(worktree) = prepared.worktree.take() {
         cleanup_agent_worktree(worktree)?;
     }
     Ok(serde_json::to_string_pretty(&payload)?)
 }
+
+const DEFAULT_AGENT_MAX_TURNS: u32 = 10;
 
 fn launch_background_agent(
     mut prepared: PreparedAgentExecution,
@@ -517,47 +544,52 @@ fn launch_background_agent(
         };
         spawn_teammate(config, teammate_registry());
     } else {
+        let notification_cwd = prepared.nested_state.session.cwd.clone();
+        let agent_id_for_notify = prepared.agent_id.clone();
+        let description_for_notify = prepared.description.clone();
+
         thread::spawn(move || {
             let mut nested_state = prepared.nested_state;
             let nested_resources = prepared.nested_resources;
-            let prompt = prepared.prompt.clone();
-            let result = {
-                let mut nested_auth_store = auth_store;
-                super::execute_user_prompt(
-                    &mut nested_state,
-                    &nested_resources,
-                    &providers,
-                    &mut nested_auth_store,
-                    &prompt,
-                )
-            };
-            let final_payload = match result {
-                Ok(turn) => json!(AgentCompletedOutput {
-                    status: "completed",
-                    agent_id: prepared.agent_id,
-                    agent_type: prepared.agent_type,
-                    description: prepared.description,
-                    prompt: prepared.prompt,
-                    name: prepared.name,
-                    cwd: prepared.nested_cwd.display().to_string(),
-                    model: prepared.resolved_model,
-                    effort: prepared.resolved_effort,
-                    team_name: prepared.team_name,
-                    mode: prepared.mode,
-                    max_turns: prepared.max_turns,
-                    isolation: prepared.isolation,
-                    worktree_path: prepared
-                        .worktree
-                        .as_ref()
-                        .map(|worktree| worktree.path.display().to_string()),
-                    worktree_branch: prepared
-                        .worktree
-                        .as_ref()
-                        .map(|worktree| worktree.branch.clone()),
-                    tool_uses: turn.tool_invocations.len(),
-                    result: turn.assistant_text.trim().to_string(),
-                }),
-                Err(error) => json!({
+            let max_outer = prepared.max_turns.unwrap_or(DEFAULT_AGENT_MAX_TURNS);
+            let mut total_tool_uses = 0usize;
+            let mut last_text = String::new();
+            let mut failed = false;
+
+            for outer in 0..max_outer {
+                let prompt = if outer == 0 {
+                    prepared.prompt.clone()
+                } else {
+                    format!("[Continue from previous turn]\n{last_text}")
+                };
+                let result = {
+                    let mut nested_auth_store = auth_store.clone();
+                    super::execute_user_prompt(
+                        &mut nested_state,
+                        &nested_resources,
+                        &providers,
+                        &mut nested_auth_store,
+                        &prompt,
+                    )
+                };
+                match result {
+                    Ok(turn) => {
+                        total_tool_uses += turn.tool_invocations.len();
+                        last_text = turn.assistant_text.trim().to_string();
+                        if turn.tool_invocations.is_empty() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        last_text = error.to_string();
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+
+            let final_payload = if failed {
+                json!({
                     "status": "failed",
                     "agentId": prepared.agent_id,
                     "agentType": prepared.agent_type,
@@ -579,18 +611,92 @@ fn launch_background_agent(
                         .worktree
                         .as_ref()
                         .map(|worktree| worktree.branch.clone()),
-                    "error": error.to_string(),
-                }),
+                    "error": last_text,
+                })
+            } else {
+                json!(AgentCompletedOutput {
+                    status: "completed",
+                    agent_id: prepared.agent_id,
+                    agent_type: prepared.agent_type,
+                    description: prepared.description,
+                    prompt: prepared.prompt,
+                    name: prepared.name,
+                    cwd: prepared.nested_cwd.display().to_string(),
+                    model: prepared.resolved_model,
+                    effort: prepared.resolved_effort,
+                    team_name: prepared.team_name,
+                    mode: prepared.mode,
+                    max_turns: prepared.max_turns,
+                    isolation: prepared.isolation,
+                    worktree_path: prepared
+                        .worktree
+                        .as_ref()
+                        .map(|worktree| worktree.path.display().to_string()),
+                    worktree_branch: prepared
+                        .worktree
+                        .as_ref()
+                        .map(|worktree| worktree.branch.clone()),
+                    tool_uses: total_tool_uses,
+                    result: last_text.clone(),
+                })
             };
             let _ = fs::write(
                 &output_file,
                 serde_json::to_string_pretty(&final_payload)
                     .unwrap_or_else(|_| "{\"status\":\"failed\"}".to_string()),
             );
+
+            // Notify leader: write a completion notification to the
+            // messages store so TaskOutput / TaskList can detect it.
+            write_agent_completion_notification(
+                &notification_cwd,
+                &agent_id_for_notify,
+                &description_for_notify,
+                if failed { "failed" } else { "completed" },
+                &last_text,
+            );
         });
     }
 
     Ok(serde_json::to_string_pretty(&response)?)
+}
+
+/// Writes a completion notification to the messages store so the leader
+/// can detect that a background agent has finished.
+fn write_agent_completion_notification(
+    cwd: &Path,
+    agent_id: &str,
+    description: &str,
+    status: &str,
+    result_summary: &str,
+) {
+    use crate::runtime::claude_tools::workflow::store::{
+        load_store, messages_path, now_ms, save_store, MessageStore, StoredMessage,
+    };
+    let Ok(mut store) = load_store::<MessageStore>(&messages_path(cwd)) else {
+        return;
+    };
+    let preview = if result_summary.len() > 200 {
+        format!("{}...", &result_summary[..200])
+    } else {
+        result_summary.to_string()
+    };
+    store.messages.push(StoredMessage {
+        id: format!("notify-{}", Uuid::new_v4().simple()),
+        to: "team-lead".to_string(),
+        from: agent_id.to_string(),
+        read: false,
+        summary: Some(format!("agent {status}: {description}")),
+        message: json!({
+            "type": "agent_completion",
+            "agent_id": agent_id,
+            "status": status,
+            "description": description,
+            "result": preview,
+        }),
+        created_at_ms: now_ms(),
+    });
+    let _ = save_store(&messages_path(cwd), &store);
 }
 
 fn resolve_agent_cwd(parent_cwd: &Path, override_cwd: Option<&str>) -> Result<PathBuf> {

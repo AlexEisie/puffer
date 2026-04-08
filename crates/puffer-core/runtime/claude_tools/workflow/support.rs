@@ -203,6 +203,7 @@ pub(super) fn execute_send_message(
     let mut messages = load_store::<MessageStore>(&messages_path(store_cwd))?;
     let mut agents = load_store::<AgentStore>(&agents_path(store_cwd))?;
     let mut message_ids = Vec::new();
+    let mut resumed_agents: Vec<String> = Vec::new();
     for recipient in &recipients {
         let msg_id = format!("msg-{}", Uuid::new_v4().simple());
         message_ids.push(msg_id.clone());
@@ -238,17 +239,26 @@ pub(super) fn execute_send_message(
             agent.agent_id == *recipient || agent.name.as_deref() == Some(recipient.as_str())
         }) {
             append_agent_message(Path::new(&agent.output_file), &parsed.message)?;
+            // Resume stopped agents: mark as running so the next poll picks them up.
+            if matches!(agent.status.as_str(), "stopped" | "completed" | "failed") {
+                agent.status = "running".to_string();
+                resumed_agents.push(recipient.clone());
+            }
         }
     }
     save_store(&messages_path(store_cwd), &messages)?;
     save_store(&agents_path(store_cwd), &agents)?;
-    Ok(serde_json::to_string_pretty(&json!({
+    let mut result = json!({
         "delivered": recipients,
         "from": from,
         "messageIds": message_ids,
         "summary": parsed.summary,
         "message": parsed.message
-    }))?)
+    });
+    if !resumed_agents.is_empty() {
+        result["resumed"] = json!(resumed_agents);
+    }
+    Ok(serde_json::to_string_pretty(&result)?)
 }
 
 fn handle_shutdown_request(

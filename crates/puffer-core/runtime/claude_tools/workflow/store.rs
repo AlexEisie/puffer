@@ -109,7 +109,7 @@ pub(crate) struct ClaudeTeamMember {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct StoredCronJob {
-    pub(super) id: String,
+    pub(crate) id: String,
     pub(super) cron: String,
     pub(super) prompt: String,
     pub(super) recurring: bool,
@@ -117,16 +117,16 @@ pub(super) struct StoredCronJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(super) struct StoredMessage {
-    pub(super) id: String,
-    pub(super) to: String,
+pub(crate) struct StoredMessage {
+    pub(crate) id: String,
+    pub(crate) to: String,
     #[serde(default)]
-    pub(super) from: String,
+    pub(crate) from: String,
     #[serde(default)]
-    pub(super) read: bool,
-    pub(super) summary: Option<String>,
-    pub(super) message: Value,
-    pub(super) created_at_ms: u64,
+    pub(crate) read: bool,
+    pub(crate) summary: Option<String>,
+    pub(crate) message: Value,
+    pub(crate) created_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -165,17 +165,17 @@ pub(super) struct CronStore {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub(super) struct MessageStore {
-    pub(super) messages: Vec<StoredMessage>,
+pub(crate) struct MessageStore {
+    pub(crate) messages: Vec<StoredMessage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct PendingShutdownRequest {
     pub(super) request_id: String,
-    pub(super) from: String,
-    pub(super) to: String,
+    pub(crate) from: String,
+    pub(crate) to: String,
     pub(super) reason: Option<String>,
-    pub(super) created_at_ms: u64,
+    pub(crate) created_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -212,10 +212,10 @@ pub(super) struct AgentInput {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct SendMessageInput {
-    pub(super) to: String,
+    pub(crate) to: String,
     #[serde(default)]
-    pub(super) summary: Option<String>,
-    pub(super) message: Value,
+    pub(crate) summary: Option<String>,
+    pub(crate) message: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -368,7 +368,7 @@ pub(super) struct CronCreateInput {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct CronDeleteInput {
-    pub(super) id: String,
+    pub(crate) id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -458,7 +458,7 @@ pub(super) fn detect_powershell_binary() -> Result<String> {
     bail!("PowerShell is not installed on this system")
 }
 
-pub(super) fn load_store<T>(path: &Path) -> Result<T>
+pub(crate) fn load_store<T>(path: &Path) -> Result<T>
 where
     T: DeserializeOwned + Default,
 {
@@ -471,7 +471,7 @@ where
         .with_context(|| format!("failed to parse workflow store {}", path.display()))
 }
 
-pub(super) fn save_store<T>(path: &Path, value: &T) -> Result<()>
+pub(crate) fn save_store<T>(path: &Path, value: &T) -> Result<()>
 where
     T: Serialize,
 {
@@ -664,7 +664,7 @@ pub(super) fn crons_path(cwd: &Path) -> PathBuf {
     workflow_root(cwd).unwrap().join("crons.json")
 }
 
-pub(super) fn messages_path(cwd: &Path) -> PathBuf {
+pub(crate) fn messages_path(cwd: &Path) -> PathBuf {
     workflow_root(cwd).unwrap().join("messages.json")
 }
 
@@ -788,7 +788,7 @@ pub(super) fn resolve_path(cwd: &Path, path: &str) -> PathBuf {
     }
 }
 
-pub(super) fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
