@@ -461,6 +461,10 @@ fn execute_anthropic(
             .collect::<std::collections::BTreeSet<_>>(),
     )?;
 
+    // Prepend system-reminder context (CC's prependUserContext).
+    // Injected as the first user message so the model sees current date/context.
+    prepend_system_reminder(&mut messages);
+
     // History snipping: truncate old tool outputs in messages to save context.
     // CC does this via applyToolResultBudget / applyHistorySnip.
     snip_old_tool_outputs(&mut messages);
@@ -1022,6 +1026,26 @@ struct AnthropicToolResults {
 /// This matches CC's auto-compact behavior (triggered at ~80% context usage).
 /// Maximum characters per individual tool result (matches CC's DEFAULT_MAX_RESULT_SIZE_CHARS).
 const MAX_TOOL_RESULT_CHARS: usize = 50_000;
+
+/// Prepends a system-reminder user message with current date and context.
+/// Matches CC's `prependUserContext()` which injects `<system-reminder>` tags.
+fn prepend_system_reminder(messages: &mut Vec<Value>) {
+    let now = time::OffsetDateTime::now_utc();
+    let date_str = format!("{}-{:02}-{:02}", now.year(), now.month() as u8, now.day());
+    let reminder = format!(
+        "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n\
+         # currentDate\nToday's date is {date_str}.\n</system-reminder>"
+    );
+    // Merge into first user message if possible to avoid breaking alternation.
+    if let Some(first) = messages.first_mut() {
+        if first["role"].as_str() == Some("user") {
+            let existing = first["content"].as_str().unwrap_or("").to_string();
+            first["content"] = json!(format!("{reminder}\n{existing}"));
+            return;
+        }
+    }
+    messages.insert(0, json!({"role": "user", "content": reminder}));
+}
 
 /// Number of recent messages whose tool outputs are preserved in full.
 const SNIP_KEEP_RECENT: usize = 6;
