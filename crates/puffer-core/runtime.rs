@@ -626,6 +626,17 @@ fn send_http_request_raw(
         match send_http_request_raw_once(url, headers, body, anthropic) {
             Ok(response) => {
                 trace_http_response(url, response.status.as_u16(), &response.text);
+                // Retry on 429 (rate limit) and 5xx (server errors).
+                let status = response.status.as_u16();
+                if attempt < total_attempts
+                    && (status == 429 || (500..=599).contains(&status))
+                {
+                    let delay = retry_delay(retry_config, attempt);
+                    if !delay.is_zero() {
+                        std::thread::sleep(delay);
+                    }
+                    continue;
+                }
                 return Ok(response);
             }
             Err(error) if attempt < total_attempts && is_retryable_http_error(&error) => {
@@ -647,7 +658,10 @@ fn send_http_request_raw_once(
     body: &str,
     anthropic: bool,
 ) -> Result<RawHttpResponse> {
-    let client = Client::new();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()
+        .unwrap_or_else(|_| Client::new());
     let mut request = client.post(url);
     for (key, value) in headers {
         request = request.header(key, value);
@@ -688,7 +702,7 @@ fn send_http_request_raw_once(
 fn http_retry_config() -> HttpRetryConfig {
     HttpRetryConfig {
         retries: parsed_env_usize(HTTP_RETRY_ATTEMPTS_ENV)
-            .unwrap_or(0)
+            .unwrap_or(3)
             .min(10),
         delay_ms: parsed_env_u64(HTTP_RETRY_DELAY_MS_ENV)
             .unwrap_or(1_000)

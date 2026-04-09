@@ -98,7 +98,13 @@ pub(super) fn render_runtime_system_prompt(
         .unwrap_or_else(|| render_fallback_prompt(&variables));
     let mut prompt = normalize_prompt_whitespace(&rendered);
     // Inject CLAUDE.md / memory contents if present (matches CC's memory section).
-    if let Some(memory) = load_memory_prompt(&state.cwd) {
+    if let Some(mut memory) = load_memory_prompt(&state.cwd) {
+        // CC limits memory to 40K characters to avoid bloating the system prompt.
+        const MAX_MEMORY_CHARS: usize = 40_000;
+        if memory.chars().count() > MAX_MEMORY_CHARS {
+            memory = memory.chars().take(MAX_MEMORY_CHARS).collect();
+            memory.push_str("\n\n[CLAUDE.md truncated — 40K char limit reached]");
+        }
         prompt.push_str("\n\n# Project Context (CLAUDE.md)\n");
         prompt.push_str(&memory);
     }
