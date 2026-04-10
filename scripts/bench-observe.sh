@@ -198,6 +198,43 @@ print(f\"    success={d.get('success')}  tools={len(d.get('tool_invocations',[])
         fi
     fi
 
+    # Session file (benchmark writes to ~/.puffer/sessions/ or container's /app/.puffer/sessions/)
+    local session_jsonl=""
+    # Try container first
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "$container_name"; then
+        session_jsonl=$(docker exec "$container_name" sh -c 'ls -t /root/.puffer/sessions/*.jsonl /app/.puffer/sessions/*.jsonl 2>/dev/null | head -1' 2>/dev/null || true)
+        if [ -n "$session_jsonl" ]; then
+            echo -e "  ${BOLD}Session transcript:${NC} (in container: $session_jsonl)"
+            docker exec "$container_name" cat "$session_jsonl" 2>/dev/null | python3 -c "
+import sys, json
+for i, line in enumerate(sys.stdin, 1):
+    line = line.strip()
+    if not line: continue
+    try:
+        d = json.loads(line)
+        t = d.get('type', '?')
+        text = d.get('text', '')
+        if t == 'user_message':
+            preview = text.replace(chr(10), ' ')[:80]
+            print(f'    {i:3d} \033[0;36m[user]\033[0m {preview}')
+        elif t == 'assistant_message':
+            preview = text.replace(chr(10), ' ')[:80]
+            print(f'    {i:3d} \033[0;32m[asst]\033[0m {preview}')
+        elif t == 'system_message':
+            if text.startswith('Tool '):
+                parts = text.split(chr(10), 2)
+                tool_line = parts[0][:60]
+                print(f'    {i:3d} \033[0;33m[tool]\033[0m {tool_line}')
+            else:
+                preview = text.replace(chr(10), ' ')[:60]
+                print(f'    {i:3d} \033[0;90m[sys]\033[0m  {preview}')
+        else:
+            print(f'    {i:3d} [{t}]')
+    except: pass
+" 2>/dev/null
+        fi
+    fi
+
     # Exception
     if [ -f "$task_dir/exception.txt" ]; then
         echo -e "  ${RED}Exception:${NC}"
