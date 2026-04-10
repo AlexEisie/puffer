@@ -39,6 +39,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 use std::cell::RefCell;
+use unicode_width::UnicodeWidthStr;
 const COMPOSER_SEPARATOR_COLOR: Color = Color::Indexed(214);
 
 #[derive(Default)]
@@ -257,9 +258,10 @@ pub(crate) fn render(
     };
     if overlay_active {
         frame.render_widget(Paragraph::new(overlay_prompt_line(input)), prompt_row);
+        let display_cursor = input.get(..cursor).map_or(0, UnicodeWidthStr::width);
         let max_cursor = usize::from(prompt_row.width.saturating_sub(3));
         frame.set_cursor_position((
-            prompt_row.x + 2 + cursor.min(max_cursor) as u16,
+            prompt_row.x + 2 + display_cursor.min(max_cursor) as u16,
             prompt_row.y,
         ));
         if let Some(hint_row) = hint_row {
@@ -276,9 +278,10 @@ pub(crate) fn render(
             prompt_line(input)
         };
         frame.render_widget(Paragraph::new(prompt), prompt_row);
+        let display_cursor = input.get(..cursor).map_or(0, UnicodeWidthStr::width);
         let max_cursor = usize::from(prompt_row.width.saturating_sub(3));
         frame.set_cursor_position((
-            prompt_row.x + 2 + cursor.min(max_cursor) as u16,
+            prompt_row.x + 2 + display_cursor.min(max_cursor) as u16,
             prompt_row.y,
         ));
 
@@ -667,7 +670,8 @@ fn render_onboarding_overlay(frame: &mut Frame<'_>, viewport: Rect, overlay: &Ov
         area,
     );
     if let OverlayState::ApiKeyPrompt { value, cursor, .. } = overlay {
-        let cursor_x = area.x + 2 + (*cursor as u16).min(area.width.saturating_sub(4));
+        let display_cursor = value.get(..*cursor).map_or(0, UnicodeWidthStr::width);
+        let cursor_x = area.x + 2 + (display_cursor as u16).min(area.width.saturating_sub(4));
         let cursor_y = area.y + height.saturating_sub(3);
         frame.set_cursor_position((cursor_x, cursor_y));
         if value.is_empty() && area.width > 6 {
