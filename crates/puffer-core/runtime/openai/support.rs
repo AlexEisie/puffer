@@ -390,6 +390,94 @@ pub(super) fn extend_input_with_response_items(
     Value::Array(items)
 }
 
+/// Compact the OpenAI input array by truncating old function_call_output
+/// items when the total size exceeds ~80% of the model's context window.
+/// This mirrors CC's snip + autocompact running inside the tool loop.
+pub(super) fn compact_openai_input(
+    input: &mut Value,
+    provider: &ProviderDescriptor,
+    model_id: &str,
+) {
+    let items = match input.as_array_mut() {
+        Some(arr) => arr,
+        None => return,
+    };
+    if items.len() <= 3 {
+        return;
+    }
+
+    let context_window = provider
+        .models
+        .iter()
+        .find(|m| m.id == model_id)
+        .map(|m| m.context_window as usize)
+        .unwrap_or(200_000);
+    let threshold = context_window * 80 / 100;
+
+    // Estimate total chars (rough: ~4 chars/token).
+    let estimate = |arr: &[Value]| -> usize {
+        arr.iter()
+            .map(|item| {
+                item.get("output")
+                    .and_then(Value::as_str)
+                    .map(|s| s.len())
+                    .unwrap_or_else(|| {
+                        item.get("content")
+                            .map(|c| c.to_string().len())
+                            .unwrap_or(50)
+                    })
+            })
+            .sum::<usize>()
+            / 4
+    };
+
+    if estimate(items) <= threshold {
+        return;
+    }
+
+    // Phase 1: Snip old function_call_output items (keep last 6).
+    let keep_recent = 6;
+    if items.len() > keep_recent {
+        let cutoff = items.len() - keep_recent;
+        for item in &mut items[..cutoff] {
+            let item_type = item
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if item_type == "function_call_output" {
+                if let Some(output) = item.get("output").and_then(Value::as_str) {
+                    if output.len() > 500 {
+                        let snipped: String = output.chars().take(500).collect();
+                        item["output"] =
+                            Value::String(format!("{snipped}\n[...output snipped...]"));
+                    }
+                }
+            }
+        }
+    }
+
+    // Phase 2: Drop oldest items if still over budget.
+    while items.len() > 3 && estimate(items) > threshold {
+        items.remove(0);
+    }
+
+    // Insert a compaction marker if we dropped items.
+    if items
+        .first()
+        .and_then(|i| i.get("type").and_then(Value::as_str))
+        != Some("message")
+    {
+        items.insert(
+            0,
+            serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "[Earlier context compacted]"}]
+            }),
+        );
+    }
+}
+
 fn codex_reasoning_config(state: &AppState, supports_reasoning: bool) -> Option<Value> {
     if !supports_reasoning {
         return None;

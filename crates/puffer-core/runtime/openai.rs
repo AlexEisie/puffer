@@ -7,8 +7,9 @@ mod support;
 
 pub(super) use self::support::build_codex_openai_request_body;
 use self::support::{
-    append_default_openai_headers, apply_previous_response_id, is_codex_openai_provider,
-    extend_input_with_response_items, is_openai_structured_output_error, next_openai_input,
+    append_default_openai_headers, apply_previous_response_id, compact_openai_input,
+    extend_input_with_response_items, is_codex_openai_provider,
+    is_openai_structured_output_error, next_openai_input,
     openai_base_url_for_auth, openai_model_supports_reasoning, openai_registry_credential,
     openai_responses_path, openai_stream_read_timeout, prefer_native_structured_output,
     retry_openai_transport, structured_output_endpoint_id, trace_openai_http_request,
@@ -191,6 +192,7 @@ fn execute_openai_once(
             next_input,
             continuation_input(&tool_calls, &tool_results.outputs),
         );
+        compact_openai_input(&mut next_input, provider, &model_id);
     }
 }
 
@@ -352,6 +354,9 @@ where
             &response,
             continuation_input(&tool_calls, &tool_results.outputs),
         );
+        // Context management between tool iterations (CC/Codex parity).
+        // Truncate old items in the input array to stay within budget.
+        compact_openai_input(&mut next_input, provider, &model_id);
     }
 }
 

@@ -611,6 +611,9 @@ fn execute_anthropic(
                 "role": "user",
                 "content": tool_results.results,
             }));
+            // Context management between tool iterations (CC parity).
+            snip_old_tool_outputs(&mut messages);
+            auto_compact_messages(&mut messages, auto_compact_threshold);
             continue;
         }
 
@@ -779,6 +782,13 @@ where
                 "role": "user",
                 "content": tool_results.results,
             }));
+            // Context management between tool iterations (CC parity).
+            snip_old_tool_outputs(&mut messages);
+            let ctx_threshold = provider
+                .models.iter().find(|m| m.id == model_id)
+                .map(|m| m.context_window as u32).unwrap_or(200_000)
+                .saturating_mul(80) / 100;
+            auto_compact_messages(&mut messages, ctx_threshold);
             continue;
         }
 
