@@ -68,6 +68,8 @@ pub(crate) struct TuiState {
     pub(crate) active_loop: Option<LoopState>,
     /// Timestamp of last Ctrl+C press. Second press within 2s exits.
     pub(crate) last_ctrl_c: Option<std::time::Instant>,
+    /// Transient hint shown in the status bar (auto-clears after 2s).
+    pub(crate) status_hint: Option<(String, std::time::Instant)>,
 }
 
 /// Carries one completed background provider turn back to the UI thread.
@@ -114,6 +116,7 @@ impl Default for TuiState {
             queued_prompts: VecDeque::new(),
             active_loop: None,
             last_ctrl_c: None,
+            status_hint: None,
         }
     }
 }

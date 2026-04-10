@@ -194,6 +194,7 @@ pub fn run_app(
             render::set_tool_details_expanded(tui.tool_details_expanded);
             render::set_follow_output(tui.follow_output);
             render::set_active_loop_state(tui.active_loop.clone());
+            render::set_status_hint(tui.status_hint.clone());
             render::render(
                 frame,
                 state,
@@ -279,30 +280,26 @@ fn handle_key(
             tui.tool_details_expanded = !tui.tool_details_expanded;
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            // Active loop: first Ctrl+C stops loop
             if tui.active_loop.is_some() {
                 cancel_pending_submit(state, session_store, tui)?;
                 tui.active_loop = None;
                 tui.queued_prompts.clear();
-                emit_system_message(state, session_store, "Loop stopped.".to_string())?;
+                tui.status_hint = Some(("Loop stopped.".into(), std::time::Instant::now()));
             } else if tui.has_pending_submit() {
-                // Running turn: first Ctrl+C cancels the turn
                 cancel_pending_submit(state, session_store, tui)?;
-                emit_system_message(
-                    state,
-                    session_store,
-                    "Interrupted. Press Ctrl+C again to exit.".to_string(),
-                )?;
+                tui.status_hint = Some((
+                    "Interrupted. Press Ctrl+C again to exit.".into(),
+                    std::time::Instant::now(),
+                ));
                 tui.last_ctrl_c = Some(std::time::Instant::now());
             } else if tui.should_exit_on_ctrl_c() {
                 state.should_exit = true;
                 return Ok(true);
             } else {
-                emit_system_message(
-                    state,
-                    session_store,
-                    "Press Ctrl+C again to exit.".to_string(),
-                )?;
+                tui.status_hint = Some((
+                    "Press Ctrl+C again to exit.".into(),
+                    std::time::Instant::now(),
+                ));
             }
             return Ok(false);
         }

@@ -55,6 +55,7 @@ thread_local! {
     static ACTIVE_FOLLOW_OUTPUT: RefCell<bool> = const { RefCell::new(true) };
     static ACTIVE_TRANSCRIPT_VIEWPORT: RefCell<Option<Rect>> = const { RefCell::new(None) };
     static ACTIVE_LOOP_STATE: RefCell<Option<crate::state::LoopState>> = RefCell::new(None);
+    static ACTIVE_STATUS_HINT: RefCell<Option<(String, std::time::Instant)>> = RefCell::new(None);
 }
 
 /// Sets the active overlay rendered by the TUI on the next draw.
@@ -85,6 +86,11 @@ pub(crate) fn set_tool_details_expanded(expanded: bool) {
 /// Sets whether the transcript should stay pinned to the latest output.
 pub(crate) fn set_follow_output(follow_output: bool) {
     ACTIVE_FOLLOW_OUTPUT.with(|value| *value.borrow_mut() = follow_output);
+}
+
+/// Sets a transient hint shown in the status bar area.
+pub(crate) fn set_status_hint(hint: Option<(String, std::time::Instant)>) {
+    ACTIVE_STATUS_HINT.with(|value| *value.borrow_mut() = hint);
 }
 
 /// Sets the active loop state for the current frame.
@@ -286,13 +292,30 @@ pub(crate) fn render(
         ));
 
         if let Some(hint_row) = hint_row {
-            let footer_line = custom_status_line
-                .clone()
-                .unwrap_or_else(|| footer_status_line(state, providers));
-            frame.render_widget(
-                Paragraph::new(footer_line).style(Style::default().add_modifier(Modifier::DIM)),
-                hint_row,
-            );
+            // Show transient status hint in the status bar for 3s,
+            // then revert to normal footer status line.
+            let hint_text = ACTIVE_STATUS_HINT.with(|h| {
+                h.borrow()
+                    .as_ref()
+                    .filter(|(_, t)| t.elapsed().as_secs() < 3)
+                    .map(|(text, _)| text.clone())
+            });
+            if let Some(text) = hint_text {
+                frame.render_widget(
+                    Paragraph::new(Line::from(text))
+                        .style(Style::default().fg(Color::Yellow)),
+                    hint_row,
+                );
+            } else {
+                let footer_line = custom_status_line
+                    .clone()
+                    .unwrap_or_else(|| footer_status_line(state, providers));
+                frame.render_widget(
+                    Paragraph::new(footer_line)
+                        .style(Style::default().add_modifier(Modifier::DIM)),
+                    hint_row,
+                );
+            }
         }
     }
 
