@@ -3,13 +3,14 @@ use super::{
     ToolExecutionBackend, ToolInvocation, TurnStreamEvent, APP_VERSION,
 };
 use crate::permissions::load_runtime_permission_context;
+pub(crate) mod conversation;
 mod support;
 
 pub(super) use self::support::build_codex_openai_request_body;
 use self::support::{
-    append_default_openai_headers, apply_previous_response_id, compact_openai_chat_messages,
-    compact_openai_input, extend_input_with_response_items, is_codex_openai_provider,
-    is_openai_structured_output_error, next_openai_input,
+    append_default_openai_headers, apply_previous_response_id,
+    is_codex_openai_provider,
+    is_openai_structured_output_error,
     openai_base_url_for_auth, openai_model_supports_reasoning, openai_registry_credential,
     openai_responses_path, openai_stream_read_timeout, prefer_native_structured_output,
     retry_openai_transport, structured_output_endpoint_id, trace_openai_http_request,
@@ -26,7 +27,7 @@ use puffer_provider_openai::{
     build_chat_completions_request, build_json_post_request, extract_chat_completions_text,
     extract_chat_completions_tool_calls, extract_responses_text, extract_responses_tool_calls,
     parse_chat_completions_response, parse_responses_response, refresh_oauth_token, OpenAIAuth,
-    OpenAIChatCompletionsRequest, OpenAIChatFunctionCall, OpenAIChatMessage, OpenAIChatToolCall,
+    OpenAIChatCompletionsRequest,
     OpenAIRequestConfig, OpenAIResponseToolCall, OpenAIResponsesFunctionCallOutput,
     OpenAIResponsesResponse, OpenAIResponsesToolChoiceMode,
 };
@@ -35,7 +36,7 @@ use puffer_resources::LoadedResources;
 use puffer_tools::ToolRegistry;
 use reqwest::blocking::{Client, Response};
 use reqwest::StatusCode;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 pub(super) use super::openai_sse::{
     is_event_stream, parse_openai_sse_reader, parse_openai_sse_response,
@@ -112,6 +113,11 @@ fn execute_openai_once(
     options: super::TurnRequestOptions<'_>,
     use_native: bool,
 ) -> Result<super::TurnExecution> {
+    use self::conversation::{
+        append_tool_results, compact_conversation, inject_post_compact_context,
+        items_to_responses_input, transcript_to_items, ConversationItem,
+    };
+
     let structured_output = options.structured_output;
     let mut execution = resolve_openai_execution_config(state, auth_store, provider)?;
     let registry = ToolRegistry::from_resources(resources);
@@ -134,19 +140,29 @@ fn execute_openai_once(
             .collect::<std::collections::BTreeSet<_>>(),
     )?;
     let instructions = openai_request_instructions(state, Some(&system_prompt))?;
-    let mut next_input = transcript_to_openai_input(state, input)?;
+    // Unified: all internal logic on Vec<ConversationItem>.
+    let mut items = transcript_to_items(state, input);
     let mut invocations = Vec::new();
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
     let mut previous_response_id = None;
+    // Index where "continuation" items start — used for previous_response_id optimization.
+    // When previous_response_id is set, only items[start..] are sent as wire input.
+    let mut continuation_start: Option<usize> = None;
 
     loop {
+        // Wire boundary: ConversationItem → Responses API input.
+        let wire_input = match (previous_response_id.as_ref(), continuation_start) {
+            (Some(_), Some(start)) => items_to_responses_input(&items[start..]),
+            _ => items_to_responses_input(&items),
+        };
+
         let response =
             send_openai_request_with_refresh(auth_store, &mut execution, |request_config| {
                 let mut body = build_codex_openai_request_body(
                     state,
                     &model_id,
                     &instructions,
-                    next_input.clone(),
+                    wire_input.clone(),
                     &tools,
                     supports_reasoning,
                     text.clone(),
@@ -177,6 +193,14 @@ fn execute_openai_once(
             });
         }
 
+        // Add assistant text from this round (if any) to maintain full history.
+        let assistant_text = extract_responses_text(&parsed);
+        if !assistant_text.trim().is_empty() {
+            items.push(ConversationItem::assistant_message(&assistant_text));
+        }
+        // Record where continuation starts (tool calls + outputs for next request).
+        continuation_start = Some(items.len());
+
         let cwd = state.cwd.clone();
         let tool_results = execute_openai_tool_calls(
             state,
@@ -192,13 +216,13 @@ fn execute_openai_once(
             options.tool_filter,
         )?;
         invocations.extend(tool_results.invocations);
-        next_input = next_openai_input(
-            previous_response_id.as_deref(),
-            next_input,
-            continuation_input(&tool_calls, &tool_results.outputs),
-        );
-        let compacted = compact_openai_input(
-            &mut next_input,
+
+        // Shared: append tool calls + outputs to canonical items.
+        append_tool_results(&mut items, &tool_calls, &tool_results.outputs);
+
+        // Shared: unified compaction.
+        let compacted = compact_conversation(
+            &mut items,
             provider,
             &model_id,
             &execution.request_config,
@@ -206,7 +230,8 @@ fn execute_openai_once(
         );
         if compacted {
             previous_response_id = None;
-            inject_post_compact_context(&mut next_input, &cwd);
+            continuation_start = None;
+            inject_post_compact_context(&mut items, &cwd);
         }
     }
 }
@@ -271,9 +296,13 @@ fn execute_openai_streaming_once<F>(
 where
     F: FnMut(TurnStreamEvent),
 {
+    use self::conversation::{
+        append_tool_results, compact_conversation, inject_post_compact_context,
+        items_to_responses_input, transcript_to_items, ConversationItem,
+    };
+
     let structured_output = options.structured_output;
     let mut execution = resolve_openai_execution_config(state, auth_store, provider)?;
-
     let registry = ToolRegistry::from_resources(resources);
     let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
     let text = openai_responses_text_config(structured_output, use_native);
@@ -294,11 +323,15 @@ where
             .collect::<std::collections::BTreeSet<_>>(),
     )?;
     let instructions = openai_request_instructions(state, Some(&system_prompt))?;
-    let mut next_input = transcript_to_openai_input(state, input)?;
+    // Unified: all internal logic on Vec<ConversationItem>.
+    let mut items = transcript_to_items(state, input);
     let mut invocations = Vec::new();
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
 
     loop {
+        // Wire boundary: always send full history (streaming doesn't use previous_response_id).
+        let wire_input = items_to_responses_input(&items);
+
         let response = retry_openai_transport(|| {
             send_openai_request_with_refresh_streaming(
                 auth_store,
@@ -308,7 +341,7 @@ where
                         state,
                         &model_id,
                         &instructions,
-                        next_input.clone(),
+                        wire_input.clone(),
                         &tools,
                         supports_reasoning,
                         text.clone(),
@@ -344,6 +377,13 @@ where
                 })
                 .collect(),
         ));
+
+        // Add assistant text from this round to maintain full history.
+        let assistant_text = extract_responses_text(&parsed);
+        if !assistant_text.trim().is_empty() {
+            items.push(ConversationItem::assistant_message(&assistant_text));
+        }
+
         let cwd = state.cwd.clone();
         let tool_results = execute_openai_tool_calls(
             state,
@@ -364,26 +404,24 @@ where
             ));
         }
         invocations.extend(tool_results.invocations);
-        next_input = extend_input_with_response_items(
-            next_input,
-            &response,
-            continuation_input(&tool_calls, &tool_results.outputs),
-        );
+
+        // Shared: append tool calls + outputs to canonical items.
+        append_tool_results(&mut items, &tool_calls, &tool_results.outputs);
+
         // Extract server-reported input token count for precise compaction.
         let input_tokens = response
             .pointer("/usage/input_tokens")
             .and_then(Value::as_u64)
             .map(|v| v as usize);
-        let compacted = compact_openai_input(
-            &mut next_input,
+        let compacted = compact_conversation(
+            &mut items,
             provider,
             &model_id,
             &execution.request_config,
             input_tokens,
         );
         if compacted {
-            let cwd = state.cwd.clone();
-            inject_post_compact_context(&mut next_input, &cwd);
+            inject_post_compact_context(&mut items, &cwd);
         }
     }
 }
@@ -438,6 +476,11 @@ fn execute_openai_completions_once(
     options: super::TurnRequestOptions<'_>,
     use_native: bool,
 ) -> Result<super::TurnExecution> {
+    use self::conversation::{
+        append_tool_results, build_system_reminder, compact_conversation,
+        inject_post_compact_context, items_to_chat_messages, transcript_to_items,
+    };
+
     let structured_output = options.structured_output;
     let mut execution = resolve_openai_execution_config(state, auth_store, provider)?;
     let registry = ToolRegistry::from_resources(resources);
@@ -459,10 +502,22 @@ fn execute_openai_completions_once(
             .map(|tool| tool.function.name.clone())
             .collect::<std::collections::BTreeSet<_>>(),
     )?;
-    let mut messages = transcript_to_openai_chat_messages(state, input, Some(&system_prompt))?;
+    let plan_mode_context =
+        crate::command_helpers::prompt::plan_mode_context_message(state)?;
+    let system_reminder = build_system_reminder(&super::git_status_context());
+
+    // Unified: all internal logic on Vec<ConversationItem>.
+    let mut items = transcript_to_items(state, input);
     let mut invocations = Vec::new();
 
     loop {
+        // Wire boundary: ConversationItem → Chat Completions messages.
+        let messages = items_to_chat_messages(
+            &items,
+            Some(&system_prompt),
+            plan_mode_context.as_deref(),
+            Some(&system_reminder),
+        );
         let response =
             send_openai_request_with_refresh(auth_store, &mut execution, |request_config| {
                 build_chat_completions_request(
@@ -482,10 +537,6 @@ fn execute_openai_completions_once(
             })?;
         let parsed = parse_chat_completions_response(&serde_json::to_string(&response)?)?;
         let tool_calls = extract_chat_completions_tool_calls(&parsed)?;
-        let choice = parsed
-            .choices
-            .first()
-            .ok_or_else(|| anyhow!("OpenAI Chat Completions response did not contain choices"))?;
         if tool_calls.is_empty() {
             let text = extract_chat_completions_text(&parsed);
             let assistant_text = if text.trim().is_empty() {
@@ -516,59 +567,22 @@ fn execute_openai_completions_once(
             options.tool_filter,
         )?;
         invocations.extend(tool_results.invocations);
-        messages.push(OpenAIChatMessage {
-            role: choice
-                .message
-                .role
-                .clone()
-                .unwrap_or_else(|| "assistant".to_string()),
-            content: choice.message.content.clone(),
-            tool_call_id: None,
-            tool_calls: tool_calls
-                .iter()
-                .map(|tool_call| OpenAIChatToolCall {
-                    id: tool_call.call_id.clone(),
-                    kind: "function".to_string(),
-                    function: OpenAIChatFunctionCall {
-                        name: tool_call.name.clone(),
-                        arguments: serde_json::to_string(&tool_call.arguments)
-                            .unwrap_or_else(|_| "{}".to_string()),
-                    },
-                })
-                .collect(),
-        });
-        for output in tool_results.outputs {
-            messages.push(OpenAIChatMessage {
-                role: "tool".to_string(),
-                content: Some(json!(output.output)),
-                tool_call_id: Some(output.call_id),
-                tool_calls: Vec::new(),
-            });
-        }
-        compact_openai_chat_messages(
-            &mut messages,
+
+        // Shared: append tool calls + outputs to canonical items.
+        append_tool_results(&mut items, &tool_calls, &tool_results.outputs);
+
+        // Shared: unified compaction (previously missing post-compact context).
+        let compacted = compact_conversation(
+            &mut items,
             provider,
             &model_id,
             &execution.request_config,
+            None, // Chat Completions doesn't return input_tokens
         );
+        if compacted {
+            inject_post_compact_context(&mut items, &cwd);
+        }
     }
-}
-
-fn continuation_input(
-    tool_calls: &[OpenAIResponseToolCall],
-    outputs: &[OpenAIResponsesFunctionCallOutput],
-) -> Value {
-    let mut items = Vec::with_capacity(tool_calls.len() + outputs.len());
-    for tool_call in tool_calls {
-        items.push(json!({
-            "type": "function_call",
-            "call_id": tool_call.call_id,
-            "name": tool_call.name,
-            "arguments": serde_json::to_string(&tool_call.arguments).unwrap_or_else(|_| "{}".to_string()),
-        }));
-    }
-    items.extend(outputs.iter().map(|output| json!(output)));
-    Value::Array(items)
 }
 
 pub(super) fn execute_openai_tool_calls(
@@ -675,49 +689,6 @@ fn parse_openai_text(response: &Value) -> Result<String> {
     Ok(parts.join("\n"))
 }
 
-pub(super) fn transcript_to_openai_input(state: &AppState, input: &str) -> Result<Value> {
-    if state.transcript.is_empty() {
-        return Ok(Value::String(input.to_string()));
-    }
-
-    let mut items = Vec::new();
-    items.extend(
-        state
-            .transcript
-            .iter()
-            .enumerate()
-            .map(|(index, message)| match message.role {
-                crate::MessageRole::User => json!({
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": message.text,
-                        }
-                    ],
-                }),
-                crate::MessageRole::Assistant => json!({
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": message.text,
-                            "annotations": [],
-                        }
-                    ],
-                    "status": "completed",
-                    "id": format!("msg_{index}"),
-                }),
-                crate::MessageRole::System => json!({
-                    "role": "system",
-                    "content": message.text,
-                }),
-            }),
-    );
-    Ok(Value::Array(items))
-}
-
 fn openai_request_instructions(state: &AppState, system_prompt: Option<&str>) -> Result<String> {
     let mut sections = Vec::new();
     if let Some(system_prompt) = system_prompt
@@ -743,56 +714,6 @@ fn openai_request_instructions(state: &AppState, system_prompt: Option<&str>) ->
     }
     sections.push(reminder);
     Ok(sections.join("\n\n"))
-}
-
-pub(super) fn transcript_to_openai_chat_messages(
-    state: &AppState,
-    input: &str,
-    system_prompt: Option<&str>,
-) -> Result<Vec<OpenAIChatMessage>> {
-    let plan_mode_context = crate::command_helpers::prompt::plan_mode_context_message(state)?;
-    let mut messages = Vec::new();
-    if let Some(system_prompt) = system_prompt.filter(|prompt| !prompt.trim().is_empty()) {
-        messages.push(OpenAIChatMessage {
-            role: "system".to_string(),
-            content: Some(json!(system_prompt)),
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-        });
-    }
-    if let Some(plan_mode_context) = plan_mode_context {
-        messages.push(OpenAIChatMessage {
-            role: "system".to_string(),
-            content: Some(json!(plan_mode_context)),
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-        });
-    }
-    messages.extend(
-        state
-            .transcript
-            .iter()
-            .map(|message| OpenAIChatMessage {
-                role: match message.role {
-                    crate::MessageRole::User => "user".to_string(),
-                    crate::MessageRole::Assistant => "assistant".to_string(),
-                    crate::MessageRole::System => "system".to_string(),
-                },
-                content: Some(json!(message.text)),
-                tool_call_id: None,
-                tool_calls: Vec::new(),
-            })
-            .collect::<Vec<_>>(),
-    );
-    if messages.is_empty() {
-        messages.push(OpenAIChatMessage {
-            role: "user".to_string(),
-            content: Some(json!(input)),
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-        });
-    }
-    Ok(messages)
 }
 
 pub(super) fn parse_openai_assistant_text(
@@ -1069,24 +990,3 @@ where
         .with_context(|| format!("response from {url} was not valid JSON"))
 }
 
-/// Inject a brief context-restoration message after compaction so the model
-/// knows its context was trimmed and can orient itself.
-fn inject_post_compact_context(input: &mut Value, cwd: &std::path::Path) {
-    let Some(items) = input.as_array_mut() else {
-        return;
-    };
-    let reminder = format!(
-        "[Context restored after compaction]\nCurrent working directory: {}\n\
-         Continue the task from where you left off.",
-        cwd.display()
-    );
-    let pos = 1.min(items.len());
-    items.insert(
-        pos,
-        json!({
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": reminder}]
-        }),
-    );
-}
