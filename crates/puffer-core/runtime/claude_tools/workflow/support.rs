@@ -686,6 +686,75 @@ pub(super) fn register_background_shell_task(
     save_store(&tasks_path(cwd), &store)
 }
 
+/// Marks a background shell task as completed in the persistent store.
+/// Called from the reaper thread after `child.wait()` returns.
+pub(super) fn mark_shell_task_completed(
+    cwd: &Path,
+    task_id: &str,
+    exit_code: Option<i32>,
+) -> Result<()> {
+    let mut store = load_store::<TaskStore>(&tasks_path(cwd))?;
+    if let Some(task) = store.tasks.iter_mut().find(|t| t.task_id == task_id) {
+        if task.status == "running" {
+            task.status = "completed".to_string();
+            task.exit_code = exit_code;
+            task.process_id = None;
+            task.updated_at_ms = Some(now_ms());
+            if task.output.is_none() {
+                task.output = super::task_runtime::read_task_output(task);
+            }
+        }
+    }
+    save_store(&tasks_path(cwd), &store)?;
+    // Write a completion marker so the agent loop can detect newly finished tasks.
+    let marker_dir = cwd
+        .join(".puffer")
+        .join("runtime")
+        .join("claude_workflow")
+        .join("completed_tasks");
+    let _ = std::fs::create_dir_all(&marker_dir);
+    let _ = std::fs::write(marker_dir.join(task_id), "");
+    Ok(())
+}
+
+/// Drains completion markers for background shell tasks that finished since
+/// the last call.  Returns a human-readable description for each.
+pub(super) fn drain_completed_shell_tasks(cwd: &Path) -> Vec<String> {
+    let marker_dir = cwd
+        .join(".puffer")
+        .join("runtime")
+        .join("claude_workflow")
+        .join("completed_tasks");
+    let entries = match std::fs::read_dir(&marker_dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    let mut descriptions = Vec::new();
+    let store = load_store::<TaskStore>(&tasks_path(cwd)).ok();
+    for entry in entries.flatten() {
+        let task_id = entry.file_name().to_string_lossy().to_string();
+        // Remove marker so we don't report it again.
+        let _ = std::fs::remove_file(entry.path());
+        // Build a description from the stored task metadata.
+        let desc = store
+            .as_ref()
+            .and_then(|s| s.tasks.iter().find(|t| t.task_id == task_id))
+            .map(|t| {
+                let exit = t
+                    .exit_code
+                    .map(|c| format!(" (exit code {c})"))
+                    .unwrap_or_default();
+                format!(
+                    "Background task \"{}\" ({}) completed{}",
+                    t.subject, t.task_id, exit
+                )
+            })
+            .unwrap_or_else(|| format!("Background task {task_id} completed"));
+        descriptions.push(desc);
+    }
+    descriptions
+}
+
 /// Executes the live `AskUserQuestion` workflow tool.
 pub(super) fn execute_ask_user_question(
     state: &mut AppState,

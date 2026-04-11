@@ -33,7 +33,7 @@ fn header_snapshot_reports_compact_status() {
     let resources = sample_resources();
     let auth_store = sample_auth_store();
     let registry = ToolRegistry::from_resources(&resources);
-    let snapshot = header_lines(&state, &resources, &auth_store, &registry)
+    let snapshot = header_lines(&state, &resources, &auth_store, &registry, &ProviderRegistry::new())
         .into_iter()
         .map(|line| line.to_string())
         .collect::<Vec<_>>()
@@ -76,7 +76,7 @@ fn header_snapshot_includes_oauth_identity_when_available() {
     let resources = sample_resources();
     let auth_store = sample_auth_store();
     let registry = ToolRegistry::from_resources(&resources);
-    let snapshot = header_lines(&state, &resources, &auth_store, &registry)
+    let snapshot = header_lines(&state, &resources, &auth_store, &registry, &ProviderRegistry::new())
         .into_iter()
         .map(|line| line.to_string())
         .collect::<Vec<_>>()
@@ -194,6 +194,7 @@ fn render_pending_submit_shows_loading_below_prompt() {
                 Some("Review the current worktree and call out any risks.".to_string()),
                 Vec::new(),
                 Vec::new(),
+                Some(std::time::Instant::now()),
             );
             render(
                 frame,
@@ -207,7 +208,7 @@ fn render_pending_submit_shows_loading_below_prompt() {
                 0,
                 &sample_commands(),
             );
-            set_pending_submit_state(None, Vec::new(), Vec::new());
+            set_pending_submit_state(None, Vec::new(), Vec::new(), None);
         })
         .unwrap();
 
@@ -243,6 +244,7 @@ fn render_pending_submit_shows_tool_call_before_output() {
                         .to_string(),
                 }],
                 Vec::new(),
+                Some(std::time::Instant::now()),
             );
             render(
                 frame,
@@ -256,7 +258,7 @@ fn render_pending_submit_shows_tool_call_before_output() {
                 0,
                 &sample_commands(),
             );
-            set_pending_submit_state(None, Vec::new(), Vec::new());
+            set_pending_submit_state(None, Vec::new(), Vec::new(), None);
         })
         .unwrap();
 
@@ -282,6 +284,7 @@ fn render_pending_submit_shows_queued_prompts() {
                 Some("first prompt".to_string()),
                 Vec::new(),
                 vec!["second prompt".to_string(), "third prompt".to_string()],
+                Some(std::time::Instant::now()),
             );
             render(
                 frame,
@@ -295,7 +298,7 @@ fn render_pending_submit_shows_queued_prompts() {
                 0,
                 &sample_commands(),
             );
-            set_pending_submit_state(None, Vec::new(), Vec::new());
+            set_pending_submit_state(None, Vec::new(), Vec::new(), None);
         })
         .unwrap();
 

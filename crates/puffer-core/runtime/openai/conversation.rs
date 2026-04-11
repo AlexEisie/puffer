@@ -73,15 +73,33 @@ impl ConversationItem {
         }
     }
 
-    /// Approximate token count (chars / 4).
+    /// Approximate token count with CJK-aware heuristic.
+    ///
+    /// ASCII characters average ~0.25 tokens each (4 chars/token).
+    /// CJK / non-ASCII characters average ~1.5 tokens each.
     fn estimated_tokens(&self) -> usize {
-        let chars = match self {
-            Self::Message { content, .. } => content.len(),
-            Self::FunctionCall { arguments, name, .. } => arguments.len() + name.len(),
-            Self::FunctionCallOutput { output, .. } => output.len(),
-        };
-        (chars + 3) / 4
+        match self {
+            Self::Message { content, .. } => estimate_text_tokens(content),
+            Self::FunctionCall { arguments, name, .. } => {
+                estimate_text_tokens(name) + estimate_text_tokens(arguments)
+            }
+            Self::FunctionCallOutput { output, .. } => estimate_text_tokens(output),
+        }
     }
+}
+
+/// CJK-aware token estimation: ASCII chars count as 1 unit, non-ASCII as 6 units,
+/// then divide by 4. This yields ~0.25 tokens/ASCII char and ~1.5 tokens/CJK char.
+fn estimate_text_tokens(text: &str) -> usize {
+    let mut units = 0usize;
+    for ch in text.chars() {
+        if ch.is_ascii() {
+            units += 1;
+        } else {
+            units += 6;
+        }
+    }
+    (units + 3) / 4
 }
 
 // ---------------------------------------------------------------------------
@@ -375,8 +393,11 @@ pub(crate) fn compact_conversation(
         return false;
     }
 
-    // Phase 2: AI summary of old items, keep last 4 intact.
-    let keep_count = 4.min(items.len());
+    // Phase 2: AI summary of old items, keep recent items intact.
+    // Find a valid keep boundary: we want at least 4 items, but the kept tail
+    // must start with a Message to avoid orphan FunctionCall/FunctionCallOutput
+    // items that would produce invalid Chat Completions history.
+    let keep_count = find_valid_keep_boundary(items, 4);
     let to_summarize = &items[..items.len() - keep_count];
     if !to_summarize.is_empty() {
         let old_context = build_summary_text(to_summarize);
@@ -400,7 +421,16 @@ pub(crate) fn compact_conversation(
         cycles += 1;
     }
 
-    if !matches!(items.first(), Some(ConversationItem::Message { .. })) {
+    // Strip leading orphan FunctionCall/FunctionCallOutput items that lack a
+    // preceding assistant message — these would produce invalid Chat Completions
+    // history (tool messages without a corresponding assistant tool_calls message).
+    while !items.is_empty()
+        && !matches!(items.first(), Some(ConversationItem::Message { .. }))
+    {
+        items.remove(0);
+    }
+
+    if items.is_empty() || !matches!(items.first(), Some(ConversationItem::Message { .. })) {
         items.insert(
             0,
             ConversationItem::user_message("[Earlier context compacted]"),
@@ -422,6 +452,27 @@ pub(crate) fn inject_post_compact_context(
     );
     let pos = 1.min(items.len());
     items.insert(pos, ConversationItem::user_message(reminder));
+}
+
+/// Finds the number of items to keep from the tail during compaction such that
+/// the kept slice starts with a `Message` item. This prevents orphan
+/// `FunctionCall`/`FunctionCallOutput` items that would produce invalid Chat
+/// Completions history.
+///
+/// Starts from `min_keep` and extends backward until a `Message` boundary is
+/// found, capped at the total item count.
+fn find_valid_keep_boundary(items: &[ConversationItem], min_keep: usize) -> usize {
+    let n = items.len();
+    let mut keep = min_keep.min(n);
+    // Walk backward from the candidate boundary until we find a Message.
+    while keep < n {
+        let start_index = n - keep;
+        if matches!(&items[start_index], ConversationItem::Message { .. }) {
+            break;
+        }
+        keep += 1;
+    }
+    keep
 }
 
 // ---------------------------------------------------------------------------

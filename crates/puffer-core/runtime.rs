@@ -57,7 +57,10 @@ use self::structured_output_support::{
 #[cfg(test)]
 use self::structured_output_support::anthropic_tool_definitions;
 use self::system_prompt::render_runtime_system_prompt;
-use self::tool_executor::{execute_tool_call, ToolExecutionBackend};
+use self::tool_executor::{
+    execute_tool_call, is_parallel_safe_tool, resolve_tool_permission, PermissionOutcome,
+    ToolExecutionBackend,
+};
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OPENAI_CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";

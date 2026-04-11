@@ -1,8 +1,10 @@
 use super::{
-    execute_tool_call, parse_http_json_response, run_turn_hooks, send_http_request_raw,
-    ToolExecutionBackend, ToolInvocation, TurnStreamEvent, APP_VERSION,
+    execute_tool_call, is_parallel_safe_tool, parse_http_json_response, resolve_tool_permission,
+    run_turn_hooks, send_http_request_raw, PermissionOutcome, ToolExecutionBackend, ToolInvocation,
+    TurnStreamEvent, APP_VERSION,
 };
 use crate::permissions::load_runtime_permission_context;
+use crate::workspace_paths;
 pub(crate) mod conversation;
 mod support;
 
@@ -178,11 +180,14 @@ fn execute_openai_once(
 
         let parsed = parse_responses_response(&serde_json::to_string(&response)?)?;
         previous_response_id = parsed.id.clone();
-        // Extract server-reported input token count for precise compaction.
+        // Extract server-reported input token count for precise compaction & context display.
         let input_tokens = response
             .pointer("/usage/input_tokens")
             .and_then(Value::as_u64)
             .map(|v| v as usize);
+        if let Some(tokens) = input_tokens {
+            state.last_input_tokens = Some(tokens as u32);
+        }
         let tool_calls = extract_responses_tool_calls(&parsed)?;
         if tool_calls.is_empty() {
             let assistant_text = parse_openai_assistant_text(&parsed, &response, state)?;
@@ -327,17 +332,37 @@ where
     let mut items = transcript_to_items(state, input);
     let mut invocations = Vec::new();
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
+    let mut previous_response_id: Option<String> = None;
+    // Index where "continuation" items start — used for previous_response_id optimization.
+    // When previous_response_id is set, only items[start..] are sent as wire input.
+    let mut continuation_start: Option<usize> = None;
 
     loop {
-        // Wire boundary: always send full history (streaming doesn't use previous_response_id).
-        let wire_input = items_to_responses_input(&items);
+        // Check for background tasks that completed since the last turn and inject
+        // a system reminder so the model learns about them without needing to poll.
+        let completed = super::claude_tools::workflow::drain_completed_shell_tasks(&state.cwd);
+        if !completed.is_empty() {
+            let notice = format!(
+                "<system-reminder>\n{}\nUse TaskOutput to retrieve the full output if needed.\n</system-reminder>",
+                completed.join("\n")
+            );
+            items.push(ConversationItem::user_message(&notice));
+        }
 
+        // Wire boundary: ConversationItem → Responses API input.
+        // When previous_response_id is set, only send continuation items.
+        let wire_input = match (previous_response_id.as_ref(), continuation_start) {
+            (Some(_), Some(start)) => items_to_responses_input(&items[start..]),
+            _ => items_to_responses_input(&items),
+        };
+
+        let prev_resp_id = previous_response_id.clone();
         let response = retry_openai_transport(|| {
             send_openai_request_with_refresh_streaming(
                 auth_store,
                 &mut execution,
                 |request_config| {
-                    let body = build_codex_openai_request_body(
+                    let mut body = build_codex_openai_request_body(
                         state,
                         &model_id,
                         &instructions,
@@ -347,6 +372,7 @@ where
                         text.clone(),
                         true,
                     );
+                    apply_previous_response_id(&mut body, prev_resp_id.as_deref());
                     build_json_post_request(
                         request_config,
                         openai_responses_path(&request_config.base_url),
@@ -358,6 +384,15 @@ where
         })?;
 
         let parsed = parse_responses_response(&serde_json::to_string(&response)?)?;
+        previous_response_id = parsed.id.clone();
+        // Extract server-reported input token count for context display & compaction.
+        let input_tokens = response
+            .pointer("/usage/input_tokens")
+            .and_then(Value::as_u64)
+            .map(|v| v as usize);
+        if let Some(tokens) = input_tokens {
+            state.last_input_tokens = Some(tokens as u32);
+        }
         let tool_calls = extract_responses_tool_calls(&parsed)?;
         if tool_calls.is_empty() {
             let assistant_text = parse_openai_assistant_text(&parsed, &response, state)?;
@@ -383,6 +418,8 @@ where
         if !assistant_text.trim().is_empty() {
             items.push(ConversationItem::assistant_message(&assistant_text));
         }
+        // Record where continuation starts (tool calls + outputs for next request).
+        continuation_start = Some(items.len());
 
         let cwd = state.cwd.clone();
         let tool_results = execute_openai_tool_calls(
@@ -408,11 +445,7 @@ where
         // Shared: append tool calls + outputs to canonical items.
         append_tool_results(&mut items, &tool_calls, &tool_results.outputs);
 
-        // Extract server-reported input token count for precise compaction.
-        let input_tokens = response
-            .pointer("/usage/input_tokens")
-            .and_then(Value::as_u64)
-            .map(|v| v as usize);
+        // Shared: unified compaction.
         let compacted = compact_conversation(
             &mut items,
             provider,
@@ -421,6 +454,8 @@ where
             input_tokens,
         );
         if compacted {
+            previous_response_id = None;
+            continuation_start = None;
             inject_post_compact_context(&mut items, &cwd);
         }
     }
@@ -479,6 +514,7 @@ fn execute_openai_completions_once(
     use self::conversation::{
         append_tool_results, build_system_reminder, compact_conversation,
         inject_post_compact_context, items_to_chat_messages, transcript_to_items,
+        ConversationItem,
     };
 
     let structured_output = options.structured_output;
@@ -511,6 +547,16 @@ fn execute_openai_completions_once(
     let mut invocations = Vec::new();
 
     loop {
+        // Check for background tasks that completed since the last turn.
+        let completed = super::claude_tools::workflow::drain_completed_shell_tasks(&state.cwd);
+        if !completed.is_empty() {
+            let notice = format!(
+                "<system-reminder>\n{}\nUse TaskOutput to retrieve the full output if needed.\n</system-reminder>",
+                completed.join("\n")
+            );
+            items.push(ConversationItem::user_message(&notice));
+        }
+
         // Wire boundary: ConversationItem → Chat Completions messages.
         let messages = items_to_chat_messages(
             &items,
@@ -552,6 +598,13 @@ fn execute_openai_completions_once(
             });
         }
 
+        // Preserve assistant text from this round (the model may emit text
+        // alongside tool calls, e.g. "Let me check that file.").
+        let assistant_text = extract_chat_completions_text(&parsed);
+        if !assistant_text.trim().is_empty() {
+            items.push(ConversationItem::assistant_message(&assistant_text));
+        }
+
         let cwd = state.cwd.clone();
         let tool_results = execute_openai_tool_calls(
             state,
@@ -586,6 +639,209 @@ fn execute_openai_completions_once(
 }
 
 pub(super) fn execute_openai_tool_calls(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
+    tool_calls: &[OpenAIResponseToolCall],
+    registry: &ToolRegistry,
+    cwd: &std::path::Path,
+    request_config: &OpenAIRequestConfig,
+    model_id: &str,
+    structured_output: Option<&StructuredOutputConfig>,
+    tool_filter: Option<&super::RequestToolFilter>,
+) -> Result<OpenAIToolResults> {
+    // Count how many parallel-safe tools we have.
+    let parallel_count = tool_calls
+        .iter()
+        .filter(|tc| is_parallel_safe_tool(&tc.name))
+        .count();
+
+    // If 0-1 tool calls or nothing to parallelize, use the serial fast-path.
+    if tool_calls.len() <= 1 || parallel_count <= 1 {
+        return execute_openai_tool_calls_serial(
+            state,
+            resources,
+            providers,
+            auth_store,
+            tool_calls,
+            registry,
+            cwd,
+            request_config,
+            model_id,
+            structured_output,
+            tool_filter,
+        );
+    }
+
+    // ---------- Phase 1: Pre-resolve permissions for all tools (serial) ----------
+    // Permission prompts require user interaction and &mut state (for AllowSession),
+    // so they must be resolved before we enter the parallel phase.
+    let mut permissions: Vec<PermissionOutcome> = Vec::with_capacity(tool_calls.len());
+    for tc in tool_calls {
+        permissions.push(resolve_tool_permission(
+            state,
+            resources,
+            registry,
+            cwd,
+            &tc.name,
+            &tc.arguments,
+            tool_filter,
+        )?);
+    }
+
+    // ---------- Phase 2: Execute tools ----------
+    // Clone immutable data needed by parallel tools.
+    let working_dirs = state.working_dirs.clone();
+    let allow_all_paths = workspace_paths::sandbox_allows_all_paths(&state.sandbox_mode);
+    let provider_context = super::claude_tools::ProviderToolContext::OpenAI {
+        request_config,
+        model_id,
+        structured_output,
+    };
+
+    // Pre-allocate results array; each slot filled by either parallel or serial exec.
+    let mut results: Vec<Option<(String, bool)>> = vec![None; tool_calls.len()];
+
+    // Execute parallel-safe permitted tools concurrently.
+    std::thread::scope(|s| {
+        let mut handles: Vec<(usize, std::thread::ScopedJoinHandle<'_, (String, bool)>)> =
+            Vec::new();
+        for (i, tc) in tool_calls.iter().enumerate() {
+            // Skip denied tools and non-parallel tools.
+            if !is_parallel_safe_tool(&tc.name) {
+                continue;
+            }
+            if let PermissionOutcome::Denied(ref denied) = permissions[i] {
+                results[i] = Some((denied.output.stdout.clone(), denied.success));
+                continue;
+            }
+            let definition = match registry.definition(&tc.name) {
+                Some(d) => d.clone(),
+                None => {
+                    results[i] = Some((format!("unknown tool {}", tc.name), false));
+                    continue;
+                }
+            };
+            let args = tc.arguments.clone();
+            let wd = &working_dirs;
+            let pc = &provider_context;
+            handles.push((
+                i,
+                s.spawn(move || {
+                    match super::claude_tools::execute_parallel_tool(
+                        &definition,
+                        cwd,
+                        wd,
+                        allow_all_paths,
+                        args,
+                        resources,
+                        registry,
+                        pc,
+                    ) {
+                        Ok(exec) => {
+                            let output = if exec.output.stderr.is_empty() {
+                                exec.output.stdout
+                            } else if exec.output.stdout.is_empty() {
+                                exec.output.stderr
+                            } else {
+                                format!("{}\n{}", exec.output.stdout, exec.output.stderr)
+                            };
+                            (output, exec.success)
+                        }
+                        Err(error) => (format!("Tool execution failed: {error}"), false),
+                    }
+                }),
+            ));
+        }
+        for (i, handle) in handles {
+            results[i] = Some(handle.join().unwrap_or_else(|_| {
+                ("Tool execution panicked".to_string(), false)
+            }));
+        }
+    });
+
+    // Execute serial tools (those that need &mut state).
+    for (i, tc) in tool_calls.iter().enumerate() {
+        if results[i].is_some() {
+            continue; // Already executed in parallel or denied.
+        }
+        if let PermissionOutcome::Denied(ref denied) = permissions[i] {
+            results[i] = Some((denied.output.stdout.clone(), denied.success));
+            continue;
+        }
+        // Serial execution with full &mut state access.
+        let (output, success) = match execute_tool_call(
+            state,
+            resources,
+            providers,
+            auth_store,
+            registry,
+            model_id,
+            cwd,
+            ToolExecutionBackend::OpenAi {
+                request_config,
+                structured_output,
+            },
+            tool_filter,
+            &tc.name,
+            tc.arguments.clone(),
+        ) {
+            Ok(exec) => {
+                let output = if exec.output.stderr.is_empty() {
+                    exec.output.stdout
+                } else if exec.output.stdout.is_empty() {
+                    exec.output.stderr
+                } else {
+                    format!("{}\n{}", exec.output.stdout, exec.output.stderr)
+                };
+                (output, exec.success)
+            }
+            Err(error) => (format!("Tool execution failed: {error}"), false),
+        };
+        results[i] = Some((output, success));
+    }
+
+    // ---------- Phase 3: Assemble outputs in original order ----------
+    let session_id = &state.session.id;
+    let mut outputs = Vec::with_capacity(tool_calls.len());
+    let mut invocations = Vec::with_capacity(tool_calls.len());
+    for (i, tc) in tool_calls.iter().enumerate() {
+        let (raw_output, success) = results[i]
+            .take()
+            .unwrap_or_else(|| ("Tool was not executed".to_string(), false));
+        let output = super::process_tool_result(&raw_output, super::MAX_TOOL_RESULT_CHARS, session_id);
+        outputs.push(OpenAIResponsesFunctionCallOutput {
+            kind: "function_call_output".to_string(),
+            call_id: tc.call_id.clone(),
+            output: output.clone(),
+        });
+        invocations.push(ToolInvocation {
+            tool_id: tc.name.clone(),
+            input: serde_json::to_string(&tc.arguments)?,
+            output,
+            success,
+        });
+    }
+
+    // Enforce per-message aggregate budget (CC: 200K).
+    let mut output_strings: Vec<String> = outputs.iter().map(|o| o.output.clone()).collect();
+    super::enforce_tool_result_budget(&mut output_strings, session_id);
+    for (i, new_output) in output_strings.into_iter().enumerate() {
+        if new_output != outputs[i].output {
+            invocations[i].output = new_output.clone();
+            outputs[i].output = new_output;
+        }
+    }
+
+    Ok(OpenAIToolResults {
+        outputs,
+        invocations,
+    })
+}
+
+/// Serial fallback for single tool calls or when no parallelism is beneficial.
+fn execute_openai_tool_calls_serial(
     state: &mut AppState,
     resources: &LoadedResources,
     providers: &ProviderRegistry,

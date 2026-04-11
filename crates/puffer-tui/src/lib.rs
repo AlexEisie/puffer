@@ -166,6 +166,18 @@ pub fn run_app(
             )?;
         }
         check_loop_interval(&mut tui);
+        // Auto-wake: when the agent is idle and background tasks have completed,
+        // enqueue a synthetic notification so the agent sees the completion.
+        if !tui.has_pending_submit() && tui.queued_prompts.is_empty() {
+            let completed = puffer_core::drain_background_task_completions(state);
+            if !completed.is_empty() {
+                let notice = format!(
+                    "<task-notification>\n{}\nUse TaskOutput to retrieve the full output if needed.\n</task-notification>",
+                    completed.join("\n")
+                );
+                tui.enqueue_prompt(notice);
+            }
+        }
         if !tui.has_pending_submit() && !tui.queued_prompts.is_empty() {
             submit_next_queued_prompt(
                 state,
@@ -178,7 +190,7 @@ pub fn run_app(
                 no_alt_screen,
             )?;
         }
-        refresh_status_line(state)?;
+        refresh_status_line(state, providers)?;
         terminal.draw(|frame| {
             render::set_active_overlay(tui.overlay.clone());
             render::set_pending_submit_state(
@@ -190,6 +202,9 @@ pub fn run_app(
                     .map(|pending| pending.pending_tool_calls.clone())
                     .unwrap_or_default(),
                 tui.queued_prompts.iter().cloned().collect(),
+                tui.pending_submit
+                    .as_ref()
+                    .map(|pending| pending.started_at),
             );
             render::set_tool_details_expanded(tui.tool_details_expanded);
             render::set_follow_output(tui.follow_output);
@@ -211,7 +226,7 @@ pub fn run_app(
         if state.should_exit {
             break;
         }
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(Duration::from_millis(16))? {
             match event::read()? {
                 Event::Key(key) => {
                     if handle_key(

@@ -2,7 +2,7 @@ use super::prompt_border_style;
 use super::summary::top_panel_compact_lines;
 use image::{imageops::FilterType, DynamicImage, ImageReader, Rgba, RgbaImage};
 use puffer_core::AppState;
-use puffer_provider_registry::AuthStore;
+use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use puffer_tools::ToolRegistry;
 use ratatui::layout::Rect;
@@ -34,9 +34,11 @@ pub(super) fn render_fixed_top_panel(
     resources: &LoadedResources,
     auth_store: &AuthStore,
     tool_registry: &ToolRegistry,
+    providers: &ProviderRegistry,
 ) {
     let art_lines = puffer_art_lines();
-    let summary_lines = top_panel_compact_lines(state, resources, auth_store, tool_registry);
+    let summary_lines =
+        top_panel_compact_lines(state, resources, auth_store, tool_registry, providers);
     let plan = panel_render_plan(area, &art_lines, &summary_lines);
 
     if plan.show_puffer {

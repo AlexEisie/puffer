@@ -47,6 +47,7 @@ struct PendingSubmitRenderState {
     loading_prompt: Option<String>,
     pending_tool_calls: Vec<ToolCallRequest>,
     queued_prompts: Vec<String>,
+    started_at: Option<std::time::Instant>,
 }
 thread_local! {
     static ACTIVE_OVERLAY: RefCell<Option<OverlayState>> = const { RefCell::new(None) };
@@ -68,12 +69,14 @@ pub(crate) fn set_pending_submit_state(
     loading_prompt: Option<String>,
     pending_tool_calls: Vec<ToolCallRequest>,
     queued_prompts: Vec<String>,
+    started_at: Option<std::time::Instant>,
 ) {
     ACTIVE_PENDING_SUBMIT.with(|value| {
         *value.borrow_mut() = PendingSubmitRenderState {
             loading_prompt,
             pending_tool_calls,
             queued_prompts,
+            started_at,
         };
     });
 }
@@ -146,6 +149,7 @@ pub(crate) fn render(
             resources,
             auth_store,
             &tool_registry,
+            providers,
             frame.area().width,
         )
         .min(frame.area().height.saturating_sub(footer_height + body_min_height))
@@ -175,6 +179,7 @@ pub(crate) fn render(
             resources,
             auth_store,
             &tool_registry,
+            providers,
         );
     }
 
@@ -266,10 +271,12 @@ pub(crate) fn render(
         frame.render_widget(Paragraph::new(overlay_prompt_line(input)), prompt_row);
         let display_cursor = input.get(..cursor).map_or(0, UnicodeWidthStr::width);
         let max_cursor = usize::from(prompt_row.width.saturating_sub(3));
-        frame.set_cursor_position((
-            prompt_row.x + 2 + display_cursor.min(max_cursor) as u16,
-            prompt_row.y,
-        ));
+        let cursor_x = prompt_row.x + 2 + display_cursor.min(max_cursor) as u16;
+        let cursor_y = prompt_row.y;
+        let buf = frame.area();
+        if cursor_x < buf.width && cursor_y < buf.height {
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
         if let Some(hint_row) = hint_row {
             frame.render_widget(
                 Paragraph::new(overlay_hint_line(input, onboarding_active))
@@ -286,10 +293,12 @@ pub(crate) fn render(
         frame.render_widget(Paragraph::new(prompt), prompt_row);
         let display_cursor = input.get(..cursor).map_or(0, UnicodeWidthStr::width);
         let max_cursor = usize::from(prompt_row.width.saturating_sub(3));
-        frame.set_cursor_position((
-            prompt_row.x + 2 + display_cursor.min(max_cursor) as u16,
-            prompt_row.y,
-        ));
+        let cursor_x = prompt_row.x + 2 + display_cursor.min(max_cursor) as u16;
+        let cursor_y = prompt_row.y;
+        let buf = frame.area();
+        if cursor_x < buf.width && cursor_y < buf.height {
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
 
         if let Some(hint_row) = hint_row {
             // Show transient status hint in the status bar for 3s,
@@ -429,6 +438,7 @@ fn pending_submit_state() -> PendingSubmitRenderState {
         loading_prompt: value.borrow().loading_prompt.clone(),
         pending_tool_calls: value.borrow().pending_tool_calls.clone(),
         queued_prompts: value.borrow().queued_prompts.clone(),
+        started_at: value.borrow().started_at,
     })
 }
 
@@ -448,9 +458,15 @@ fn pending_submit_lines(pending_submit: &PendingSubmitRenderState) -> Vec<Line<'
         }
     }
     if pending_submit.loading_prompt.is_some() {
+        let label = if let Some(started) = pending_submit.started_at {
+            let elapsed = started.elapsed().as_secs_f64();
+            format!("Loading... ({elapsed:.1}s)")
+        } else {
+            "Loading...".to_string()
+        };
         lines.push(Line::from(vec![
             Span::styled("  ⎿ ", Style::default().add_modifier(Modifier::DIM)),
-            Span::styled("Loading...", Style::default().add_modifier(Modifier::DIM)),
+            Span::styled(label, Style::default().add_modifier(Modifier::DIM)),
         ]));
     }
     for prompt in &pending_submit.queued_prompts {

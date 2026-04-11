@@ -342,6 +342,9 @@ fn codex_reasoning_config(state: &AppState, supports_reasoning: bool) -> Option<
     if !supports_reasoning {
         return None;
     }
+    if state.fast_mode {
+        return None;
+    }
     if std::env::var("PUFFER_OPENAI_DISABLE_REASONING")
         .ok()
         .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
