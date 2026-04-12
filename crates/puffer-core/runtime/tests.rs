@@ -611,8 +611,10 @@ fn build_codex_openai_request_body_uses_priority_tier_for_fast_mode() {
 
     assert_eq!(body["service_tier"], json!("priority"));
     assert_eq!(body["parallel_tool_calls"], json!(true));
-    assert!(body.get("reasoning").is_none());
-    assert!(body["include"].as_array().is_some_and(Vec::is_empty));
+    // Fast mode no longer disables reasoning — it only sets service_tier.
+    // Reasoning is controlled solely by effort_level, matching Anthropic behavior.
+    assert_eq!(body["reasoning"]["effort"], json!("medium"));
+    assert_eq!(body["include"][0], json!("reasoning.encrypted_content"));
 }
 
 #[test]

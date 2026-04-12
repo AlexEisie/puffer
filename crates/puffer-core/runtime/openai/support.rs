@@ -342,15 +342,16 @@ fn codex_reasoning_config(state: &AppState, supports_reasoning: bool) -> Option<
     if !supports_reasoning {
         return None;
     }
-    if state.fast_mode {
-        return None;
-    }
     if std::env::var("PUFFER_OPENAI_DISABLE_REASONING")
         .ok()
         .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
     {
         return None;
     }
+    // Fast mode only controls service_tier (set in the caller), not reasoning.
+    // This mirrors the Anthropic path where fast_mode sets body["speed"] but
+    // does not disable thinking.  The effort_level is the sole control for
+    // reasoning depth.
     let mut reasoning = json!({ "summary": "auto" });
     match state.effort_level.as_str() {
         "auto" | "unset" | "default" => {
