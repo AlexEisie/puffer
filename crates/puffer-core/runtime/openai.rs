@@ -224,10 +224,10 @@ fn execute_openai_once(
             structured_output,
             options.tool_filter,
         )?;
-        invocations.extend(tool_results.invocations);
 
         // Shared: append tool calls + outputs to canonical items.
-        append_tool_results(&mut items, &tool_calls, &tool_results.outputs);
+        append_tool_results(&mut items, &tool_results.invocations);
+        invocations.extend(tool_results.invocations);
 
         // Shared: unified compaction.
         let compacted = compact_conversation(
@@ -447,10 +447,10 @@ where
                 tool_results.invocations.clone(),
             ));
         }
-        invocations.extend(tool_results.invocations);
 
         // Shared: append tool calls + outputs to canonical items.
-        append_tool_results(&mut items, &tool_calls, &tool_results.outputs);
+        append_tool_results(&mut items, &tool_results.invocations);
+        invocations.extend(tool_results.invocations);
 
         // Shared: unified compaction.
         let compacted = compact_conversation(
@@ -624,10 +624,10 @@ fn execute_openai_completions_once(
             structured_output,
             options.tool_filter,
         )?;
-        invocations.extend(tool_results.invocations);
 
         // Shared: append tool calls + outputs to canonical items.
-        append_tool_results(&mut items, &tool_calls, &tool_results.outputs);
+        append_tool_results(&mut items, &tool_results.invocations);
+        invocations.extend(tool_results.invocations);
 
         // Shared: unified compaction (previously missing post-compact context).
         let compacted = compact_conversation(
@@ -825,6 +825,7 @@ pub(super) fn execute_openai_tool_calls(
             output: output.clone(),
         });
         invocations.push(ToolInvocation {
+            call_id: tc.call_id.clone(),
             tool_id: tc.name.clone(),
             input: serde_json::to_string(&tc.arguments)?,
             output,
@@ -901,6 +902,7 @@ fn execute_openai_tool_calls_serial(
             output: output.clone(),
         });
         invocations.push(ToolInvocation {
+            call_id: tool_call.call_id.clone(),
             tool_id: tool_call.name.clone(),
             input: serde_json::to_string(&tool_call.arguments)?,
             output,
