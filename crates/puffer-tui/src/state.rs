@@ -585,6 +585,50 @@ impl OverlayState {
         }
     }
 
+    /// Returns `true` when this overlay is a scrollable text panel (not a picker).
+    pub(crate) fn is_text_overlay(&self) -> bool {
+        matches!(
+            self,
+            Self::Text(..)
+                | Self::Btw(..)
+                | Self::Session(..)
+                | Self::Status(..)
+                | Self::PermissionPrompt { .. }
+        )
+    }
+
+    /// Scrolls upward by half a page (Vim Ctrl+u).
+    pub(crate) fn half_page_up(&mut self) {
+        match self {
+            Self::Text(overlay) => overlay.half_page_up(),
+            _ => self.page_up(),
+        }
+    }
+
+    /// Scrolls downward by half a page (Vim Ctrl+d).
+    pub(crate) fn half_page_down(&mut self) {
+        match self {
+            Self::Text(overlay) => overlay.half_page_down(),
+            _ => self.page_down(),
+        }
+    }
+
+    /// Jumps to the top (Vim gg).
+    pub(crate) fn scroll_to_top(&mut self) {
+        match self {
+            Self::Text(overlay) => overlay.scroll_to_top(),
+            _ => {}
+        }
+    }
+
+    /// Jumps to the bottom (Vim G).
+    pub(crate) fn scroll_to_bottom(&mut self) {
+        match self {
+            Self::Text(overlay) => overlay.scroll_to_bottom(),
+            _ => {}
+        }
+    }
+
     /// Returns the direct slash-command submission for simple overlays.
     pub(crate) fn selected_command(&self) -> Option<String> {
         match self {

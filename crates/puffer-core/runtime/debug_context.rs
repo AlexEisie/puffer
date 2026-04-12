@@ -54,8 +54,8 @@ pub(crate) fn render_debug_context(
         let definitions =
             anthropic_tool_definitions_for_request(&registry, None, Some(&permission_context), None)?;
         for def in &definitions {
-            let name = def.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-            let _ = writeln!(&mut out, "  • {}", name);
+            let pretty = serde_json::to_string_pretty(def).unwrap_or_else(|_| format!("{:?}", def));
+            let _ = writeln!(&mut out, "{}", pretty);
         }
     } else {
         let definitions = openai_tool_definitions_for_request(
@@ -66,7 +66,8 @@ pub(crate) fn render_debug_context(
             None,
         )?;
         for def in &definitions {
-            let _ = writeln!(&mut out, "  • {}", def.name);
+            let pretty = serde_json::to_string_pretty(def).unwrap_or_else(|_| format!("{:?}", def));
+            let _ = writeln!(&mut out, "{}", pretty);
         }
     }
     let _ = writeln!(&mut out, "└─── END TOOLS ───\n");

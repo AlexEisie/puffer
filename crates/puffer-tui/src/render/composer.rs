@@ -5,7 +5,7 @@ use crate::popup::popup_rows;
 use crate::OverlayState;
 use puffer_core::CommandSpec;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
@@ -145,17 +145,16 @@ fn command_dropdown_lines(
     rows.into_iter()
         .enumerate()
         .map(|(index, command)| {
+            let selected = index == slash_selection;
             let argument_hint = command
                 .argument_hint
                 .as_deref()
                 .map(|value| format!("  {value}"))
                 .unwrap_or_default();
-            selection_line(
-                format!(
-                    "/{}  {}{}",
-                    command.name, command.description, argument_hint
-                ),
-                index == slash_selection,
+            command_selection_line(
+                &command.name,
+                &format!("{}{}",command.description, argument_hint),
+                selected,
             )
         })
         .collect()
@@ -243,5 +242,26 @@ fn selection_line(text: String, selected: bool) -> Line<'static> {
                 Style::default()
             },
         ),
+    ])
+}
+
+fn command_selection_line(name: &str, description: &str, selected: bool) -> Line<'static> {
+    let prefix = if selected { "› " } else { "  " };
+    let base = if selected {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let cmd_style = if selected {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    Line::from(vec![
+        Span::styled(prefix.to_string(), base),
+        Span::styled(format!("/{name}"), cmd_style),
+        Span::styled(format!("  {description}"), base),
     ])
 }

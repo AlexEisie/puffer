@@ -1077,6 +1077,35 @@ fn handle_overlay_key(
                 no_alt_screen,
             )?;
         }
+        // ── Vim-style navigation for scrollable text overlays ──
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(overlay) = tui.overlay.as_mut() {
+                if overlay.is_text_overlay() {
+                    overlay.half_page_up();
+                }
+            }
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(overlay) = tui.overlay.as_mut() {
+                if overlay.is_text_overlay() {
+                    overlay.half_page_down();
+                }
+            }
+        }
+        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(overlay) = tui.overlay.as_mut() {
+                if overlay.is_text_overlay() {
+                    overlay.page_down();
+                }
+            }
+        }
+        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(overlay) = tui.overlay.as_mut() {
+                if overlay.is_text_overlay() {
+                    overlay.page_up();
+                }
+            }
+        }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if tui.active_loop.is_some() {
                 cancel_pending_submit(state, session_store, tui)?;
@@ -1104,6 +1133,19 @@ fn handle_overlay_key(
             }
         }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Vim-style keys for text overlays (j/k/g/G/H/L).
+            if let Some(overlay) = tui.overlay.as_mut() {
+                if overlay.is_text_overlay() {
+                    match ch {
+                        'j' => { overlay.select_next(); return Ok(false); }
+                        'k' => { overlay.select_previous(); return Ok(false); }
+                        'g' => { overlay.scroll_to_top(); return Ok(false); }
+                        'G' => { overlay.scroll_to_bottom(); return Ok(false); }
+                        'q' => { set_overlay_state(tui, None); return Ok(false); }
+                        _ => {}
+                    }
+                }
+            }
             if ch == '/' && tui.input.is_empty() {
                 let commands = command_surface(resources);
                 set_overlay_state(tui, None);
