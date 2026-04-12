@@ -5,6 +5,10 @@ use crate::model::{
 };
 use anyhow::{anyhow, Result};
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Stores all providers and models known to the application.
 #[derive(Debug, Clone, Default)]
@@ -116,17 +120,96 @@ impl ProviderRegistry {
     }
 
     /// Discovers and merges runtime models for every provider that exposes discovery config.
+    ///
+    /// Uses a disk cache (`~/.puffer/model_discovery_cache.json`) to avoid
+    /// redundant HTTP requests within a 1-hour window.  When the cache is stale
+    /// or missing, providers are discovered in parallel using thread::scope.
     pub fn discover_and_merge_all(&mut self, auth_store: &AuthStore) -> Result<()> {
-        let client = ModelDiscoveryClient::new();
-        let provider_ids = self.providers.keys().cloned().collect::<Vec<_>>();
-        let mut failures = Vec::new();
-        for provider_id in provider_ids {
-            if let Err(error) =
-                self.discover_and_merge_provider_with_client(&provider_id, auth_store, &client)
-            {
-                failures.push(format!("{provider_id}: {error}"));
+        let cache_path = discovery_cache_path();
+
+        // --- Try loading from cache first ---
+        if let Some(cache) = load_discovery_cache(&cache_path) {
+            let now_ms = current_time_ms();
+            let all_fresh = self.providers.values().all(|entry| {
+                let id = &entry.descriptor.id;
+                entry.descriptor.discovery.is_none()
+                    || cache
+                        .entries
+                        .get(id.as_str())
+                        .is_some_and(|e| now_ms.saturating_sub(e.cached_at_ms) < CACHE_TTL_MS)
+            });
+            if all_fresh {
+                for entry in self.providers.values_mut() {
+                    if let Some(cached) = cache.entries.get(entry.descriptor.id.as_str()) {
+                        merge_discovered_models(&mut entry.descriptor.models, cached.models.clone());
+                    }
+                }
+                return Ok(());
             }
         }
+
+        // --- Parallel discovery ---
+        let eligible: Vec<_> = self
+            .providers
+            .values()
+            .filter(|entry| entry.descriptor.discovery.is_some())
+            .filter(|entry| {
+                auth_store.get(entry.descriptor.id.as_str()).is_some()
+                    || is_local_url(&entry.descriptor.base_url)
+            })
+            .map(|entry| entry.descriptor.clone())
+            .collect();
+
+        let results: Vec<(String, Result<Vec<ModelDescriptor>>)> =
+            std::thread::scope(|s| {
+                let handles: Vec<_> = eligible
+                    .iter()
+                    .map(|provider| {
+                        let id = provider.id.clone();
+                        let client = ModelDiscoveryClient::new();
+                        s.spawn(move || {
+                            let models = client.discover_models(provider, auth_store);
+                            (id, models)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("discovery thread panicked"))
+                    .collect()
+            });
+
+        let mut failures = Vec::new();
+        let mut cache_entries: HashMap<String, DiscoveryCacheEntry> = HashMap::new();
+        let now_ms = current_time_ms();
+
+        for (provider_id, result) in results {
+            match result {
+                Ok(discovered) => {
+                    cache_entries.insert(
+                        provider_id.clone(),
+                        DiscoveryCacheEntry {
+                            models: discovered.clone(),
+                            cached_at_ms: now_ms,
+                        },
+                    );
+                    if !discovered.is_empty() {
+                        if let Some(entry) = self.providers.get_mut(&provider_id) {
+                            merge_discovered_models(&mut entry.descriptor.models, discovered);
+                        }
+                    }
+                }
+                Err(error) => {
+                    failures.push(format!("{provider_id}: {error}"));
+                }
+            }
+        }
+
+        // --- Persist cache ---
+        if !cache_entries.is_empty() {
+            let _ = save_discovery_cache(&cache_path, &DiscoveryCache { entries: cache_entries });
+        }
+
         if failures.is_empty() {
             Ok(())
         } else {
@@ -176,6 +259,46 @@ impl ProviderRegistry {
         }
         Ok(())
     }
+}
+
+/// Cache TTL: 1 hour.
+const CACHE_TTL_MS: u64 = 3_600_000;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DiscoveryCache {
+    entries: HashMap<String, DiscoveryCacheEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DiscoveryCacheEntry {
+    models: Vec<ModelDescriptor>,
+    cached_at_ms: u64,
+}
+
+fn discovery_cache_path() -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".puffer").join("model_discovery_cache.json")
+}
+
+fn current_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn load_discovery_cache(path: &PathBuf) -> Option<DiscoveryCache> {
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+fn save_discovery_cache(path: &PathBuf, cache: &DiscoveryCache) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let data = serde_json::to_string(cache)?;
+    std::fs::write(path, data)?;
+    Ok(())
 }
 
 fn is_local_url(url: &str) -> bool {
