@@ -7,7 +7,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 const MIN_OVERLAY_WIDTH: u16 = 34;
-const MAX_OVERLAY_WIDTH: u16 = 84;
+const MAX_OVERLAY_WIDTH: u16 = 200;
 
 /// Stores a generic scrollable text overlay used for settings-style slash commands.
 #[derive(Clone)]
@@ -51,14 +51,14 @@ impl TextOverlay {
     /// Scrolls the overlay upward by one page.
     pub(crate) fn page_up(&self) {
         if let Ok(mut state) = self.shared.lock() {
-            state.scroll = state.scroll.saturating_sub(10);
+            state.scroll = state.scroll.saturating_sub(30);
         }
     }
 
     /// Scrolls the overlay downward by one page.
     pub(crate) fn page_down(&self) {
         if let Ok(mut state) = self.shared.lock() {
-            state.scroll = state.scroll.saturating_add(10);
+            state.scroll = state.scroll.saturating_add(30);
         }
     }
 
@@ -95,7 +95,7 @@ pub(crate) fn render_text_overlay(frame: &mut Frame<'_>, viewport: Rect, overlay
     let snapshot = overlay.snapshot();
     let width = viewport
         .width
-        .saturating_sub(8)
+        .saturating_sub(4)
         .clamp(MIN_OVERLAY_WIDTH, MAX_OVERLAY_WIDTH);
     let area = Rect {
         x: viewport.x + viewport.width.saturating_sub(width) / 2,
