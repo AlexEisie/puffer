@@ -88,6 +88,15 @@ pub fn render_context_panel(
     runtime::render_context_usage_summary(state, resources, providers)
 }
 
+/// Renders the full raw context that would be sent to the model.
+pub fn render_debug_context(
+    state: &AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+) -> Result<String> {
+    runtime::render_debug_context(state, resources, providers)
+}
+
 /// Returns the number of background shell tasks currently running.
 pub fn running_background_task_count(state: &AppState) -> usize {
     runtime::claude_tools::workflow::running_shell_task_count(&state.cwd, &state.session.id)

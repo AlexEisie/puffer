@@ -38,23 +38,31 @@ pub(super) fn top_panel_compact_lines(
     } else {
         String::new()
     };
+    let cache_label = match (state.last_cache_hit_ratio, state.session_cache_hit_ratio) {
+        (Some(last), Some(avg)) => {
+            format!(" · cache {:.0}% (avg {:.0}%)", last * 100.0, avg * 100.0)
+        }
+        _ => String::new(),
+    };
     let context = if remote == "local" {
         format!(
-            "{} · {} msgs · {} wds · sandbox {}{}",
+            "{} · {} msgs · {} wds · sandbox {}{}{}",
             path_tail(&state.cwd),
             state.transcript.len(),
             state.working_dirs.len(),
             state.sandbox_mode,
             ctx_pct,
+            cache_label,
         )
     } else {
         format!(
-            "{} · {} msgs · {} wds · {}{}",
+            "{} · {} msgs · {} wds · {}{}{}",
             path_tail(&state.cwd),
             state.transcript.len(),
             state.working_dirs.len(),
             remote,
             ctx_pct,
+            cache_label,
         )
     };
 

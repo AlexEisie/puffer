@@ -111,6 +111,10 @@ pub(crate) fn try_open_overlay(
             "Context",
             render_context_panel(state, resources, providers)?,
         )),
+        ("debug", true) => Some(TextOverlay::open(
+            "Debug Context",
+            puffer_core::render_debug_context(state, resources, providers)?,
+        )),
         ("doctor", true) => Some(TextOverlay::open(
             "Doctor",
             render_doctor_report(state, resources, providers, auth_store)?,

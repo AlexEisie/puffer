@@ -144,6 +144,13 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             CommandKind::Local,
         ),
         cmd(
+            "debug",
+            &[],
+            "Show the full raw context sent to the model",
+            None,
+            CommandKind::Local,
+        ),
+        cmd(
             "doctor",
             &[],
             "Diagnose and verify your Puffer Code installation and settings",
@@ -874,6 +881,11 @@ fn execute_local_command(
         "tasks" => handle_tasks_command(state, session_store, args),
         "config" => handle_config_command(state, session_store, args),
         "context" => describe_context(state, resources, providers, session_store),
+        "debug" => {
+            // Rendered as overlay in TUI; fallback to system message for non-TUI.
+            let text = crate::render_debug_context(state, resources, providers)?;
+            emit_system(state, session_store, text)
+        }
         "plan" => handle_plan_command(state, resources, providers, auth_store, session_store, args),
         "agents" => handle_agents_command(state, session_store, args),
         "memory" => handle_memory_command(state, session_store, args),

@@ -35,7 +35,9 @@ mod system_prompt;
 pub mod teammate_loop;
 mod tool_executor;
 
+mod debug_context;
 pub(crate) use self::context_usage::render_context_usage_summary;
+pub(crate) use self::debug_context::render_debug_context;
 pub(crate) use self::hook_support::run_turn_hooks;
 #[cfg(test)]
 use self::openai::{

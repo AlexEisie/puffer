@@ -230,6 +230,16 @@ fn provider_message_payload(message: &RenderedMessage, api: &str, index: usize) 
     }
 }
 
+/// Returns the set of enabled tool names for the active API.
+pub(crate) fn enabled_tool_names(
+    api: &str,
+    registry: &ToolRegistry,
+    permission_context: &crate::permissions::RuntimePermissionContext,
+) -> Result<BTreeSet<String>> {
+    let (rows, _) = tool_rows_for_summary(api, registry, permission_context)?;
+    Ok(rows.into_iter().map(|r| r.label).collect())
+}
+
 fn tool_rows_for_summary(
     api: &str,
     registry: &ToolRegistry,
