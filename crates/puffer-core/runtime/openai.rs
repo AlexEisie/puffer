@@ -190,6 +190,13 @@ fn execute_openai_once(
         if let Some(tokens) = input_tokens {
             state.last_input_tokens = Some(tokens as u32);
         }
+        let cached_tokens = response
+            .pointer("/usage/input_tokens_details/cached_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if let Some(input) = input_tokens {
+            state.update_cache_stats(input as u64, cached_tokens);
+        }
         let parsed: OpenAIResponsesResponse = serde_json::from_value(response.clone())
             .context("failed to parse OpenAI Responses payload")?;
         previous_response_id = parsed.id.clone();
@@ -368,37 +375,62 @@ where
         };
 
         let prev_resp_id = previous_response_id.clone();
-        let response = retry_openai_transport(|| {
-            send_openai_request_with_refresh_streaming(
-                auth_store,
-                &mut execution,
-                |request_config| {
-                    let mut body = build_codex_openai_request_body(
-                        state,
-                        &model_id,
-                        &instructions,
-                        wire_input.clone(),
-                        &tools,
-                        supports_reasoning,
-                        text.clone(),
-                        true,
-                    );
-                    apply_previous_response_id(&mut body, prev_resp_id.as_deref());
-                    build_json_post_request(
-                        request_config,
-                        openai_responses_path(&request_config.base_url),
-                        &body,
-                    )
-                },
-                on_event,
-            )
-        })?;
+        let mut retry_events: Vec<TurnStreamEvent> = Vec::new();
+        let response = retry_openai_transport(
+            || {
+                send_openai_request_with_refresh_streaming(
+                    auth_store,
+                    &mut execution,
+                    |request_config| {
+                        let mut body = build_codex_openai_request_body(
+                            state,
+                            &model_id,
+                            &instructions,
+                            wire_input.clone(),
+                            &tools,
+                            supports_reasoning,
+                            text.clone(),
+                            true,
+                        );
+                        apply_previous_response_id(&mut body, prev_resp_id.as_deref());
+                        build_json_post_request(
+                            request_config,
+                            openai_responses_path(&request_config.base_url),
+                            &body,
+                        )
+                    },
+                    on_event,
+                )
+            },
+            |attempt, max, error| {
+                retry_events.push(TurnStreamEvent::RetryAttempt {
+                    attempt,
+                    max_attempts: max,
+                    error: error.to_string(),
+                });
+            },
+        )?;
+        for event in retry_events {
+            on_event(event);
+        }
 
         // Typed fields extracted during SSE — no Value→String→typed roundtrip.
         previous_response_id = response.response_id;
         let input_tokens = response.input_tokens;
         if let Some(tokens) = input_tokens {
             state.last_input_tokens = Some(tokens as u32);
+        }
+        // Emit per-turn usage with cache hit data.
+        if let Some(input) = response.input_tokens {
+            let cached = response.cached_tokens.unwrap_or(0);
+            let output = response.output_tokens.unwrap_or(0);
+            state.update_cache_stats(input as u64, cached as u64);
+            on_event(TurnStreamEvent::Usage(super::TurnUsageReport {
+                input_tokens: input as u64,
+                output_tokens: output as u64,
+                cache_read_tokens: cached as u64,
+                cache_creation_tokens: 0,
+            }));
         }
         if response.tool_calls.is_empty() {
             // Final turn — extract assistant text (typed, with raw fallback).
@@ -1156,9 +1188,10 @@ pub(super) fn send_openai_request_with_refresh<F>(
 where
     F: Fn(&OpenAIRequestConfig) -> Result<puffer_provider_openai::BuiltOpenAIRequest>,
 {
-    retry_openai_transport(|| {
-        send_openai_request_with_refresh_once(auth_store, execution, &build_request)
-    })
+    retry_openai_transport(
+        || send_openai_request_with_refresh_once(auth_store, execution, &build_request),
+        |_, _, _| {},
+    )
 }
 
 fn send_openai_request_with_refresh_once<F>(
@@ -1203,9 +1236,16 @@ where
     G: FnMut(TurnStreamEvent),
 {
     let request = build_request(&execution.request_config)?;
-    let response = retry_openai_transport(|| {
-        send_openai_request_stream_raw(&request.url, &request.headers, &request.body)
-    })?;
+    let response = retry_openai_transport(
+        || send_openai_request_stream_raw(&request.url, &request.headers, &request.body),
+        |attempt, max, error| {
+            on_event(TurnStreamEvent::RetryAttempt {
+                attempt,
+                max_attempts: max,
+                error: error.to_string(),
+            });
+        },
+    )?;
     if response.status() != StatusCode::UNAUTHORIZED || execution.refresh_token.is_none() {
         return parse_openai_stream_response(&request.url, response, on_event);
     }
@@ -1223,9 +1263,16 @@ where
     auth_store.set_oauth(execution.provider_id.clone(), stored);
 
     let retry = build_request(&execution.request_config)?;
-    let retry_response = retry_openai_transport(|| {
-        send_openai_request_stream_raw(&retry.url, &retry.headers, &retry.body)
-    })?;
+    let retry_response = retry_openai_transport(
+        || send_openai_request_stream_raw(&retry.url, &retry.headers, &retry.body),
+        |attempt, max, error| {
+            on_event(TurnStreamEvent::RetryAttempt {
+                attempt,
+                max_attempts: max,
+                error: error.to_string(),
+            });
+        },
+    )?;
     parse_openai_stream_response(&retry.url, retry_response, on_event)
 }
 
@@ -1301,6 +1348,8 @@ where
     Ok(OpenAISseResult {
         response_id,
         input_tokens,
+        output_tokens: None,
+        cached_tokens: None,
         assistant_text,
         tool_calls,
         emitted_tool_call_ids: HashSet::new(),

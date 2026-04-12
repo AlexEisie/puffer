@@ -7,7 +7,7 @@ use crate::text_overlay::TextOverlay;
 use crate::usage::UsageOverlay;
 use puffer_core::{
     CommandSpec, PermissionPromptAction, PermissionPromptRequest, ToolCallRequest, ToolInvocation,
-    TurnExecution,
+    TurnExecution, TurnUsageReport,
 };
 use puffer_provider_registry::{AuthStore, ExternalImportCandidate};
 use puffer_session_store::SessionSummary;
@@ -88,6 +88,12 @@ pub(crate) enum PendingSubmitEvent {
     TextDelta(String),
     ToolCallsRequested(Vec<ToolCallRequest>),
     ToolInvocations(Vec<ToolInvocation>),
+    RetryAttempt {
+        attempt: usize,
+        max_attempts: usize,
+        error: String,
+    },
+    Usage(TurnUsageReport),
     PermissionRequest(PermissionPromptRequest, Sender<PermissionPromptAction>),
     Finished(PendingSubmitResult),
 }
@@ -101,6 +107,8 @@ pub(crate) struct PendingSubmit {
     pub(crate) started_at: std::time::Instant,
     /// Set to true when the model is actively producing thinking/reasoning tokens.
     pub(crate) thinking_active: bool,
+    /// Transient status message (e.g. "Retrying (2/3)...").
+    pub(crate) status_hint: Option<String>,
 }
 
 /// Stores the response channel for the currently visible permission prompt.

@@ -88,7 +88,10 @@ pub(super) fn is_openai_structured_output_error(error: &anyhow::Error) -> bool {
     .any(|pattern| text.contains(pattern))
 }
 
-pub(super) fn retry_openai_transport<F, T>(mut operation: F) -> Result<T>
+pub(super) fn retry_openai_transport<F, T>(
+    mut operation: F,
+    mut on_retry: impl FnMut(usize, usize, &str),
+) -> Result<T>
 where
     F: FnMut() -> Result<T>,
 {
@@ -98,6 +101,7 @@ where
         match operation() {
             Ok(value) => return Ok(value),
             Err(error) if attempt < attempts && is_retryable_openai_transport_error(&error) => {
+                on_retry(attempt, attempts, &error.to_string());
                 if !delay.is_zero() {
                     std::thread::sleep(delay);
                 }

@@ -109,6 +109,15 @@ pub struct TurnExecution {
     pub tool_invocations: Vec<ToolInvocation>,
 }
 
+/// Per-turn token usage report emitted after the provider response completes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnUsageReport {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+}
+
 /// Describes one incremental event emitted while a model turn is running.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnStreamEvent {
@@ -117,6 +126,14 @@ pub enum TurnStreamEvent {
     TextDelta(String),
     ToolCallsRequested(Vec<ToolCallRequest>),
     ToolInvocations(Vec<ToolInvocation>),
+    /// A transport-level retry is about to be attempted.
+    RetryAttempt {
+        attempt: usize,
+        max_attempts: usize,
+        error: String,
+    },
+    /// Per-turn token usage (including cache hit data).
+    Usage(TurnUsageReport),
 }
 
 /// Executes one user prompt against the currently selected provider and model.

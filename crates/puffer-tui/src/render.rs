@@ -54,6 +54,8 @@ struct PendingSubmitRenderState {
     started_at: Option<std::time::Instant>,
     /// True when the model is actively producing thinking/reasoning tokens.
     thinking_active: bool,
+    /// Transient status hint (e.g. "Retrying (2/3)…").
+    status_hint: Option<String>,
 }
 thread_local! {
     static ACTIVE_OVERLAY: RefCell<Option<OverlayState>> = const { RefCell::new(None) };
@@ -77,6 +79,7 @@ pub(crate) fn set_pending_submit_state(
     queued_prompts: Vec<String>,
     started_at: Option<std::time::Instant>,
     thinking_active: bool,
+    status_hint: Option<String>,
 ) {
     ACTIVE_PENDING_SUBMIT.with(|value| {
         *value.borrow_mut() = PendingSubmitRenderState {
@@ -85,6 +88,7 @@ pub(crate) fn set_pending_submit_state(
             queued_prompts,
             started_at,
             thinking_active,
+            status_hint,
         };
     });
 }
@@ -588,6 +592,7 @@ fn pending_submit_state() -> PendingSubmitRenderState {
         queued_prompts: value.borrow().queued_prompts.clone(),
         started_at: value.borrow().started_at,
         thinking_active: value.borrow().thinking_active,
+        status_hint: value.borrow().status_hint.clone(),
     })
 }
 
@@ -607,7 +612,9 @@ fn pending_submit_lines(pending_submit: &PendingSubmitRenderState) -> Vec<Line<'
         }
     }
     if pending_submit.loading_prompt.is_some() {
-        let base_label = if pending_submit.thinking_active {
+        let base_label = if let Some(hint) = &pending_submit.status_hint {
+            hint.as_str()
+        } else if pending_submit.thinking_active {
             "Thinking..."
         } else {
             "Loading..."

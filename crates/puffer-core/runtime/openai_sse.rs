@@ -12,6 +12,8 @@ use std::io::{BufRead, BufReader};
 pub(super) struct OpenAISseResult {
     pub(super) response_id: Option<String>,
     pub(super) input_tokens: Option<usize>,
+    pub(super) output_tokens: Option<usize>,
+    pub(super) cached_tokens: Option<usize>,
     pub(super) assistant_text: String,
     pub(super) tool_calls: Vec<OpenAIResponseToolCall>,
     pub(super) emitted_tool_call_ids: HashSet<String>,
@@ -242,6 +244,8 @@ struct OpenAISseState {
     // Typed fields — accumulated during SSE to avoid post-parse roundtrip.
     response_id: Option<String>,
     input_tokens: Option<usize>,
+    output_tokens: Option<usize>,
+    cached_tokens: Option<usize>,
     assistant_text: String,
     tool_calls: Vec<OpenAIResponseToolCall>,
 }
@@ -258,6 +262,18 @@ impl OpenAISseState {
                 .and_then(Value::as_u64)
             {
                 self.input_tokens = Some(tokens as usize);
+            }
+            if let Some(tokens) = response
+                .pointer("/usage/output_tokens")
+                .and_then(Value::as_u64)
+            {
+                self.output_tokens = Some(tokens as usize);
+            }
+            if let Some(tokens) = response
+                .pointer("/usage/input_tokens_details/cached_tokens")
+                .and_then(Value::as_u64)
+            {
+                self.cached_tokens = Some(tokens as usize);
             }
             self.response = Some(response.clone());
         }
@@ -286,6 +302,8 @@ impl OpenAISseState {
         OpenAISseResult {
             response_id: self.response_id,
             input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cached_tokens: self.cached_tokens,
             assistant_text,
             tool_calls: self.tool_calls,
             emitted_tool_call_ids: self.emitted_tool_call_ids,

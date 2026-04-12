@@ -104,6 +104,16 @@ pub struct AppState {
     /// Last API-reported input token count (from `usage.input_tokens`).
     /// Updated after each Responses API call for accurate context-window display.
     pub last_input_tokens: Option<u32>,
+    /// Cache hit ratio for the most recent provider request (0.0–1.0).
+    pub last_cache_hit_ratio: Option<f64>,
+    /// Running session-average cache hit ratio (0.0–1.0).
+    pub session_cache_hit_ratio: Option<f64>,
+    /// Number of turns with cache data, used to compute session average.
+    session_cache_turn_count: u64,
+    /// Cumulative cache-read tokens across the session.
+    session_cache_read_total: u64,
+    /// Cumulative input tokens across the session.
+    session_input_total: u64,
     tasks: Vec<TaskRecord>,
     next_task_id: u64,
 }
@@ -155,6 +165,11 @@ impl AppState {
             status_line_signature: None,
             pending_query_prompt: None,
             last_input_tokens: None,
+            last_cache_hit_ratio: None,
+            session_cache_hit_ratio: None,
+            session_cache_turn_count: 0,
+            session_cache_read_total: 0,
+            session_input_total: 0,
             tasks: Vec::new(),
             next_task_id: 1,
         }
@@ -253,6 +268,20 @@ impl AppState {
             }
         }
         state
+    }
+
+    /// Updates per-turn and session-average cache hit ratios from a usage report.
+    pub fn update_cache_stats(&mut self, input_tokens: u64, cache_read_tokens: u64) {
+        if input_tokens == 0 {
+            return;
+        }
+        let ratio = cache_read_tokens as f64 / input_tokens as f64;
+        self.last_cache_hit_ratio = Some(ratio);
+        self.session_cache_turn_count += 1;
+        self.session_cache_read_total += cache_read_tokens;
+        self.session_input_total += input_tokens;
+        self.session_cache_hit_ratio =
+            Some(self.session_cache_read_total as f64 / self.session_input_total as f64);
     }
 
     /// Appends a rendered message to the in-memory transcript.

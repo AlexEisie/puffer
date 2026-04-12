@@ -297,6 +297,20 @@ pub(crate) fn handle_prompt_submit(
                 TurnStreamEvent::ToolInvocations(invocations) => {
                     let _ = event_sender.send(PendingSubmitEvent::ToolInvocations(invocations));
                 }
+                TurnStreamEvent::RetryAttempt {
+                    attempt,
+                    max_attempts,
+                    error,
+                } => {
+                    let _ = event_sender.send(PendingSubmitEvent::RetryAttempt {
+                        attempt,
+                        max_attempts,
+                        error,
+                    });
+                }
+                TurnStreamEvent::Usage(report) => {
+                    let _ = event_sender.send(PendingSubmitEvent::Usage(report));
+                }
             },
             move |request: PermissionPromptRequest| {
                 let (response_tx, response_rx) = mpsc::channel();
@@ -320,6 +334,7 @@ pub(crate) fn handle_prompt_submit(
         rendered_tool_invocations: 0,
         started_at: std::time::Instant::now(),
         thinking_active: false,
+        status_hint: None,
     });
     Ok(())
 }
@@ -411,6 +426,18 @@ pub(crate) fn poll_pending_submit(
                 pending.pending_tool_calls.drain(0..completed);
                 pending.rendered_tool_invocations += invocations.len();
                 append_tool_messages(state, session_store, &invocations)?;
+            }
+            PendingSubmitEvent::RetryAttempt {
+                attempt,
+                max_attempts,
+                error: _,
+            } => {
+                pending.status_hint =
+                    Some(format!("Retrying ({}/{})\u{2026}", attempt, max_attempts));
+            }
+            PendingSubmitEvent::Usage(report) => {
+                state.update_cache_stats(report.input_tokens, report.cache_read_tokens);
+                pending.status_hint = None; // clear retry hint on success
             }
             PendingSubmitEvent::PermissionRequest(request, response_tx) => {
                 tui.pending_permission_request = Some(PendingPermissionRequest { response_tx });

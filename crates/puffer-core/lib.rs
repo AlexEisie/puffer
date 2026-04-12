@@ -44,7 +44,7 @@ pub use runtime::{
     execute_user_prompt_with_structured_output as execute_user_turn_with_structured_output,
     shutdown_runtime_services, with_permission_prompt_handler, PermissionPromptAction,
     PermissionPromptRequest, StructuredOutputConfig, ToolCallRequest, ToolInvocation,
-    TurnExecution, TurnStreamEvent,
+    TurnExecution, TurnStreamEvent, TurnUsageReport,
 };
 pub use state::{AppState, MessageRole, RenderedMessage, TaskRecord, TaskStatus};
 

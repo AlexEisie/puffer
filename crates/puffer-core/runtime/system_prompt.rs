@@ -185,6 +185,9 @@ fn build_using_tools_section(enabled_tools: &BTreeSet<String>) -> String {
         items.push(format!(
             "Break down and manage your work with the {task_tool} tool. These tools are helpful for planning your work and helping the user track your progress. Mark each task as completed as soon as you are done with the task. Do not batch up multiple tasks before marking them as completed."
         ));
+        items.push(format!(
+            "Do NOT use the {task_tool} tool when the task is trivial, single-step, purely conversational, or can be completed in fewer than 3 steps. In those cases, just do the work directly without creating a task."
+        ));
     }
     items.push("You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead.".to_string());
 

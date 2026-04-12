@@ -351,6 +351,9 @@ fn sync_render_state(tui: &TuiState) {
         tui.pending_submit
             .as_ref()
             .is_some_and(|pending| pending.thinking_active),
+        tui.pending_submit
+            .as_ref()
+            .and_then(|pending| pending.status_hint.clone()),
     );
     render::set_tool_details_expanded(tui.tool_details_expanded);
     render::set_follow_output(tui.follow_output);
