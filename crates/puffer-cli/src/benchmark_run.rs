@@ -32,6 +32,9 @@ When the task names a required output file, start a draft as soon as you have en
 If the required output file does not exist, create a minimal valid draft immediately after your first relevant read or verifier inspection, then iterate on that file instead of continuing to explore.
 When the task already names both the verifier file and the required output file, do not use Glob or Grep before writing the first draft.
 
+Before opening or running a tool on a file, consider whether it may modify that file or its neighbors as a side effect. When in doubt, back up first.
+When a file's contents look unexpected, inspect it with a low-level tool before passing it to a higher-level one that might alter it.
+
 $USING_YOUR_TOOLS
 
 $ENVIRONMENT"#;
@@ -313,6 +316,7 @@ fn benchmark_resources(resources: &LoadedResources) -> LoadedResources {
     benchmark_resources
         .prompts
         .retain(|prompt| prompt.value.id != BENCHMARK_SYSTEM_PROMPT_ID);
+
     benchmark_resources.prompts.insert(
         0,
         LoadedItem {
