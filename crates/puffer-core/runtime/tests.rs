@@ -1028,6 +1028,8 @@ fn tool_definitions_keep_never_approval_tools_enabled() {
 mod http_retries;
 #[path = "tests/openai_stream_transport.rs"]
 mod openai_stream_transport;
+#[path = "tests/iteration_behavior.rs"]
+mod iteration_behavior;
 #[path = "tests/openai_tool_errors.rs"]
 mod openai_tool_errors;
 #[path = "tests/permissions.rs"]

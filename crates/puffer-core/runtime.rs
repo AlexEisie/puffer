@@ -516,13 +516,8 @@ fn execute_anthropic(
 
     // Pre-turn compaction using shared logic.
     let cwd = state.cwd.clone();
-    let compacted = compact_conversation_with(
-        &mut items,
-        provider,
-        &model_id,
-        None,
-        &anthropic_summary_fn,
-    );
+    let compacted =
+        compact_conversation_with(&mut items, provider, &model_id, None, &anthropic_summary_fn);
     if compacted {
         inject_post_compact_context(&mut items, &cwd);
     }
@@ -536,7 +531,7 @@ fn execute_anthropic(
         .unwrap_or(false);
     let max_output = resolve_max_output_tokens(provider, &model_id);
 
-    for _ in 0..8 {
+    loop {
         // Convert items to Anthropic wire format at each iteration.
         let wire_messages = items_to_anthropic_messages(&items);
 
@@ -653,8 +648,6 @@ fn execute_anthropic(
             tool_invocations: invocations,
         });
     }
-
-    bail!("anthropic tool loop exceeded iteration limit")
 }
 
 /// Streaming variant of execute_anthropic — sends `stream: true` and parses
@@ -732,13 +725,8 @@ where
 
     // Pre-turn compaction.
     let cwd = state.cwd.clone();
-    let compacted = compact_conversation_with(
-        &mut items,
-        provider,
-        &model_id,
-        None,
-        &anthropic_summary_fn,
-    );
+    let compacted =
+        compact_conversation_with(&mut items, provider, &model_id, None, &anthropic_summary_fn);
     if compacted {
         inject_post_compact_context(&mut items, &cwd);
     }
@@ -753,9 +741,10 @@ where
         provider.id == "anthropic" || provider.base_url.contains("anthropic.com");
     let max_output = resolve_max_output_tokens(provider, &model_id);
 
-    for _ in 0..8 {
+    loop {
         // Drain completed background tasks and inject as user messages.
-        let completed = claude_tools::workflow::drain_completed_shell_tasks(&state.cwd, &state.session.id);
+        let completed =
+            claude_tools::workflow::drain_completed_shell_tasks(&state.cwd, &state.session.id);
         if !completed.is_empty() {
             let notice = format!(
                 "<system-reminder>\n{}\nUse TaskOutput to retrieve the full output if needed.\n</system-reminder>",
@@ -864,8 +853,6 @@ where
             tool_invocations: invocations,
         });
     }
-
-    bail!("anthropic streaming tool loop exceeded iteration limit")
 }
 
 fn build_anthropic_request_config(
