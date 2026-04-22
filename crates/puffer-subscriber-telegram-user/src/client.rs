@@ -13,7 +13,9 @@ use tracing::{error, info, warn};
 use crate::commands::CommandStream;
 use crate::events::{build_message_event, emit, emit_control};
 use crate::login;
-use crate::state::{LoginState, SkillEnv};
+use crate::state::{
+    resolve_api_hash, resolve_api_id, LoginState, PersistedCredentials, SkillEnv,
+};
 
 /// Runs the Telegram user subscriber until stdin closes or a fatal error
 /// occurs. The caller is expected to already be inside a Tokio runtime
@@ -195,20 +197,13 @@ async fn try_resume_session(env: &SkillEnv) -> anyhow::Result<Option<Client>> {
         return Ok(None);
     }
 
-    // Resume requires api credentials for the `Config`; we read them from the
-    // environment, which the supervisor is expected to populate alongside the
-    // state dir. If missing, fall back to asking the agent for login.
-    let api_id = match std::env::var("PUFFER_TELEGRAM_API_ID")
-        .ok()
-        .and_then(|s| s.parse::<i32>().ok())
-    {
-        Some(v) => v,
-        None => return Ok(None),
-    };
-    let api_hash = match std::env::var("PUFFER_TELEGRAM_API_HASH").ok() {
-        Some(v) if !v.is_empty() => v,
-        _ => return Ok(None),
-    };
+    // Resume needs api credentials for the `Config`. Resolution order:
+    // persisted credentials (written on the last successful login), env
+    // vars, then Telegram Desktop's published default. With the default
+    // baked in the resume path always has *something* to try.
+    let persisted = PersistedCredentials::load(&env.credentials_path()).unwrap_or_default();
+    let api_id = resolve_api_id(None, &persisted);
+    let api_hash = resolve_api_hash(None, &persisted);
 
     let config = Config {
         session,
@@ -297,12 +292,16 @@ async fn handle_runtime_command(
             // Re-request a code on the live client rather than reconnecting.
             // The effect is that the running session keeps serving updates
             // until sign_in succeeds and overwrites the auth.
+            let persisted = PersistedCredentials::load(&env.credentials_path())
+                .unwrap_or_default();
+            let resolved_id = resolve_api_id(api_id, &persisted);
+            let resolved_hash = resolve_api_hash(api_hash, &persisted);
             match client.request_login_code(&phone).await {
                 Ok(token) => {
                     login_state.login_token = Some(token);
                     login_state.phone = Some(phone.clone());
-                    login_state.api_id = Some(api_id);
-                    login_state.api_hash = Some(api_hash);
+                    login_state.api_id = Some(resolved_id);
+                    login_state.api_hash = Some(resolved_hash);
                     emit_control(
                         &env.topic,
                         "login_awaiting_code",

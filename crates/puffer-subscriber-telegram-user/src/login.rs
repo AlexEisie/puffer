@@ -16,20 +16,29 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use crate::events::emit_control;
-use crate::state::{LoginState, SkillEnv};
+use crate::state::{
+    resolve_api_hash, resolve_api_id, LoginState, PersistedCredentials, SkillEnv,
+};
 
 /// Starts a login attempt: connects to Telegram (creating a fresh session if
 /// necessary), requests a login code for `phone`, stores the resulting
 /// [`grammers_client::types::LoginToken`] in `state`, and emits
 /// `login_awaiting_code`. Returns the connected [`Client`] so the caller can
 /// reuse it for the subsequent sign-in step.
+///
+/// `api_id`/`api_hash` may be `None`; the subscriber resolves a working
+/// pair via [`resolve_api_id`] / [`resolve_api_hash`] (persisted creds,
+/// env vars, then Telegram Desktop's published default).
 pub async fn start(
     env: &SkillEnv,
     state: &mut LoginState,
     phone: String,
-    api_id: i32,
-    api_hash: String,
+    api_id: Option<i32>,
+    api_hash: Option<String>,
 ) -> anyhow::Result<Option<Client>> {
+    let persisted = PersistedCredentials::load(&env.credentials_path()).unwrap_or_default();
+    let api_id = resolve_api_id(api_id, &persisted);
+    let api_hash = resolve_api_hash(api_hash, &persisted);
     let session = Session::load_file_or_create(&env.session_path)
         .with_context(|| format!("load session file {}", env.session_path.display()))?;
 
@@ -107,6 +116,7 @@ pub async fn submit_code(
     match client.sign_in(&token, &code).await {
         Ok(user) => {
             save_session(env, client)?;
+            persist_credentials_from_state(env, state);
             state.clear_tokens();
             emit_control(
                 &env.topic,
@@ -174,6 +184,7 @@ pub async fn submit_password(
     match client.check_password(password_token, password.as_bytes()).await {
         Ok(user) => {
             save_session(env, client)?;
+            persist_credentials_from_state(env, state);
             state.clear_tokens();
             emit_control(
                 &env.topic,
@@ -209,4 +220,19 @@ pub fn save_session(env: &SkillEnv, client: &Client) -> anyhow::Result<()> {
         .session()
         .save_to_file(&env.session_path)
         .with_context(|| format!("save session to {}", env.session_path.display()))
+}
+
+/// Best-effort: writes the api_id/api_hash/phone the active login used
+/// to the credentials file so future reconnects can skip prompting the
+/// agent. Errors are logged and ignored — the login itself already
+/// succeeded and we don't want a write failure to roll that back.
+fn persist_credentials_from_state(env: &SkillEnv, state: &LoginState) {
+    let creds = PersistedCredentials {
+        api_id: state.api_id,
+        api_hash: state.api_hash.clone(),
+        phone: state.phone.clone(),
+    };
+    if let Err(error) = creds.save(&env.credentials_path()) {
+        warn!(error = %error, "failed to persist telegram credentials");
+    }
 }

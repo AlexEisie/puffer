@@ -27,13 +27,21 @@ pub enum SubscriberCommand {
     /// subscriber arranges for the code to be sent by Telegram and emits
     /// a `login_awaiting_code` event on success or a `login_error` event
     /// on failure.
+    ///
+    /// `api_id` and `api_hash` are optional. When omitted the subscriber
+    /// uses Telegram Desktop's published credentials, which means the
+    /// user does not need to register an application at my.telegram.org
+    /// for typical usage. Supply your own only if you've hit a
+    /// `FLOOD_WAIT` from sharing the default credentials.
     TelegramLoginStart {
         /// E.164 phone number including the leading '+'.
         phone: String,
-        /// Telegram `api_id` from my.telegram.org.
-        api_id: i32,
-        /// Telegram `api_hash` from my.telegram.org.
-        api_hash: String,
+        /// Optional Telegram `api_id` from my.telegram.org.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_id: Option<i32>,
+        /// Optional Telegram `api_hash` from my.telegram.org.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_hash: Option<String>,
     },
     /// Submit the 5-digit login code Telegram delivered to the user.
     TelegramLoginSubmitCode {

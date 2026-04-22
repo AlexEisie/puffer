@@ -31,11 +31,15 @@ const TELEGRAM_USER_TOPIC: &str = "telegram-user";
 struct LoginStartInput {
     /// E.164 phone number including the leading `+`.
     phone: String,
-    /// Telegram `api_id` from my.telegram.org. The agent must obtain this
-    /// from the user before calling the tool.
-    api_id: i32,
-    /// Telegram `api_hash` from my.telegram.org.
-    api_hash: String,
+    /// Optional Telegram `api_id` from my.telegram.org. Omit to use
+    /// Telegram Desktop's published default credentials so the user
+    /// does not have to register an application.
+    #[serde(default)]
+    api_id: Option<i32>,
+    /// Optional Telegram `api_hash` from my.telegram.org. Omit when
+    /// `api_id` is omitted.
+    #[serde(default)]
+    api_hash: Option<String>,
 }
 
 /// Starts the Telegram login flow. After a successful call, the subscriber
