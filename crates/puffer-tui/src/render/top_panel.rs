@@ -54,6 +54,59 @@ pub(super) fn render_fixed_top_panel(
         .render(inner_area(plan.layout.box_area), frame.buffer_mut());
 }
 
+/// Builds scrollable top-panel lines for transcript rendering.
+pub(super) fn top_panel_lines(
+    area_width: u16,
+    state: &AppState,
+    resources: &LoadedResources,
+    auth_store: &AuthStore,
+    tool_registry: &ToolRegistry,
+    providers: &ProviderRegistry,
+) -> Vec<Line<'static>> {
+    let art_lines = puffer_art_lines();
+    let summary_lines =
+        top_panel_compact_lines(state, resources, auth_store, tool_registry, providers);
+    let title_line = Line::from(vec![Span::styled("Puffer Code", Style::reset())]);
+    let content_area = Rect {
+        x: 0,
+        y: 0,
+        width: area_width.max(1),
+        height: (art_lines.len().max(summary_lines.len().saturating_add(1)) as u16).max(1),
+    };
+    let plan = panel_render_plan(content_area, &art_lines, &summary_lines);
+    let art_width = art_lines.iter().map(Line::width).max().unwrap_or(0);
+    let gap = " ".repeat(TOP_PANEL_GAP as usize);
+    let mut lines = Vec::new();
+
+    lines.push(Line::default());
+    if plan.show_puffer {
+        let mut summary_rows = Vec::with_capacity(plan.summary_lines.len().saturating_add(1));
+        summary_rows.push(title_line);
+        summary_rows.extend(plan.summary_lines);
+        let row_count = art_lines.len().max(summary_rows.len());
+        for index in 0..row_count {
+            let mut spans = Vec::new();
+            if let Some(art_line) = art_lines.get(index) {
+                spans.extend(art_line.spans.clone());
+            } else if art_width > 0 {
+                spans.push(Span::raw(" ".repeat(art_width)));
+            }
+            if art_width > 0 {
+                spans.push(Span::raw(gap.clone()));
+            }
+            if let Some(summary_line) = summary_rows.get(index) {
+                spans.extend(summary_line.spans.clone());
+            }
+            lines.push(Line::from(spans).patch_style(Style::reset()));
+        }
+    } else {
+        lines.push(title_line);
+        lines.extend(plan.summary_lines);
+    }
+    lines.push(Line::default());
+    lines
+}
+
 fn panel_block(state: &AppState) -> Block<'static> {
     Block::default()
         .title(" Puffer Code ")
