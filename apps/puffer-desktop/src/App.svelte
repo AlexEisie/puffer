@@ -17,11 +17,6 @@
   import Workspace from "./lib/screens/Workspace.svelte";
   import WorkspacePicker from "./lib/screens/WorkspacePicker.svelte";
   import AgentDetail from "./lib/screens/agent/AgentDetail.svelte";
-  import {
-    AGENTS as MOCK_AGENTS,
-    PROJECTS as MOCK_PROJECTS,
-    type MockAgent
-  } from "./lib/data/mockProjects";
   import Pipelines from "./lib/screens/Pipelines.svelte";
   import Deployments from "./lib/screens/Deployments.svelte";
   import Settings from "./lib/screens/Settings.svelte";
@@ -104,10 +99,9 @@
   let sessionDetail = $state<SessionDetail | null>(null);
   let sessionLoading = $state(false);
 
-  // Drill-in: when a workspace agent card is clicked we open AgentDetail in
-  // the main stage. If the mock agent isn't mapped to a real session we fall
-  // back to the first available one so the Chat tab has data to render.
-  let openAgent = $state<MockAgent | null>(null);
+  // Drill-in marker: which session id is currently expanded in AgentDetail.
+  // Cleared when the user backs out to the workspace board.
+  let openAgentSessionId = $state<string | null>(null);
   let submittedMessages = $state<TimelineItem[]>([]);
   let dismissedPermissionIds = $state<string[]>([]);
 
@@ -191,55 +185,34 @@
     )
   );
 
-  let mockSidebarAgents = $derived<ActiveAgent[]>(
-    MOCK_AGENTS.map((a) => ({
-      id: a.id,
-      name: a.name,
-      title: a.title,
-      project: MOCK_PROJECTS.find((p) => p.id === a.project)?.name ?? a.project,
-      branch: a.branch,
-      state: (a.status === "review" ? "idle" : (a.status as AgentState))
-    }))
-  );
-
-  let activeAgents = $derived<ActiveAgent[]>(skipOnboarding ? mockSidebarAgents : realAgents);
+  let activeAgents = $derived<ActiveAgent[]>(realAgents);
 
   let userChip = $derived<UserChip | null>(
-    skipOnboarding
-      ? { initials: "YO", name: "You", meta: "Pro plan · 18 / 24 agents" }
-      : settingsSnapshot?.auth.length
-        ? {
-            initials: (settingsSnapshot.auth[0].email ?? "you").slice(0, 2).toUpperCase(),
-            name: settingsSnapshot.auth[0].email ?? "You",
-            meta: `${settingsSnapshot.auth[0].providerId}${
-              settingsSnapshot.auth[0].planType ? " · " + settingsSnapshot.auth[0].planType : ""
-            }`
-          }
-        : null
+    settingsSnapshot?.auth.length
+      ? {
+          initials: (settingsSnapshot.auth[0].email ?? "you").slice(0, 2).toUpperCase(),
+          name: settingsSnapshot.auth[0].email ?? "You",
+          meta: `${settingsSnapshot.auth[0].providerId}${
+            settingsSnapshot.auth[0].planType ? " · " + settingsSnapshot.auth[0].planType : ""
+          }`
+        }
+      : null
   );
-
-  const mockTitleTabs: TitleTab[] = [
-    { id: "tab1", title: "Fix proration in webhook", state: "running" },
-    { id: "tab2", title: "Add dark-mode toggle",     state: "thinking" },
-    { id: "tab3", title: "Bump terraform aws",       state: "awaiting" }
-  ];
 
   let tabs = $derived<TitleTab[]>(
-    skipOnboarding || forceOnboarding
-      ? mockTitleTabs
-      : selectedSession
-        ? [
-            {
-              id: selectedSession.id,
-              title: selectedSession.displayName ?? selectedSession.title,
-              state: tweaks.agentState
-            }
-          ]
-        : []
+    selectedSession
+      ? [
+          {
+            id: selectedSession.id,
+            title: selectedSession.displayName ?? selectedSession.title,
+            state: tweaks.agentState
+          }
+        ]
+      : []
   );
-  let activeTab = $state("tab1");
+  let activeTab = $state<string>("");
   $effect(() => {
-    if (!skipOnboarding && selectedSession) activeTab = selectedSession.id;
+    if (selectedSession) activeTab = selectedSession.id;
   });
 
   // ─────────────────────────────────────────────────────────────
@@ -252,16 +225,6 @@
       onboarding = true;
     } else if (skipOnboarding) {
       onboarding = false;
-    }
-    if (typeof window !== "undefined") {
-      const debugOpen = window.localStorage.getItem("puffer-desktop:debug-open-agent");
-      if (debugOpen) {
-        const m = MOCK_AGENTS.find((a) => a.id === debugOpen);
-        if (m) {
-          openAgent = m;
-          tweaks = { ...tweaks, screen: "workspace" };
-        }
-      }
     }
     void init();
   });
@@ -473,7 +436,7 @@
         };
         await openSession(fallback);
       }
-      openAgent = null; // blank chat, no mock identity
+      openAgentSessionId = created.sessionId;
       tweaks = { ...tweaks, screen: "workspace" };
       statusMessage = `New agent in ${cwd || defaultWorkspaceCwd || "default workspace"}.`;
     } catch (error) {
@@ -551,30 +514,15 @@
   }
 
   function onOpenAgent(id: string) {
-    // First: a real session id (from the sidebar's active-agents list).
     const realTarget = groups.flatMap((g) => g.sessions).find((s) => s.id === id);
-    if (realTarget) {
-      openAgent = null;
-      tweaks = { ...tweaks, screen: "workspace" };
-      void openSession(realTarget);
-      return;
-    }
-    // Otherwise: a mock agent id (from a workspace board agent card). We open
-    // the AgentDetail shell and load whichever real session we have so the
-    // Chat tab has content; backend wiring comes later.
-    const mock = MOCK_AGENTS.find((a) => a.id === id) ?? null;
-    if (mock) {
-      openAgent = mock;
-      tweaks = { ...tweaks, screen: "workspace" };
-      const firstReal = groups.flatMap((g) => g.sessions)[0];
-      if (firstReal && !selectedSession) {
-        void openSession(firstReal);
-      }
-    }
+    if (!realTarget) return;
+    openAgentSessionId = realTarget.id;
+    tweaks = { ...tweaks, screen: "workspace" };
+    void openSession(realTarget);
   }
 
   function onCloseAgent() {
-    openAgent = null;
+    openAgentSessionId = null;
   }
 
   /** Fired by ConnectProjectModal once a clone+create has landed. Refreshes
@@ -592,7 +540,7 @@
     if (session) {
       await openSession(session);
     }
-    openAgent = null;
+    openAgentSessionId = sessionId;
     tweaks = { ...tweaks, screen: "workspace" };
   }
 
@@ -843,9 +791,8 @@
       <div class="pf-main">
         <div class="pf-stage">
           {#if tweaks.screen === "workspace"}
-            {#if openAgent}
+            {#if openAgentSessionId}
               <AgentDetail
-                agent={openAgent}
                 session={selectedSession}
                 sessionDetail={sessionDetail}
                 timeline={combinedTimeline}
@@ -859,7 +806,7 @@
               />
             {:else}
               <Workspace
-                groups={skipOnboarding ? undefined : groups}
+                groups={groups}
                 defaultWorkspaceCwd={defaultWorkspaceCwd}
                 loading={groupsLoading}
                 onOpenAgent={(id) => onOpenAgent(id)}

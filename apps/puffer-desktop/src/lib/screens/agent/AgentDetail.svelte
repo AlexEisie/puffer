@@ -8,8 +8,7 @@
   import {
     AGENT_STATE_LABELS,
     agentPufferState,
-    type AgentStatus,
-    type MockAgent
+    type AgentStatus
   } from "../../data/mockProjects";
   import type {
     PermissionTimelineItem,
@@ -20,8 +19,6 @@
   import type { AgentState } from "../../shell/tweaks";
 
   type Props = {
-    // Mock agent (from workspace board click) — provides display identity.
-    agent?: MockAgent | null;
     // Live session data from the backend.
     session: SessionListItem | null;
     sessionDetail: SessionDetail | null;
@@ -36,7 +33,6 @@
   };
 
   let {
-    agent = null,
     session,
     sessionDetail,
     timeline,
@@ -54,23 +50,14 @@
   let tab = $state<Tab>("chat");
   let diffTab = $state<DiffSubTab>("agent");
 
-  // Identity for the header: prefer the mock agent, fall back to real session.
-  let displayName = $derived(
-    agent?.name ?? (session?.displayName ?? session?.title ?? "Session")
-  );
-  let displayTitle = $derived(
-    agent?.title ?? session?.title ?? (session?.note ?? "")
-  );
-  let displayBranch = $derived(
-    agent?.branch ?? sessionDetail?.repoStatus?.branch ?? ""
-  );
-  let displayProject = $derived(
-    agent?.project ?? (session?.folderPath?.split("/").pop() ?? "")
-  );
-  let displayWorktree = $derived(agent?.worktree ?? "");
-  let status = $derived<AgentStatus>(
-    agent?.status ?? inferStatusFromSession(sessionDetail)
-  );
+  // Header identity comes straight from the live session record. No
+  // local board persona — the daemon is the source of truth.
+  let displayName = $derived(session?.displayName ?? session?.title ?? "Session");
+  let displayTitle = $derived(session?.title ?? session?.note ?? "");
+  let displayBranch = $derived(sessionDetail?.repoStatus?.branch ?? "");
+  let displayProject = $derived(session?.folderPath?.split("/").pop() ?? "");
+  let displayWorktree = $derived("");
+  let status = $derived<AgentStatus>(inferStatusFromSession(sessionDetail));
 
   function inferStatusFromSession(d: SessionDetail | null): AgentStatus {
     if (!d) return "idle";

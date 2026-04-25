@@ -4,20 +4,12 @@
   import Icon from "../design/Icon.svelte";
   import ProjectRow from "./workspace/ProjectRow.svelte";
   import ConnectProjectModal from "./workspace/ConnectProjectModal.svelte";
-  import {
-    AGENTS as MOCK_AGENTS,
-    EXTRA_TASKS as MOCK_EXTRA_TASKS,
-    PROJECTS as MOCK_PROJECTS,
-    type MockAgent,
-    type MockProject,
-    type MockTask
-  } from "../data/mockProjects";
+  import type { MockAgent, MockProject } from "../data/mockProjects";
   import type { FolderGroup, SessionListItem } from "../types";
 
   type Props = {
-    /** Real folder-groups loaded from the daemon. If omitted the board
-     *  falls back to the design mock data. */
-    groups?: FolderGroup[];
+    /** Real folder-groups loaded from the daemon. */
+    groups: FolderGroup[];
     /** Daemon's default workspace cwd — shown in the header so users know
      *  where new sessions will land. */
     defaultWorkspaceCwd?: string;
@@ -36,7 +28,7 @@
   };
 
   let {
-    groups = undefined,
+    groups,
     defaultWorkspaceCwd = "",
     loading = false,
     onOpenAgent,
@@ -104,17 +96,10 @@
     };
   }
 
-  let realProjects = $derived(groups ? groups.map(projectFromGroup) : []);
-  let realAgents = $derived<MockAgent[]>(
-    groups
-      ? groups.flatMap((g) => g.sessions.slice(0, 6).map((s) => agentFromSession(s, g.id)))
-      : []
+  let projects = $derived<MockProject[]>(groups.map(projectFromGroup));
+  let agents = $derived<MockAgent[]>(
+    groups.flatMap((g) => g.sessions.slice(0, 6).map((s) => agentFromSession(s, g.id)))
   );
-
-  let useMock = $derived(groups === undefined);
-  let projects = $derived(useMock ? MOCK_PROJECTS : realProjects);
-  let agents = $derived(useMock ? MOCK_AGENTS : realAgents);
-  let tasks = $derived<MockTask[]>(useMock ? MOCK_EXTRA_TASKS : []);
 
   let agentCount = $derived(agents.length);
   let projectCount = $derived(projects.length);
@@ -122,7 +107,7 @@
   let headerSubtitle = $derived(
     loading
       ? "loading…"
-      : defaultWorkspaceCwd && !useMock
+      : defaultWorkspaceCwd
         ? defaultWorkspaceCwd
         : `${agentCount} active ${agentCount === 1 ? "agent" : "agents"}`
   );
@@ -188,7 +173,7 @@
   {/if}
 
   <div class="pf-pw-list">
-    {#if !useMock && projectCount === 0 && !loading}
+    {#if projectCount === 0 && !loading}
       <div class="pf-pw-empty">
         <div class="pf-pw-empty-inner">
           <h2>No sessions yet</h2>
@@ -214,7 +199,6 @@
       <ProjectRow
         project={p}
         agents={agents.filter((a) => a.project === p.id)}
-        tasks={tasks.filter((t) => t.project === p.id)}
         {onOpenAgent}
         {onOpenBoard}
         onNewAgent={onNewAgent ? () => handleNewAgent(p.path) : undefined}

@@ -2,23 +2,20 @@
   import Puffer from "../../design/Puffer.svelte";
   import Icon from "../../design/Icon.svelte";
   import AgentCard from "./AgentCard.svelte";
-  import type { MockAgent, MockProject, MockTask } from "../../data/mockProjects";
+  import type { MockAgent, MockProject } from "../../data/mockProjects";
 
   type Props = {
     project: MockProject;
     agents: MockAgent[];
-    tasks: MockTask[];
     onOpenAgent?: (id: string) => void;
     onOpenBoard?: (projectId: string) => void;
     onNewAgent?: () => void;
   };
 
-  let { project, agents, tasks, onOpenAgent, onOpenBoard, onNewAgent }: Props = $props();
+  let { project, agents, onOpenAgent, onOpenBoard, onNewAgent }: Props = $props();
 
   let running = $derived(agents.filter((a) => a.status === "running").length);
   let review = $derived(agents.filter((a) => a.status === "review").length);
-  let queued = $derived(tasks.filter((t) => t.status === "queued").length);
-  let done = $derived(tasks.filter((t) => t.status === "done").length);
 </script>
 
 <div class="pf-pw-project">
@@ -43,12 +40,6 @@
       {/if}
       {#if review > 0}
         <span class="count review" title="Review"><span class="pip review"></span>{review}</span>
-      {/if}
-      {#if queued > 0}
-        <span class="count queued" title="Queued"><Icon name="clock" size={11} />{queued}</span>
-      {/if}
-      {#if done > 0}
-        <span class="count done" title="Done (recent)"><Icon name="check" size={11} />{done}</span>
       {/if}
     </div>
     <button
