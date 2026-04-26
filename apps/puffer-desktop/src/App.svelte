@@ -455,7 +455,11 @@
       }
       statusMessage = `Loaded ${detail.timeline.length} conversation items.`;
     } catch (error) {
-      statusMessage = String(error);
+      const detail = errorText(error);
+      statusMessage = detail;
+      if (selectedSession?.id === session.id || openAgentSessionId === session.id) {
+        appendAgentError("Conversation load failed", detail, "load-session");
+      }
     } finally {
       if (showLoading) sessionLoading = false;
     }
@@ -628,7 +632,9 @@
       turnStartedAtMs = null;
       turnThinking = false;
       turnStatusHint = null;
-      statusMessage = `run_agent_turn failed: ${error}`;
+      const detail = errorText(error);
+      statusMessage = `run_agent_turn failed: ${detail}`;
+      appendAgentError("Agent start failed", detail, "turn-start-error");
     }
   }
 
@@ -649,7 +655,9 @@
         await resolveTurnPermission(mapping.turnId, mapping.requestId, mapPermissionAction(choice));
         statusMessage = `${choice} sent to agent.`;
       } catch (error) {
-        statusMessage = `resolve_permission failed: ${error}`;
+        const detail = errorText(error);
+        statusMessage = `resolve_permission failed: ${detail}`;
+        appendAgentError("Permission response failed", detail, "permission-error");
       }
       const { [permissionId]: _drop, ...rest } = turnPermissionLookup;
       turnPermissionLookup = rest;
@@ -660,6 +668,23 @@
 
   function appendLive(item: TimelineItem) {
     liveStreamItems = [...liveStreamItems, item];
+  }
+
+  function errorText(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  function appendAgentError(title: string, body: string, code: string) {
+    const trimmed = body.trim() || "Unknown error.";
+    appendLive({
+      id: `live-error-${code}-${Date.now()}`,
+      kind: "system",
+      title,
+      summary: trimmed,
+      body: trimmed,
+      meta: ["error", code],
+      status: "error"
+    });
   }
 
   function upsertStreamingAssistant(delta: string) {
@@ -816,20 +841,13 @@
           // and a status-strip toast.
           const detail = ev.error?.trim() || "Unknown agent error.";
           statusMessage = `Agent error: ${detail}`;
-          appendLive({
-            id: `live-turn-error-${ev.turnId}`,
-            kind: "system",
-            title: "Agent error",
-            summary: detail,
-            body: detail,
-            meta: ["turn-error"]
-          });
+          appendAgentError("Agent error", detail, "turn-error");
         }
         // Reload the persisted transcript; then drop live items.
         if (selectedSession) {
           const sessionToRefresh = selectedSession;
-          const preservedErrorItems = liveStreamItems.filter((item) =>
-            item.id.startsWith("live-turn-error-")
+          const preservedErrorItems = liveStreamItems.filter(
+            (item) => item.kind === "system" && item.meta.includes("error")
           );
           void openSession(sessionToRefresh, {
             showLoading: false,

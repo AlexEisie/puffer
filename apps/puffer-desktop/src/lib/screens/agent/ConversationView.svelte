@@ -208,9 +208,15 @@
               </div>
             </div>
           {:else if row.kind === "system"}
-            <div class="pf-msg" data-role="system" style="opacity: 0.75;">
-              <div class="pf-msg-avatar" style="background: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;">sys</div>
+            {@const isError = row.item.status === "error" || row.item.meta.includes("error")}
+            <div class="pf-msg" data-role="system" data-error={isError}>
+              <div class="pf-msg-avatar">{isError ? "err" : "sys"}</div>
               <div class="pf-msg-body">
+                {#if isError}
+                  <div class="pf-msg-meta">
+                    <span class="name">{row.item.title || "Error"}</span>
+                  </div>
+                {/if}
                 <div class="pf-msg-text">
                   <MessageBody body={row.item.body} />
                 </div>
