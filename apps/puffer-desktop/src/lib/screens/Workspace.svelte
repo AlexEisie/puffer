@@ -90,7 +90,7 @@
       branch: "",
       status: "idle",
       progress: 0,
-      step: session.note ?? "",
+      step: session.note ?? (session.eventCount > 0 ? `${session.eventCount} transcript events` : "Ready to start"),
       tools: session.eventCount,
       elapsed: formatAge(session.updatedAtMs),
       model: ""

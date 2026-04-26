@@ -15,6 +15,7 @@
   } from "./lib/shell/tweaks";
 
   import Workspace from "./lib/screens/Workspace.svelte";
+  import ProjectDetail from "./lib/screens/workspace/ProjectDetail.svelte";
   import WorkspacePicker from "./lib/screens/WorkspacePicker.svelte";
   import AgentDetail from "./lib/screens/agent/AgentDetail.svelte";
   import Pipelines from "./lib/screens/Pipelines.svelte";
@@ -109,6 +110,7 @@
   // Drill-in marker: which session id is currently expanded in AgentDetail.
   // Cleared when the user backs out to the workspace board.
   let openAgentSessionId = $state<string | null>(null);
+  let openProjectId = $state<string | null>(null);
   let submittedMessages = $state<TimelineItem[]>([]);
   let dismissedPermissionIds = $state<string[]>([]);
   let dismissedQuestionIds = $state<string[]>([]);
@@ -578,6 +580,10 @@
 
   function onSelectScreen(id: ScreenId) {
     tweaks = { ...tweaks, screen: id };
+    if (id !== "workspace") {
+      openProjectId = null;
+      openAgentSessionId = null;
+    }
   }
 
   function onSelectTab(id: string) {
@@ -594,6 +600,12 @@
 
   function onCloseAgent() {
     openAgentSessionId = null;
+  }
+
+  function onOpenProject(id: string) {
+    openProjectId = id;
+    openAgentSessionId = null;
+    tweaks = { ...tweaks, screen: "workspace" };
   }
 
   /** Fired by ConnectProjectModal once a clone+create has landed. Refreshes
@@ -1038,13 +1050,20 @@
                 onResolveUserQuestion={resolveUserQuestion}
                 onCancelTurn={() => { if (currentTurnId) void cancelTurn(currentTurnId); }}
               />
+            {:else if openProjectId && groups.find((g) => g.id === openProjectId)}
+              <ProjectDetail
+                group={groups.find((g) => g.id === openProjectId)!}
+                onBack={() => (openProjectId = null)}
+                onOpenAgent={(id) => onOpenAgent(id)}
+                onNewAgent={(cwd) => handleNewAgent(cwd)}
+              />
             {:else}
               <Workspace
                 groups={groups}
                 defaultWorkspaceCwd={defaultWorkspaceCwd}
                 loading={groupsLoading}
                 onOpenAgent={(id) => onOpenAgent(id)}
-                onOpenBoard={(id) => { console.log("open board", id); }}
+                onOpenBoard={onOpenProject}
                 onNewAgent={(cwd) => handleNewAgent(cwd)}
                 onSessionReady={(sessionId) => handleSessionReady(sessionId)}
                 onOpenWorkspacePicker={() => (showWorkspacePicker = true)}
@@ -1099,6 +1118,8 @@
       defaultWorkspaceCwd = hs.workspaceRoot;
       selectedSession = null;
       sessionDetail = null;
+      openAgentSessionId = null;
+      openProjectId = null;
       submittedMessages = [];
       liveStreamItems = [];
       turnPermissionLookup = {};

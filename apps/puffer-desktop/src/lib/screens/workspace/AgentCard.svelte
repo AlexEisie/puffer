@@ -19,19 +19,13 @@
   {#if a.title}
     <div class="title">{a.title}</div>
   {/if}
-  <div class="branch-row">
-    <Icon name="branch" size={10} />
-    <span class="branch">{a.branch}</span>
-  </div>
-  {#if a.status === "running"}
-    <div class="progress">
-      <div class="bar" style="width: {a.progress}%;"></div>
-    </div>
+  {#if a.step}
+    <div class="step">{a.step}</div>
   {/if}
-  <div class="step">{a.step}</div>
   <div class="meta">
-    <span><Icon name="bolt" size={10} />{a.tools}</span>
+    {#if a.branch}
+      <span><Icon name="branch" size={10} />{a.branch}</span>
+    {/if}
     <span><Icon name="clock" size={10} />{a.elapsed}</span>
-    <span class="worktree" title="worktree">{a.worktree}</span>
   </div>
 </button>
