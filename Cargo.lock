@@ -4224,6 +4224,7 @@ name = "puffer-resources"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "include_dir",
  "indexmap 2.13.1",
  "puffer-config",
  "puffer-provider-registry",
