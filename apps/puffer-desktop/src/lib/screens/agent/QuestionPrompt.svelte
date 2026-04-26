@@ -11,96 +11,162 @@
   };
 
   let { item, onResolve }: Props = $props();
-  let answers = $state<Answers>({});
-  let otherText = $state<Record<string, string>>({});
+  let selectedAnswers = $state<Answers>({});
+  let customText = $state<Record<string, string>>({});
+  let customActive = $state<Record<string, boolean>>({});
 
-  function valueFor(question: AskUserQuestionItem): string | string[] {
-    return answers[question.question] ?? (question.multiSelect ? [] : "");
+  function keyFor(question: AskUserQuestionItem): string {
+    return question.question;
   }
 
-  function setSingle(question: AskUserQuestionItem, label: string) {
-    answers = { ...answers, [question.question]: label };
-    if (item.questions.length === 1) submit({ ...answers, [question.question]: label });
+  function selectedList(question: AskUserQuestionItem): string[] {
+    const current = selectedAnswers[keyFor(question)];
+    return Array.isArray(current) ? current : [];
+  }
+
+  function selectSingle(question: AskUserQuestionItem, label: string) {
+    const key = keyFor(question);
+    selectedAnswers = { ...selectedAnswers, [key]: label };
+    customActive = { ...customActive, [key]: false };
   }
 
   function toggleMulti(question: AskUserQuestionItem, label: string) {
-    const current = valueFor(question);
-    const list = Array.isArray(current) ? current : [];
+    const key = keyFor(question);
+    const list = selectedList(question);
     const next = list.includes(label) ? list.filter((v) => v !== label) : [...list, label];
-    answers = { ...answers, [question.question]: next };
+    selectedAnswers = { ...selectedAnswers, [key]: next };
   }
 
-  function setOther(question: AskUserQuestionItem, value: string) {
-    const previous = otherText[question.question];
-    otherText = { ...otherText, [question.question]: value };
+  function setCustom(question: AskUserQuestionItem, value: string) {
+    const key = keyFor(question);
+    customText = { ...customText, [key]: value };
     if (!question.multiSelect) {
-      answers = { ...answers, [question.question]: value };
-      return;
+      customActive = { ...customActive, [key]: true };
     }
-    const current = valueFor(question);
-    const base = Array.isArray(current)
-      ? current.filter((entry) => !previous || entry !== previous)
-      : [];
-    answers = {
-      ...answers,
-      [question.question]: value.trim() ? [...base, value] : base
-    };
   }
 
   function checked(question: AskUserQuestionItem, label: string): boolean {
-    const current = valueFor(question);
+    const current = selectedAnswers[keyFor(question)];
     return Array.isArray(current) ? current.includes(label) : current === label;
   }
 
-  function hasAnswer(question: AskUserQuestionItem, source: Answers = answers): boolean {
-    const current = source[question.question];
-    if (Array.isArray(current)) return current.length > 0;
-    return typeof current === "string" && current.trim().length > 0;
+  function customValue(question: AskUserQuestionItem): string {
+    return customText[keyFor(question)] ?? "";
   }
 
-  function canSubmit(source: Answers = answers): boolean {
-    return item.questions.every((question) => hasAnswer(question, source));
+  function customChecked(question: AskUserQuestionItem): boolean {
+    const text = customValue(question).trim();
+    if (!text) return false;
+    return question.multiSelect || customActive[keyFor(question)] === true;
   }
 
-  function submit(source: Answers = answers) {
-    if (!canSubmit(source)) return;
-    onResolve(item.id, source, {});
+  function answerFor(question: AskUserQuestionItem): string | string[] | null {
+    const custom = customValue(question).trim();
+    if (question.multiSelect) {
+      const values = selectedList(question);
+      const withCustom = custom ? [...values, custom] : values;
+      return withCustom.length > 0 ? withCustom : null;
+    }
+    if (customActive[keyFor(question)] === true && custom) return custom;
+    const selected = selectedAnswers[keyFor(question)];
+    return typeof selected === "string" && selected.trim() ? selected : null;
+  }
+
+  function buildAnswers(): Answers {
+    const next: Answers = {};
+    for (const question of item.questions) {
+      const answer = answerFor(question);
+      if (answer !== null) next[keyFor(question)] = answer;
+    }
+    return next;
+  }
+
+  function hasAnswer(question: AskUserQuestionItem): boolean {
+    const answer = answerFor(question);
+    if (Array.isArray(answer)) return answer.length > 0;
+    return typeof answer === "string" && answer.trim().length > 0;
+  }
+
+  function canSubmit(): boolean {
+    return item.questions.every((question) => hasAnswer(question));
+  }
+
+  function submit() {
+    if (!canSubmit()) return;
+    onResolve(item.id, buildAnswers(), {});
   }
 </script>
 
-<div class="pf-question">
+<form
+  class="pf-question"
+  onsubmit={(event) => {
+    event.preventDefault();
+    submit();
+  }}
+>
   <div class="pf-question-head">
     <Icon name="sparkles" size={14} color="var(--puffer-accent)" />
     Question
   </div>
-  {#each item.questions as question (question.question)}
+  {#each item.questions as question, index (question.question)}
     <div class="pf-question-block">
       <div class="pf-question-kicker">{question.header}</div>
       <div class="pf-question-title">{question.question}</div>
+      <div class="pf-question-hint">
+        {question.multiSelect ? "Choose one or more options, or enter a custom answer." : "Choose one option, or enter a custom answer."}
+      </div>
       <div class="pf-question-options" data-multi={question.multiSelect === true}>
         {#each question.options as option (option.label)}
-          <button
-            type="button"
+          <label
             class="pf-question-option"
             data-selected={checked(question, option.label)}
-            onclick={() =>
-              question.multiSelect
-                ? toggleMulti(question, option.label)
-                : setSingle(question, option.label)}
           >
-            <span>{option.label}</span>
-            <small>{option.description}</small>
-          </button>
+            <input
+              type={question.multiSelect ? "checkbox" : "radio"}
+              name={`question-${item.id}-${index}`}
+              checked={checked(question, option.label)}
+              onchange={() =>
+                question.multiSelect
+                  ? toggleMulti(question, option.label)
+                  : selectSingle(question, option.label)}
+            />
+            <span class="pf-question-option-body">
+              <span>{option.label}</span>
+              <small>{option.description}</small>
+              {#if option.preview}
+                <pre>{option.preview}</pre>
+              {/if}
+            </span>
+          </label>
         {/each}
       </div>
-      <div class="pf-question-other">
+      <label class="pf-question-other" data-selected={customChecked(question)}>
         <input
-          value={otherText[question.question] ?? ""}
-          placeholder="Other answer"
-          oninput={(event) =>
-            setOther(question, (event.currentTarget as HTMLInputElement).value)}
+          class="pf-question-other-choice"
+          type={question.multiSelect ? "checkbox" : "radio"}
+          name={`question-${item.id}-${index}`}
+          checked={customChecked(question)}
+          onchange={(event) => {
+            const checked = (event.currentTarget as HTMLInputElement).checked;
+            if (question.multiSelect) {
+              if (!checked) setCustom(question, "");
+              return;
+            }
+            customActive = { ...customActive, [keyFor(question)]: true };
+          }}
+          aria-label="Use custom answer"
         />
-      </div>
+        <input
+          class="pf-question-other-input"
+          value={customValue(question)}
+          placeholder="Type another answer"
+          onfocus={() => {
+            if (!question.multiSelect) customActive = { ...customActive, [keyFor(question)]: true };
+          }}
+          oninput={(event) =>
+            setCustom(question, (event.currentTarget as HTMLInputElement).value)}
+        />
+      </label>
     </div>
   {/each}
   <div class="pf-question-actions">
@@ -115,7 +181,7 @@
       Send answer
     </button>
   </div>
-</div>
+</form>
 
 <style>
   .pf-question {
@@ -155,6 +221,12 @@
     font-weight: 600;
   }
 
+  .pf-question-hint {
+    color: var(--muted-foreground);
+    font-size: 12px;
+    line-height: 1.35;
+  }
+
   .pf-question-options {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -169,8 +241,8 @@
     padding: 9px 10px;
     text-align: left;
     display: flex;
-    flex-direction: column;
-    gap: 3px;
+    align-items: flex-start;
+    gap: 8px;
     cursor: pointer;
   }
 
@@ -179,20 +251,62 @@
     background: color-mix(in oklab, var(--puffer-accent) 10%, var(--background));
   }
 
-  .pf-question-option span {
+  .pf-question-option input,
+  .pf-question-other-choice {
+    accent-color: var(--puffer-accent);
+    margin: 2px 0 0;
+    flex-shrink: 0;
+  }
+
+  .pf-question-option-body {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .pf-question-option-body > span {
     font-weight: 600;
   }
 
-  .pf-question-option small {
+  .pf-question-option small,
+  .pf-question-option pre {
     color: var(--muted-foreground);
     line-height: 1.35;
   }
 
-  .pf-question-other input {
-    width: 100%;
+  .pf-question-option pre {
+    margin: 4px 0 0;
+    white-space: pre-wrap;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: color-mix(in oklab, var(--muted) 70%, var(--background));
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 7px;
+  }
+
+  .pf-question-other {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--background);
+    padding: 0 10px;
+  }
+
+  .pf-question-other[data-selected="true"] {
+    border-color: var(--puffer-accent);
+    background: color-mix(in oklab, var(--puffer-accent) 8%, var(--background));
+  }
+
+  .pf-question-other-input {
+    width: 100%;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
     color: var(--foreground);
     padding: 8px 10px;
     font: inherit;
