@@ -10,7 +10,7 @@
 
   import Icon from "../design/Icon.svelte";
   import { connectSshDaemon, restartLocalDaemon } from "../api/desktop";
-  import { currentDaemonClient } from "../api/daemonClient";
+  import { canInvokeTauri, currentDaemonClient } from "../api/daemonClient";
 
   type Props = {
     onClose: () => void;
@@ -41,7 +41,7 @@
   const current = currentDaemonClient()?.handshake ?? null;
 
   async function pickDirectory(): Promise<string | null> {
-    if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
+    if (!canInvokeTauri()) {
       return null;
     }
     try {

@@ -236,7 +236,12 @@ let sharedClient: DaemonClient | null = null;
 let sharedConnectPromise: Promise<DaemonClient> | null = null;
 
 export function canInvokeTauri(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  if (typeof window === "undefined") return false;
+  const tauriWindow = window as unknown as {
+    __TAURI_INTERNALS__?: unknown;
+    __TAURI__?: unknown;
+  };
+  return Boolean(tauriWindow.__TAURI_INTERNALS__) || Boolean(tauriWindow.__TAURI__);
 }
 
 function envValue(name: string): string | null {

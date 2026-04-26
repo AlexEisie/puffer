@@ -5,11 +5,12 @@
     connectSshDaemon,
     createSession
   } from "../../api/desktop";
+  import { canInvokeTauri } from "../../api/daemonClient";
 
   /** Native directory chooser — only works in Tauri. Silently becomes a
    *  no-op in the web preview so the modal can still be used for testing. */
   async function pickDirectory(): Promise<string | null> {
-    if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
+    if (!canInvokeTauri()) {
       return null;
     }
     try {
