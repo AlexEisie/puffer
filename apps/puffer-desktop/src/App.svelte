@@ -429,26 +429,35 @@
     }
   }
 
-  async function openSession(session: SessionListItem) {
-    sessionLoading = true;
+  type OpenSessionOptions = {
+    showLoading?: boolean;
+    resetLiveState?: boolean;
+  };
+
+  async function openSession(session: SessionListItem, options: OpenSessionOptions = {}) {
+    const showLoading = options.showLoading ?? selectedSession?.id !== session.id;
+    const resetLiveState = options.resetLiveState ?? true;
+    if (showLoading) sessionLoading = true;
     try {
       const detail = await loadSessionDetailFromDaemon(session.id);
       selectedSession = detail.session;
       sessionDetail = detail;
-      // New session lands: drop any lingering live-stream items + local draft
-      // so the composer feels fresh.
-      submittedMessages = [];
-      liveStreamItems = [];
-      turnPermissionLookup = {};
-      currentTurnId = null;
-      turnStartedAtMs = null;
-      turnThinking = false;
-      turnStatusHint = null;
+      if (resetLiveState) {
+        // New session lands: drop any lingering live-stream items + local draft
+        // so the composer feels fresh.
+        submittedMessages = [];
+        liveStreamItems = [];
+        turnPermissionLookup = {};
+        currentTurnId = null;
+        turnStartedAtMs = null;
+        turnThinking = false;
+        turnStatusHint = null;
+      }
       statusMessage = `Loaded ${detail.timeline.length} conversation items.`;
     } catch (error) {
       statusMessage = String(error);
     } finally {
-      sessionLoading = false;
+      if (showLoading) sessionLoading = false;
     }
   }
 
@@ -818,13 +827,17 @@
         }
         // Reload the persisted transcript; then drop live items.
         if (selectedSession) {
-          void openSession(selectedSession).then(() => {
+          const sessionToRefresh = selectedSession;
+          const preservedErrorItems = liveStreamItems.filter((item) =>
+            item.id.startsWith("live-turn-error-")
+          );
+          void openSession(sessionToRefresh, {
+            showLoading: false,
+            resetLiveState: false
+          }).then(() => {
             // Preserve a turn-error placeholder so the user can still
             // read the failure after the persisted transcript reloads.
-            const errorItems = liveStreamItems.filter((item) =>
-              item.id.startsWith("live-turn-error-")
-            );
-            liveStreamItems = errorItems;
+            liveStreamItems = preservedErrorItems;
             submittedMessages = [];
           });
         }

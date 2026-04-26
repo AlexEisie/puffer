@@ -188,7 +188,7 @@
 <div class="pf-chat">
   <div class="pf-chat-thread" bind:this={threadEl}>
     <div class="pf-chat-thread-inner">
-      {#if loading}
+      {#if loading && rows.length === 0}
         <div class="state">Loading conversation…</div>
       {:else if rows.length === 0 && !typingLabel}
         <div class="state">No messages in this session yet. Send a prompt to get started.</div>
