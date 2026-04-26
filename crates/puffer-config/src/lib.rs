@@ -94,6 +94,53 @@ fn default_editor_mode() -> String {
     "normal".to_string()
 }
 
+/// Resolves the directory containing puffer's built-in resources
+/// (providers, tools, agents, prompts, hooks, skills, plugins, …).
+///
+/// Tries, in order:
+/// 1. `$PUFFER_BUILTIN_RESOURCES_DIR` env var (explicit override).
+/// 2. `<workspace_root>/resources` — useful for `cargo run` from the
+///    repo root.
+/// 3. `<binary_dir>/resources` — useful when the binary is shipped
+///    next to its resources directory (e.g. a release tarball that
+///    extracts to `puffer-bin/{puffer, resources/}`).
+/// 4. `<binary_dir>/../resources` and `<binary_dir>/../../resources`
+///    — useful for `target/{debug,release}/puffer` and similar.
+/// 5. `<binary_dir>/../share/puffer/resources` — Unix-style install
+///    (e.g. `/usr/local/bin/puffer` → `/usr/local/share/puffer/resources`).
+/// 6. `~/.puffer/resources` — user-level fallback.
+///
+/// Returns the first existing directory; if none exist, returns the
+/// workspace fallback so callers see a stable path in error messages.
+fn resolve_builtin_resources_dir(workspace_root: &Path) -> PathBuf {
+    if let Some(explicit) = env::var_os(BUILTIN_RESOURCES_DIR_ENV).map(PathBuf::from) {
+        return explicit;
+    }
+    let workspace_fallback = workspace_root.join("resources");
+    let mut candidates: Vec<PathBuf> = vec![workspace_fallback.clone()];
+    if let Ok(exe) = env::current_exe() {
+        if let Some(bin_dir) = exe.parent() {
+            candidates.push(bin_dir.join("resources"));
+            if let Some(parent) = bin_dir.parent() {
+                candidates.push(parent.join("resources"));
+                candidates.push(parent.join("share/puffer/resources"));
+                if let Some(grandparent) = parent.parent() {
+                    candidates.push(grandparent.join("resources"));
+                }
+            }
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from).or_else(dirs::home_dir) {
+        candidates.push(home.join(".puffer/resources"));
+    }
+    for candidate in &candidates {
+        if candidate.is_dir() {
+            return candidate.clone();
+        }
+    }
+    workspace_fallback
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigPaths {
     pub workspace_root: PathBuf,
@@ -113,9 +160,7 @@ impl ConfigPaths {
             .or_else(dirs::home_dir)
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".puffer");
-        let builtin_resources_dir = env::var_os(BUILTIN_RESOURCES_DIR_ENV)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| workspace_root.join("resources"));
+        let builtin_resources_dir = resolve_builtin_resources_dir(&workspace_root);
         Self {
             workspace_root,
             workspace_config_dir,

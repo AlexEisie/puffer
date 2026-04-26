@@ -78,6 +78,22 @@ fn main() -> Result<()> {
     let mut auth_store = AuthStore::load(&auth_path)?;
     let mut resources = load_resources(&paths)?;
 
+    if resources.providers.is_empty() {
+        eprintln!(
+            "puffer: no providers loaded from any of the discovered resources roots.\n  \
+             Builtin resources directory: {}\n  \
+             User resources directory:    {}\n  \
+             Workspace resources dir:     {}\n  \
+             None of these directories contained a `providers/` subdirectory with provider YAMLs.\n  \
+             Set `PUFFER_BUILTIN_RESOURCES_DIR=/path/to/repo/resources` or copy the resources tree to one\n  \
+             of the user/workspace locations above. Without providers, every turn will fail with\n  \
+             `Provider request failed: no providers are registered`.",
+            paths.builtin_resources_dir.display(),
+            paths.user_config_dir.join("resources").display(),
+            paths.workspace_config_dir.join("resources").display(),
+        );
+    }
+
     let mut providers = ProviderRegistry::new();
     for provider in &resources.providers {
         providers.register_with_source(
