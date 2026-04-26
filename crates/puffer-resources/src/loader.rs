@@ -3,7 +3,8 @@ use crate::model::{
     McpServerSpec, PluginSpec, PromptTemplate, ProviderPack, SkillSpec, SourceInfo, SourceKind,
     ToolSpec,
 };
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use include_dir::{include_dir, Dir};
 use indexmap::IndexMap;
 use puffer_config::ConfigPaths;
 use serde::de::DeserializeOwned;
@@ -14,10 +15,37 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Built-in `<repo>/resources/` baked into the binary at compile time.
+/// Same pattern as codex's `include_str!("../templates/foo.md")` (used at
+/// e.g. codex-rs/core/src/compact.rs:43), generalized to a directory tree
+/// because puffer ships ~95 yaml/md files. Without this, running `puffer`
+/// from a directory that has no sibling `resources/` would silently load
+/// 0 providers and the very first turn would fail with the misleading
+/// `no providers are registered`.
+static BUILTIN_RESOURCES: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../resources");
+
 /// Loads bundled, user, and workspace resources into one in-memory registry.
+///
+/// Merge order (later wins on id collision):
+/// 1. **Embedded** — built-in `BUILTIN_RESOURCES` baked into the binary.
+///    Always present, no filesystem dependency.
+/// 2. **Filesystem builtin** — `paths.builtin_resources_dir`, set via
+///    `PUFFER_BUILTIN_RESOURCES_DIR` env var or defaulting to
+///    `<workspace>/resources`. Skipped if the directory does not exist
+///    (developer convenience: editing yaml in-place without rebuilding).
+/// 3. **User** — `~/.puffer/resources/`. Lets users override individual
+///    files (e.g. add a custom provider) without touching the install.
+/// 4. **Workspace** — `<cwd>/.puffer/resources/`. Project-level overrides.
 pub fn load_resources(paths: &ConfigPaths) -> Result<LoadedResources> {
     let mut loaded = LoadedResources::default();
+    apply_embedded_resources(&mut loaded)?;
     for (root, kind) in resource_roots(paths) {
+        // Filesystem layers are optional. Without this guard the misleading
+        // "no providers are registered" error used to fire whenever the
+        // user ran puffer from a directory with no sibling `resources/`.
+        if !root.exists() {
+            continue;
+        }
         let plugins = load_yaml_dir::<PluginSpec>(&root.join("plugins"), kind)?;
         merge_by_id(
             &mut loaded.providers,
@@ -279,6 +307,225 @@ fn resource_roots(paths: &ConfigPaths) -> Vec<(PathBuf, SourceKind)> {
             SourceKind::Workspace,
         ),
     ]
+}
+
+/// Applies the compile-time-embedded resources as the base layer of the
+/// loader. Filesystem layers in `resource_roots` are merged on top.
+fn apply_embedded_resources(loaded: &mut LoadedResources) -> Result<()> {
+    let plugins = load_yaml_embedded::<PluginSpec>("plugins")?;
+    merge_by_id(
+        &mut loaded.providers,
+        load_yaml_embedded::<ProviderPack>("providers")?,
+        |item| MergeKey::simple(item.value.id.clone()),
+        "provider",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.tools,
+        load_yaml_embedded::<ToolSpec>("tools")?,
+        |item| MergeKey::simple(item.value.id.clone()),
+        "tool",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.agents,
+        load_yaml_embedded::<AgentSpec>("agents")?,
+        |item| MergeKey::simple(item.value.id.clone()),
+        "agent",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.prompts,
+        load_yaml_embedded::<PromptTemplate>("prompts")?,
+        |item| prompt_variant_key(&item.value),
+        "prompt",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.hooks,
+        load_yaml_embedded::<HookSpec>("hooks")?,
+        |item| MergeKey::simple(item.value.id.clone()),
+        "hook",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.skills,
+        load_skill_embedded()?,
+        |item| MergeKey::simple(item.value.name.clone()),
+        "skill",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.mascots,
+        load_yaml_embedded::<MascotSpec>("mascots")?,
+        |item| MergeKey::simple(item.value.id.clone()),
+        "mascot",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.plugins,
+        plugins.clone(),
+        |item| MergeKey::simple(item.value.id.clone()),
+        "plugin",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.agents,
+        plugin_agent_specs(&plugins),
+        |item| MergeKey::simple(item.value.id.clone()),
+        "agent",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.mcp_servers,
+        load_mcp_server_manifests_embedded()?,
+        |item| MergeKey::simple(item.value.id.clone()),
+        "mcp_server",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.ides,
+        load_yaml_embedded::<IdeSpec>("ides")?,
+        |item| MergeKey::simple(item.value.id.clone()),
+        "ide",
+        &mut loaded.diagnostics,
+    );
+    Ok(())
+}
+
+/// Loads every `*.yaml` / `*.yml` file under `BUILTIN_RESOURCES/<subdir>`
+/// and parses each as `T`.
+fn load_yaml_embedded<T>(subdir: &str) -> Result<Vec<LoadedItem<T>>>
+where
+    T: DeserializeOwned,
+{
+    let Some(dir) = BUILTIN_RESOURCES.get_dir(subdir) else {
+        return Ok(Vec::new());
+    };
+    let mut files: Vec<_> = dir.files().collect();
+    files.sort_by_key(|file| file.path().to_path_buf());
+
+    let mut items = Vec::new();
+    for file in files {
+        let path = file.path();
+        let ext = path.extension().and_then(|e| e.to_str());
+        if !matches!(ext, Some("yaml" | "yml")) {
+            continue;
+        }
+        let raw = file
+            .contents_utf8()
+            .ok_or_else(|| anyhow!("embedded resource {} is not UTF-8", path.display()))?;
+        let value: T = serde_yaml::from_str(raw)
+            .with_context(|| format!("failed to parse embedded resource {}", path.display()))?;
+        items.push(LoadedItem {
+            value,
+            source_info: SourceInfo {
+                path: PathBuf::from("<embedded>").join(path),
+                kind: SourceKind::Builtin,
+            },
+        });
+    }
+    Ok(items)
+}
+
+/// Embedded equivalent of `load_skill_dir` — walks `BUILTIN_RESOURCES/skills/`
+/// and reads each `<skill>/SKILL.md` with the same frontmatter parsing the
+/// filesystem path uses.
+fn load_skill_embedded() -> Result<Vec<LoadedItem<SkillSpec>>> {
+    let Some(skills_dir) = BUILTIN_RESOURCES.get_dir("skills") else {
+        return Ok(Vec::new());
+    };
+    let mut subdirs: Vec<_> = skills_dir.dirs().collect();
+    subdirs.sort_by_key(|d| d.path().to_path_buf());
+
+    let mut items = Vec::new();
+    for subdir in subdirs {
+        let skill_path = subdir.path().join("SKILL.md");
+        let Some(skill_file) = BUILTIN_RESOURCES.get_file(&skill_path) else {
+            continue;
+        };
+        let raw = skill_file
+            .contents_utf8()
+            .ok_or_else(|| anyhow!("embedded skill {} is not UTF-8", skill_path.display()))?
+            .to_string();
+        let (frontmatter, body) = split_frontmatter(&raw)
+            .with_context(|| format!("failed to parse skill frontmatter {}", skill_path.display()))?;
+        let raw_name = frontmatter_string(&frontmatter, &["name"]).unwrap_or_else(|| {
+            subdir
+                .path()
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        });
+        let name = normalize_skill_name(&raw_name);
+        let description = frontmatter_string(&frontmatter, &["description"])
+            .unwrap_or_else(|| first_descriptive_line(&body).to_string());
+        let disable_model_invocation = frontmatter_bool(
+            &frontmatter,
+            &["disable-model-invocation", "disableModelInvocation"],
+        )
+        .unwrap_or(false);
+        let allowed_tools =
+            frontmatter_string_list(&frontmatter, &["allowed-tools", "allowedTools"]);
+        let argument_hint = frontmatter_string(&frontmatter, &["argument-hint", "argumentHint"]);
+        let argument_names =
+            frontmatter_whitespace_list(&frontmatter, &["arguments", "argumentNames"]);
+        let user_invocable =
+            frontmatter_bool(&frontmatter, &["user-invocable", "userInvocable"]).unwrap_or(true);
+        let model = frontmatter_string(&frontmatter, &["model"]);
+        let effort = frontmatter_string(&frontmatter, &["effort"]);
+        let context = frontmatter_string(&frontmatter, &["context"]);
+
+        items.push(LoadedItem {
+            value: SkillSpec {
+                name,
+                description,
+                content: body,
+                allowed_tools,
+                argument_hint,
+                argument_names,
+                user_invocable,
+                model,
+                effort,
+                context,
+                disable_model_invocation,
+            },
+            source_info: SourceInfo {
+                path: PathBuf::from("<embedded>").join(&skill_path),
+                kind: SourceKind::Builtin,
+            },
+        });
+    }
+    Ok(items)
+}
+
+/// Embedded equivalent of `load_mcp_server_manifests` — reads canonical
+/// `mcp_servers/` plus the legacy `mcp/` directory if it exists.
+fn load_mcp_server_manifests_embedded() -> Result<Vec<LoadedItem<McpServerSpec>>> {
+    let canonical = load_mcp_manifest_dir_embedded("mcp_servers")?;
+    let canonical_ids = canonical
+        .iter()
+        .map(|item| item.value.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let legacy = load_mcp_manifest_dir_embedded("mcp")?
+        .into_iter()
+        .filter(|item| !canonical_ids.contains(&item.value.id))
+        .collect::<Vec<_>>();
+    let mut merged = legacy;
+    merged.extend(canonical);
+    Ok(merged)
+}
+
+fn load_mcp_manifest_dir_embedded(subdir: &str) -> Result<Vec<LoadedItem<McpServerSpec>>> {
+    Ok(load_yaml_embedded::<McpManifestFile>(subdir)?
+        .into_iter()
+        .filter_map(|item| {
+            item.value.enabled.then_some(LoadedItem {
+                value: item.value.server,
+                source_info: item.source_info,
+            })
+        })
+        .collect())
 }
 
 #[derive(Debug, Clone, Deserialize)]
