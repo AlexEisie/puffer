@@ -3,10 +3,10 @@
           ████████████████████
       ████████████████████████    ╭ Puffer Code ───────────────────────────────────────────────────╮
       ██████████████████████      │Account   anthropic via API key                                 │
-    ████████████████████████████  │Model     anthropic/claude-sonnet-4-5 · tools 0/0               │
+    ████████████████████████████  │Model     anthropic/claude-sonnet-4-5 · tools 51/59             │
 ██████████████████████████████    │Session   session-<id><id>│
   ████████████████████████████    │Mode      effort auto                                           │
-      ████████████████████████    │Context   dockyard · 0 msgs · 0 wds · sandbox workspace-write   │
+      ████████████████████████    │Context   dockyard · 0 msgs · 0 wds · sandbox workspace-write...│
     ████████████████████████      ╰────────────────────────────────────────────────────────────────╯
         ████████████████████
         ████████████████
@@ -14,4 +14,4 @@
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ❯ Review changes, ask a question, or type /
-anthropic/claude-sonnet-4-5 · 0% left · ~/dockyard · sandbox workspace-write
+anthropic/claude-sonnet-4-5 · 100% left · ~/dockyard

@@ -35,6 +35,7 @@ puffer-tui = { path = "../puffer-tui" }
 puffer-workflow = { path = "../puffer-workflow" }
 reqwest.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net"] }
+tungstenite.workspace = true
 
 # Daemon subcommand dependencies — WebSocket server + tower-layered HTTP
 axum = { version = "0.7", features = ["ws"] }

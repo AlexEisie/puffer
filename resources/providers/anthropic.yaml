@@ -13,6 +13,13 @@ discovery:
   max_output_tokens: 8192
   supports_reasoning: true
 models:
+  - id: claude-haiku-4-5-20251001
+    display_name: Claude Haiku 4.5
+    provider: anthropic
+    api: anthropic-messages
+    context_window: 200000
+    max_output_tokens: 8192
+    supports_reasoning: true
   - id: claude-sonnet-4-5
     display_name: Claude Sonnet 4.5
     provider: anthropic

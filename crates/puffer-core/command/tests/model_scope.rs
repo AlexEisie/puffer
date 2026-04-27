@@ -633,6 +633,6 @@ fn effort_command_accepts_auto_mode() {
         state.transcript.last(),
         Some(RenderedMessage { text, .. })
             if text.contains("Effort level set to auto.")
-                && text.contains("Current provider default: high")
+                && text.contains("Current provider default: low")
     ));
 }

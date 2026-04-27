@@ -127,6 +127,7 @@ fn execute_agent_tool_background_returns_async_payload_and_output_file() {
     let session = SessionMetadata {
         id: Uuid::new_v4(),
         display_name: None,
+        generated_title: None,
         cwd: temp.path().to_path_buf(),
         created_at_ms: 0,
         updated_at_ms: 0,
@@ -246,6 +247,7 @@ fn execute_agent_tool_sync_reports_worktree_isolation_metadata() {
     let session = SessionMetadata {
         id: Uuid::new_v4(),
         display_name: None,
+        generated_title: None,
         cwd: temp.path().to_path_buf(),
         created_at_ms: 0,
         updated_at_ms: 0,
@@ -361,6 +363,7 @@ fn execute_agent_tool_loads_workspace_agent_resources_from_disk() {
     let session = SessionMetadata {
         id: Uuid::new_v4(),
         display_name: None,
+        generated_title: None,
         cwd: temp.path().to_path_buf(),
         created_at_ms: 0,
         updated_at_ms: 0,
@@ -432,6 +435,7 @@ fn execute_agent_tool_background_preserves_worktree_path() {
     let session = SessionMetadata {
         id: Uuid::new_v4(),
         display_name: None,
+        generated_title: None,
         cwd: temp.path().to_path_buf(),
         created_at_ms: 0,
         updated_at_ms: 0,
@@ -525,6 +529,7 @@ fn execute_agent_tool_combines_initial_prompt_skills_and_case_insensitive_model(
     let session = SessionMetadata {
         id: Uuid::new_v4(),
         display_name: None,
+        generated_title: None,
         cwd: temp.path().to_path_buf(),
         created_at_ms: 0,
         updated_at_ms: 0,
@@ -594,6 +599,7 @@ fn execute_agent_tool_rejects_missing_required_mcp_servers() {
     let session = SessionMetadata {
         id: Uuid::new_v4(),
         display_name: None,
+        generated_title: None,
         cwd: temp.path().to_path_buf(),
         created_at_ms: 0,
         updated_at_ms: 0,

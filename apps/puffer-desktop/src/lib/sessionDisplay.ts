@@ -16,6 +16,8 @@ export function sessionDisplayName(session: SessionListItem | null | undefined):
   if (!session) return DEFAULT_SESSION_NAME;
   const displayName = clean(session.displayName);
   if (displayName) return displayName;
+  const generatedTitle = clean(session.generatedTitle);
+  if (generatedTitle) return generatedTitle;
   const title = clean(session.title);
   if (title && !isGeneratedSessionTitle(title)) return title;
   return DEFAULT_SESSION_NAME;

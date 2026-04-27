@@ -3,8 +3,8 @@
   import HighlightedLine from "../../components/HighlightedLine.svelte";
   import type { DiffTimelineItem } from "../../types";
 
-  type Props = { item: DiffTimelineItem };
-  let { item }: Props = $props();
+  type Props = { item: DiffTimelineItem; defaultCollapsed?: boolean };
+  let { item, defaultCollapsed = true }: Props = $props();
 
   type Row = { k: "ctx" | "add" | "del"; n: number | null; t: string };
   type Hunk = { header: string | null; rows: Row[] };
@@ -48,22 +48,13 @@
     return { add, del };
   }
 
-  // Collapse thresholds — one-hunk, short diffs render inline; anything
-  // bigger defaults to a preview with a chevron.
-  const AUTO_COLLAPSE_HUNKS = 2;
-  const AUTO_COLLAPSE_TOTAL_ROWS = 18;
-
   let allHunks = $derived(parseHunks(item.diff.patch));
-  let totalRows = $derived(allHunks.reduce((n, h) => n + h.rows.length, 0));
   let s = $derived(stats(item.diff.patch));
-  let isLarge = $derived(
-    allHunks.length > AUTO_COLLAPSE_HUNKS || totalRows > AUTO_COLLAPSE_TOTAL_ROWS
-  );
+  function initialCollapsed(): boolean {
+    return defaultCollapsed;
+  }
 
-  let collapsed = $state(false);
-  $effect(() => {
-    collapsed = isLarge;
-  });
+  let collapsed = $state(initialCollapsed());
 
   let visibleHunks = $derived(allHunks);
 </script>

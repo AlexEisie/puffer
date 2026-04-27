@@ -135,6 +135,7 @@ pub(crate) fn run_benchmark_command(
         SessionMetadata {
             id: session_id,
             display_name: Some("benchmark-run".to_string()),
+            generated_title: None,
             cwd: cwd.to_path_buf(),
             created_at_ms: now_ms,
             updated_at_ms: now_ms,

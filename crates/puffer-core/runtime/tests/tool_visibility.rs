@@ -56,7 +56,10 @@ fn sleep_tool_is_visible_to_anthropic_and_openai_tool_builders() {
         .iter()
         .find(|definition| definition.name == "Sleep")
         .expect("Sleep tool definition");
-    assert_eq!(openai_sleep.description, expected);
+    assert_eq!(
+        openai_sleep.description,
+        expected_openai_tool_description("Sleep", "Sleep", &expected)
+    );
     assert_eq!(openai_sleep.parameters["required"], json!(["duration_ms"]));
 }
 
@@ -94,7 +97,10 @@ fn notebook_edit_tool_is_visible_to_anthropic_and_openai_tool_builders() {
         .iter()
         .find(|definition| definition.name == "NotebookEdit")
         .expect("NotebookEdit tool definition");
-    assert_eq!(openai_notebook.description, NOTEBOOK_EDIT_DESCRIPTION);
+    assert_eq!(
+        openai_notebook.description,
+        expected_openai_tool_description("NotebookEdit", "NotebookEdit", NOTEBOOK_EDIT_DESCRIPTION)
+    );
     assert_eq!(
         openai_notebook.parameters["required"],
         json!(["notebook_path", "new_source"])
@@ -156,7 +162,10 @@ fn workflow_tool_descriptions_match_claude_reference_for_anthropic_and_openai() 
             .iter()
             .find(|item| item.name == tool_id)
             .expect("openai tool definition");
-        assert_eq!(openai_definition.description, description);
+        assert_eq!(
+            openai_definition.description,
+            expected_openai_tool_description(tool_id, tool_id, &description)
+        );
     }
 }
 
@@ -192,7 +201,10 @@ fn agent_tool_description_is_rendered_for_anthropic_and_openai() {
         .iter()
         .find(|item| item.name == "Agent")
         .expect("openai Agent tool definition");
-    assert_eq!(openai_definition.description, description);
+    assert_eq!(
+        openai_definition.description,
+        expected_openai_tool_description("Agent", "Agent", &description)
+    );
 }
 
 #[test]
@@ -232,7 +244,10 @@ fn config_tool_description_is_rendered_for_anthropic_and_openai() {
         .iter()
         .find(|item| item.name == "Config")
         .expect("openai Config tool definition");
-    assert_eq!(openai_definition.description, description);
+    assert_eq!(
+        openai_definition.description,
+        expected_openai_tool_description("Config", "Config", &description)
+    );
     assert!(openai_definition.parameters["properties"]["value"]["oneOf"]
         .as_array()
         .is_some_and(|variants| variants.iter().any(|variant| variant["type"] == "integer")));
@@ -289,7 +304,11 @@ fn powershell_tool_description_matches_claude_reference_for_anthropic_and_openai
         .expect("PowerShell openai tool definition");
     assert_eq!(
         normalize_prompt_lines(&openai_definition.description),
-        normalize_prompt_lines(&expected)
+        normalize_prompt_lines(&expected_openai_tool_description(
+            "PowerShell",
+            "PowerShell",
+            &expected
+        ))
     );
     assert_eq!(
         openai_definition.parameters["properties"]["timeout"]["description"],
@@ -330,7 +349,10 @@ fn web_search_tool_prompt_matches_claude_reference_for_anthropic_and_openai() {
         .iter()
         .find(|definition| definition.name == "WebSearch")
         .expect("WebSearch openai tool definition");
-    assert_eq!(openai_definition.description, expected);
+    assert_eq!(
+        openai_definition.description,
+        expected_openai_tool_description("WebSearch", "WebSearch", &expected)
+    );
 }
 
 #[test]
@@ -381,7 +403,7 @@ fn selected_tool_prompts_match_claude_reference_for_anthropic_and_openai() {
             .expect("openai tool definition");
         assert_eq!(
             openai_definition.description.trim_end(),
-            expected.trim_end(),
+            expected_openai_tool_description(tool_id, tool_id, &expected).trim_end(),
             "openai description for {tool_id}"
         );
     }
@@ -497,7 +519,11 @@ fn file_tool_prompts_and_schemas_match_claude_reference_for_anthropic_and_openai
             .expect("openai tool definition");
         assert_eq!(
             trim_line_trailing_whitespace(&openai_definition.description),
-            trim_line_trailing_whitespace(&expected_prompt),
+            trim_line_trailing_whitespace(&expected_openai_tool_description(
+                tool_id,
+                tool_id,
+                &expected_prompt
+            )),
             "openai description for {tool_id}"
         );
         assert_eq!(

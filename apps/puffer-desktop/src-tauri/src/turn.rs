@@ -479,16 +479,8 @@ fn drive_turn(
     })
     .with_context(|| format!("run_agent_turn: session={session_id}"))?;
 
-    // Persist the assistant message + tool invocations so reloads see them.
-    if !outcome.assistant_text.is_empty() {
-        state.push_message(MessageRole::Assistant, outcome.assistant_text.clone());
-        session_store.append_event(
-            session_uuid,
-            TranscriptEvent::AssistantMessage {
-                text: outcome.assistant_text.clone(),
-            },
-        )?;
-    }
+    // Persist tool invocations before the assistant text so reloads read in
+    // the same order as the work happened.
     for invocation in &outcome.tool_invocations {
         session_store.append_event(
             session_uuid,
@@ -498,6 +490,15 @@ fn drive_turn(
                 input: invocation.input.clone(),
                 output: invocation.output.clone(),
                 success: invocation.success,
+            },
+        )?;
+    }
+    if !outcome.assistant_text.is_empty() {
+        state.push_message(MessageRole::Assistant, outcome.assistant_text.clone());
+        session_store.append_event(
+            session_uuid,
+            TranscriptEvent::AssistantMessage {
+                text: outcome.assistant_text.clone(),
             },
         )?;
     }

@@ -181,8 +181,10 @@ pub(crate) fn list_grouped_sessions(session_store: &SessionStore) -> Result<Vec<
             .push(SessionListItemDto {
                 session_id: session.id.to_string(),
                 display_name: session.display_name.clone(),
+                generated_title: session.generated_title.clone(),
                 title: session_title(
                     session.display_name.as_ref(),
+                    session.generated_title.as_ref(),
                     session.slug.as_ref(),
                     &session.cwd,
                     &session.id.to_string(),
@@ -248,8 +250,10 @@ pub(crate) fn load_session_detail(
     Ok(SessionDetailDto {
         session_id: record.metadata.id.to_string(),
         display_name: record.metadata.display_name.clone(),
+        generated_title: record.metadata.generated_title.clone(),
         title: session_title(
             record.metadata.display_name.as_ref(),
+            record.metadata.generated_title.as_ref(),
             record.metadata.slug.as_ref(),
             &record.metadata.cwd,
             &record.metadata.id.to_string(),
@@ -643,12 +647,14 @@ fn session_group_root(cwd: &Path) -> PathBuf {
 
 fn session_title(
     display_name: Option<&String>,
+    generated_title: Option<&String>,
     slug: Option<&String>,
     cwd: &Path,
     fallback: &str,
 ) -> String {
     display_name
         .cloned()
+        .or_else(|| generated_title.cloned())
         .or_else(|| slug.cloned())
         .or_else(|| {
             cwd.file_name()
@@ -949,22 +955,32 @@ fn extract_paths_from_patch(patch: &str, _cwd: &Path) -> BTreeSet<String> {
 
 fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
     let mut items = Vec::new();
+    let mut pending_assistant = None;
     for (index, event) in record.events.iter().enumerate() {
         match event {
-            TranscriptEvent::UserMessage { text } => items.push(TimelineItemDto::UserMessage {
-                id: format!("timeline-{index}"),
-                text: text.clone(),
-            }),
-            TranscriptEvent::AssistantMessage { text } => {
-                items.push(TimelineItemDto::AssistantMessage {
+            TranscriptEvent::UserMessage { text } => {
+                flush_pending_assistant(&mut items, &mut pending_assistant);
+                items.push(TimelineItemDto::UserMessage {
                     id: format!("timeline-{index}"),
                     text: text.clone(),
-                })
+                });
+            }
+            TranscriptEvent::AssistantMessage { text } => {
+                flush_pending_assistant(&mut items, &mut pending_assistant);
+                pending_assistant = Some(TimelineItemDto::AssistantMessage {
+                    id: format!("timeline-{index}"),
+                    text: text.clone(),
+                });
             }
             TranscriptEvent::SystemMessage { text } => {
-                items.extend(parse_system_message(index, text))
+                let parsed = parse_system_message(index, text);
+                if parse_tool_message(text).is_none() {
+                    flush_pending_assistant(&mut items, &mut pending_assistant);
+                }
+                items.extend(parsed);
             }
             TranscriptEvent::CommandInvoked { name, args } => {
+                flush_pending_assistant(&mut items, &mut pending_assistant);
                 items.push(TimelineItemDto::Command {
                     id: format!("timeline-{index}"),
                     command_name: name.clone(),
@@ -972,12 +988,14 @@ fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
                 })
             }
             TranscriptEvent::GitDiffSnapshot { snapshot } => {
+                flush_pending_assistant(&mut items, &mut pending_assistant);
                 items.push(TimelineItemDto::DiffSnapshot {
                     id: format!("timeline-{index}"),
                     snapshot: diff_summary(index, snapshot),
                 })
             }
             TranscriptEvent::SessionRenamed { name } => {
+                flush_pending_assistant(&mut items, &mut pending_assistant);
                 items.push(TimelineItemDto::SystemMessage {
                     id: format!("timeline-{index}"),
                     text: format!("Session renamed to {name}."),
@@ -998,7 +1016,17 @@ fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
             }
         }
     }
+    flush_pending_assistant(&mut items, &mut pending_assistant);
     items
+}
+
+fn flush_pending_assistant(
+    items: &mut Vec<TimelineItemDto>,
+    pending_assistant: &mut Option<TimelineItemDto>,
+) {
+    if let Some(item) = pending_assistant.take() {
+        items.push(item);
+    }
 }
 
 fn parse_system_message(index: usize, text: &str) -> Vec<TimelineItemDto> {
@@ -1477,4 +1505,86 @@ fn command_exists(command: &str) -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{timeline_items, TimelineItemDto};
+    use puffer_session_store::{SessionMetadata, SessionRecord, TranscriptEvent};
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    fn record(events: Vec<TranscriptEvent>) -> SessionRecord {
+        SessionRecord {
+            metadata: SessionMetadata {
+                id: Uuid::nil(),
+                display_name: None,
+                generated_title: None,
+                cwd: PathBuf::from("/tmp"),
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                parent_session_id: None,
+                slug: None,
+                tags: Vec::new(),
+                note: None,
+            },
+            events,
+        }
+    }
+
+    fn item_kind(item: &TimelineItemDto) -> &'static str {
+        match item {
+            TimelineItemDto::UserMessage { .. } => "user",
+            TimelineItemDto::AssistantMessage { .. } => "assistant",
+            TimelineItemDto::SystemMessage { .. } => "system",
+            TimelineItemDto::Command { .. } => "command",
+            TimelineItemDto::ToolCall { .. } => "tool",
+            TimelineItemDto::PermissionDialog { .. } => "permission",
+            TimelineItemDto::DiffSnapshot { .. } => "diff",
+        }
+    }
+
+    #[test]
+    fn timeline_places_persisted_tool_invocations_before_assistant_text() {
+        let items = timeline_items(&record(vec![
+            TranscriptEvent::UserMessage {
+                text: "inspect this".to_string(),
+            },
+            TranscriptEvent::AssistantMessage {
+                text: "Here is what I found.".to_string(),
+            },
+            TranscriptEvent::ToolInvocation {
+                call_id: "call-1".to_string(),
+                tool_id: "Read".to_string(),
+                input: r#"{"path":"Cargo.toml"}"#.to_string(),
+                output: "contents".to_string(),
+                success: true,
+            },
+        ]));
+
+        let kinds = items.iter().map(item_kind).collect::<Vec<_>>();
+        assert_eq!(kinds, vec!["user", "tool", "assistant"]);
+    }
+
+    #[test]
+    fn timeline_keeps_new_tool_before_assistant_order() {
+        let items = timeline_items(&record(vec![
+            TranscriptEvent::UserMessage {
+                text: "inspect this".to_string(),
+            },
+            TranscriptEvent::ToolInvocation {
+                call_id: "call-1".to_string(),
+                tool_id: "Read".to_string(),
+                input: r#"{"path":"Cargo.toml"}"#.to_string(),
+                output: "contents".to_string(),
+                success: true,
+            },
+            TranscriptEvent::AssistantMessage {
+                text: "Here is what I found.".to_string(),
+            },
+        ]));
+
+        let kinds = items.iter().map(item_kind).collect::<Vec<_>>();
+        assert_eq!(kinds, vec!["user", "tool", "assistant"]);
+    }
 }

@@ -1,16 +1,20 @@
 <script lang="ts">
+  import { onDestroy, onMount } from "svelte";
+  import { ensureLocalDaemonClient } from "../../api/daemonClient";
+  import { browserRecording, type BrowserRecordedFrame } from "../../api/desktop";
   import Icon, { type IconName } from "../../design/Icon.svelte";
   import HighlightedLine from "../../components/HighlightedLine.svelte";
   import type { ToolTimelineItem } from "../../types";
 
-  type Props = { item: ToolTimelineItem };
-  let { item }: Props = $props();
+  type Props = { item: ToolTimelineItem; sessionId?: string | null; defaultCollapsed?: boolean };
+  let { item, sessionId = null, defaultCollapsed = true }: Props = $props();
   type RenderRow = { kind: "ctx" | "add" | "del" | "omit"; line: number | null; text: string };
   type FileRender = { mode: "read" | "diff"; path: string; rows: RenderRow[] };
   type BashRender = { mode: "bash"; stdout: string; stderr: string; meta: string[] };
   type ListRender = { mode: "list"; title: string; meta: string[]; rows: string[]; body?: string | null; hint?: string | null };
   type WebRender = { mode: "web"; title: string; meta: string[]; body: string };
   type ToolRender = FileRender | BashRender | ListRender | WebRender;
+  type RecordingFrame = BrowserRecordedFrame & { src: string };
 
   function iconFor(name: string | null | undefined): IconName {
     if (!name) return "bolt";
@@ -19,7 +23,7 @@
     if (t.includes("read") || t.includes("view")) return "file";
     if (t.includes("grep") || t.includes("search")) return "search";
     if (t.includes("bash") || t.includes("shell") || t.includes("exec")) return "terminal";
-    if (t.includes("fetch") || t.includes("web")) return "globe";
+    if (t.includes("browser") || t.includes("fetch") || t.includes("web")) return "globe";
     if (t.includes("git") || t.includes("diff")) return "git";
     if (t.includes("list") || t.includes("ls")) return "folder";
     return "bolt";
@@ -48,6 +52,67 @@
       }
     }
     return trimmed;
+  }
+
+  function titleCaseAction(value: string | null): string {
+    if (!value) return "Action";
+    return value
+      .split(/[_-]+/)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ");
+  }
+
+  function shortValue(value: string | null, max = 80): string | null {
+    if (!value) return null;
+    const compact = value.replace(/\s+/g, " ").trim();
+    if (!compact) return null;
+    return compact.length > max ? `${compact.slice(0, max - 1)}...` : compact;
+  }
+
+  function browserArgLine(input: Record<string, unknown> | null): string | null {
+    const action = stringField(input, ["action"]);
+    if (!action) return null;
+    const label = titleCaseAction(action);
+    const url = shortValue(stringField(input, ["url"]));
+    const tabId = shortValue(stringField(input, ["tabId"]));
+    const ref = shortValue(stringField(input, ["ref"]));
+    const text = shortValue(stringField(input, ["text"]), 48);
+    const key = shortValue(stringField(input, ["key"]));
+    const script = shortValue(stringField(input, ["script"]), 48);
+
+    switch (action) {
+      case "list":
+        return "List";
+      case "open":
+        return url ? `Open ${url}` : "Open";
+      case "focus":
+        return tabId ? `Focus ${tabId}` : "Focus";
+      case "close":
+        return tabId ? `Close ${tabId}` : "Close";
+      case "navigate":
+        return url ? `Navigate ${url}` : "Navigate";
+      case "reload":
+        return "Reload";
+      case "back":
+        return "Back";
+      case "forward":
+        return "Forward";
+      case "snapshot":
+        return "Snapshot";
+      case "click":
+        return ref ? `Click ${ref}` : "Click";
+      case "type":
+        return text ? `Type "${text}"` : "Type";
+      case "fill":
+        return text ? `Fill "${text}"` : "Fill";
+      case "press":
+        return key ? `Press ${key}` : "Press";
+      case "evaluate":
+        return script ? `Evaluate ${script}` : "Evaluate";
+      default:
+        return label;
+    }
   }
 
   function statusLabel(s: string): string {
@@ -296,9 +361,6 @@
       ?? webRenderFor(name, input, output);
   }
 
-  // Auto-collapse threshold for long terminal-style outputs.
-  const AUTO_COLLAPSE_LINE_THRESHOLD = 8;
-
   let toolName = $derived(
     item.toolName && item.toolName !== "undefined" ? item.toolName : "Tool"
   );
@@ -315,20 +377,87 @@
   let isPending = $derived(
     toolStatus.toLowerCase().startsWith("run") || toolStatus === "pending"
   );
-  let isLarge = $derived(totalLines > AUTO_COLLAPSE_LINE_THRESHOLD);
+  let isBrowserTool = $derived(toolName.toLowerCase() === "browser");
+  let recordingFrames = $state<RecordingFrame[]>([]);
+  let selectedFrameId = $state<string | null>(null);
+  let recordingDisposer: (() => void) | null = null;
 
-  // Per-card collapse state — seeded from content size; user can override.
-  // Pending cards render expanded so the placeholder stays visible; they
-  // re-seed to the size-based default as soon as output arrives.
-  let collapsed = $state(false);
-  $effect(() => {
-    collapsed = isPending ? false : isLarge;
+  function toRecordingFrame(frame: BrowserRecordedFrame): RecordingFrame {
+    return {
+      ...frame,
+      src: `data:${frame.mimeType || "image/jpeg"};base64,${frame.data}`
+    };
+  }
+
+  function tabIdForBrowserAction(): string | null {
+    return stringField(inputJson, ["tabId"]);
+  }
+
+  function mergeRecordingFrame(frame: BrowserRecordedFrame) {
+    const tabId = tabIdForBrowserAction();
+    if (tabId && frame.tabId !== tabId) return;
+    const next = toRecordingFrame(frame);
+    if (recordingFrames.some((item) => item.frameId === next.frameId)) return;
+    recordingFrames = [...recordingFrames, next].slice(-80);
+  }
+
+  async function loadBrowserRecording() {
+    if (!sessionId || !isBrowserTool) return;
+    try {
+      const tabId = tabIdForBrowserAction();
+      const snapshot = await browserRecording(sessionId);
+      recordingFrames = snapshot.frames
+        .filter((frame) => !tabId || frame.tabId === tabId)
+        .map(toRecordingFrame)
+        .slice(-80);
+    } catch {
+      recordingFrames = [];
+    }
+  }
+
+  async function subscribeBrowserRecording() {
+    if (!sessionId || !isBrowserTool) return;
+    const client = await ensureLocalDaemonClient();
+    recordingDisposer?.();
+    recordingDisposer = client.on<BrowserRecordedFrame>(`browser:${sessionId}:recording`, mergeRecordingFrame);
+  }
+
+  onMount(() => {
+    if (!isBrowserTool) return;
+    void loadBrowserRecording();
+    void subscribeBrowserRecording();
   });
 
-  let visibleLines = $derived(nonEmptyLines);
-  let toggleable = $derived(hasOutput);
+  onDestroy(() => {
+    recordingDisposer?.();
+    recordingDisposer = null;
+  });
 
-  let arg = $derived(argLine(toolInput));
+  let selectedFrame = $derived(
+    recordingFrames.find((frame) => frame.frameId === selectedFrameId) ?? recordingFrames.at(-1) ?? null
+  );
+
+  $effect(() => {
+    if (!isBrowserTool) return;
+    if (!selectedFrameId && recordingFrames.length > 0) {
+      selectedFrameId = recordingFrames.at(-1)?.frameId ?? null;
+    }
+    if (selectedFrameId && !recordingFrames.some((frame) => frame.frameId === selectedFrameId)) {
+      selectedFrameId = recordingFrames.at(-1)?.frameId ?? null;
+    }
+  });
+
+  // Actions default closed; users can open the row when they want details.
+  function initialCollapsed(): boolean {
+    return defaultCollapsed;
+  }
+
+  let collapsed = $state(initialCollapsed());
+
+  let visibleLines = $derived(nonEmptyLines);
+  let toggleable = $derived(hasOutput || isPending || isBrowserTool);
+
+  let arg = $derived(isBrowserTool ? (browserArgLine(inputJson) ?? "Action") : argLine(toolInput));
   let status = $derived(statusLabel(toolStatus));
 </script>
 
@@ -355,7 +484,34 @@
   </button>
   {#if hasOutput && !collapsed}
     <div class="pf-tool-body">
-      {#if toolRender?.mode === "read" || toolRender?.mode === "diff"}
+      {#if isBrowserTool}
+        <div class="pf-browser-recording-render">
+          {#if selectedFrame}
+            <figure class="pf-browser-screen">
+              <img src={selectedFrame.src} alt={selectedFrame.title || selectedFrame.url || "Browser recording frame"} />
+              <figcaption>
+                <span>{selectedFrame.title || "Browser"}</span>
+                <span>{selectedFrame.url}</span>
+              </figcaption>
+            </figure>
+            <div class="pf-browser-strip" aria-label="Browser screen recording">
+              {#each recordingFrames as frame (frame.frameId)}
+                <button
+                  type="button"
+                  class="pf-browser-thumb"
+                  class:selected={frame.frameId === selectedFrame.frameId}
+                  onclick={() => (selectedFrameId = frame.frameId)}
+                  title={frame.title || frame.url}
+                >
+                  <img src={frame.src} alt="" />
+                </button>
+              {/each}
+            </div>
+          {:else}
+            <div class="pf-browser-empty">No browser frames recorded for this action yet.</div>
+          {/if}
+        </div>
+      {:else if toolRender?.mode === "read" || toolRender?.mode === "diff"}
         <div class="pf-file-render" data-mode={toolRender.mode}>
           {#if toolRender.path}
             <div class="pf-file-path" title={toolRender.path}>{toolRender.path}</div>
@@ -425,11 +581,17 @@
         </div>
       {/if}
     </div>
-  {:else if isPending}
+  {:else if !collapsed && isPending}
     <div class="pf-tool-body pf-tool-pending-body">
       <div class="pf-tool-pending">
         <div class="pf-tool-pending-bar"></div>
         <div class="pf-tool-pending-text">awaiting result…</div>
+      </div>
+    </div>
+  {:else if !collapsed && isBrowserTool}
+    <div class="pf-tool-body">
+      <div class="pf-browser-recording-render">
+        <div class="pf-browser-empty">No browser frames recorded for this action yet.</div>
       </div>
     </div>
   {/if}
@@ -591,6 +753,84 @@
   }
   .pf-result-row:last-child {
     border-bottom: 0;
+  }
+  .pf-browser-recording-render {
+    background: var(--background);
+    border-top: 1px solid var(--border);
+    padding: 10px;
+    display: grid;
+    gap: 8px;
+  }
+  .pf-browser-screen {
+    margin: 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--background);
+  }
+  .pf-browser-screen img {
+    width: 100%;
+    max-height: 260px;
+    display: block;
+    object-fit: contain;
+    background: #fff;
+  }
+  .pf-browser-screen figcaption {
+    display: grid;
+    gap: 3px;
+    padding: 7px 9px;
+    border-top: 1px solid var(--border);
+    font-family: var(--font-sans);
+    font-size: 11px;
+  }
+  .pf-browser-screen figcaption span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pf-browser-screen figcaption span:first-child {
+    font-weight: 600;
+    color: var(--foreground);
+  }
+  .pf-browser-screen figcaption span:last-child {
+    color: var(--muted-foreground);
+    font-family: var(--font-mono);
+  }
+  .pf-browser-strip {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+  .pf-browser-thumb {
+    width: 88px;
+    height: 54px;
+    flex: 0 0 auto;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 2px;
+    background: var(--background);
+    cursor: pointer;
+    overflow: hidden;
+  }
+  .pf-browser-thumb img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
+  }
+  .pf-browser-thumb.selected {
+    border-color: var(--puffer-accent);
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--puffer-accent) 20%, transparent);
+  }
+  .pf-browser-empty {
+    min-height: 120px;
+    display: grid;
+    place-items: center;
+    color: var(--muted-foreground);
+    font-family: var(--font-sans);
+    font-size: 12px;
+    text-align: center;
   }
   .pf-tool-pending-body {
     background: oklch(0.16 0 0);

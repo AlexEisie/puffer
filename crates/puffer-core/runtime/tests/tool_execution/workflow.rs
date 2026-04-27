@@ -499,7 +499,10 @@ fn task_update_sets_timestamps_for_progress() {
 
     let tasks_path = ConfigPaths::discover(&cwd)
         .workspace_config_dir
-        .join("runtime/claude_workflow/tasks.json");
+        .join(format!(
+            "runtime/claude_workflow/sessions/{}/tasks.json",
+            state.session.id
+        ));
     let persisted: Value = serde_json::from_str(&fs::read_to_string(tasks_path).unwrap()).unwrap();
     let task = persisted["tasks"][0].clone();
     assert_eq!(task["task_id"], task_id);

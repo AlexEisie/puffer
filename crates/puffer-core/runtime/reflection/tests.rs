@@ -51,6 +51,7 @@ fn llm_judge_side_state_inherits_main_agent_cache_key_by_default() {
         SessionMetadata {
             id: Uuid::nil(),
             display_name: None,
+            generated_title: None,
             cwd: std::env::temp_dir(),
             created_at_ms: 0,
             updated_at_ms: 0,
@@ -89,6 +90,7 @@ fn llm_judge_side_state_can_use_dedicated_cache_key() {
         SessionMetadata {
             id: Uuid::nil(),
             display_name: None,
+            generated_title: None,
             cwd: std::env::temp_dir(),
             created_at_ms: 0,
             updated_at_ms: 0,
@@ -303,6 +305,7 @@ fn llm_judge_skipped_event_fires_when_llm_judge_is_disabled() {
         SessionMetadata {
             id: Uuid::nil(),
             display_name: None,
+            generated_title: None,
             cwd: std::env::temp_dir(),
             created_at_ms: 0,
             updated_at_ms: 0,

@@ -14,6 +14,7 @@ pub struct SessionListItemDto {
     pub id: String,
     pub title: String,
     pub display_name: Option<String>,
+    pub generated_title: Option<String>,
     pub cwd: String,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,

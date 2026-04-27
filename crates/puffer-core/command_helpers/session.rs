@@ -778,6 +778,7 @@ mod tests {
             SessionMetadata {
                 id: Uuid::nil(),
                 display_name: Some("demo".to_string()),
+                generated_title: None,
                 cwd: PathBuf::from("/workspace/puffer"),
                 created_at_ms: 0,
                 updated_at_ms: 0,

@@ -17,6 +17,7 @@ const now = Date.now();
 const sessionA: SessionListItem = {
   id: "session-a",
   displayName: "Claude parity sweep",
+  generatedTitle: null,
   title: "Claude parity sweep",
   cwd: "/home/c/puffer",
   folderPath: "/home/c/puffer",
@@ -32,6 +33,7 @@ const sessionA: SessionListItem = {
 const sessionB: SessionListItem = {
   id: "session-b",
   displayName: "Desktop shell",
+  generatedTitle: null,
   title: "Desktop shell",
   cwd: "/home/c/puffer/.worktree/tauri-desktop-ui",
   folderPath: "/home/c/puffer",
@@ -47,6 +49,7 @@ const sessionB: SessionListItem = {
 const sessionC: SessionListItem = {
   id: "session-c",
   displayName: "Python LSP validation",
+  generatedTitle: null,
   title: "Python LSP validation",
   cwd: "/home/c/sample-python",
   folderPath: "/home/c/sample-python",

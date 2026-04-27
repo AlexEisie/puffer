@@ -9,6 +9,7 @@ use serde_json::Value;
 
 const OPENAI_CODEX_ORIGINATOR: &str = "codex_cli_rs";
 const OPENAI_CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+const OPENAI_CODEX_COMPAT_VERSION: &str = "0.125.0";
 
 /// Performs runtime provider model-discovery requests.
 #[derive(Debug, Clone)]
@@ -125,7 +126,7 @@ fn discovery_url(
                 for (key, value) in &provider.query_params {
                     pairs.append_pair(key, value);
                 }
-                pairs.append_pair("client_version", env!("CARGO_PKG_VERSION"));
+                pairs.append_pair("client_version", OPENAI_CODEX_COMPAT_VERSION);
             }
             parsed.to_string()
         }
@@ -156,9 +157,9 @@ fn apply_discovery_headers(
         request = request.header("originator", OPENAI_CODEX_ORIGINATOR);
         request = request.header(
             reqwest::header::USER_AGENT,
-            format!("{OPENAI_CODEX_ORIGINATOR}/{}", env!("CARGO_PKG_VERSION")),
+            format!("{OPENAI_CODEX_ORIGINATOR}/{OPENAI_CODEX_COMPAT_VERSION}"),
         );
-        request = request.header("version", env!("CARGO_PKG_VERSION"));
+        request = request.header("version", OPENAI_CODEX_COMPAT_VERSION);
     }
     request
 }
@@ -604,10 +605,12 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "gpt-5.3-codex");
         let request = server.join().expect("request");
-        assert!(request.contains("GET /api/codex/models?client_version="));
+        assert!(request.contains("GET /api/codex/models?client_version=0.125.0"));
         assert!(request.contains("authorization: Bearer token-123"));
         assert!(request.contains("chatgpt-account-id: acct-123"));
         assert!(request.contains("originator: codex_cli_rs"));
+        assert!(request.contains("user-agent: codex_cli_rs/0.125.0"));
+        assert!(request.contains("version: 0.125.0"));
     }
 
     #[test]

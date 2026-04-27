@@ -38,6 +38,7 @@ impl SessionStore {
         let metadata = SessionMetadata {
             id: Uuid::new_v4(),
             display_name: None,
+            generated_title: None,
             cwd,
             created_at_ms: now,
             updated_at_ms: now,
@@ -146,6 +147,17 @@ impl SessionStore {
         })
     }
 
+    /// Sets or clears a generated title without appending a rename event.
+    pub fn set_generated_title(
+        &self,
+        session_id: Uuid,
+        generated_title: Option<String>,
+    ) -> Result<()> {
+        self.update_metadata(session_id, |metadata| {
+            metadata.generated_title = generated_title;
+        })
+    }
+
     /// Sets or clears a free-form note on a session.
     pub fn set_note(&self, session_id: Uuid, note: Option<String>) -> Result<()> {
         self.update_metadata(session_id, |metadata| {
@@ -204,6 +216,7 @@ impl SessionStore {
             sessions.push(SessionSummary {
                 id: file.metadata.id,
                 display_name: file.metadata.display_name.clone(),
+                generated_title: file.metadata.generated_title.clone(),
                 cwd: file.metadata.cwd.clone(),
                 created_at_ms: file.metadata.created_at_ms,
                 updated_at_ms: file.metadata.updated_at_ms,
@@ -218,7 +231,7 @@ impl SessionStore {
         Ok(sessions)
     }
 
-    /// Finds the most recent session matching a UUID prefix or display-name substring.
+    /// Finds the most recent session matching a UUID prefix, name, or generated-title substring.
     pub fn find_session(&self, query: &str) -> Result<Option<SessionSummary>> {
         let normalized = query.trim().to_lowercase();
         if normalized.is_empty() {
@@ -244,8 +257,11 @@ impl SessionStore {
             session
                 .display_name
                 .as_deref()
-                .map(|name| name.to_lowercase().contains(&normalized))
-                .unwrap_or(false)
+                .is_some_and(|name| name.to_lowercase().contains(&normalized))
+                || session
+                    .generated_title
+                    .as_deref()
+                    .is_some_and(|title| title.to_lowercase().contains(&normalized))
         }))
     }
 
@@ -260,6 +276,11 @@ impl SessionStore {
                 .display_name
                 .as_ref()
                 .map(|name| format!("Fork of {name}")),
+            generated_title: source
+                .metadata
+                .generated_title
+                .as_ref()
+                .map(|title| format!("Fork of {title}")),
             cwd,
             created_at_ms: now,
             updated_at_ms: now,
@@ -486,7 +507,42 @@ mod tests {
     }
 
     #[test]
-    fn find_session_matches_uuid_prefix_and_name() {
+    fn generated_title_can_be_set_without_rename_event() {
+        let tempdir = tempdir().unwrap();
+        let paths = test_paths(tempdir.path());
+        fs::create_dir_all(&paths.workspace_config_dir).unwrap();
+        let store = SessionStore::from_paths(&paths).unwrap();
+
+        let session = store.create_session(tempdir.path().join("src")).unwrap();
+        store
+            .set_generated_title(session.id, Some("Fix browser title".to_string()))
+            .unwrap();
+
+        let loaded = store.load_session(session.id).unwrap();
+        assert_eq!(
+            loaded.metadata.generated_title.as_deref(),
+            Some("Fix browser title")
+        );
+        assert!(loaded.events.is_empty());
+
+        let summary = store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.id == session.id)
+            .unwrap();
+        assert_eq!(
+            summary.generated_title.as_deref(),
+            Some("Fix browser title")
+        );
+
+        store.set_generated_title(session.id, None).unwrap();
+        let cleared = store.load_session(session.id).unwrap();
+        assert!(cleared.metadata.generated_title.is_none());
+    }
+
+    #[test]
+    fn find_session_matches_uuid_prefix_name_and_generated_title() {
         let tempdir = tempdir().unwrap();
         let paths = test_paths(tempdir.path());
         fs::create_dir_all(&paths.workspace_config_dir).unwrap();
@@ -503,6 +559,16 @@ mod tests {
 
         let by_name = store.find_session("review").unwrap().unwrap();
         assert_eq!(by_name.id, session.id);
+
+        let generated = store
+            .create_session(tempdir.path().join("generated"))
+            .unwrap();
+        store
+            .set_generated_title(generated.id, Some("Repair daemon title".to_string()))
+            .unwrap();
+
+        let by_title = store.find_session("daemon").unwrap().unwrap();
+        assert_eq!(by_title.id, generated.id);
     }
 
     #[test]

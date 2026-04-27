@@ -7,6 +7,7 @@ mod cli_args;
 mod command_surface;
 mod connectors;
 mod daemon;
+mod daemon_browser;
 mod daemon_files;
 mod daemon_fs_watch;
 mod daemon_lsp;

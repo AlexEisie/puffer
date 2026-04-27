@@ -1,0 +1,78 @@
+id: Browser
+name: Browser
+aliases:
+  - browser
+description: |-
+  Control the Puffer Browser tab's managed Chrome sessions. Use this for
+  opening tabs, listing tabs, navigating pages, taking DOM snapshots, and
+  interacting with fresh element refs from the latest snapshot. The `open`
+  action creates or reuses a tab and navigates to `url` when one is provided;
+  do not follow `open` with a duplicate `navigate` to the same URL.
+handler: runtime:browser
+approval_policy: auto
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - list
+        - open
+        - focus
+        - close
+        - navigate
+        - reload
+        - back
+        - forward
+        - snapshot
+        - click
+        - type
+        - fill
+        - press
+        - evaluate
+      description: Browser action to perform. `open` with `url` is already a navigation.
+    sessionId:
+      type: string
+      description: Puffer session id. Defaults to the current agent session.
+    tabId:
+      type: string
+      description: Stable browser tab id such as t1 or t2.
+    label:
+      type: string
+      description: Optional stable label for a newly opened tab.
+    url:
+      type: string
+      description: URL for open or navigate actions. Prefer one `open` call when creating a tab at a URL.
+    ref:
+      type: string
+      description: Fresh element ref from the latest snapshot, such as @e1.
+    text:
+      type: string
+      description: Text for type or fill actions.
+    key:
+      type: string
+      description: Keyboard key for press actions, such as Enter or Escape.
+    script:
+      type: string
+      description: JavaScript expression for evaluate actions.
+    width:
+      type: integer
+      description: Optional viewport width for launching a tab.
+    height:
+      type: integer
+      description: Optional viewport height for launching a tab.
+    activate:
+      type: boolean
+      description: Whether a newly opened tab should become active.
+  required:
+    - action
+  additionalProperties: false
+metadata:
+  may_spawn_processes: true
+  may_read_files: false
+  may_write_files: false
+display:
+  group: browser
+  title: Browser
+  show_in_status: true

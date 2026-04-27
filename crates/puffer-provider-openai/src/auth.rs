@@ -6,7 +6,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::codex::{default_headers, default_originator};
+use crate::codex::{default_headers, default_originator, OPENAI_CODEX_COMPAT_VERSION};
 
 /// The registered OpenAI OAuth client id used for Codex-style CLI flows.
 pub const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -203,7 +203,7 @@ pub(crate) fn refresh_oauth_token(refresh_token: &str) -> Result<OpenAIOAuthCred
 fn codex_oauth_client() -> Result<Client> {
     Client::builder()
         .default_headers(default_headers(
-            env!("CARGO_PKG_VERSION"),
+            OPENAI_CODEX_COMPAT_VERSION,
             &default_originator(),
         ))
         .build()

@@ -7,18 +7,32 @@
     fsWatch,
     isDaemonReachable,
     listDir,
+    loadFileTabs,
     lspInspect,
     readFile,
+    saveFileTabs,
     writeFile,
     type DirEntry,
+    type FileTabsState,
     type FsChangedEvent,
     type LspInspectResult,
     type ReadFileResult
   } from "../../api/desktop";
   import { ensureLocalDaemonClient } from "../../api/daemonClient";
 
-  type Props = { cwd: string };
-  let { cwd }: Props = $props();
+  type Props = { cwd: string; sessionId?: string };
+  let { cwd, sessionId = "preview" }: Props = $props();
+
+  type OpenFileTab = {
+    path: string;
+    name: string;
+    size: number;
+    pinned: boolean;
+  };
+
+  type OpenFileOptions = {
+    pinned?: boolean;
+  };
 
   // Directory cache: absolute path → its (already-loaded) entries. Keeps
   // the tree interactions snappy across expand/collapse cycles and lets
@@ -29,14 +43,16 @@
   let loading = $state<Set<string>>(new Set());
   let errors = $state<Map<string, string>>(new Map());
 
-  // Active right-pane state. `activeLoading` flips during a readFile RPC
-  // so we don't flash the previous file while the new one loads.
+  // Active right-pane state. Open tabs mirror VS Code's preview behavior:
+  // an unpinned preview tab is replaceable until edited, saved, or pinned.
+  let openTabs = $state<OpenFileTab[]>([]);
+  let fileCache = $state<Map<string, ReadFileResult>>(new Map());
+  let draftCache = $state<Map<string, string>>(new Map());
   let activePath = $state<string | null>(null);
   let activeSize = $state<number>(0);
   let activeFile = $state<ReadFileResult | null>(null);
   let activeLoading = $state(false);
   let activeError = $state<string | null>(null);
-  let editing = $state(false);
   let draftContent = $state("");
   let saving = $state(false);
   let saveError = $state<string | null>(null);
@@ -47,6 +63,8 @@
   let lspAnchor = $state<{ line: number; character: number } | null>(null);
   let editorGutterEl = $state<HTMLDivElement | null>(null);
   let editorHighlightEl = $state<HTMLPreElement | null>(null);
+  let fileTabsReady = $state(false);
+  let fileTabsSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Root is derived from cwd — switching sessions resets everything.
   let root = $derived(cwd);
@@ -61,23 +79,35 @@
     // this effect — otherwise setting `loading` / `cache` from
     // loadDir's synchronous prelude loops back into the effect.
     const next = root;
+    const nextSessionId = sessionId;
     if (!next || previewMode) return;
     untrack(() => {
+      fileTabsReady = false;
       cache = new Map();
       expanded = new Set([next]);
       loading = new Set();
       errors = new Map();
+      openTabs = [];
+      fileCache = new Map();
+      draftCache = new Map();
       activePath = null;
       activeFile = null;
       activeError = null;
       activeSize = 0;
-      editing = false;
       draftContent = "";
       saving = false;
       saveError = null;
       clearLspState();
       void loadDir(next);
+      void restoreFileTabs(next, nextSessionId);
     });
+  });
+
+  $effect(() => {
+    openTabs;
+    activePath;
+    if (!fileTabsReady || previewMode || sessionId === "preview") return;
+    scheduleFileTabsSave();
   });
 
   // Filesystem-watcher lifecycle. When `cwd` is set, ask the daemon to watch
@@ -152,6 +182,7 @@
 
   onDestroy(() => {
     destroyed = true;
+    if (fileTabsSaveTimer) clearTimeout(fileTabsSaveTimer);
     void teardownWatch();
   });
 
@@ -241,13 +272,11 @@
   async function reloadActiveFile() {
     const target = activePath;
     if (!target) return;
-    if (editing) return;
+    if (isTabDirty(target)) return;
     try {
       const result = await readFile(target);
       if (activePath === target) {
-        activeFile = result;
-        activeSize = result.size;
-        activeError = null;
+        cacheFileResult(result, true);
       }
     } catch (err) {
       if (activePath === target) {
@@ -256,11 +285,127 @@
     }
   }
 
+  async function restoreFileTabs(expectedRoot: string, expectedSessionId: string) {
+    if (!expectedSessionId || expectedSessionId === "preview") {
+      fileTabsReady = true;
+      return;
+    }
+    try {
+      const state = await loadFileTabs(expectedSessionId);
+      if (destroyed || root !== expectedRoot || sessionId !== expectedSessionId) return;
+      const restoredTabs = state.tabs.map((tab) => tabFor(tab.path, 0, tab.pinned));
+      openTabs = restoredTabs;
+      const restoredActive =
+        state.activePath && restoredTabs.some((tab) => tab.path === state.activePath)
+          ? state.activePath
+          : restoredTabs[0]?.path;
+      if (restoredActive) {
+        await activateFile(restoredActive, restoredTabs.find((tab) => tab.path === restoredActive)?.size);
+      }
+    } catch (err) {
+      console.warn("failed to restore Files tabs", err);
+    } finally {
+      if (!destroyed && root === expectedRoot && sessionId === expectedSessionId) {
+        fileTabsReady = true;
+      }
+    }
+  }
+
+  function fileTabsState(): FileTabsState {
+    return {
+      tabs: openTabs.map((tab) => ({
+        path: tab.path,
+        pinned: tab.pinned
+      })),
+      activePath
+    };
+  }
+
+  function scheduleFileTabsSave() {
+    if (fileTabsSaveTimer) clearTimeout(fileTabsSaveTimer);
+    const targetSessionId = sessionId;
+    const snapshot = fileTabsState();
+    fileTabsSaveTimer = setTimeout(() => {
+      fileTabsSaveTimer = null;
+      void persistFileTabs(targetSessionId, snapshot);
+    }, 200);
+  }
+
+  async function persistFileTabs(targetSessionId: string, state: FileTabsState) {
+    if (previewMode || targetSessionId === "preview") return;
+    try {
+      await saveFileTabs(targetSessionId, state);
+    } catch (err) {
+      console.warn("failed to persist Files tabs", err);
+    }
+  }
+
   function parentPath(p: string): string {
     if (!p) return p;
     const idx = p.lastIndexOf("/");
     if (idx <= 0) return "/";
     return p.slice(0, idx);
+  }
+
+  function fileName(path: string): string {
+    return path.split("/").pop() || path;
+  }
+
+  function tabFor(path: string, size: number, pinned: boolean): OpenFileTab {
+    return {
+      path,
+      name: fileName(path),
+      size,
+      pinned
+    };
+  }
+
+  function isTabDirty(path: string): boolean {
+    const file = fileCache.get(path);
+    if (!file || file.encoding !== "utf8") return false;
+    const draft = draftCache.get(path);
+    return draft != null && draft !== file.content;
+  }
+
+  function pinTab(path: string) {
+    const next = openTabs.map((tab) => (tab.path === path ? { ...tab, pinned: true } : tab));
+    openTabs = next;
+  }
+
+  function cacheFileResult(result: ReadFileResult, resetDraft: boolean) {
+    const nextFiles = new Map(fileCache);
+    nextFiles.set(result.path, result);
+    fileCache = nextFiles;
+
+    if (resetDraft || !draftCache.has(result.path)) {
+      const nextDrafts = new Map(draftCache);
+      nextDrafts.set(result.path, result.encoding === "utf8" ? result.content : "");
+      draftCache = nextDrafts;
+    }
+
+    openTabs = openTabs.map((tab) =>
+      tab.path === result.path ? { ...tab, size: result.size } : tab
+    );
+
+    if (activePath === result.path) {
+      activeFile = result;
+      activeSize = result.size;
+      activeError = null;
+      draftContent = draftCache.get(result.path) ?? (result.encoding === "utf8" ? result.content : "");
+    }
+  }
+
+  function rememberDraft(path: string, content: string) {
+    const next = new Map(draftCache);
+    next.set(path, content);
+    draftCache = next;
+  }
+
+  function setDraft(content: string) {
+    draftContent = content;
+    if (!activePath) return;
+    rememberDraft(activePath, content);
+    if (isTabDirty(activePath)) pinTab(activePath);
   }
 
   async function loadDir(path: string) {
@@ -303,20 +448,59 @@
     expanded = next;
   }
 
-  async function openFile(path: string, size: number) {
+  async function openFile(path: string, size: number, options: OpenFileOptions = {}) {
+    const pinned = options.pinned ?? false;
+    const existingIndex = openTabs.findIndex((tab) => tab.path === path);
+    const previewIndex = openTabs.findIndex((tab) => !tab.pinned && !isTabDirty(tab.path));
+    const nextTab = tabFor(path, size, pinned);
+
+    if (existingIndex >= 0) {
+      openTabs = openTabs.map((tab) =>
+        tab.path === path ? { ...tab, pinned: tab.pinned || pinned, size } : tab
+      );
+    } else if (!pinned && previewIndex >= 0) {
+      const replaced = openTabs[previewIndex];
+      const nextTabs = [...openTabs];
+      nextTabs[previewIndex] = nextTab;
+      openTabs = nextTabs;
+      if (replaced) {
+        const nextFiles = new Map(fileCache);
+        nextFiles.delete(replaced.path);
+        fileCache = nextFiles;
+        const nextDrafts = new Map(draftCache);
+        nextDrafts.delete(replaced.path);
+        draftCache = nextDrafts;
+      }
+    } else {
+      openTabs = [...openTabs, nextTab];
+    }
+
+    await activateFile(path, size);
+  }
+
+  async function activateFile(path: string, size?: number) {
     activePath = path;
-    activeSize = size;
-    activeFile = null;
+    activeSize = size ?? openTabs.find((tab) => tab.path === path)?.size ?? 0;
     activeError = null;
-    editing = false;
-    draftContent = "";
     saveError = null;
     clearLspState();
+
+    const cached = fileCache.get(path);
+    if (cached) {
+      activeFile = cached;
+      activeSize = cached.size;
+      draftContent = draftCache.get(path) ?? (cached.encoding === "utf8" ? cached.content : "");
+      activeLoading = false;
+      return;
+    }
+
+    activeFile = null;
+    draftContent = "";
     activeLoading = true;
     try {
       const result = await readFile(path);
       if (activePath === path) {
-        activeFile = result;
+        cacheFileResult(result, false);
       }
     } catch (err) {
       if (activePath === path) {
@@ -324,6 +508,39 @@
       }
     } finally {
       if (activePath === path) activeLoading = false;
+    }
+  }
+
+  async function closeTab(event: Event, path: string) {
+    event.stopPropagation();
+    if (isTabDirty(path) && !window.confirm(`Discard unsaved changes to ${fileName(path)}?`)) {
+      return;
+    }
+
+    const closingIndex = openTabs.findIndex((tab) => tab.path === path);
+    const nextTabs = openTabs.filter((tab) => tab.path !== path);
+    openTabs = nextTabs;
+
+    const nextFiles = new Map(fileCache);
+    nextFiles.delete(path);
+    fileCache = nextFiles;
+    const nextDrafts = new Map(draftCache);
+    nextDrafts.delete(path);
+    draftCache = nextDrafts;
+
+    if (activePath !== path) return;
+    const nextActive = nextTabs[Math.min(closingIndex, nextTabs.length - 1)] ?? nextTabs[nextTabs.length - 1];
+    if (nextActive) {
+      await activateFile(nextActive.path, nextActive.size);
+    } else {
+      activePath = null;
+      activeSize = 0;
+      activeFile = null;
+      activeLoading = false;
+      activeError = null;
+      draftContent = "";
+      saveError = null;
+      clearLspState();
     }
   }
 
@@ -361,35 +578,24 @@
   let canEdit = $derived(
     !!activeFile && activeFile.encoding === "utf8" && !activeFile.truncated && !activeLoading
   );
-  let dirty = $derived(editing && activeFile?.encoding === "utf8" && draftContent !== activeFile.content);
-
-  function startEditing() {
-    if (!canEdit || !activeFile) return;
-    editing = true;
-    draftContent = activeFile.content;
-    saveError = null;
-    clearLspState();
-  }
+  let dirty = $derived(activePath ? isTabDirty(activePath) : false);
 
   function cancelEditing() {
-    editing = false;
     draftContent = activeFile?.encoding === "utf8" ? activeFile.content : "";
+    if (activePath) rememberDraft(activePath, draftContent);
     saveError = null;
   }
 
   async function saveEditing() {
     const target = activePath;
-    if (!target || !editing || saving) return;
+    if (!target || !dirty || saving) return;
     saving = true;
     saveError = null;
     try {
       const result = await writeFile(target, draftContent);
       if (activePath === target) {
-        activeFile = result;
-        activeSize = result.size;
-        activeError = null;
-        editing = false;
-        draftContent = result.encoding === "utf8" ? result.content : "";
+        cacheFileResult(result, true);
+        pinTab(target);
         clearLspState();
       }
       void refreshDir(parentPath(target));
@@ -409,7 +615,7 @@
     }
     if (event.key === "Escape" && !dirty) {
       event.preventDefault();
-      cancelEditing();
+      clearLspState();
     }
   }
 
@@ -508,7 +714,7 @@
   }
 
   function handleEditorCursorInspect(event: MouseEvent | KeyboardEvent) {
-    if (!editing || !activePath || !activeFile || activeFile.encoding !== "utf8") return;
+    if (!activePath || !activeFile || activeFile.encoding !== "utf8") return;
     const target = event.currentTarget as HTMLTextAreaElement;
     const { line, character } = lineCharacterFromOffset(draftContent, target.selectionStart);
     const sourceLine = draftLines[line] ?? "";
@@ -713,6 +919,11 @@
               row.kind === "directory" || (row.kind === "symlink" && !errors.has(row.path))
                 ? toggleDir(row.path)
                 : openFile(row.path, row.size)}
+            ondblclick={(event) => {
+              if (row.kind !== "file") return;
+              event.preventDefault();
+              void openFile(row.path, row.size, { pinned: true });
+            }}
             title={row.path}
           >
             {#if row.kind === "directory"}
@@ -767,6 +978,42 @@
         <div class="sub">Pick a file in the tree on the left to preview it here.</div>
       </div>
     {:else}
+      <div class="file-tabs" role="tablist" aria-label="Open files">
+        {#each openTabs as tab (tab.path)}
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activePath === tab.path}
+            class="file-tab"
+            class:active={activePath === tab.path}
+            class:preview={!tab.pinned}
+            class:dirty={isTabDirty(tab.path)}
+            title={tab.path}
+            onclick={() => void activateFile(tab.path, tab.size)}
+            ondblclick={() => pinTab(tab.path)}
+          >
+            <Icon name="file" size={11} color="var(--muted-foreground)" />
+            <span class="tab-title">{tab.name}</span>
+            {#if isTabDirty(tab.path)}
+              <span class="dirty-dot" aria-label="Unsaved changes"></span>
+            {/if}
+            <span
+              role="button"
+              tabindex="0"
+              class="tab-close"
+              aria-label="Close {tab.name}"
+              onclick={(event) => void closeTab(event, tab.path)}
+              onkeydown={(event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                void closeTab(event, tab.path);
+              }}
+            >
+              <Icon name="x" size={11} />
+            </span>
+          </button>
+        {/each}
+      </div>
       <header class="viewer-head">
         <Icon name="file" size={12} color="var(--muted-foreground)" />
         <span class="path mono" title={activePath}>{activePath}</span>
@@ -778,7 +1025,7 @@
           <span class="save-error mono">{saveError}</span>
         {/if}
         <div class="viewer-actions">
-          {#if editing}
+          {#if canEdit && dirty}
             <button
               type="button"
               class="file-action"
@@ -795,16 +1042,6 @@
             >
               {saving ? "Saving..." : "Save"}
             </button>
-          {:else}
-            <button
-              type="button"
-              class="file-action"
-              onclick={startEditing}
-              disabled={!canEdit}
-              title={canEdit ? "Edit file" : "Only complete UTF-8 previews can be edited"}
-            >
-              Edit
-            </button>
           {/if}
         </div>
       </header>
@@ -813,7 +1050,7 @@
           <div class="viewer-msg sub">Loading...</div>
         {:else if activeError}
           <div class="viewer-msg err mono">{activeError}</div>
-        {:else if activeFile && activeFile.encoding === "utf8" && editing}
+        {:else if canEdit}
           <div class="editor-shell">
             <div class="editor-gutter" bind:this={editorGutterEl} aria-hidden="true">
               {#each draftLineNumbers as lineNumber}
@@ -824,9 +1061,10 @@
               <pre class="editor-highlight" bind:this={editorHighlightEl} aria-hidden="true">{#each draftLines as line}<span class:symbol-line={lineHasSymbol(line, selectedSymbol)}><HighlightedLine text={line || " "} path={activePath} highlight={selectedSymbol} /></span>{/each}</pre>
               <textarea
                 class="editor"
-                bind:value={draftContent}
+                value={draftContent}
                 spellcheck="false"
                 wrap="off"
+                oninput={(event) => setDraft((event.currentTarget as HTMLTextAreaElement).value)}
                 onkeydown={handleEditorKeydown}
                 onkeyup={handleEditorKeyup}
                 onmouseup={handleEditorCursorInspect}
@@ -1023,6 +1261,78 @@
     display: flex;
     flex-direction: column;
     background: var(--background);
+  }
+  .file-tabs {
+    flex-shrink: 0;
+    display: flex;
+    min-height: 31px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in oklab, var(--background) 95%, var(--muted));
+  }
+  .file-tab {
+    height: 31px;
+    min-width: 120px;
+    max-width: 220px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 6px 0 10px;
+    border: 0;
+    border-right: 1px solid var(--border);
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    color: var(--muted-foreground);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .file-tab:hover {
+    background: color-mix(in oklab, var(--accent) 55%, transparent);
+    color: var(--foreground);
+  }
+  .file-tab.active {
+    background: var(--background);
+    border-bottom-color: var(--puffer-accent, var(--foreground));
+    color: var(--foreground);
+  }
+  .file-tab.preview .tab-title {
+    font-style: italic;
+  }
+  .file-tab.dirty .tab-title {
+    color: var(--foreground);
+  }
+  .file-tab .tab-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+  }
+  .dirty-dot {
+    width: 6px;
+    height: 6px;
+    flex-shrink: 0;
+    border-radius: 999px;
+    background: var(--muted-foreground);
+  }
+  .tab-close {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    color: var(--muted-foreground);
+  }
+  .tab-close:hover,
+  .tab-close:focus-visible {
+    background: var(--muted);
+    color: var(--foreground);
+    outline: none;
   }
   .viewer-head {
     flex-shrink: 0;

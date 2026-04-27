@@ -18,20 +18,33 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize};
+use serde::Serialize;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::daemon::ServerEnvelope;
 
+const PTY_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const PTY_REPLAY_MAX_BYTES: usize = 1024 * 1024;
+
 /// Owns a single live PTY. Dropping this kills the child and joins the
 /// reader thread implicitly via the Child/master drops.
 pub struct PtyHandle {
+    session_id: String,
+    title: String,
+    cwd: String,
+    cols: u16,
+    rows: u16,
+    created_at_ms: i64,
+    last_active: Arc<Mutex<Instant>>,
+    replay: Arc<Mutex<PtyReplay>>,
     /// Master side — we write user keystrokes here. The reader thread owns
     /// its own `try_clone_reader()` so we don't need to share the reader.
     master: Box<dyn MasterPty + Send>,
@@ -49,18 +62,73 @@ pub struct PtyHandle {
     reader: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PtyTabInfo {
+    pub(crate) pty_id: String,
+    pub(crate) session_id: String,
+    pub(crate) title: String,
+    pub(crate) cwd: String,
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
+    pub(crate) created_at_ms: i64,
+    pub(crate) active: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PtySessionInfo {
+    pub(crate) tabs: Vec<PtyTabInfo>,
+    pub(crate) initialized: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PtyReplayChunk {
+    pub(crate) seq: u64,
+    pub(crate) data: String,
+    #[serde(skip)]
+    bytes: usize,
+}
+
+#[derive(Default)]
+struct PtyReplay {
+    chunks: VecDeque<PtyReplayChunk>,
+    bytes: usize,
+}
+
+struct PtyRegistryInner {
+    handles: HashMap<String, PtyHandle>,
+    active_by_session: HashMap<String, String>,
+    known_sessions: HashSet<String>,
+}
+
 /// Thread-safe map of pty_id → live handle. The map is stored inside
 /// `DaemonState` as `Arc<PtyRegistry>` so the RPC handlers (sync) and the
 /// reader thread (also sync, via broadcast::Sender) share one registry.
 pub struct PtyRegistry {
-    inner: Mutex<HashMap<String, PtyHandle>>,
+    inner: Mutex<PtyRegistryInner>,
 }
 
 impl PtyRegistry {
+    /// Creates an empty PTY registry.
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(HashMap::new()),
+            inner: Mutex::new(PtyRegistryInner {
+                handles: HashMap::new(),
+                active_by_session: HashMap::new(),
+                known_sessions: HashSet::new(),
+            }),
         }
+    }
+
+    /// Starts the idle pruner for this registry.
+    pub fn spawn_idle_pruner(self: &Arc<Self>) {
+        let registry = Arc::clone(self);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(60));
+            registry.close_idle(PTY_IDLE_TIMEOUT);
+        });
     }
 
     /// Spawn a shell in `cwd` and register the resulting PTY. Returns the
@@ -73,9 +141,11 @@ impl PtyRegistry {
     pub fn open(
         self: &Arc<Self>,
         events: broadcast::Sender<ServerEnvelope>,
+        session_id: String,
         cwd: PathBuf,
         cols: u16,
         rows: u16,
+        title: Option<String>,
     ) -> Result<String> {
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system
@@ -108,6 +178,13 @@ impl PtyRegistry {
         drop(pair.slave);
 
         let pty_id = Uuid::new_v4().to_string();
+        let title = title
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "Terminal".to_string());
+        let cwd_string = cwd.display().to_string();
+        let replay = Arc::new(Mutex::new(PtyReplay::default()));
+        let next_seq = Arc::new(Mutex::new(0u64));
+        let last_active = Arc::new(Mutex::new(Instant::now()));
 
         let mut reader = pair.master.try_clone_reader().context("clone pty reader")?;
         let writer = pair.master.take_writer().context("take pty writer")?;
@@ -120,6 +197,8 @@ impl PtyRegistry {
         let events_for_reader = events.clone();
         let id_for_reader = pty_id.clone();
         let registry_for_reader = Arc::clone(self);
+        let replay_for_reader = Arc::clone(&replay);
+        let seq_for_reader = Arc::clone(&next_seq);
 
         let reader_handle = std::thread::spawn(move || {
             let data_channel = format!("pty:{id_for_reader}:data");
@@ -130,12 +209,21 @@ impl PtyRegistry {
                     Ok(0) => break, // EOF — child closed its end
                     Ok(n) => {
                         let encoded = BASE64.encode(&buf[..n]);
+                        let seq = {
+                            let mut guard = seq_for_reader.lock().unwrap();
+                            *guard += 1;
+                            *guard
+                        };
+                        replay_for_reader
+                            .lock()
+                            .unwrap()
+                            .push(seq, encoded.clone(), n);
                         // Best-effort: if no one's listening, drop the
                         // frame. Keeps the reader thread from deadlocking
                         // on a disconnected UI.
                         let _ = events_for_reader.send(ServerEnvelope::Event {
                             event: data_channel.clone(),
-                            payload: json!({ "data": encoded }),
+                            payload: json!({ "data": encoded, "seq": seq }),
                         });
                     }
                     Err(e) => {
@@ -160,37 +248,146 @@ impl PtyRegistry {
             // Drop our handle from the registry so memory doesn't grow
             // unbounded across many terminal-tab lifecycles.
             let mut guard = registry_for_reader.inner.lock().unwrap();
-            guard.remove(&id_for_reader);
+            if let Some(handle) = guard.handles.remove(&id_for_reader) {
+                if guard
+                    .active_by_session
+                    .get(&handle.session_id)
+                    .is_some_and(|active| active == &id_for_reader)
+                {
+                    guard.active_by_session.remove(&handle.session_id);
+                }
+            }
         });
 
         let handle = PtyHandle {
+            session_id: session_id.clone(),
+            title,
+            cwd: cwd_string,
+            cols,
+            rows,
+            created_at_ms: now_ms(),
+            last_active,
+            replay,
             master: pair.master,
             writer,
             killer,
             reader: Some(reader_handle),
         };
-        self.inner.lock().unwrap().insert(pty_id.clone(), handle);
+        let mut guard = self.inner.lock().unwrap();
+        guard.known_sessions.insert(session_id.clone());
+        guard.active_by_session.insert(session_id, pty_id.clone());
+        guard.handles.insert(pty_id.clone(), handle);
         Ok(pty_id)
     }
 
+    /// Lists live PTYs for one agent session.
+    pub fn list(&self, session_id: &str) -> PtySessionInfo {
+        let mut guard = self.inner.lock().unwrap();
+        let active_id = guard.active_by_session.get(session_id).cloned();
+        let mut tabs = guard
+            .handles
+            .iter_mut()
+            .filter_map(|(pty_id, handle)| {
+                (handle.session_id == session_id).then(|| {
+                    handle.touch();
+                    handle.info(pty_id, active_id.as_deref() == Some(pty_id))
+                })
+            })
+            .collect::<Vec<_>>();
+        tabs.sort_by_key(|tab| tab.created_at_ms);
+        PtySessionInfo {
+            tabs,
+            initialized: guard.known_sessions.contains(session_id),
+        }
+    }
+
+    /// Marks one live PTY as the active tab for its session.
+    pub fn focus(&self, pty_id: &str) -> Result<()> {
+        let mut guard = self.inner.lock().unwrap();
+        let session_id = {
+            let handle = guard
+                .handles
+                .get_mut(pty_id)
+                .with_context(|| format!("no pty `{pty_id}`"))?;
+            handle.touch();
+            handle.session_id.clone()
+        };
+        guard
+            .active_by_session
+            .insert(session_id, pty_id.to_string());
+        Ok(())
+    }
+
+    /// Returns replay chunks for a live PTY.
+    pub fn replay(&self, pty_id: &str) -> Result<Vec<PtyReplayChunk>> {
+        let guard = self.inner.lock().unwrap();
+        let handle = guard
+            .handles
+            .get(pty_id)
+            .with_context(|| format!("no pty `{pty_id}`"))?;
+        handle.touch();
+        let chunks = handle
+            .replay
+            .lock()
+            .unwrap()
+            .chunks
+            .iter()
+            .cloned()
+            .collect();
+        Ok(chunks)
+    }
+
+    /// Renames a live PTY tab.
+    pub fn rename(&self, pty_id: &str, title: String) -> Result<PtyTabInfo> {
+        let mut guard = self.inner.lock().unwrap();
+        let active_id = guard
+            .handles
+            .get(pty_id)
+            .map(|handle| {
+                guard
+                    .active_by_session
+                    .get(&handle.session_id)
+                    .is_some_and(|active| active == pty_id)
+            })
+            .unwrap_or(false);
+        let handle = guard
+            .handles
+            .get_mut(pty_id)
+            .with_context(|| format!("no pty `{pty_id}`"))?;
+        let trimmed = title.trim();
+        if !trimmed.is_empty() {
+            handle.title = trimmed.to_string();
+        }
+        handle.touch();
+        Ok(handle.info(pty_id, active_id))
+    }
+
+    /// Writes raw base64-encoded bytes to a live PTY.
     pub fn write(&self, pty_id: &str, data_b64: &str) -> Result<()> {
         let bytes = BASE64
             .decode(data_b64.as_bytes())
             .context("decode pty data")?;
         let mut guard = self.inner.lock().unwrap();
         let handle = guard
+            .handles
             .get_mut(pty_id)
             .with_context(|| format!("no pty `{pty_id}`"))?;
+        handle.touch();
         handle.writer.write_all(&bytes).context("write to pty")?;
         handle.writer.flush().ok();
         Ok(())
     }
 
+    /// Resizes a live PTY.
     pub fn resize(&self, pty_id: &str, cols: u16, rows: u16) -> Result<()> {
-        let guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap();
         let handle = guard
-            .get(pty_id)
+            .handles
+            .get_mut(pty_id)
             .with_context(|| format!("no pty `{pty_id}`"))?;
+        handle.touch();
+        handle.cols = cols;
+        handle.rows = rows;
         handle
             .master
             .resize(PtySize {
@@ -203,28 +400,106 @@ impl PtyRegistry {
         Ok(())
     }
 
+    /// Closes a live PTY. Missing ids are treated as already closed.
     pub fn close(&self, pty_id: &str) -> Result<()> {
         let mut handle = {
             let mut guard = self.inner.lock().unwrap();
-            match guard.remove(pty_id) {
-                Some(h) => h,
+            match guard.handles.remove(pty_id) {
+                Some(h) => {
+                    if guard
+                        .active_by_session
+                        .get(&h.session_id)
+                        .is_some_and(|active| active == pty_id)
+                    {
+                        guard.active_by_session.remove(&h.session_id);
+                    }
+                    h
+                }
                 None => return Ok(()), // idempotent
             }
         };
-        // Kill the child first so the reader thread wakes from its blocking
-        // read and exits; then attempt a non-blocking join.
-        let _ = handle.killer.kill();
-        // Drop the master explicitly so the reader sees EOF even on
-        // platforms where kill() is asynchronous.
-        drop(handle.master);
-        if let Some(reader) = handle.reader.take() {
-            // Don't wait forever — the reader might be blocked on something
-            // exotic. If it doesn't join promptly we let the OS reclaim it
-            // when the daemon exits.
-            let _ = reader.join();
-        }
+        close_handle(&mut handle);
         Ok(())
     }
+
+    fn close_idle(&self, timeout: Duration) {
+        let mut stale = {
+            let mut guard = self.inner.lock().unwrap();
+            let stale_ids = guard
+                .handles
+                .iter()
+                .filter_map(|(pty_id, handle)| {
+                    (handle.idle_for() >= timeout).then(|| pty_id.clone())
+                })
+                .collect::<Vec<_>>();
+            let mut removed = Vec::new();
+            for pty_id in stale_ids {
+                if let Some(handle) = guard.handles.remove(&pty_id) {
+                    if guard
+                        .active_by_session
+                        .get(&handle.session_id)
+                        .is_some_and(|active| active == &pty_id)
+                    {
+                        guard.active_by_session.remove(&handle.session_id);
+                    }
+                    removed.push(handle);
+                }
+            }
+            removed
+        };
+        for handle in &mut stale {
+            close_handle(handle);
+        }
+    }
+}
+
+impl PtyHandle {
+    fn touch(&self) {
+        *self.last_active.lock().unwrap() = Instant::now();
+    }
+
+    fn idle_for(&self) -> Duration {
+        self.last_active.lock().unwrap().elapsed()
+    }
+
+    fn info(&self, pty_id: &str, active: bool) -> PtyTabInfo {
+        PtyTabInfo {
+            pty_id: pty_id.to_string(),
+            session_id: self.session_id.clone(),
+            title: self.title.clone(),
+            cwd: self.cwd.clone(),
+            cols: self.cols,
+            rows: self.rows,
+            created_at_ms: self.created_at_ms,
+            active,
+        }
+    }
+}
+
+impl PtyReplay {
+    fn push(&mut self, seq: u64, data: String, bytes: usize) {
+        self.bytes += bytes;
+        self.chunks.push_back(PtyReplayChunk { seq, data, bytes });
+        while self.bytes > PTY_REPLAY_MAX_BYTES {
+            if let Some(chunk) = self.chunks.pop_front() {
+                self.bytes = self.bytes.saturating_sub(chunk.bytes);
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+fn close_handle(handle: &mut PtyHandle) {
+    let _ = handle.killer.kill();
+    let _ = handle.reader.take();
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Pick the shell to spawn. Prefer the user's $SHELL, then bash, then sh.

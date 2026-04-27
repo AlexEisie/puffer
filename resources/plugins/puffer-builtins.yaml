@@ -10,6 +10,7 @@ commands:
     description: Manage IDE integrations
 skills:
   - reviewer
+  - browser
 mcp_servers:
   - id: filesystem
     display_name: Filesystem

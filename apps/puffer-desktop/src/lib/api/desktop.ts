@@ -45,6 +45,7 @@ type BackendDesktopPinState = {
 type BackendSessionListItem = {
   sessionId: string;
   displayName: string | null;
+  generatedTitle?: string | null;
   title: string;
   cwd: string;
   folderPath: string;
@@ -345,6 +346,7 @@ function normalizeSessionListItem(value: BackendSessionListItem): SessionListIte
   return {
     id: value.sessionId,
     displayName: value.displayName,
+    generatedTitle: value.generatedTitle ?? null,
     title: value.title,
     cwd: value.cwd,
     folderPath: value.folderPath,
@@ -962,6 +964,16 @@ export async function loadSessionDetailFromDaemon(
   }
 }
 
+/** Sets or clears the user-edited title for one session. */
+export async function renameSession(sessionId: string, title: string): Promise<SessionDetail> {
+  const client = await ensureLocalDaemonClient();
+  const raw = await client.request<BackendSessionDetail>("rename_session", {
+    sessionId,
+    title
+  });
+  return normalizeSessionDetail(raw);
+}
+
 /** Load registered workflows and recent runs from the daemon. */
 export async function loadWorkflowSnapshot(): Promise<WorkflowSnapshot> {
   const client = await ensureLocalDaemonClient();
@@ -1106,6 +1118,16 @@ export type ReadFileResult = {
   truncated: boolean;
 };
 
+export type FileTabStateItem = {
+  path: string;
+  pinned: boolean;
+};
+
+export type FileTabsState = {
+  tabs: FileTabStateItem[];
+  activePath?: string | null;
+};
+
 export type LspOperationResult = {
   operation: string;
   filePath: string;
@@ -1147,6 +1169,21 @@ export async function readFile(path: string, maxBytes?: number): Promise<ReadFil
 export async function writeFile(path: string, content: string): Promise<ReadFileResult> {
   const client = await ensureLocalDaemonClient();
   return client.request<ReadFileResult>("write_file", { path, content });
+}
+
+/** Load daemon-persisted Files tab state for one agent session. */
+export async function loadFileTabs(sessionId: string): Promise<FileTabsState> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<FileTabsState>("load_file_tabs", { sessionId });
+}
+
+/** Persist Files tab state for one agent session in the daemon. */
+export async function saveFileTabs(
+  sessionId: string,
+  state: FileTabsState
+): Promise<FileTabsState> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<FileTabsState>("save_file_tabs", { sessionId, ...state });
 }
 
 /** Ask the configured language server for symbol context at a file position.
@@ -1196,16 +1233,64 @@ export type FsChangedEvent = {
 // shell output. One pty_id per open tab.
 // ---------------------------------------------------------------------------
 
+export type PtyTabInfo = {
+  ptyId: string;
+  sessionId: string;
+  title: string;
+  cwd: string;
+  cols: number;
+  rows: number;
+  createdAtMs: number;
+  active: boolean;
+};
+
+export type PtySessionInfo = {
+  tabs: PtyTabInfo[];
+  initialized: boolean;
+};
+
+export type PtyReplayChunk = {
+  seq: number;
+  data: string;
+};
+
+/** List live PTYs owned by one agent session. */
+export async function listPtys(sessionId: string): Promise<PtySessionInfo> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<PtySessionInfo>("pty_list", { sessionId });
+}
+
 /** Open a new PTY in `cwd` (defaults to the daemon's cwd). Returns the
  *  opaque pty_id to use on subsequent write/resize/close calls and to
  *  subscribe to `pty:<id>:data` + `pty:<id>:exit` events. */
 export async function openPty(params: {
+  sessionId?: string;
   cwd?: string;
   cols?: number;
   rows?: number;
+  title?: string;
 }): Promise<{ ptyId: string }> {
   const client = await ensureLocalDaemonClient();
   return client.request<{ ptyId: string }>("pty_open", params);
+}
+
+/** Mark a PTY as the active terminal for its agent session. */
+export async function focusPty(ptyId: string): Promise<void> {
+  const client = await ensureLocalDaemonClient();
+  await client.request("pty_focus", { ptyId });
+}
+
+/** Replay buffered PTY output for reconnecting terminal panes. */
+export async function replayPty(ptyId: string): Promise<PtyReplayChunk[]> {
+  const client = await ensureLocalDaemonClient();
+  const result = await client.request<{ chunks: PtyReplayChunk[] }>("pty_replay", { ptyId });
+  return result.chunks;
+}
+
+/** Rename a live PTY tab. */
+export async function renamePty(ptyId: string, title: string): Promise<PtyTabInfo> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<PtyTabInfo>("pty_rename", { ptyId, title });
 }
 
 /** Send keystrokes to the PTY. `dataB64` is the base64-encoding of the
@@ -1230,6 +1315,246 @@ export async function resizePty(
 export async function closePty(ptyId: string): Promise<void> {
   const client = await ensureLocalDaemonClient();
   await client.request("pty_close", { ptyId });
+}
+
+// ---------------------------------------------------------------------------
+// Browser — Chrome-backed Browser tab. The daemon owns a managed Chrome
+// process and streams screencast frames back to the renderer.
+// ---------------------------------------------------------------------------
+
+export type BrowserState = {
+  url: string;
+  title: string;
+  loading: boolean;
+  width?: number;
+  height?: number;
+  popOut?: boolean;
+  error?: string;
+};
+
+export type BrowserFrameEvent = {
+  frameId: string;
+  mimeType: string;
+  encoding: "base64";
+  data: string;
+  width: number;
+  height: number;
+};
+
+export type BrowserMouseInput = {
+  kind: "mouse";
+  eventType: "mousePressed" | "mouseReleased" | "mouseMoved";
+  x: number;
+  y: number;
+  button?: "left" | "middle" | "right" | "none";
+  buttons?: number;
+  clickCount?: number;
+};
+
+export type BrowserWheelInput = {
+  kind: "wheel";
+  x: number;
+  y: number;
+  deltaX: number;
+  deltaY: number;
+};
+
+export type BrowserKeyInput = {
+  kind: "key";
+  eventType: "keyDown" | "keyUp" | "rawKeyDown" | "char";
+  key: string;
+  code: string;
+  text?: string;
+  modifiers?: number;
+};
+
+export type BrowserTextInput = {
+  kind: "text";
+  text: string;
+};
+
+export type BrowserInputEvent =
+  | BrowserMouseInput
+  | BrowserWheelInput
+  | BrowserKeyInput
+  | BrowserTextInput;
+
+export type BrowserCopySelectionResult = {
+  text: string;
+  copiedFrom: string;
+};
+
+export type BrowserCursorResult = {
+  cursor: string;
+};
+
+export type BrowserDevtoolsEvent =
+  | {
+      kind: "console";
+      level: string;
+      text: string;
+      url?: string;
+      timestamp?: number;
+    }
+  | {
+      kind: "network";
+      phase: "request" | "response" | "failed";
+      requestId: string;
+      method?: string;
+      status?: number;
+      url?: string;
+      mimeType?: string;
+      errorText?: string;
+    };
+
+export type BrowserTabInfo = {
+  tabId: string;
+  label: string;
+  url: string;
+  title: string;
+  loading: boolean;
+  connected: boolean;
+  active: boolean;
+  backendSessionId: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+export type BrowserTabsState = {
+  activeTabId?: string | null;
+  tabs: BrowserTabInfo[];
+};
+
+export type BrowserRecordedFrame = {
+  frameId: string;
+  backendSessionId: string;
+  rootSessionId: string;
+  tabId: string;
+  url: string;
+  title: string;
+  mimeType: string;
+  encoding: string;
+  data: string;
+  width: number;
+  height: number;
+  recordedAtMs: number;
+};
+
+export type BrowserRecordingSnapshot = {
+  frames: BrowserRecordedFrame[];
+};
+
+/** Open or reuse the Chrome-backed browser session for a Puffer session. */
+export async function browserOpen(params: {
+  sessionId: string;
+  url?: string;
+  width: number;
+  height: number;
+}): Promise<BrowserState> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<BrowserState>("browser_open", params);
+}
+
+/** Navigate the Chrome-backed browser session. */
+export async function browserNavigate(sessionId: string, url: string): Promise<void> {
+  const client = await ensureLocalDaemonClient();
+  await client.request("browser_navigate", { sessionId, url });
+}
+
+/** Reload the Chrome-backed browser session. */
+export async function browserReload(sessionId: string): Promise<void> {
+  const client = await ensureLocalDaemonClient();
+  await client.request("browser_reload", { sessionId });
+}
+
+/** Move the Chrome-backed browser session backward or forward in history. */
+export async function browserHistory(
+  sessionId: string,
+  direction: "back" | "forward"
+): Promise<void> {
+  const client = await ensureLocalDaemonClient();
+  await client.request("browser_history", { sessionId, direction });
+}
+
+/** Resize the Chrome viewport backing the Browser tab. */
+export async function browserResize(
+  sessionId: string,
+  width: number,
+  height: number
+): Promise<void> {
+  const client = await ensureLocalDaemonClient();
+  await client.request("browser_resize", { sessionId, width, height });
+}
+
+/** Forward one user input event from the Browser tab to Chrome. */
+export async function browserInput(
+  sessionId: string,
+  event: BrowserInputEvent
+): Promise<void> {
+  const client = await ensureLocalDaemonClient();
+  await client.request("browser_input", { sessionId, event });
+}
+
+/** Copy the current Chrome-owned webpage selection as plain text. */
+export async function browserCopySelection(
+  sessionId: string
+): Promise<BrowserCopySelectionResult> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<BrowserCopySelectionResult>("browser_copy_selection", { sessionId });
+}
+
+/** Read the CSS cursor Chrome reports at a browser viewport coordinate. */
+export async function browserCursor(
+  sessionId: string,
+  x: number,
+  y: number
+): Promise<BrowserCursorResult> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<BrowserCursorResult>("browser_cursor", { sessionId, x, y });
+}
+
+/** Close the Chrome-backed browser session. */
+export async function browserClose(sessionId: string): Promise<void> {
+  const client = await ensureLocalDaemonClient();
+  await client.request("browser_close", { sessionId });
+}
+
+/** List the daemon-owned Browser tabs for an agent session. */
+export async function browserTabsList(sessionId: string): Promise<BrowserTabsState> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<BrowserTabsState>("browser_agent", { action: "list", sessionId });
+}
+
+/** Open or reuse a daemon-owned Browser tab for an agent session. */
+export async function browserTabOpen(params: {
+  sessionId: string;
+  tabId?: string;
+  label?: string;
+  url?: string;
+  width?: number;
+  height?: number;
+  activate?: boolean;
+}): Promise<BrowserTabInfo> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<BrowserTabInfo>("browser_agent", { action: "open", ...params });
+}
+
+/** Focus a daemon-owned Browser tab for an agent session. */
+export async function browserTabFocus(sessionId: string, tabId: string): Promise<BrowserTabInfo> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<BrowserTabInfo>("browser_agent", { action: "focus", sessionId, tabId });
+}
+
+/** Close a daemon-owned Browser tab for an agent session. */
+export async function browserTabClose(sessionId: string, tabId: string): Promise<BrowserTabsState> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<BrowserTabsState>("browser_agent", { action: "close", sessionId, tabId });
+}
+
+/** Load the deduplicated browser screen recording for one agent session. */
+export async function browserRecording(sessionId: string): Promise<BrowserRecordingSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<BrowserRecordingSnapshot>("browser_recording", { sessionId });
 }
 
 // ---------------------------------------------------------------------------

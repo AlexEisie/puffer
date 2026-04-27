@@ -72,9 +72,13 @@ use crate::auth_credentials::{
 use crate::auth_provider::{
     oauth_family_for_provider, oauth_login_bundle_for_provider, OauthFamily,
 };
+use crate::daemon_browser::BrowserRegistry;
 use crate::daemon_fs_watch::FsWatchRegistry;
 use crate::daemon_pty::PtyRegistry;
-use crate::daemon_ui_state::{load_pin_state, set_pin_state, DesktopPinState};
+use crate::daemon_ui_state::{
+    load_file_tabs_state, load_pin_state, set_file_tabs_state, set_pin_state, DesktopFileTab,
+    DesktopFileTabsState, DesktopPinState,
+};
 use crate::desktop_api;
 use crate::desktop_api_types::{
     ExternalCredentialDto, FolderGroupDto, McpServerDto, ModelDescriptorDto, RepoActionResultDto,
@@ -222,6 +226,8 @@ pub(crate) struct DaemonState {
     /// debounce threads and the RPC handlers hit the same registry and
     /// dropping the watch id actually tears down the kernel subscription.
     pub(crate) fs_watches: Arc<FsWatchRegistry>,
+    /// Chrome-backed browser sessions used by the desktop Browser tab.
+    pub(crate) browsers: Arc<BrowserRegistry>,
     /// Transcript replay buffer — a bounded ring of recent session / clone /
     /// workspace events. On a fresh WebSocket connection we replay these
     /// so UIs that disconnected mid-turn don't miss deltas. Size capped at
@@ -260,6 +266,9 @@ impl DaemonState {
     fn load(cwd: std::path::PathBuf, paths: ConfigPaths, token: String) -> Result<Self> {
         let config = load_config(&paths)?;
         let (events, _rx) = broadcast::channel::<ServerEnvelope>(256);
+        let browser_profile_root = paths.user_config_dir.join("browser-profiles");
+        let ptys = Arc::new(PtyRegistry::new());
+        ptys.spawn_idle_pruner();
         Ok(Self {
             cwd,
             paths,
@@ -268,10 +277,17 @@ impl DaemonState {
             events,
             turns: Arc::new(Mutex::new(HashMap::new())),
             next_request_id: Arc::new(AtomicU64::new(0)),
-            ptys: Arc::new(PtyRegistry::new()),
+            ptys,
             fs_watches: Arc::new(FsWatchRegistry::new()),
+            browsers: Arc::new(BrowserRegistry::new(browser_profile_root)),
             recent_events: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_EVENT_CAPACITY))),
         })
+    }
+
+    /// Returns a clone of the daemon event bus sender for background
+    /// subsystems that need to stream UI-visible events.
+    pub(crate) fn event_sender(&self) -> broadcast::Sender<ServerEnvelope> {
+        self.events.clone()
     }
 
     /// Publishes `env` to the broadcast bus and — if it's a replay-worthy
@@ -583,7 +599,10 @@ async fn dispatch_request(
         "list_grouped_sessions" => respond!(handle_list_grouped_sessions(&state)),
         "load_desktop_pins" => respond!(handle_load_desktop_pins(&state)),
         "set_desktop_pin" => respond!(handle_set_desktop_pin(&state, &params)),
+        "load_file_tabs" => respond!(handle_load_file_tabs(&state, &params)),
+        "save_file_tabs" => respond!(handle_save_file_tabs(&state, &params)),
         "load_session_detail" => respond!(handle_load_session_detail(&state, &params)),
+        "rename_session" => respond!(handle_rename_session(&state, &params)),
         "refresh_repo_status" => respond!(handle_refresh_repo_status(&state, &params)),
         "load_settings_snapshot" => respond!(detached!(|s| handle_load_settings_snapshot(&s))),
         "login_with_api_key" => {
@@ -612,7 +631,11 @@ async fn dispatch_request(
         "create_session" => respond!(handle_create_session(&state, &params)),
         "default_workspace" => respond!(handle_default_workspace(&state)),
         "git_clone" => respond!(handle_git_clone(&state, &params)),
+        "pty_list" => respond!(handle_pty_list(&state, &params)),
         "pty_open" => respond!(handle_pty_open(&state, &params)),
+        "pty_focus" => respond!(handle_pty_focus(&state, &params)),
+        "pty_replay" => respond!(handle_pty_replay(&state, &params)),
+        "pty_rename" => respond!(handle_pty_rename(&state, &params)),
         "pty_write" => respond!(handle_pty_write(&state, &params)),
         "pty_resize" => respond!(handle_pty_resize(&state, &params)),
         "pty_close" => respond!(handle_pty_close(&state, &params)),
@@ -624,6 +647,39 @@ async fn dispatch_request(
         ))),
         "fs_watch" => respond!(crate::daemon_fs_watch::handle_fs_watch(&state, &params)),
         "fs_unwatch" => respond!(crate::daemon_fs_watch::handle_fs_unwatch(&state, &params)),
+        "browser_open" => respond!(detached!(
+            |s, p| crate::daemon_browser::handle_browser_open(&s, &p)
+        )),
+        "browser_navigate" => respond!(detached!(|s, p| {
+            crate::daemon_browser::handle_browser_navigate(&s, &p)
+        })),
+        "browser_reload" => respond!(detached!(|s, p| {
+            crate::daemon_browser::handle_browser_reload(&s, &p)
+        })),
+        "browser_history" => respond!(detached!(|s, p| {
+            crate::daemon_browser::handle_browser_history(&s, &p)
+        })),
+        "browser_resize" => respond!(detached!(|s, p| {
+            crate::daemon_browser::handle_browser_resize(&s, &p)
+        })),
+        "browser_input" => respond!(detached!(|s, p| {
+            crate::daemon_browser::handle_browser_input(&s, &p)
+        })),
+        "browser_copy_selection" => respond!(detached!(|s, p| {
+            crate::daemon_browser::handle_browser_copy_selection(&s, &p)
+        })),
+        "browser_cursor" => respond!(detached!(|s, p| {
+            crate::daemon_browser::handle_browser_cursor(&s, &p)
+        })),
+        "browser_close" => respond!(detached!(|s, p| {
+            crate::daemon_browser::handle_browser_close(&s, &p)
+        })),
+        "browser_recording" => respond!(detached!(|s, p| {
+            crate::daemon_browser::handle_browser_recording(&s, &p)
+        })),
+        "browser_agent" => respond!(detached!(|s, p| {
+            crate::daemon_browser::handle_browser_agent(&s, &p)
+        })),
         "workflow_list" => respond!(handle_workflow_list(&state)),
         "workflow_runs_list" => respond!(handle_workflow_runs_list(&state, &params)),
         "workflow_run_show" => respond!(handle_workflow_run_show(&state, &params)),
@@ -710,6 +766,74 @@ fn handle_set_desktop_pin(state: &DaemonState, params: &Value) -> Result<Value> 
     Ok(serde_json::to_value(pins)?)
 }
 
+fn handle_load_file_tabs(state: &DaemonState, params: &Value) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(Value::as_str)
+        .context("missing sessionId")?;
+    let stored = load_file_tabs_state(&state.paths.user_config_dir, session_id)?;
+    Ok(serde_json::to_value(validate_file_tabs_state(
+        state, stored,
+    ))?)
+}
+
+fn handle_save_file_tabs(state: &DaemonState, params: &Value) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(Value::as_str)
+        .context("missing sessionId")?;
+    let requested: DesktopFileTabsState =
+        serde_json::from_value(params.clone()).context("invalid file tabs payload")?;
+    let validated = validate_file_tabs_state(state, requested);
+    let saved = set_file_tabs_state(&state.paths.user_config_dir, session_id, validated)?;
+    Ok(serde_json::to_value(saved)?)
+}
+
+fn validate_file_tabs_state(
+    state: &DaemonState,
+    requested: DesktopFileTabsState,
+) -> DesktopFileTabsState {
+    let mut tabs = Vec::new();
+    for tab in requested.tabs.into_iter().take(64) {
+        let Ok(path) = crate::daemon_files::validate_path(state, &tab.path) else {
+            continue;
+        };
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
+            continue;
+        }
+        tabs.push(DesktopFileTab {
+            path: path.display().to_string(),
+            pinned: tab.pinned,
+        });
+    }
+
+    let active_path = requested.active_path.and_then(|active| {
+        tabs.iter()
+            .find(|tab| tab.path == active)
+            .map(|tab| tab.path.clone())
+            .or_else(|| {
+                crate::daemon_files::validate_path(state, &active)
+                    .ok()
+                    .and_then(|path| {
+                        let canonical = path.display().to_string();
+                        tabs.iter()
+                            .any(|tab| tab.path == canonical)
+                            .then_some(canonical)
+                    })
+            })
+    });
+
+    DesktopFileTabsState {
+        active_path: active_path.or_else(|| tabs.first().map(|tab| tab.path.clone())),
+        tabs,
+    }
+}
+
 fn handle_load_session_detail(state: &DaemonState, params: &Value) -> Result<Value> {
     let session_id = params
         .get("sessionId")
@@ -717,6 +841,35 @@ fn handle_load_session_detail(state: &DaemonState, params: &Value) -> Result<Val
         .and_then(|v| v.as_str())
         .context("missing sessionId")?;
     let session_store = SessionStore::from_paths(&state.paths)?;
+    let detail: SessionDetailDto = desktop_api::load_session_detail(&session_store, session_id)?;
+    Ok(serde_json::to_value(detail)?)
+}
+
+fn handle_rename_session(state: &DaemonState, params: &Value) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(|v| v.as_str())
+        .context("missing sessionId")?;
+    let title = params
+        .get("title")
+        .and_then(|v| v.as_str())
+        .context("missing title")?
+        .trim();
+    let session_uuid = Uuid::parse_str(session_id).context("invalid sessionId")?;
+    let session_store = SessionStore::from_paths(&state.paths)?;
+    if title.is_empty() {
+        session_store.set_display_name(session_uuid, None)?;
+    } else {
+        session_store.rename_session(session_uuid, title.to_string())?;
+    }
+    state.publish_event(ServerEnvelope::Event {
+        event: "workspace:sessions:changed".to_string(),
+        payload: json!({
+            "reason": "rename_session",
+            "sessionId": session_id,
+        }),
+    });
     let detail: SessionDetailDto = desktop_api::load_session_detail(&session_store, session_id)?;
     Ok(serde_json::to_value(detail)?)
 }
@@ -1310,6 +1463,7 @@ fn handle_create_session(state: &DaemonState, params: &Value) -> Result<Value> {
     Ok(json!({
         "sessionId": session.id.to_string(),
         "displayName": session.display_name,
+        "generatedTitle": session.generated_title,
         "cwd": session.cwd.display().to_string(),
         "createdAtMs": session.created_at_ms,
         "updatedAtMs": session.updated_at_ms,
@@ -1496,7 +1650,22 @@ fn handle_git_clone(state: &Arc<DaemonState>, params: &Value) -> Result<Value> {
 // out via `pty:<id>:data` events and exit status via `pty:<id>:exit`.
 // ---------------------------------------------------------------------------
 
+fn handle_pty_list(state: &DaemonState, params: &Value) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(Value::as_str)
+        .context("missing sessionId")?;
+    Ok(serde_json::to_value(state.ptys.list(session_id))?)
+}
+
 fn handle_pty_open(state: &DaemonState, params: &Value) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("default")
+        .to_string();
     let cwd = params
         .get("cwd")
         .and_then(|v| v.as_str())
@@ -1512,8 +1681,48 @@ fn handle_pty_open(state: &DaemonState, params: &Value) -> Result<Value> {
         .and_then(|v| v.as_u64())
         .map(|n| n as u16)
         .unwrap_or(24);
-    let pty_id = state.ptys.open(state.events.clone(), cwd, cols, rows)?;
+    let title = params
+        .get("title")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let pty_id = state
+        .ptys
+        .open(state.events.clone(), session_id, cwd, cols, rows, title)?;
     Ok(json!({ "ptyId": pty_id }))
+}
+
+fn handle_pty_focus(state: &DaemonState, params: &Value) -> Result<Value> {
+    let pty_id = params
+        .get("ptyId")
+        .or_else(|| params.get("pty_id"))
+        .and_then(Value::as_str)
+        .context("missing ptyId")?;
+    state.ptys.focus(pty_id)?;
+    Ok(json!({ "ok": true }))
+}
+
+fn handle_pty_replay(state: &DaemonState, params: &Value) -> Result<Value> {
+    let pty_id = params
+        .get("ptyId")
+        .or_else(|| params.get("pty_id"))
+        .and_then(Value::as_str)
+        .context("missing ptyId")?;
+    Ok(json!({ "chunks": state.ptys.replay(pty_id)? }))
+}
+
+fn handle_pty_rename(state: &DaemonState, params: &Value) -> Result<Value> {
+    let pty_id = params
+        .get("ptyId")
+        .or_else(|| params.get("pty_id"))
+        .and_then(Value::as_str)
+        .context("missing ptyId")?;
+    let title = params
+        .get("title")
+        .and_then(Value::as_str)
+        .context("missing title")?;
+    Ok(serde_json::to_value(
+        state.ptys.rename(pty_id, title.to_string())?,
+    )?)
 }
 
 fn handle_pty_write(state: &DaemonState, params: &Value) -> Result<Value> {
@@ -1723,7 +1932,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         // Load provider registry + auth + resources + session record on
         // this thread so the inner reqwest runtime is built + dropped in
         // the same clean (non-tokio) context.
-        let inputs = match setup_state.build_runtime_inputs() {
+        let mut inputs = match setup_state.build_runtime_inputs() {
             Ok(v) => v,
             Err(err) => {
                 setup_state.publish_event(ServerEnvelope::Event {
@@ -1759,9 +1968,26 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             .any(|event| matches!(event, TranscriptEvent::UserMessage { .. }));
         let auto_title = if crate::daemon_title::should_auto_title(
             record.metadata.display_name.as_deref(),
+            record.metadata.generated_title.as_deref(),
             has_user_message,
         ) {
-            crate::daemon_title::title_from_first_message(&message_for_thread)
+            match crate::daemon_title::generate_title_with_model(
+                &AppState::from_session_record(
+                    setup_state.config.lock().unwrap().clone(),
+                    record.clone(),
+                ),
+                &inputs.resources,
+                &inputs.providers,
+                &mut inputs.auth_store,
+                &message_for_thread,
+            ) {
+                Ok(Some(title)) => Some(title),
+                Ok(None) => crate::daemon_title::title_from_first_message(&message_for_thread),
+                Err(error) => {
+                    eprintln!("session title generation failed; falling back: {error:#}");
+                    crate::daemon_title::title_from_first_message(&message_for_thread)
+                }
+            }
         } else {
             None
         };
@@ -1770,14 +1996,14 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         if let Some(title) = auto_title {
             if inputs
                 .session_store
-                .set_display_name(session_uuid, Some(title.clone()))
+                .set_generated_title(session_uuid, Some(title.clone()))
                 .is_ok()
             {
-                app_state.session.display_name = Some(title);
+                app_state.session.generated_title = Some(title);
                 setup_state.publish_event(ServerEnvelope::Event {
                     event: "workspace:sessions:changed".to_string(),
                     payload: json!({
-                        "reason": "auto_title",
+                        "reason": "generated_title",
                         "sessionId": session_id_for_thread.clone(),
                     }),
                 });
@@ -1929,15 +2155,6 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
 
         match outcome {
             Ok(turn) => {
-                if !turn.assistant_text.is_empty() {
-                    app_state.push_message(MessageRole::Assistant, turn.assistant_text.clone());
-                    let _ = inputs.session_store.append_event(
-                        session_uuid,
-                        TranscriptEvent::AssistantMessage {
-                            text: turn.assistant_text.clone(),
-                        },
-                    );
-                }
                 for inv in &turn.tool_invocations {
                     let _ = inputs.session_store.append_event(
                         session_uuid,
@@ -1947,6 +2164,15 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                             input: inv.input.clone(),
                             output: inv.output.clone(),
                             success: inv.success,
+                        },
+                    );
+                }
+                if !turn.assistant_text.is_empty() {
+                    app_state.push_message(MessageRole::Assistant, turn.assistant_text.clone());
+                    let _ = inputs.session_store.append_event(
+                        session_uuid,
+                        TranscriptEvent::AssistantMessage {
+                            text: turn.assistant_text.clone(),
                         },
                     );
                 }

@@ -1,12 +1,8 @@
 <script lang="ts">
   import Puffer from "../../design/Puffer.svelte";
-  import Icon from "../../design/Icon.svelte";
-  import HighlightedLine from "../../components/HighlightedLine.svelte";
-  import ConversationView from "./ConversationView.svelte";
-  import DiffView from "../../components/DiffView.svelte";
-  import FilesPane from "./FilesPane.svelte";
+  import Icon, { type IconName } from "../../design/Icon.svelte";
+  import AgentDetailContent from "./AgentDetailContent.svelte";
   import ModelPicker from "./ModelPicker.svelte";
-  import TerminalPane from "./TerminalPane.svelte";
   import {
     AGENT_STATE_LABELS,
     agentPufferState,
@@ -45,6 +41,7 @@
       annotations?: Record<string, Record<string, string>>
     ) => void;
     onCancelTurn?: () => void;
+    onRenameTitle?: (title: string) => void | Promise<void>;
     onModelChange?: (providerId: string, modelId: string) => void;
   };
 
@@ -65,13 +62,16 @@
     onResolvePermission,
     onResolveUserQuestion,
     onCancelTurn,
+    onRenameTitle,
     onModelChange
   }: Props = $props();
 
-  type Tab = "chat" | "diff" | "terminal" | "files";
-  type DiffSubTab = "agent" | "git" | "divergence";
+  type Tab = "chat" | "diff" | "terminal" | "files" | "browser" | "history";
   let tab = $state<Tab>("chat");
-  let diffTab = $state<DiffSubTab>("agent");
+  let sideTab = $state<Tab | null>(null);
+  let sideWidth = $state(420);
+  let sideDragStart: { pointerId: number; startX: number; startWidth: number } | null = null;
+  let previousActionCount = $state(0);
 
   // Header identity comes straight from the live session record. No
   // local board persona — the daemon is the source of truth.
@@ -82,6 +82,13 @@
   let projectCwd = $derived(sessionDetail?.repoStatus?.cwd ?? session?.cwd ?? "");
   let displayWorktree = $derived("");
   let status = $derived<AgentStatus>(inferStatusFromSession(sessionDetail));
+  let editingTitle = $state(false);
+  let titleDraft = $state("");
+  let titleSaving = $state(false);
+
+  $effect(() => {
+    if (!editingTitle) titleDraft = displayName;
+  });
 
   function inferStatusFromSession(d: SessionDetail | null): AgentStatus {
     if (!d) return "idle";
@@ -109,22 +116,131 @@
       : AGENT_STATE_LABELS[status] ?? status
   );
   let diffCount = $derived(timeline.filter((t) => t.kind === "diff").length);
-  let agentDiff = $derived(sessionDetail?.agentDiff ?? { files: [], entries: [] });
-  let divergence = $derived(
-    sessionDetail?.divergence ?? { agentOnly: [], gitOnly: [], agentTotal: 0, gitTotal: 0 }
+  let actionCount = $derived(
+    timeline.filter((item) => {
+      if (item.kind !== "tool") return false;
+      const tool = item.toolName.toLowerCase();
+      return [
+        "write",
+        "write_file",
+        "edit",
+        "edit_file",
+        "replace",
+        "replace_in_file",
+        "multiedit",
+        "multi_edit",
+        "notebookedit",
+        "bash",
+        "shell",
+        "powershell",
+        "browser"
+      ].includes(tool);
+    }).length
   );
-  let divergenceCount = $derived(divergence.agentOnly.length + divergence.gitOnly.length);
 
-  function kindIcon(kind: string): "edit" | "file" | "x" | "branch" {
-    switch (kind) {
-      case "write":
-        return "file";
-      case "remove":
-        return "x";
-      case "move":
-        return "branch";
-      default:
-        return "edit";
+  $effect(() => {
+    if (actionCount > previousActionCount && sideTab === null) sideTab = "history";
+    previousActionCount = actionCount;
+  });
+
+  function startTitleEdit() {
+    if (!session || !onRenameTitle) return;
+    titleDraft = displayName;
+    editingTitle = true;
+  }
+
+  function cancelTitleEdit() {
+    titleDraft = displayName;
+    editingTitle = false;
+  }
+
+  async function saveTitleEdit() {
+    if (!session || !onRenameTitle || titleSaving) return;
+    titleSaving = true;
+    try {
+      await onRenameTitle(titleDraft);
+      editingTitle = false;
+    } finally {
+      titleSaving = false;
+    }
+  }
+
+  function handleTitleKeydown(event: KeyboardEvent) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void saveTitleEdit();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      cancelTitleEdit();
+    }
+  }
+
+  function beginSideResize(event: PointerEvent) {
+    sideDragStart = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: sideWidth
+    };
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+
+  function moveSideResize(event: PointerEvent) {
+    if (!sideDragStart || event.pointerId !== sideDragStart.pointerId) return;
+    const next = sideDragStart.startWidth + sideDragStart.startX - event.clientX;
+    sideWidth = Math.max(300, Math.min(760, Math.round(next)));
+  }
+
+  function endSideResize(event: PointerEvent) {
+    if (!sideDragStart || event.pointerId !== sideDragStart.pointerId) return;
+    try {
+      (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
+    } catch {
+      /* ignore */
+    }
+    sideDragStart = null;
+  }
+
+  function handleTabClick(event: MouseEvent, nextTab: Tab) {
+    if (event.metaKey || event.ctrlKey) {
+      sideTab = nextTab;
+      event.preventDefault();
+      return;
+    }
+    tab = nextTab;
+  }
+
+  function tabLabel(value: Tab): string {
+    switch (value) {
+      case "chat":
+        return "Chat";
+      case "diff":
+        return "Diff";
+      case "terminal":
+        return "Terminal";
+      case "files":
+        return "Files";
+      case "browser":
+        return "Browser";
+      case "history":
+        return "History";
+    }
+  }
+
+  function tabIcon(value: Tab): IconName {
+    switch (value) {
+      case "chat":
+        return "sparkles";
+      case "diff":
+        return "git";
+      case "terminal":
+        return "terminal";
+      case "files":
+        return "folder";
+      case "browser":
+        return "globe";
+      case "history":
+        return "layers";
     }
   }
 </script>
@@ -136,11 +252,52 @@
     </button>
     <Puffer size={20} state={pufferState} />
     <div class="pf-agent-identity">
-      <div class="name">
-        {displayName}
-        {#if displayTitle}
-          <span class="sep">·</span>
-          <span class="title">{displayTitle}</span>
+      <div class="name" class:editing={editingTitle}>
+        {#if editingTitle}
+          <input
+            class="title-input"
+            bind:value={titleDraft}
+            onkeydown={handleTitleKeydown}
+            disabled={titleSaving}
+            aria-label="Session title"
+          />
+          <button
+            type="button"
+            class="title-icon-btn"
+            onclick={() => void saveTitleEdit()}
+            disabled={titleSaving}
+            title="Save title"
+            aria-label="Save title"
+          >
+            <Icon name="check" size={12} />
+          </button>
+          <button
+            type="button"
+            class="title-icon-btn"
+            onclick={cancelTitleEdit}
+            disabled={titleSaving}
+            title="Cancel"
+            aria-label="Cancel title edit"
+          >
+            <Icon name="x" size={12} />
+          </button>
+        {:else}
+          <span class="primary-title">{displayName}</span>
+          {#if displayTitle}
+            <span class="sep">·</span>
+            <span class="title">{displayTitle}</span>
+          {/if}
+          {#if onRenameTitle}
+            <button
+              type="button"
+              class="title-icon-btn"
+              onclick={startTitleEdit}
+              title="Edit title"
+              aria-label="Edit session title"
+            >
+              <Icon name="edit" size={12} />
+            </button>
+          {/if}
         {/if}
       </div>
       <div class="meta">
@@ -172,184 +329,111 @@
       {statusLabel}
     </span>
     <div class="pf-agent-tabs">
-      <button class="pf-agent-tab" class:on={tab === "chat"} onclick={() => (tab = "chat")}>
+      <button class="pf-agent-tab" class:on={tab === "chat"} onclick={(event) => handleTabClick(event, "chat")}>
         <Icon name="sparkles" size={12} />Chat
       </button>
-      <button class="pf-agent-tab" class:on={tab === "diff"} onclick={() => (tab = "diff")}>
+      <button class="pf-agent-tab" class:on={tab === "diff"} onclick={(event) => handleTabClick(event, "diff")}>
         <Icon name="git" size={12} />Diff
         {#if diffCount > 0}
           <span class="pf-agent-tab-badge">{diffCount}</span>
         {/if}
       </button>
-      <button class="pf-agent-tab" class:on={tab === "terminal"} onclick={() => (tab = "terminal")}>
+      <button
+        class="pf-agent-tab"
+        class:on={tab === "terminal"}
+        onclick={(event) => handleTabClick(event, "terminal")}
+      >
         <Icon name="terminal" size={12} />Terminal
       </button>
-      <button class="pf-agent-tab" class:on={tab === "files"} onclick={() => (tab = "files")}>
+      <button class="pf-agent-tab" class:on={tab === "files"} onclick={(event) => handleTabClick(event, "files")}>
         <Icon name="folder" size={12} />Files
+      </button>
+      <button
+        class="pf-agent-tab"
+        class:on={tab === "browser"}
+        onclick={(event) => handleTabClick(event, "browser")}
+      >
+        <Icon name="globe" size={12} />Browser
+      </button>
+      <button
+        class="pf-agent-tab"
+        class:on={tab === "history"}
+        onclick={(event) => handleTabClick(event, "history")}
+      >
+        <Icon name="layers" size={12} />History
+        {#if actionCount > 0}
+          <span class="pf-agent-tab-badge">{actionCount}</span>
+        {/if}
       </button>
     </div>
   </div>
 
-  <div class="pf-agent-detail-body">
-    {#if tab === "chat"}
-      <ConversationView
-        session={session}
-        agentName={displayName}
-        agentState={pufferState}
-        timeline={timeline}
-        pendingPermissions={pendingPermissions}
-        pendingQuestions={pendingQuestions}
-        loading={loading}
-        turnRunning={turnRunning}
-        turnStartedAtMs={turnStartedAtMs}
-        turnThinking={turnThinking}
-        turnStatusHint={turnStatusHint}
-        onSubmitMessage={onSubmitMessage}
-        onResolvePermission={onResolvePermission}
-        onResolveUserQuestion={onResolveUserQuestion}
-        onCancelTurn={onCancelTurn}
+  <div class="pf-agent-detail-shell" class:withSubpage={sideTab !== null}>
+    <div class="pf-agent-detail-body">
+      <AgentDetailContent
+        {tab}
+        {session}
+        {sessionDetail}
+        {timeline}
+        {pendingPermissions}
+        {pendingQuestions}
+        {loading}
+        {displayName}
+        {pufferState}
+        {projectCwd}
+        {turnRunning}
+        {turnStartedAtMs}
+        {turnThinking}
+        {turnStatusHint}
+        {onSubmitMessage}
+        {onResolvePermission}
+        {onResolveUserQuestion}
+        {onCancelTurn}
       />
-    {:else if tab === "diff"}
-      <div class="diff-subtabs">
+    </div>
+    {#if sideTab}
+      <div class="pf-side-panel" style:width={`${sideWidth}px`}>
         <button
-          class="diff-subtab"
-          class:on={diffTab === "agent"}
-          onclick={() => (diffTab = "agent")}
-        >
-          <Icon name="sparkles" size={11} />Agent
-          {#if agentDiff.files.length > 0}
-            <span class="pf-agent-tab-badge">{agentDiff.files.length}</span>
-          {/if}
-        </button>
-        <button
-          class="diff-subtab"
-          class:on={diffTab === "git"}
-          onclick={() => (diffTab = "git")}
-        >
-          <Icon name="git" size={11} />Git
-          {#if divergence.gitTotal > 0}
-            <span class="pf-agent-tab-badge">{divergence.gitTotal}</span>
-          {/if}
-        </button>
-        <button
-          class="diff-subtab"
-          class:on={diffTab === "divergence"}
-          onclick={() => (diffTab = "divergence")}
-          title={divergenceCount > 0
-            ? "Agent and git disagree on which files changed"
-            : "Agent and git agree"}
-        >
-          <Icon name="bolt" size={11} />Divergence
-          {#if divergenceCount > 0}
-            <span class="pf-agent-tab-badge warn">{divergenceCount}</span>
-          {/if}
-        </button>
-      </div>
-
-      {#if diffTab === "agent"}
-        {#if agentDiff.files.length > 0}
-          <div class="diff-wrap">
-            <div class="agent-diff-list">
-              {#each agentDiff.files as file (file.path)}
-                <article class="agent-diff-card">
-                  <header>
-                    <Icon
-                      name={kindIcon(file.latestKind)}
-                      size={12}
-                      color="var(--muted-foreground)"
-                    />
-                    <span class="path mono" title={file.path}>{file.path}</span>
-                    <span class="kind">{file.latestKind}</span>
-                    {#if file.editCount > 1}
-                      <span class="count">×{file.editCount}</span>
-                    {/if}
-                  </header>
-                  <pre class="diff-snippet"><code>{#each file.latestSummary.split("\n") as line, i (i)}<span><HighlightedLine text={line || " "} path={file.path} /></span>{/each}</code></pre>
-                </article>
-              {/each}
-            </div>
-          </div>
-        {:else}
-          <div class="pane-empty">
-            <Icon name="sparkles" size={20} color="var(--muted-foreground)" />
-            <div class="title">No agent edits yet</div>
-            <div class="sub">
-              Once the agent writes or replaces a file, the per-edit summary lands here —
-              independent of git, so you can see what the model intended even if a hook
-              rolled it back.
-            </div>
-          </div>
-        {/if}
-      {:else if diffTab === "git"}
-        {#if sessionDetail?.latestDiff}
-          <div class="diff-wrap">
-            <DiffView diff={sessionDetail.latestDiff} />
-          </div>
-        {:else}
-          <div class="pane-empty">
-            <Icon name="git" size={20} color="var(--muted-foreground)" />
-            <div class="title">No git changes</div>
-            <div class="sub">
-              The session has no working-tree changes against HEAD. Edits the agent
-              already committed won't appear here — switch to the Agent tab for those.
-            </div>
-          </div>
-        {/if}
-      {:else}
-        <div class="diff-wrap divergence-pane">
-          {#if divergenceCount === 0}
-            <div class="pane-empty">
-              <Icon name="check" size={20} color="var(--muted-foreground)" />
-              <div class="title">Agent and git agree</div>
-              <div class="sub">
-                Every file the agent edited shows up in git diff, and nothing else has
-                changed on disk. {divergence.agentTotal} agent · {divergence.gitTotal} git.
-              </div>
-            </div>
-          {:else}
-            {#if divergence.agentOnly.length > 0}
-              <section class="diverge-block">
-                <header>
-                  <Icon name="sparkles" size={12} />
-                  Agent edited, not in git ({divergence.agentOnly.length})
-                </header>
-                <p class="hint">
-                  The agent claims to have edited these files but they don't appear in
-                  the current git diff. Possible causes: a hook reverted the change, the
-                  edit was committed earlier this session, or the apply silently failed.
-                </p>
-                <ul>
-                  {#each divergence.agentOnly as path (path)}
-                    <li class="mono">{path}</li>
-                  {/each}
-                </ul>
-              </section>
-            {/if}
-            {#if divergence.gitOnly.length > 0}
-              <section class="diverge-block">
-                <header>
-                  <Icon name="git" size={12} />
-                  Changed on disk, no agent edit ({divergence.gitOnly.length})
-                </header>
-                <p class="hint">
-                  Git sees these files as modified but no agent tool call touched them.
-                  Possible causes: a post-tool hook rewrote the file, the user
-                  hand-edited between turns, or a build artifact slipped in.
-                </p>
-                <ul>
-                  {#each divergence.gitOnly as path (path)}
-                    <li class="mono">{path}</li>
-                  {/each}
-                </ul>
-              </section>
-            {/if}
-          {/if}
+          class="pf-side-resize"
+          type="button"
+          aria-label="Resize side page"
+          onpointerdown={beginSideResize}
+          onpointermove={moveSideResize}
+          onpointerup={endSideResize}
+          onpointercancel={endSideResize}
+        ></button>
+        <div class="pf-side-head">
+          <span><Icon name={tabIcon(sideTab)} size={12} />{tabLabel(sideTab)}</span>
+          <button
+            type="button"
+            class="pf-side-close"
+            aria-label="Close side page"
+            onclick={() => (sideTab = null)}
+          >
+            <Icon name="x" size={12} />
+          </button>
         </div>
-      {/if}
-    {:else if tab === "terminal"}
-      <TerminalPane cwd={projectCwd} />
-    {:else if tab === "files"}
-      <FilesPane cwd={projectCwd} />
+        <AgentDetailContent
+          tab={sideTab}
+          {session}
+          {sessionDetail}
+          {timeline}
+          {pendingPermissions}
+          {pendingQuestions}
+          {loading}
+          {displayName}
+          {pufferState}
+          {projectCwd}
+          {turnRunning}
+          {turnStartedAtMs}
+          {turnThinking}
+          {turnStatusHint}
+          {onSubmitMessage}
+          {onResolvePermission}
+          {onResolveUserQuestion}
+          {onCancelTurn}
+        />
+      </div>
     {/if}
   </div>
 </div>
@@ -398,11 +482,20 @@
   .pf-agent-identity .name {
     font-size: 14px;
     font-weight: 600;
-    letter-spacing: -0.01em;
+    letter-spacing: 0;
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 6px;
     min-width: 0;
+  }
+  .pf-agent-identity .name.editing {
+    align-items: center;
+  }
+  .pf-agent-identity .name .primary-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .pf-agent-identity .name .sep { color: var(--muted-foreground); opacity: 0.5; }
   .pf-agent-identity .name .title {
@@ -411,6 +504,44 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .title-input {
+    width: min(320px, 34vw);
+    height: 26px;
+    min-width: 140px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--background);
+    color: var(--foreground);
+    font: inherit;
+    padding: 0 8px;
+    outline: none;
+  }
+  .title-input:focus {
+    border-color: color-mix(in oklab, var(--accent-foreground) 35%, var(--border));
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 70%, transparent);
+  }
+  .title-icon-btn {
+    width: 24px;
+    height: 24px;
+    border-radius: 5px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--muted-foreground);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .title-icon-btn:hover:not(:disabled) {
+    color: var(--foreground);
+    background: var(--accent);
+    border-color: var(--border);
+  }
+  .title-icon-btn:disabled {
+    cursor: wait;
+    opacity: 0.55;
   }
   .pf-agent-identity .meta {
     display: flex;
@@ -499,166 +630,107 @@
     margin-left: 2px;
   }
 
-  .pf-agent-detail-body {
+  .pf-agent-detail-shell {
     flex: 1;
+    min-height: 0;
+    display: flex;
+    overflow: hidden;
+  }
+
+  .pf-agent-detail-body {
+    flex: 1 1 auto;
+    min-width: 0;
     min-height: 0;
     display: flex;
     flex-direction: column;
     overflow: hidden;
   }
 
-  .diff-wrap {
-    flex: 1;
+  .pf-side-panel {
+    flex: 0 0 auto;
+    min-width: 300px;
+    max-width: 760px;
     min-height: 0;
-    overflow: auto;
-  }
-  .pane-empty {
-    flex: 1;
+    position: relative;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    padding: 40px;
-    color: var(--muted-foreground);
-    text-align: center;
+    border-left: 1px solid var(--border);
+    box-shadow: -8px 0 20px rgb(0 0 0 / 0.04);
+    background: var(--background);
   }
-  .pane-empty .title { font-size: 14px; font-weight: 600; color: var(--foreground); }
-  .pane-empty .sub { font-size: 12.5px; max-width: 360px; line-height: 1.55; }
 
-  .diff-subtabs {
+  .pf-side-resize {
+    position: absolute;
+    z-index: 5;
+    top: 0;
+    bottom: 0;
+    left: -4px;
+    width: 8px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: col-resize;
+    touch-action: none;
+  }
+
+  .pf-side-resize::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 3px;
+    width: 2px;
+    background: transparent;
+  }
+
+  .pf-side-resize:hover::before {
+    background: color-mix(in oklab, var(--accent-foreground) 35%, var(--border));
+  }
+
+  .pf-side-head {
+    height: 36px;
+    flex: 0 0 auto;
     display: flex;
-    gap: 4px;
-    padding: 8px 12px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 0 10px 0 12px;
     border-bottom: 1px solid var(--border);
     background: color-mix(in oklab, var(--background) 96%, var(--muted));
+    color: var(--foreground);
+    font-size: 12px;
+    font-weight: 600;
   }
-  .diff-subtab {
+
+  .pf-side-head span {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 4px 10px;
+    min-width: 0;
+  }
+
+  .pf-side-close {
+    width: 24px;
+    height: 24px;
     border: 1px solid transparent;
-    border-radius: 999px;
+    border-radius: 5px;
     background: transparent;
     color: var(--muted-foreground);
-    font: inherit;
-    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     cursor: pointer;
-    transition: color 100ms, border-color 100ms, background 100ms;
   }
-  .diff-subtab:hover { color: var(--foreground); }
-  .diff-subtab.on {
+
+  .pf-side-close:hover {
     color: var(--foreground);
-    background: var(--background);
+    background: var(--accent);
     border-color: var(--border);
   }
-  .pf-agent-tab-badge.warn {
-    background: color-mix(in oklab, oklch(0.62 0.22 25) 18%, var(--background));
-    color: oklch(0.55 0.2 30);
-    border: 1px solid color-mix(in oklab, oklch(0.62 0.22 25) 35%, var(--border));
-  }
 
-  .agent-diff-list {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding: 14px 16px;
-  }
-  .agent-diff-card {
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    overflow: hidden;
-    background: var(--background);
-  }
-  .agent-diff-card header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    background: color-mix(in oklab, var(--background) 96%, var(--muted));
-    border-bottom: 1px solid var(--border);
-    font-size: 12px;
-  }
-  .agent-diff-card .path {
+  .pf-side-panel :global(.pf-agent-detail-content) {
     flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--foreground);
-  }
-  .agent-diff-card .kind {
-    font-size: 10.5px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    padding: 1px 6px;
-    border-radius: 4px;
-    background: var(--muted);
-    color: var(--muted-foreground);
-  }
-  .agent-diff-card .count {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--muted-foreground);
-  }
-  .diff-snippet {
-    margin: 0;
-    padding: 10px 12px;
-    font-family: var(--font-mono);
-    font-size: 11.5px;
-    line-height: 1.55;
-    color: var(--foreground);
-    white-space: pre;
-    overflow-x: auto;
-  }
-  .diff-snippet code { color: inherit; }
-  .diff-snippet code > span {
-    display: block;
-  }
-
-  .divergence-pane {
-    padding: 14px 16px;
-  }
-  .diverge-block {
-    margin-bottom: 18px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    background: var(--background);
-    overflow: hidden;
-  }
-  .diverge-block header {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--border);
-    font-weight: 600;
-    font-size: 12.5px;
-    color: var(--foreground);
-    background: color-mix(in oklab, var(--background) 96%, var(--muted));
-  }
-  .diverge-block .hint {
-    margin: 0;
-    padding: 10px 14px;
-    color: var(--muted-foreground);
-    font-size: 12px;
-    line-height: 1.55;
-  }
-  .diverge-block ul {
-    list-style: none;
-    margin: 0;
-    padding: 0 14px 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .diverge-block li {
-    font-size: 12px;
-    color: var(--foreground);
-    padding: 4px 8px;
-    border-radius: 4px;
-    background: color-mix(in oklab, var(--muted) 50%, var(--background));
+    min-height: 0;
   }
 
   @media (max-width: 720px) {

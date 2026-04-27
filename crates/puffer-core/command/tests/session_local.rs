@@ -40,7 +40,7 @@ fn branch_forks_and_switches_current_session() {
     assert_eq!(state.session.parent_session_id, Some(original_id));
     assert_eq!(
         state.session.display_name.as_deref(),
-        Some("drydock (Branch)")
+        Some("drydock (Branch 3)")
     );
     assert!(state.transcript.last().unwrap().text.contains("/resume"));
 }
@@ -84,7 +84,7 @@ fn branch_without_explicit_name_derives_branch_title_from_first_user_message() {
     assert_ne!(state.session.id, original_id);
     assert_eq!(
         state.session.display_name.as_deref(),
-        Some("Inspect the auth flow (Branch)")
+        Some("Inspect the auth flow (Branch 3)")
     );
 }
 

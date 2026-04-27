@@ -86,6 +86,7 @@ use self::tool_executor::{
 };
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const OPENAI_CODEX_COMPAT_VERSION: &str = "0.125.0";
 const OPENAI_CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const HTTP_RETRY_ATTEMPTS_ENV: &str = "PUFFER_HTTP_RETRY_ATTEMPTS";
 const HTTP_RETRY_DELAY_MS_ENV: &str = "PUFFER_HTTP_RETRY_DELAY_MS";

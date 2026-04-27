@@ -43,6 +43,7 @@
     | "link"
     | "logs"
     | "external"
+    | "copy"
     | "coin"
     | "token"
     | "wrench"
@@ -223,6 +224,9 @@
     <path d="M15 3h6v6" />
     <path d="M10 14 21 3" />
     <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
+  {:else if name === "copy"}
+    <rect x="9" y="9" width="13" height="13" rx="2" />
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
   {:else if name === "coin"}
     <line x1="12" y1="1" x2="12" y2="23" />
     <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />

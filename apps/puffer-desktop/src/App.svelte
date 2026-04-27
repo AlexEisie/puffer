@@ -32,6 +32,7 @@
     listGroupedSessionsFromDaemon,
     loadSettingsSnapshot,
     loadSessionDetailFromDaemon,
+    renameSession,
     mergePullRequest,
     logoutProvider,
     logoutProviderViaDaemon,
@@ -320,8 +321,15 @@
         // Any time a session is created or a turn finishes, refresh the
         // workspace board + sidebar. Coalesced by `refreshGroups`'s own
         // loading guard.
-        client.on("workspace:sessions:changed", () => {
+        client.on<{ sessionId?: string; reason?: string }>("workspace:sessions:changed", (event) => {
           void refreshGroups();
+          if (
+            selectedSession &&
+            event?.sessionId === selectedSession.id &&
+            (event.reason === "generated_title" || event.reason === "rename_session")
+          ) {
+            void openSession(selectedSession, { showLoading: false, resetLiveState: false });
+          }
         });
         client.on<DesktopPinState>("desktop:pins:changed", (pins) => {
           desktopPins = {
@@ -597,6 +605,7 @@
         const fallback: SessionListItem = {
           id: created.sessionId,
           displayName: null,
+          generatedTitle: null,
           title: "New Session",
           cwd: created.cwd,
           folderPath: created.cwd,
@@ -771,6 +780,22 @@
       const detail = errorText(error);
       statusMessage = `run_agent_turn failed: ${detail}`;
       appendAgentError("Agent start failed", detail, "turn-start-error");
+    }
+  }
+
+  async function renameSelectedSession(title: string) {
+    if (!selectedSession) return;
+    const previous = selectedSession;
+    try {
+      const detail = await renameSession(selectedSession.id, title);
+      selectedSession = detail.session;
+      sessionDetail = detail;
+      await refreshGroups();
+      statusMessage = title.trim() ? "Session title updated." : "Session title reset.";
+    } catch (error) {
+      selectedSession = previous;
+      statusMessage = `Failed to rename session: ${errorText(error)}`;
+      throw error;
     }
   }
 
@@ -1163,6 +1188,7 @@
                 onResolvePermission={resolvePermission}
                 onResolveUserQuestion={resolveUserQuestion}
                 onCancelTurn={() => { if (currentTurnId) void cancelTurn(currentTurnId); }}
+                onRenameTitle={renameSelectedSession}
                 onModelChange={(providerId, modelId) =>
                   void handleModelChange(providerId, modelId)}
               />

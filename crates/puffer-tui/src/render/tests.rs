@@ -46,8 +46,8 @@ fn header_snapshot_reports_compact_status() {
     .collect::<Vec<_>>()
     .join("\n");
     assert_snapshot!(
-                                            snapshot,
-                                            @r"
+                                                                                                snapshot,
+                                                                                                @r"
 Puffer Code
 Account   anthropic via API key
 Model     anthropic/claude-sonnet-4-5 · tools 3/4
@@ -55,7 +55,7 @@ Session   Shipyard · 12345678-1234-5678-1234-567812345678
 Mode      effort high · fast · vim
 Context   puffer · 2 msgs · 2 wds · dockyard@staging
 "
-                                        );
+                                                                                            );
 }
 
 #[test]
@@ -68,11 +68,11 @@ fn footer_snapshot_reports_compact_prompt_rail() {
         .collect::<Vec<_>>()
         .join("\n");
     assert_snapshot!(
-                                            snapshot,
-                                            @r"
+                                                                                                snapshot,
+                                                                                                @r"
 anthropic/claude-sonnet-4-5 · 99% left · /tmp/puffer · sandbox workspace-write
 "
-                                        );
+                                                                                            );
 }
 
 #[test]
@@ -95,8 +95,8 @@ fn header_snapshot_includes_oauth_identity_when_available() {
     .collect::<Vec<_>>()
     .join("\n");
     assert_snapshot!(
-                                            snapshot,
-                                            @r"
+                                                                                                snapshot,
+                                                                                                @r"
 Puffer Code
 Account   dev@example.com · plan Pro · acct acct-1
 Model     openai/gpt-5 · tools 3/4
@@ -104,7 +104,7 @@ Session   Shipyard · 12345678-1234-5678-1234-567812345678
 Mode      effort high · fast · vim
 Context   puffer · 2 msgs · 2 wds · dockyard@staging
 "
-                                        );
+                                                                                            );
 }
 
 #[test]
@@ -254,6 +254,7 @@ fn render_pending_submit_shows_tool_call_before_output() {
             set_pending_submit_state(
                 Some("check python".to_string()),
                 vec![ToolCallRequest {
+                    call_id: "call_python_version".to_string(),
                     tool_id: "bash".to_string(),
                     input: "{\"command\":\"python --version 2>&1; python3 --version 2>&1\"}"
                         .to_string(),
@@ -732,6 +733,7 @@ pub(super) fn sample_state() -> AppState {
         SessionMetadata {
             id: Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap(),
             display_name: Some("Shipyard".to_string()),
+            generated_title: None,
             cwd,
             created_at_ms: 0,
             updated_at_ms: 0,

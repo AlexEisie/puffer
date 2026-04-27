@@ -690,6 +690,7 @@ mod tests {
             SessionMetadata {
                 id: uuid::Uuid::nil(),
                 display_name: Some("doctor".to_string()),
+                generated_title: None,
                 cwd: cwd.to_path_buf(),
                 created_at_ms: 0,
                 updated_at_ms: 0,

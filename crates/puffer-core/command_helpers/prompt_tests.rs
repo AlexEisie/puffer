@@ -29,8 +29,8 @@ fn compact_specialization_returns_prompt_override() {
 
     match outcome {
         PromptCommandPreparation::PromptOverride(prompt) => {
-            assert!(prompt.contains("Summarize the current conversation"));
-            assert!(prompt.contains("custom_instruction: focus on tests"));
+            assert!(prompt.contains("Summarize the conversation into a compact context block"));
+            assert!(prompt.contains("Additional instruction: focus on tests"));
         }
         PromptCommandPreparation::DirectPrompt(_)
         | PromptCommandPreparation::HandledLocally
@@ -468,7 +468,7 @@ fn dispatcher_helper_routes_known_prompt_specializations() {
         prepare_prompt_command_specialization(&mut state, &session_store, "compact", "").unwrap();
     match compact {
         Some(PromptCommandPreparation::PromptOverride(prompt)) => {
-            assert!(prompt.contains("Summarize the current conversation"));
+            assert!(prompt.contains("Summarize the conversation into a compact context block"));
         }
         _ => panic!("expected /compact prompt override specialization"),
     }

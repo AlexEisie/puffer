@@ -129,6 +129,7 @@ fn summary_to_dto(summary: &SessionSummary) -> SessionListItemDto {
         id: summary.id.to_string(),
         title: session_title(summary),
         display_name: summary.display_name.clone(),
+        generated_title: summary.generated_title.clone(),
         cwd: normalize_session_path(&summary.cwd),
         created_at_ms: summary.created_at_ms,
         updated_at_ms: summary.updated_at_ms,
@@ -146,9 +147,11 @@ fn metadata_to_dto(metadata: &SessionMetadata, event_count: usize) -> SessionLis
         title: metadata
             .display_name
             .clone()
+            .or(metadata.generated_title.clone())
             .or(metadata.slug.clone())
             .unwrap_or_else(|| metadata.id.to_string()),
         display_name: metadata.display_name.clone(),
+        generated_title: metadata.generated_title.clone(),
         cwd: normalize_session_path(&metadata.cwd),
         created_at_ms: metadata.created_at_ms,
         updated_at_ms: metadata.updated_at_ms,
@@ -164,6 +167,7 @@ fn session_title(summary: &SessionSummary) -> String {
     summary
         .display_name
         .clone()
+        .or(summary.generated_title.clone())
         .or(summary.slug.clone())
         .unwrap_or_else(|| summary.id.to_string())
 }
@@ -196,12 +200,46 @@ fn snapshot_to_dto(snapshot: &GitDiffSnapshot) -> DiffSnapshotDto {
 }
 
 fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
-    record
-        .events
-        .iter()
-        .enumerate()
-        .filter_map(|(index, event)| timeline_item(index, event))
-        .collect()
+    let mut items = Vec::new();
+    let mut pending_assistant = None;
+    for (index, event) in record.events.iter().enumerate() {
+        match event {
+            TranscriptEvent::AssistantMessage { text } => {
+                flush_pending_assistant(&mut items, &mut pending_assistant);
+                pending_assistant = Some(TimelineItemDto::AssistantMessage {
+                    id: format!("event-{index}"),
+                    text: text.clone(),
+                });
+            }
+            TranscriptEvent::SystemMessage { text } if parse_tool_message(text).is_some() => {
+                if let Some(item) = timeline_item(index, event) {
+                    items.push(item);
+                }
+            }
+            TranscriptEvent::ToolInvocation { .. } => {
+                if let Some(item) = timeline_item(index, event) {
+                    items.push(item);
+                }
+            }
+            _ => {
+                flush_pending_assistant(&mut items, &mut pending_assistant);
+                if let Some(item) = timeline_item(index, event) {
+                    items.push(item);
+                }
+            }
+        }
+    }
+    flush_pending_assistant(&mut items, &mut pending_assistant);
+    items
+}
+
+fn flush_pending_assistant(
+    items: &mut Vec<TimelineItemDto>,
+    pending_assistant: &mut Option<TimelineItemDto>,
+) {
+    if let Some(item) = pending_assistant.take() {
+        items.push(item);
+    }
 }
 
 fn timeline_item(index: usize, event: &TranscriptEvent) -> Option<TimelineItemDto> {
@@ -233,6 +271,25 @@ fn timeline_item(index: usize, event: &TranscriptEvent) -> Option<TimelineItemDt
                 })
             }
         }
+        TranscriptEvent::ToolInvocation {
+            call_id,
+            tool_id,
+            input,
+            output,
+            success,
+        } => Some(TimelineItemDto::ToolCall {
+            id: format!("{id}-{call_id}"),
+            tool_id: tool_id.clone(),
+            status: if *success {
+                "success".to_string()
+            } else {
+                "error".to_string()
+            },
+            input_text: input.clone(),
+            input_json: serde_json::from_str(input).ok(),
+            output_text: output.clone(),
+            permission_dialog: permission_dialog(output),
+        }),
         TranscriptEvent::CommandInvoked { name, args } => Some(TimelineItemDto::CommandInvoked {
             id,
             name: name.clone(),

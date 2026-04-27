@@ -223,6 +223,7 @@ mod tests {
             SessionMetadata {
                 id: Uuid::new_v4(),
                 display_name: Some("dockyard".to_string()),
+                generated_title: None,
                 cwd: tempdir.path().to_path_buf(),
                 created_at_ms: 0,
                 updated_at_ms: 0,
@@ -250,6 +251,7 @@ mod tests {
             SessionMetadata {
                 id: Uuid::new_v4(),
                 display_name: None,
+                generated_title: None,
                 cwd: PathBuf::from(tempdir.path()),
                 created_at_ms: 0,
                 updated_at_ms: 0,
@@ -277,6 +279,7 @@ mod tests {
             SessionMetadata {
                 id: Uuid::new_v4(),
                 display_name: None,
+                generated_title: None,
                 cwd: tempdir.path().to_path_buf(),
                 created_at_ms: 0,
                 updated_at_ms: 0,

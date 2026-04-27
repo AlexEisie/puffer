@@ -28,7 +28,7 @@ fn reflect_command_is_registered_as_local() {
 }
 
 #[test]
-fn btw_and_compact_match_claude_local_command_classification() {
+fn btw_stays_local_and_compact_runs_as_provider_prompt() {
     let commands = supported_commands();
     assert_eq!(
         find_command(&commands, "btw").map(|command| command.kind),
@@ -36,7 +36,7 @@ fn btw_and_compact_match_claude_local_command_classification() {
     );
     assert_eq!(
         find_command(&commands, "compact").map(|command| command.kind),
-        Some(CommandKind::Local)
+        Some(CommandKind::Prompt)
     );
 }
 
@@ -109,6 +109,7 @@ fn app_state_defaults_expose_command_state() {
         SessionMetadata {
             id: uuid::Uuid::nil(),
             display_name: None,
+            generated_title: None,
             cwd: PathBuf::from("."),
             created_at_ms: 0,
             updated_at_ms: 0,

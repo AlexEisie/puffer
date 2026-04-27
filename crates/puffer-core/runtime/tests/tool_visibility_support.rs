@@ -171,9 +171,54 @@ fn assert_tool_description_matches_expected(
         .expect("openai tool definition");
     assert_eq!(
         normalize_tool_description(tool_id, &openai_definition.description),
-        expected,
+        normalize_tool_description(
+            tool_id,
+            &expected_openai_tool_description(tool_id, tool_id, &expected)
+        ),
         "openai description for {tool_id}"
     );
+}
+
+fn expected_openai_tool_description(tool_id: &str, name: &str, description: &str) -> String {
+    match tool_id {
+        "Agent" => "Delegate an independent subtask to a subagent. Use for large or parallelizable work, not simple file reads or searches.".to_string(),
+        "AskUserQuestion" => {
+            "Ask the user a short clarification or decision question when blocked by ambiguity."
+                .to_string()
+        }
+        "TodoWrite" => {
+            "Update the task list with pending, in_progress, and completed items. Keep at most one item in progress."
+                .to_string()
+        }
+        "Read" => "Read a file. Prefer reading the whole file unless it is large; use offset or limit for partial reads.".to_string(),
+        "Glob" => "Find files by path pattern. Prefer this over shelling out to find or ls for discovery.".to_string(),
+        "Grep" => "Search file contents with ripgrep-style patterns. Prefer this over running grep or rg in Bash.".to_string(),
+        "Edit" => "Make an exact text edit in an existing file. Read the file first when needed.".to_string(),
+        "Write" => "Write a file, creating parent directories if needed.".to_string(),
+        "Bash" => "Run a shell command when no dedicated tool is a better fit.".to_string(),
+        "TaskOutput" => "Read the saved output of a background task by id.".to_string(),
+        "WebFetch" => "Fetch and summarize content from a specific URL.".to_string(),
+        "WebSearch" => format!(
+            "Search the web for current or external information. The current month is {} and you must use this year when searching for recent information.",
+            current_month_year()
+        ),
+        _ => compact_openai_tool_description(name, description),
+    }
+}
+
+fn compact_openai_tool_description(name: &str, description: &str) -> String {
+    let trimmed = description.trim();
+    if trimmed.is_empty() {
+        return name.to_string();
+    }
+    let first_paragraph = trimmed.split("\n\n").next().unwrap_or(trimmed).trim();
+    if first_paragraph.len() <= 220 {
+        first_paragraph.to_string()
+    } else {
+        let mut shortened = first_paragraph.chars().take(217).collect::<String>();
+        shortened.push_str("...");
+        shortened
+    }
 }
 
 fn normalize_tool_description(tool_id: &str, raw: &str) -> String {

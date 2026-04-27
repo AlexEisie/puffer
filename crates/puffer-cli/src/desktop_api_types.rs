@@ -6,6 +6,7 @@ use serde_json::Value;
 pub(crate) struct SessionListItemDto {
     pub(crate) session_id: String,
     pub(crate) display_name: Option<String>,
+    pub(crate) generated_title: Option<String>,
     pub(crate) title: String,
     pub(crate) cwd: String,
     pub(crate) folder_path: String,
@@ -132,6 +133,7 @@ pub(crate) enum TimelineItemDto {
 pub(crate) struct SessionDetailDto {
     pub(crate) session_id: String,
     pub(crate) display_name: Option<String>,
+    pub(crate) generated_title: Option<String>,
     pub(crate) title: String,
     pub(crate) cwd: String,
     pub(crate) folder_path: String,

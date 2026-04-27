@@ -203,6 +203,7 @@ fn is_runtime_local_handler(handler: &str) -> bool {
         "runtime:agent"
             | "runtime:skill"
             | "runtime:tool_search"
+            | "runtime:browser"
             | "runtime:glob"
             | "runtime:notebook_edit"
             | "runtime:sleep"

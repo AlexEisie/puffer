@@ -426,6 +426,7 @@ mod tests {
         SessionSummary {
             id: Uuid::parse_str(id).unwrap(),
             display_name: name.map(str::to_string),
+            generated_title: None,
             cwd: PathBuf::from(cwd),
             created_at_ms: updated_at_ms,
             updated_at_ms,

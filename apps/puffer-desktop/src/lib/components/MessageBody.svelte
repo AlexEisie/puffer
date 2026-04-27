@@ -2,35 +2,172 @@
   type InlineSegment = {
     kind: "text" | "code";
     text: string;
+    strong?: boolean;
+    emphasis?: boolean;
+    strike?: boolean;
+    href?: string;
+  };
+
+  type ListItem = {
+    text: string;
+    checked: boolean | null;
   };
 
   type MessageBlock =
     | { kind: "paragraph"; text: string }
-    | { kind: "list"; ordered: boolean; items: string[] }
+    | { kind: "heading"; level: 1 | 2 | 3 | 4 | 5 | 6; text: string }
+    | { kind: "list"; ordered: boolean; items: ListItem[] }
     | { kind: "quote"; text: string }
-    | { kind: "code"; language: string | null; text: string };
+    | { kind: "code"; language: string | null; text: string }
+    | { kind: "table"; headers: string[]; rows: string[][] }
+    | { kind: "rule" };
 
   export let body = "";
 
-  function inlineSegments(text: string): InlineSegment[] {
+  const urlPattern = /^(https?:\/\/[^\s<]+|file:\/\/[^\s<]+|\/[^\s<]+)$/;
+
+  function appendText(
+    parts: InlineSegment[],
+    text: string,
+    flags: Omit<InlineSegment, "kind" | "text"> = {}
+  ) {
+    if (!text) return;
+    const prev = parts[parts.length - 1];
+    if (
+      prev?.kind === "text" &&
+      prev.strong === flags.strong &&
+      prev.emphasis === flags.emphasis &&
+      prev.strike === flags.strike &&
+      prev.href === flags.href
+    ) {
+      prev.text += text;
+      return;
+    }
+    parts.push({ kind: "text", text, ...flags });
+  }
+
+  function findClosing(source: string, marker: string, start: number): number {
+    let index = start;
+    while (index < source.length) {
+      const found = source.indexOf(marker, index);
+      if (found === -1) return -1;
+      if (found === 0 || source[found - 1] !== "\\") return found;
+      index = found + marker.length;
+    }
+    return -1;
+  }
+
+  function parseInline(
+    text: string,
+    flags: Omit<InlineSegment, "kind" | "text"> = {}
+  ): InlineSegment[] {
     const parts: InlineSegment[] = [];
-    const pattern = /`([^`]+)`/g;
-    let lastIndex = 0;
-    let match: RegExpExecArray | null;
+    let index = 0;
 
-    while ((match = pattern.exec(text)) !== null) {
-      if (match.index > lastIndex) {
-        parts.push({ kind: "text", text: text.slice(lastIndex, match.index) });
+    while (index < text.length) {
+      const rest = text.slice(index);
+
+      if (rest.startsWith("`")) {
+        const close = findClosing(text, "`", index + 1);
+        if (close !== -1) {
+          parts.push({
+            kind: "code",
+            text: text.slice(index + 1, close)
+          });
+          index = close + 1;
+          continue;
+        }
       }
-      parts.push({ kind: "code", text: match[1] });
-      lastIndex = match.index + match[0].length;
+
+      if (rest.startsWith("[")) {
+        const labelEnd = findClosing(text, "]", index + 1);
+        if (labelEnd !== -1 && text[labelEnd + 1] === "(") {
+          const hrefEnd = findClosing(text, ")", labelEnd + 2);
+          if (hrefEnd !== -1) {
+            const label = text.slice(index + 1, labelEnd);
+            const href = text.slice(labelEnd + 2, hrefEnd).trim();
+            const nested = parseInline(label, { ...flags, href });
+            parts.push(...nested);
+            index = hrefEnd + 1;
+            continue;
+          }
+        }
+      }
+
+      const strongMarker = rest.startsWith("**") ? "**" : rest.startsWith("__") ? "__" : null;
+      if (strongMarker) {
+        const close = findClosing(text, strongMarker, index + 2);
+        if (close !== -1) {
+          parts.push(
+            ...parseInline(text.slice(index + 2, close), {
+              ...flags,
+              strong: true
+            })
+          );
+          index = close + 2;
+          continue;
+        }
+      }
+
+      if (rest.startsWith("~~")) {
+        const close = findClosing(text, "~~", index + 2);
+        if (close !== -1) {
+          parts.push(
+            ...parseInline(text.slice(index + 2, close), {
+              ...flags,
+              strike: true
+            })
+          );
+          index = close + 2;
+          continue;
+        }
+      }
+
+      const emphasisMarker = rest.startsWith("*") ? "*" : rest.startsWith("_") ? "_" : null;
+      if (emphasisMarker) {
+        const close = findClosing(text, emphasisMarker, index + 1);
+        if (close !== -1 && close > index + 1) {
+          parts.push(
+            ...parseInline(text.slice(index + 1, close), {
+              ...flags,
+              emphasis: true
+            })
+          );
+          index = close + 1;
+          continue;
+        }
+      }
+
+      const nextMarkers = ["`", "[", "**", "__", "~~", "*", "_"]
+        .map((marker) => {
+          const found = text.indexOf(marker, index + 1);
+          return found === -1 ? text.length : found;
+        })
+        .reduce((left, right) => Math.min(left, right), text.length);
+      appendText(parts, text.slice(index, nextMarkers), flags);
+      index = nextMarkers;
     }
 
-    if (lastIndex < text.length) {
-      parts.push({ kind: "text", text: text.slice(lastIndex) });
-    }
+    return parts.length > 0 ? parts : [{ kind: "text", text, ...flags }];
+  }
 
-    return parts.length > 0 ? parts : [{ kind: "text", text }];
+  function taskState(text: string): { checked: boolean | null; text: string } {
+    const task = text.match(/^\[([ xX])\]\s+(.*)$/);
+    if (!task) return { checked: null, text };
+    return { checked: task[1].toLowerCase() === "x", text: task[2] };
+  }
+
+  function splitTableRow(line: string): string[] {
+    return line
+      .trim()
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((cell) => cell.trim());
+  }
+
+  function isTableSeparator(line: string): boolean {
+    return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
   }
 
   function parseBlocks(source: string): MessageBlock[] {
@@ -38,13 +175,11 @@
     const lines = source.replace(/\r\n?/g, "\n").split("\n");
     let paragraphLines: string[] = [];
     let quoteLines: string[] = [];
-    let listItems: string[] = [];
+    let listItems: ListItem[] = [];
     let listOrdered = false;
 
     function flushParagraph() {
-      if (paragraphLines.length === 0) {
-        return;
-      }
+      if (paragraphLines.length === 0) return;
       blocks.push({
         kind: "paragraph",
         text: paragraphLines.join("\n").trim()
@@ -53,9 +188,7 @@
     }
 
     function flushQuote() {
-      if (quoteLines.length === 0) {
-        return;
-      }
+      if (quoteLines.length === 0) return;
       blocks.push({
         kind: "quote",
         text: quoteLines.join("\n").trim()
@@ -64,9 +197,7 @@
     }
 
     function flushList() {
-      if (listItems.length === 0) {
-        return;
-      }
+      if (listItems.length === 0) return;
       blocks.push({
         kind: "list",
         ordered: listOrdered,
@@ -77,7 +208,9 @@
 
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index];
-      const codeFence = line.match(/^```([\w-]+)?\s*$/);
+      const trimmed = line.trim();
+      const codeFence = line.match(/^```([\w.+-]+)?\s*$/);
+
       if (codeFence) {
         flushParagraph();
         flushQuote();
@@ -97,25 +230,65 @@
         continue;
       }
 
-      if (line.trim() === "") {
+      if (index + 1 < lines.length && line.includes("|") && isTableSeparator(lines[index + 1])) {
+        flushParagraph();
+        flushQuote();
+        flushList();
+        const headers = splitTableRow(line);
+        const rows: string[][] = [];
+        index += 2;
+        while (index < lines.length && lines[index].includes("|") && lines[index].trim() !== "") {
+          rows.push(splitTableRow(lines[index]));
+          index += 1;
+        }
+        index -= 1;
+        blocks.push({ kind: "table", headers, rows });
+        continue;
+      }
+
+      if (/^#{1,6}\s+/.test(line)) {
+        flushParagraph();
+        flushQuote();
+        flushList();
+        const heading = line.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
+        if (heading) {
+          blocks.push({
+            kind: "heading",
+            level: heading[1].length as 1 | 2 | 3 | 4 | 5 | 6,
+            text: heading[2]
+          });
+          continue;
+        }
+      }
+
+      if (/^([-*_])(\s*\1){2,}\s*$/.test(trimmed)) {
+        flushParagraph();
+        flushQuote();
+        flushList();
+        blocks.push({ kind: "rule" });
+        continue;
+      }
+
+      if (trimmed === "") {
         flushParagraph();
         flushQuote();
         flushList();
         continue;
       }
 
-      const orderedItem = line.match(/^\d+\.\s+(.*)$/);
-      const unorderedItem = line.match(/^[-*]\s+(.*)$/);
+      const orderedItem = line.match(/^\s*\d+\.\s+(.*)$/);
+      const unorderedItem = line.match(/^\s*[-*+]\s+(.*)$/);
       if (orderedItem || unorderedItem) {
         flushParagraph();
         flushQuote();
         const ordered = Boolean(orderedItem);
-        const text = (orderedItem?.[1] ?? unorderedItem?.[1] ?? "").trim();
+        const rawText = (orderedItem?.[1] ?? unorderedItem?.[1] ?? "").trim();
+        const item = taskState(rawText);
         if (listItems.length > 0 && ordered !== listOrdered) {
           flushList();
         }
         listOrdered = ordered;
-        listItems.push(text);
+        listItems.push(item);
         continue;
       }
 
@@ -140,34 +313,77 @@
   $: blocks = parseBlocks(body);
 </script>
 
+{#snippet inline(text: string)}
+  {#each parseInline(text) as segment}
+    {#if segment.kind === "code"}
+      <code>{segment.text}</code>
+    {:else if segment.href && urlPattern.test(segment.href)}
+      <a
+        href={segment.href}
+        target={segment.href.startsWith("/") ? undefined : "_blank"}
+        rel={segment.href.startsWith("/") ? undefined : "noreferrer"}
+        class:strong={segment.strong}
+        class:emphasis={segment.emphasis}
+        class:strike={segment.strike}
+      >
+        {segment.text}
+      </a>
+    {:else}
+      <span
+        class:strong={segment.strong}
+        class:emphasis={segment.emphasis}
+        class:strike={segment.strike}
+      >
+        {segment.text}
+      </span>
+    {/if}
+  {/each}
+{/snippet}
+
 <div class="message-body">
   {#each blocks as block}
     {#if block.kind === "paragraph"}
-      <p>
-        {#each inlineSegments(block.text) as segment}
-          {#if segment.kind === "code"}
-            <code>{segment.text}</code>
-          {:else}
-            {segment.text}
-          {/if}
-        {/each}
-      </p>
+      <p>{@render inline(block.text)}</p>
+    {:else if block.kind === "heading"}
+      <svelte:element this={`h${block.level}`} class="heading">
+        {@render inline(block.text)}
+      </svelte:element>
     {:else if block.kind === "list"}
       <svelte:element this={block.ordered ? "ol" : "ul"} class="list">
         {#each block.items as item}
-          <li>
-            {#each inlineSegments(item) as segment}
-              {#if segment.kind === "code"}
-                <code>{segment.text}</code>
-              {:else}
-                {segment.text}
-              {/if}
-            {/each}
+          <li class:task={item.checked !== null}>
+            {#if item.checked !== null}
+              <input type="checkbox" checked={item.checked} disabled aria-label="task state" />
+            {/if}
+            <span>{@render inline(item.text)}</span>
           </li>
         {/each}
       </svelte:element>
     {:else if block.kind === "quote"}
-      <blockquote>{block.text}</blockquote>
+      <blockquote>{@render inline(block.text)}</blockquote>
+    {:else if block.kind === "table"}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              {#each block.headers as header}
+                <th>{@render inline(header)}</th>
+              {/each}
+            </tr>
+          </thead>
+          <tbody>
+            {#each block.rows as row}
+              <tr>
+                {#each block.headers as _, cellIndex}
+                  <td>{@render inline(row[cellIndex] ?? "")}</td>
+                {/each}
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {:else if block.kind === "rule"}
+      <hr />
     {:else}
       <div class="code-block">
         {#if block.language}
@@ -188,13 +404,16 @@
 
   p,
   blockquote,
-  pre {
+  pre,
+  .heading {
     margin: 0;
   }
 
   p,
   li,
-  blockquote {
+  blockquote,
+  td,
+  th {
     line-height: 1.78;
   }
 
@@ -202,11 +421,47 @@
     white-space: pre-wrap;
   }
 
+  .heading {
+    color: var(--text);
+    font-weight: 760;
+    line-height: 1.25;
+    letter-spacing: 0;
+  }
+
+  h1.heading {
+    font-size: 1.28rem;
+  }
+
+  h2.heading {
+    font-size: 1.16rem;
+  }
+
+  h3.heading,
+  h4.heading,
+  h5.heading,
+  h6.heading {
+    font-size: 1.04rem;
+  }
+
   .list {
     margin: 0;
     padding-left: 1.35rem;
     display: grid;
     gap: 0.42rem;
+  }
+
+  li.task {
+    list-style: none;
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin-left: -1.35rem;
+  }
+
+  input[type="checkbox"] {
+    width: 0.9rem;
+    height: 0.9rem;
+    accent-color: var(--accent);
   }
 
   blockquote {
@@ -225,6 +480,54 @@
     border-radius: 0;
     background: rgba(247, 243, 235, 0.92);
     box-shadow: 0 1px 0 rgba(255, 255, 255, 0.55) inset;
+  }
+
+  .strong {
+    font-weight: 720;
+  }
+
+  .emphasis {
+    font-style: italic;
+  }
+
+  .strike {
+    text-decoration: line-through;
+  }
+
+  a {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 0.16em;
+  }
+
+  .table-wrap {
+    overflow: auto;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.94rem;
+  }
+
+  th,
+  td {
+    padding: 0.42rem 0.55rem;
+    border: 1px solid rgba(47, 75, 69, 0.14);
+    text-align: left;
+    vertical-align: top;
+  }
+
+  th {
+    background: rgba(222, 238, 232, 0.42);
+    font-weight: 720;
+  }
+
+  hr {
+    width: 100%;
+    border: 0;
+    border-top: 1px solid rgba(47, 75, 69, 0.18);
+    margin: 0.2rem 0;
   }
 
   .code-block {

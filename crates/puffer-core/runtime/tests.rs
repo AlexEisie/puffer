@@ -44,6 +44,7 @@ pub(super) fn state() -> AppState {
         SessionMetadata {
             id: Uuid::nil(),
             display_name: None,
+            generated_title: None,
             cwd: std::env::current_dir().unwrap(),
             created_at_ms: 0,
             updated_at_ms: 0,
@@ -63,6 +64,7 @@ pub(super) fn plan_mode_state() -> AppState {
     let session = SessionMetadata {
         id: Uuid::new_v4(),
         display_name: None,
+        generated_title: None,
         cwd: cwd.clone(),
         created_at_ms: 0,
         updated_at_ms: 0,
@@ -557,6 +559,7 @@ fn resolve_openai_execution_config_uses_codex_chatgpt_route_for_builtin_oauth() 
     .unwrap();
 
     assert_eq!(config.request_config.base_url, OPENAI_CHATGPT_BASE_URL);
+    assert_eq!(config.request_config.version, OPENAI_CODEX_COMPAT_VERSION);
     assert_eq!(
         config.request_config.account_id.as_deref(),
         Some("acct-123")
@@ -695,7 +698,7 @@ fn openai_structured_output_falls_back_and_caches_unsupported_native_support() {
     let server = thread::spawn(move || {
         for index in 0..5 {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0_u8; 16384];
+            let mut buffer = [0_u8; 131072];
             let bytes = stream.read(&mut buffer).unwrap();
             let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
             request_log.lock().unwrap().push(request);

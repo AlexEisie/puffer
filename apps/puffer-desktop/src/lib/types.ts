@@ -27,6 +27,7 @@ export type DesktopPinState = {
 export type SessionListItem = {
   id: string;
   displayName: string | null;
+  generatedTitle: string | null;
   title: string;
   cwd: string;
   folderPath: string;

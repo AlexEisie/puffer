@@ -1,7 +1,7 @@
 use super::{
     execute_tool_call, is_parallel_safe_tool, parse_http_json_response, resolve_tool_permission,
     run_turn_hooks, send_http_request_raw, PermissionOutcome, ToolExecutionBackend, ToolInvocation,
-    TurnStreamEvent, APP_VERSION,
+    TurnStreamEvent, APP_VERSION, OPENAI_CODEX_COMPAT_VERSION,
 };
 use crate::permissions::load_runtime_permission_context;
 use crate::workspace_paths;
@@ -64,6 +64,14 @@ pub(super) struct OpenAIExecutionConfig {
 pub(super) struct OpenAIToolResults {
     pub(super) outputs: Vec<OpenAIResponsesFunctionCallOutput>,
     pub(super) invocations: Vec<ToolInvocation>,
+}
+
+fn openai_request_version(provider: &ProviderDescriptor, oauth: bool) -> String {
+    if is_codex_openai_provider(provider) || (oauth && provider.id == "openai") {
+        OPENAI_CODEX_COMPAT_VERSION.to_string()
+    } else {
+        APP_VERSION.to_string()
+    }
 }
 
 pub(super) fn execute_openai(
@@ -1243,7 +1251,7 @@ pub(super) fn resolve_openai_execution_config(
             provider_id: provider.id.clone(),
             request_config: OpenAIRequestConfig {
                 base_url: provider.base_url.clone(),
-                version: APP_VERSION.to_string(),
+                version: openai_request_version(provider, false),
                 auth: OpenAIAuth::ApiKey(key.clone()),
                 originator,
                 session_id,
@@ -1262,7 +1270,7 @@ pub(super) fn resolve_openai_execution_config(
             provider_id: provider.id.clone(),
             request_config: OpenAIRequestConfig {
                 base_url: openai_base_url_for_auth(provider, true),
-                version: APP_VERSION.to_string(),
+                version: openai_request_version(provider, true),
                 auth: OpenAIAuth::OAuthBearer(credential.access_token.clone()),
                 originator,
                 session_id,
@@ -1281,7 +1289,7 @@ pub(super) fn resolve_openai_execution_config(
             provider_id: provider.id.clone(),
             request_config: OpenAIRequestConfig {
                 base_url: provider.base_url.clone(),
-                version: APP_VERSION.to_string(),
+                version: openai_request_version(provider, false),
                 auth: OpenAIAuth::None,
                 originator,
                 session_id,

@@ -1,4 +1,4 @@
-use super::super::{APP_VERSION, OPENAI_CHATGPT_BASE_URL};
+use super::super::{OPENAI_CHATGPT_BASE_URL, OPENAI_CODEX_COMPAT_VERSION};
 use super::StructuredOutputConfig;
 use crate::AppState;
 use anyhow::{Error, Result};
@@ -236,7 +236,10 @@ pub(super) fn append_default_openai_headers(
     provider_id: &str,
 ) {
     if provider_id == "openai" && !has_header(headers, "version") {
-        headers.push(("version".to_string(), APP_VERSION.to_string()));
+        headers.push((
+            "version".to_string(),
+            OPENAI_CODEX_COMPAT_VERSION.to_string(),
+        ));
     }
     append_env_header(headers, "OpenAI-Organization", "OPENAI_ORGANIZATION");
     append_env_header(headers, "OpenAI-Project", "OPENAI_PROJECT");
