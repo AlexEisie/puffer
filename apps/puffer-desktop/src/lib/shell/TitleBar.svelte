@@ -1,4 +1,5 @@
 <script lang="ts">
+  import BrandLogo from "../design/BrandLogo.svelte";
   import Puffer from "../design/Puffer.svelte";
   import Icon from "../design/Icon.svelte";
   import type { AgentState } from "./tweaks.ts";
@@ -19,7 +20,7 @@
 
 <div class="pf-titlebar" data-tauri-drag-region>
   <div class="pf-titlebar-brand" data-tauri-drag-region>
-    <Puffer size={14} state="idle" />
+    <BrandLogo size={20} />
   </div>
   <div class="pf-titlebar-tabs">
     {#each tabs as tab (tab.id)}

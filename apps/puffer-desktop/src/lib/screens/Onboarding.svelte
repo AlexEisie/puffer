@@ -1,5 +1,6 @@
 <script lang="ts">
   import LoginView from "../components/LoginView.svelte";
+  import BrandLogo from "../design/BrandLogo.svelte";
   import Puffer from "../design/Puffer.svelte";
   import Icon from "../design/Icon.svelte";
   import type { ExternalCredential, SettingsSnapshot } from "../types";
@@ -61,7 +62,7 @@
 <div class="pf-onboard">
   <div class="pf-onboard-side">
     <div class="brand">
-      <Puffer size={28} state="idle" />
+      <BrandLogo size={32} />
       Puffer
     </div>
     <h1>An agent that codes alongside you, not for you.</h1>
