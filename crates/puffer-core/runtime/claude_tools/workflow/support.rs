@@ -16,6 +16,7 @@ use crate::config_settings::{
     config_setting_path, config_setting_scope, get_config_value, persist_config_setting,
     scope_label, set_config_value,
 };
+use crate::runtime::permission_prompt::{prompt_for_user_question, UserQuestionPromptRequest};
 use crate::AppState;
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_config::{ensure_workspace_dirs, ConfigPaths};
@@ -756,9 +757,19 @@ pub(super) fn execute_ask_user_question(
     _cwd: &Path,
     input: Value,
 ) -> Result<String> {
-    let parsed: AskUserQuestionInput =
+    let mut parsed: AskUserQuestionInput =
         serde_json::from_value(input).context("invalid AskUserQuestion input")?;
     validate_ask_user_questions(&parsed.questions)?;
+    if parsed.answers.is_empty() {
+        if let Some(response) = prompt_for_user_question(UserQuestionPromptRequest {
+            questions: serde_json::to_value(&parsed.questions)?,
+        }) {
+            parsed.answers = response.answers;
+            for (key, value) in response.annotations {
+                parsed.annotations.insert(key, value);
+            }
+        }
+    }
     let pending_path = workflow_root(state.session.cwd.as_path())?.join("pending_questions.json");
     let pending = parsed.answers.is_empty();
     if pending {

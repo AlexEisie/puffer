@@ -36,9 +36,9 @@ pub use model_preferences::{
 };
 pub use runtime::background_tasks;
 pub use runtime::claude_tools::execute_workflow_tool;
+pub use runtime::execute_user_prompt as execute_user_turn;
 pub use runtime::install_subscription_manager;
 pub use runtime::subscription_manager;
-pub use runtime::execute_user_prompt as execute_user_turn;
 pub use runtime::teammate_loop;
 pub use runtime::{
     execute_side_question, execute_user_prompt_streaming as execute_user_turn_streaming,
@@ -46,11 +46,11 @@ pub use runtime::{
     execute_user_prompt_streaming_with_reflection as execute_user_turn_streaming_with_reflection,
     execute_user_prompt_streaming_with_structured_output as execute_user_turn_streaming_with_structured_output,
     execute_user_prompt_with_structured_output as execute_user_turn_with_structured_output,
-    shutdown_runtime_services, with_permission_prompt_handler, CodeJudgeConfig, LlmJudgeConfig,
-    LlmJudgeContextScope, LlmJudgeMode, LlmJudgePromptCacheMode, PermissionPromptAction,
-    PermissionPromptRequest, ReflectionConfig, ReflectionLanguage, ReflectionTraceEvent,
-    StructuredOutputConfig, ToolCallRequest, ToolInvocation, TurnExecution, TurnStreamEvent,
-    TurnUsageReport,
+    shutdown_runtime_services, with_permission_prompt_handler, with_user_question_prompt_handler,
+    CodeJudgeConfig, LlmJudgeConfig, LlmJudgeContextScope, LlmJudgeMode, LlmJudgePromptCacheMode,
+    PermissionPromptAction, PermissionPromptRequest, ReflectionConfig, ReflectionLanguage,
+    ReflectionTraceEvent, StructuredOutputConfig, ToolCallRequest, ToolInvocation, TurnExecution,
+    TurnStreamEvent, TurnUsageReport, UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 pub use state::{AppState, MessageRole, RenderedMessage, TaskRecord, TaskStatus};
 
@@ -59,6 +59,15 @@ use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use puffer_session_store::{SessionStore, SessionSummary};
 use std::path::Path;
+
+/// Executes a standalone LSP query against the configured workspace language servers.
+pub fn execute_lsp_query(
+    resources: &LoadedResources,
+    cwd: &Path,
+    input: serde_json::Value,
+) -> Result<String> {
+    runtime::claude_tools::workflow::lsp::execute_lsp_query(resources, cwd, input)
+}
 
 /// Renders the current session/provider/tool status summary used by `/status`.
 pub fn render_status_summary(

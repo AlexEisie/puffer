@@ -64,7 +64,8 @@ use self::openai::{
     execute_openai, execute_openai_completions, is_event_stream, parse_openai_sse_response,
 };
 pub use self::permission_prompt::{
-    with_permission_prompt_handler, PermissionPromptAction, PermissionPromptRequest,
+    with_permission_prompt_handler, with_user_question_prompt_handler, PermissionPromptAction,
+    PermissionPromptRequest, UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 pub use self::reflection::{
     CodeJudgeConfig, LlmJudgeConfig, LlmJudgeContextScope, LlmJudgeMode, LlmJudgePromptCacheMode,
@@ -465,6 +466,22 @@ fn resolve_provider_and_model<'a>(
             let provider = providers
                 .provider(&model.provider)
                 .ok_or_else(|| anyhow!("provider {} not found", model.provider))?;
+            return Ok((provider, model.id.clone()));
+        }
+        if let Some(provider_id) = &state.current_provider {
+            if let Some(provider) = providers.provider(provider_id) {
+                if let Some(model) = provider.models.iter().find(|model| model.id == *selected) {
+                    return Ok((provider, model.id.clone()));
+                }
+            }
+        }
+        if let Some((provider, model)) = providers.providers().find_map(|provider| {
+            provider
+                .models
+                .iter()
+                .find(|model| model.id == *selected)
+                .map(|model| (provider, model))
+        }) {
             return Ok((provider, model.id.clone()));
         }
     }

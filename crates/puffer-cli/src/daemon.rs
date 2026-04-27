@@ -35,12 +35,22 @@ use puffer_config::{
     ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, PufferConfig,
 };
 use puffer_core::{
-    execute_user_turn_streaming_with_permissions, AppState, MessageRole, PermissionPromptAction,
-    PermissionPromptRequest, TurnStreamEvent,
+    execute_user_turn_streaming_with_permissions, with_user_question_prompt_handler, AppState,
+    MessageRole, PermissionPromptAction, PermissionPromptRequest, TurnStreamEvent,
+    UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
-use puffer_provider_registry::{AuthStore, ProviderRegistry};
-use puffer_resources::{load_resources, LoadedResources};
+use puffer_provider_openai::{
+    exchange_authorization_code as exchange_openai_authorization_code,
+    parse_authorization_input as parse_openai_authorization_input,
+};
+use puffer_provider_registry::{AuthStore, ProviderRegistry, StoredCredential};
+use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
 use puffer_session_store::{SessionStore, TranscriptEvent};
+use puffer_transport_anthropic::{
+    exchange_authorization_code as exchange_anthropic_authorization_code,
+    parse_authorization_input as parse_anthropic_authorization_input, ANTHROPIC_API_BASE_URL,
+    ANTHROPIC_MANUAL_REDIRECT_URL,
+};
 use puffer_workflow::WorkflowStore;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -51,15 +61,24 @@ use std::net::SocketAddr;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
 use uuid::Uuid;
 
+use crate::auth_credentials::{
+    inferred_anthropic_redirect_uri, set_stored_credential, store_anthropic_credential,
+    to_registry_oauth_credential_openai,
+};
+use crate::auth_provider::{
+    oauth_family_for_provider, oauth_login_bundle_for_provider, OauthFamily,
+};
 use crate::daemon_fs_watch::FsWatchRegistry;
 use crate::daemon_pty::PtyRegistry;
+use crate::daemon_ui_state::{load_pin_state, set_pin_state, DesktopPinState};
 use crate::desktop_api;
 use crate::desktop_api_types::{
-    FolderGroupDto, McpServerDto, ModelDescriptorDto, RepoActionResultDto, RepoStatusDto,
-    SessionDetailDto, SettingsSnapshotDto,
+    ExternalCredentialDto, FolderGroupDto, McpServerDto, ModelDescriptorDto, RepoActionResultDto,
+    RepoStatusDto, SessionDetailDto, SettingsSnapshotDto,
 };
 
 const PROTOCOL_VERSION: &str = "1";
@@ -225,10 +244,16 @@ impl DaemonState {
     pub(crate) fn workspace_root(&self) -> std::path::PathBuf {
         self.paths.workspace_root.clone()
     }
+
+    pub(crate) fn config_paths(&self) -> &ConfigPaths {
+        &self.paths
+    }
 }
 
 struct TurnHandle {
     pending: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<PermissionPromptAction>>>>,
+    pending_questions:
+        Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<UserQuestionPromptResponse>>>>,
 }
 
 impl DaemonState {
@@ -556,14 +581,26 @@ async fn dispatch_request(
         }
 
         "list_grouped_sessions" => respond!(handle_list_grouped_sessions(&state)),
+        "load_desktop_pins" => respond!(handle_load_desktop_pins(&state)),
+        "set_desktop_pin" => respond!(handle_set_desktop_pin(&state, &params)),
         "load_session_detail" => respond!(handle_load_session_detail(&state, &params)),
         "refresh_repo_status" => respond!(handle_refresh_repo_status(&state, &params)),
         "load_settings_snapshot" => respond!(detached!(|s| handle_load_settings_snapshot(&s))),
         "login_with_api_key" => {
             respond!(detached!(|s, p| handle_login_with_api_key(&s, &p)))
         }
+        "login_with_oauth" => {
+            respond!(detached!(|s, p| handle_login_with_oauth(&s, &p)))
+        }
+        "list_external_credentials" => {
+            respond!(detached!(|s| handle_list_external_credentials(&s)))
+        }
+        "import_external_credential" => {
+            respond!(detached!(|s, p| handle_import_external_credential(&s, &p)))
+        }
         "logout_provider" => respond!(detached!(|s, p| handle_logout_provider(&s, &p))),
         "list_mcp_servers" => respond!(detached!(|s| handle_list_mcp_servers(&s))),
+        "add_mcp_server" => respond!(detached!(|s, p| handle_add_mcp_server(&s, &p))),
         "list_provider_models" => {
             respond!(detached!(|s, p| handle_list_provider_models(&s, &p)))
         }
@@ -581,6 +618,10 @@ async fn dispatch_request(
         "pty_close" => respond!(handle_pty_close(&state, &params)),
         "list_dir" => respond!(crate::daemon_files::handle_list_dir(&state, &params)),
         "read_file" => respond!(crate::daemon_files::handle_read_file(&state, &params)),
+        "write_file" => respond!(crate::daemon_files::handle_write_file(&state, &params)),
+        "lsp_inspect" => respond!(detached!(|s, p| crate::daemon_lsp::handle_lsp_inspect(
+            &s, &p
+        ))),
         "fs_watch" => respond!(crate::daemon_fs_watch::handle_fs_watch(&state, &params)),
         "fs_unwatch" => respond!(crate::daemon_fs_watch::handle_fs_unwatch(&state, &params)),
         "workflow_list" => respond!(handle_workflow_list(&state)),
@@ -613,6 +654,7 @@ async fn dispatch_request(
         }
 
         "resolve_permission" => respond!(handle_resolve_permission(&state, &params)),
+        "resolve_user_question" => respond!(handle_resolve_user_question(&state, &params)),
         "cancel_turn" => respond!(handle_cancel_turn(&state, &params)),
 
         other => {
@@ -640,6 +682,32 @@ fn handle_list_grouped_sessions(state: &DaemonState) -> Result<Value> {
     let session_store = SessionStore::from_paths(&state.paths)?;
     let groups: Vec<FolderGroupDto> = desktop_api::list_grouped_sessions(&session_store)?;
     Ok(serde_json::to_value(groups)?)
+}
+
+fn handle_load_desktop_pins(state: &DaemonState) -> Result<Value> {
+    let pins = load_pin_state(&state.paths.user_config_dir)?;
+    Ok(serde_json::to_value(pins)?)
+}
+
+fn handle_set_desktop_pin(state: &DaemonState, params: &Value) -> Result<Value> {
+    let kind = params
+        .get("kind")
+        .and_then(Value::as_str)
+        .context("missing kind")?;
+    let id = params
+        .get("id")
+        .and_then(Value::as_str)
+        .context("missing id")?;
+    let pinned = params
+        .get("pinned")
+        .and_then(Value::as_bool)
+        .context("missing pinned")?;
+    let pins: DesktopPinState = set_pin_state(&state.paths.user_config_dir, kind, id, pinned)?;
+    state.publish_event(ServerEnvelope::Event {
+        event: "desktop:pins:changed".to_string(),
+        payload: serde_json::to_value(&pins)?,
+    });
+    Ok(serde_json::to_value(pins)?)
 }
 
 fn handle_load_session_detail(state: &DaemonState, params: &Value) -> Result<Value> {
@@ -727,6 +795,13 @@ fn handle_login_with_api_key(state: &DaemonState, params: &Value) -> Result<Valu
         provider_id,
         api_key,
     )?;
+    let _ = desktop_api::ensure_default_routing(
+        &state.paths,
+        &inputs.providers,
+        &inputs.auth_store,
+        provider_id,
+    );
+    reload_daemon_config(state)?;
     // Rebuild so provider discovery can pick up the newly-stored key.
     let fresh = state.build_runtime_inputs()?;
     let config = state.config.lock().unwrap().clone();
@@ -739,6 +814,148 @@ fn handle_login_with_api_key(state: &DaemonState, params: &Value) -> Result<Valu
         &fresh.session_store,
     )?;
     Ok(serde_json::to_value(snapshot)?)
+}
+
+/// Runs the provider OAuth flow from the daemon host and returns a fresh snapshot.
+fn handle_login_with_oauth(state: &DaemonState, params: &Value) -> Result<Value> {
+    let provider_id = params
+        .get("providerId")
+        .or_else(|| params.get("provider_id"))
+        .and_then(|v| v.as_str())
+        .context("missing providerId")?;
+
+    let mut inputs = state.build_runtime_inputs()?;
+    let auth_path = state.paths.user_config_dir.join("auth.json");
+    let listener = crate::authflow::CallbackListener::bind_localhost("/callback")?;
+    let bundle =
+        oauth_login_bundle_for_provider(&inputs.providers, provider_id, listener.redirect_uri())?;
+    let launch_url = bundle
+        .automatic_authorization_url
+        .as_deref()
+        .unwrap_or(bundle.authorization_url.as_str());
+    if !crate::authflow::open_browser(launch_url) {
+        anyhow::bail!("could not open the system browser for `{provider_id}` login");
+    }
+    let callback = listener
+        .wait_for_callback_url(Duration::from_secs(180))?
+        .ok_or_else(|| anyhow::anyhow!("timed out waiting for OAuth callback"))?;
+
+    match oauth_family_for_provider(&inputs.providers, provider_id) {
+        Some(OauthFamily::OpenAi) => {
+            let (code, parsed_state) = parse_openai_authorization_input(&callback);
+            let code = code
+                .ok_or_else(|| anyhow::anyhow!("could not extract an OpenAI authorization code"))?;
+            if let Some(parsed_state) = parsed_state {
+                if parsed_state != bundle.state {
+                    anyhow::bail!("oauth state mismatch for openai");
+                }
+            }
+            let credential = exchange_openai_authorization_code(&code, &bundle.verifier, None)?;
+            set_stored_credential(
+                &mut inputs.auth_store,
+                provider_id.to_string(),
+                StoredCredential::OAuth(to_registry_oauth_credential_openai(credential)),
+            );
+        }
+        Some(OauthFamily::Anthropic) => {
+            let (code, parsed_state) = parse_anthropic_authorization_input(&callback);
+            let code = code.ok_or_else(|| {
+                anyhow::anyhow!("could not extract an Anthropic authorization code")
+            })?;
+            let parsed_state = parsed_state.unwrap_or_else(|| bundle.state.clone());
+            if parsed_state != bundle.state {
+                anyhow::bail!("oauth state mismatch for anthropic");
+            }
+            let redirect_uri = inferred_anthropic_redirect_uri(&callback)
+                .or_else(|| bundle.manual_redirect_uri.clone())
+                .unwrap_or_else(|| ANTHROPIC_MANUAL_REDIRECT_URL.to_string());
+            let credential = exchange_anthropic_authorization_code(
+                &code,
+                &bundle.verifier,
+                &bundle.state,
+                Some(&redirect_uri),
+                Some(ANTHROPIC_API_BASE_URL),
+            )?;
+            store_anthropic_credential(&mut inputs.auth_store, provider_id, credential)?;
+        }
+        None => anyhow::bail!("oauth login is not implemented for {provider_id}"),
+    }
+
+    inputs.auth_store.save(&auth_path)?;
+    let _ = desktop_api::ensure_default_routing(
+        &state.paths,
+        &inputs.providers,
+        &inputs.auth_store,
+        provider_id,
+    );
+    reload_daemon_config(state)?;
+    let fresh = state.build_runtime_inputs()?;
+    let config = state.config.lock().unwrap().clone();
+    let snapshot: SettingsSnapshotDto = desktop_api::load_settings_snapshot(
+        &state.paths,
+        &config,
+        &fresh.resources,
+        &fresh.providers,
+        &fresh.auth_store,
+        &fresh.session_store,
+    )?;
+    Ok(serde_json::to_value(snapshot)?)
+}
+
+/// Lists importable credentials discovered under external tool config roots.
+fn handle_list_external_credentials(state: &DaemonState) -> Result<Value> {
+    let inputs = state.build_runtime_inputs()?;
+    let credentials: Vec<ExternalCredentialDto> =
+        desktop_api::list_external_credentials(&inputs.providers)?;
+    Ok(serde_json::to_value(credentials)?)
+}
+
+/// Imports a discovered external credential and returns a fresh settings snapshot.
+fn handle_import_external_credential(state: &DaemonState, params: &Value) -> Result<Value> {
+    let provider_id = params
+        .get("providerId")
+        .or_else(|| params.get("provider_id"))
+        .and_then(|v| v.as_str())
+        .context("missing providerId")?;
+    let source = params
+        .get("source")
+        .and_then(|v| v.as_str())
+        .context("missing source")?;
+
+    let mut inputs = state.build_runtime_inputs()?;
+    let auth_path = state.paths.user_config_dir.join("auth.json");
+    desktop_api::import_external_credential(
+        &state.paths,
+        &mut inputs.auth_store,
+        &inputs.providers,
+        &auth_path,
+        provider_id,
+        source,
+    )?;
+    let _ = desktop_api::ensure_default_routing(
+        &state.paths,
+        &inputs.providers,
+        &inputs.auth_store,
+        provider_id,
+    );
+    reload_daemon_config(state)?;
+    let fresh = state.build_runtime_inputs()?;
+    let config = state.config.lock().unwrap().clone();
+    let snapshot: SettingsSnapshotDto = desktop_api::load_settings_snapshot(
+        &state.paths,
+        &config,
+        &fresh.resources,
+        &fresh.providers,
+        &fresh.auth_store,
+        &fresh.session_store,
+    )?;
+    Ok(serde_json::to_value(snapshot)?)
+}
+
+fn reload_daemon_config(state: &DaemonState) -> Result<()> {
+    let config = load_config(&state.paths)?;
+    *state.config.lock().unwrap() = config;
+    Ok(())
 }
 
 /// Removes stored credentials for a provider and returns the refreshed
@@ -766,12 +983,97 @@ fn handle_logout_provider(state: &DaemonState, params: &Value) -> Result<Value> 
 }
 
 /// Lists all MCP servers discovered across workspace + user + builtin
-/// resource roots. Read-only — editing servers still happens by editing
-/// the TOML on disk (the UI just surfaces what's loaded).
+/// resource roots.
 fn handle_list_mcp_servers(state: &DaemonState) -> Result<Value> {
     let inputs = state.build_runtime_inputs()?;
-    let servers: Vec<McpServerDto> = inputs
-        .resources
+    let servers = mcp_server_dtos(&inputs.resources);
+    Ok(json!({ "servers": servers }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddMcpServerParams {
+    id: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    transport: String,
+    #[serde(default)]
+    endpoint: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+fn handle_add_mcp_server(state: &DaemonState, params: &Value) -> Result<Value> {
+    let params: AddMcpServerParams = serde_json::from_value(params.clone())?;
+    let id = params.id.trim();
+    validate_mcp_id(id)?;
+    let transport = params.transport.trim();
+    if !matches!(transport, "stdio" | "sse" | "http") {
+        anyhow::bail!("unsupported MCP transport `{transport}`");
+    }
+
+    let endpoint = params.endpoint.unwrap_or_default().trim().to_string();
+    let target = params.target.unwrap_or_default().trim().to_string();
+    if transport == "stdio" && target.is_empty() {
+        anyhow::bail!("stdio MCP servers require a command");
+    }
+    if transport != "stdio" && endpoint.is_empty() {
+        anyhow::bail!("{transport} MCP servers require a URL");
+    }
+
+    let spec = McpServerSpec {
+        id: id.to_string(),
+        display_name: params
+            .display_name
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| id.to_string()),
+        transport: transport.to_string(),
+        endpoint,
+        target,
+        description: params
+            .description
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default(),
+    };
+
+    let dir = match params.scope.as_deref().unwrap_or("local") {
+        "user" => state.paths.user_config_dir.join("resources/mcp_servers"),
+        "local" | "project" | "workspace" => state
+            .paths
+            .workspace_config_dir
+            .join("resources/mcp_servers"),
+        other => anyhow::bail!("unsupported MCP scope `{other}`"),
+    };
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{id}.yaml"));
+    std::fs::write(&path, serde_yaml::to_string(&spec)?)?;
+
+    let inputs = state.build_runtime_inputs()?;
+    Ok(json!({ "servers": mcp_server_dtos(&inputs.resources) }))
+}
+
+fn validate_mcp_id(id: &str) -> Result<()> {
+    if id.is_empty() {
+        anyhow::bail!("MCP server id is required");
+    }
+    if !id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
+    {
+        anyhow::bail!(
+            "MCP server id may only contain letters, numbers, dots, dashes, and underscores"
+        );
+    }
+    Ok(())
+}
+
+fn mcp_server_dtos(resources: &LoadedResources) -> Vec<McpServerDto> {
+    resources
         .mcp_servers
         .iter()
         .map(|item| McpServerDto {
@@ -788,8 +1090,7 @@ fn handle_list_mcp_servers(state: &DaemonState) -> Result<Value> {
             source_kind: format!("{:?}", item.source_info.kind).to_lowercase(),
             source_path: Some(item.source_info.path.display().to_string()),
         })
-        .collect();
-    Ok(json!({ "servers": servers }))
+        .collect()
 }
 
 /// Returns the full model list for one provider. The snapshot only carries
@@ -1295,6 +1596,45 @@ fn handle_resolve_permission(state: &DaemonState, params: &Value) -> Result<Valu
     Ok(json!({"ok": true}))
 }
 
+fn handle_resolve_user_question(state: &DaemonState, params: &Value) -> Result<Value> {
+    let turn_id = params
+        .get("turnId")
+        .or_else(|| params.get("turn_id"))
+        .and_then(|v| v.as_str())
+        .context("missing turnId")?;
+    let request_id = params
+        .get("requestId")
+        .or_else(|| params.get("request_id"))
+        .and_then(|v| v.as_str())
+        .context("missing requestId")?;
+    let answers = params
+        .get("answers")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .context("missing answers")?;
+    let annotations = params
+        .get("annotations")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let responder = {
+        let mut turns = state.turns.lock().unwrap();
+        turns
+            .get_mut(turn_id)
+            .and_then(|h| h.pending_questions.lock().unwrap().remove(request_id))
+    };
+    let responder = responder.ok_or_else(|| {
+        anyhow::anyhow!("no pending user question request `{request_id}` on turn `{turn_id}`")
+    })?;
+    responder
+        .send(UserQuestionPromptResponse {
+            answers,
+            annotations,
+        })
+        .map_err(|_| anyhow::anyhow!("worker already released the user question channel"))?;
+    Ok(json!({"ok": true}))
+}
+
 fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
     let turn_id = params
         .get("turnId")
@@ -1306,6 +1646,13 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
         let mut pending = handle.pending.lock().unwrap();
         for (_, tx) in pending.drain() {
             let _ = tx.send(PermissionPromptAction::Deny);
+        }
+        let mut pending_questions = handle.pending_questions.lock().unwrap();
+        for (_, tx) in pending_questions.drain() {
+            let _ = tx.send(UserQuestionPromptResponse {
+                answers: serde_json::Map::new(),
+                annotations: serde_json::Map::new(),
+            });
         }
     }
     Ok(json!({"ok": true}))
@@ -1340,11 +1687,15 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let channel = format!("session:{session_id}:event");
     let pending: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<PermissionPromptAction>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let pending_questions: Arc<
+        Mutex<HashMap<String, std::sync::mpsc::Sender<UserQuestionPromptResponse>>>,
+    > = Arc::new(Mutex::new(HashMap::new()));
 
     state.turns.lock().unwrap().insert(
         turn_id.clone(),
         TurnHandle {
             pending: pending.clone(),
+            pending_questions: pending_questions.clone(),
         },
     );
 
@@ -1402,8 +1753,36 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 return;
             }
         };
+        let has_user_message = record
+            .events
+            .iter()
+            .any(|event| matches!(event, TranscriptEvent::UserMessage { .. }));
+        let auto_title = if crate::daemon_title::should_auto_title(
+            record.metadata.display_name.as_deref(),
+            has_user_message,
+        ) {
+            crate::daemon_title::title_from_first_message(&message_for_thread)
+        } else {
+            None
+        };
         let cfg_for_turn = setup_state.config.lock().unwrap().clone();
         let mut app_state = AppState::from_session_record(cfg_for_turn, record);
+        if let Some(title) = auto_title {
+            if inputs
+                .session_store
+                .set_display_name(session_uuid, Some(title.clone()))
+                .is_ok()
+            {
+                app_state.session.display_name = Some(title);
+                setup_state.publish_event(ServerEnvelope::Event {
+                    event: "workspace:sessions:changed".to_string(),
+                    payload: json!({
+                        "reason": "auto_title",
+                        "sessionId": session_id_for_thread.clone(),
+                    }),
+                });
+            }
+        }
 
         // Persist the user message before the turn starts so a crash
         // doesn't silently drop it.
@@ -1505,17 +1884,48 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             rx.recv().unwrap_or(PermissionPromptAction::Deny)
         };
 
+        let question_state = setup_state.clone();
+        let question_channel = channel_thread.clone();
+        let question_turn = turn_id_thread.clone();
+        let question_pending = pending_questions.clone();
+        let question_next_id = setup_state.next_request_id.clone();
+        let on_user_question = move |req: UserQuestionPromptRequest| -> UserQuestionPromptResponse {
+            let request_id = question_next_id.fetch_add(1, Ordering::SeqCst).to_string();
+            let (tx, rx) = std::sync::mpsc::channel();
+            question_pending
+                .lock()
+                .unwrap()
+                .insert(request_id.clone(), tx);
+
+            question_state.publish_event(ServerEnvelope::Event {
+                event: question_channel.clone(),
+                payload: json!({
+                    "type": "user-question-request",
+                    "turnId": question_turn.clone(),
+                    "requestId": request_id,
+                    "questions": req.questions,
+                }),
+            });
+
+            rx.recv().unwrap_or(UserQuestionPromptResponse {
+                answers: serde_json::Map::new(),
+                annotations: serde_json::Map::new(),
+            })
+        };
+
         let mut auth_store = inputs.auth_store.clone();
-        let outcome = execute_user_turn_streaming_with_permissions(
-            &mut app_state,
-            &inputs.resources,
-            &inputs.providers,
-            &mut auth_store,
-            &message_for_thread,
-            None,
-            on_event,
-            on_permission,
-        );
+        let outcome = with_user_question_prompt_handler(on_user_question, || {
+            execute_user_turn_streaming_with_permissions(
+                &mut app_state,
+                &inputs.resources,
+                &inputs.providers,
+                &mut auth_store,
+                &message_for_thread,
+                None,
+                on_event,
+                on_permission,
+            )
+        });
 
         match outcome {
             Ok(turn) => {

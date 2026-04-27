@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
-use puffer_config::{ConfigPaths, PufferConfig};
-use puffer_provider_registry::{AuthMode, AuthStore, ProviderRegistry, StoredCredential};
+use puffer_config::{load_config, save_user_config, ConfigPaths, PufferConfig};
+use puffer_provider_registry::{
+    detect_import_candidates, AuthMode, AuthStore, ExternalImportCandidate, ExternalImportFamily,
+    ExternalImportSource, ProviderRegistry, StoredCredential,
+};
 use puffer_resources::LoadedResources;
 use puffer_session_store::{GitDiffSnapshot, SessionRecord, SessionStore, TranscriptEvent};
 use puffer_workflow::WorkflowStore;
@@ -12,9 +15,10 @@ use uuid::Uuid;
 use crate::cli_args::DesktopApiCommand;
 use crate::desktop_api_types::{
     AgentDiffDto, AgentDiffEntryDto, AgentDiffFileDto, AuthProviderStatusDto, DiffSummaryDto,
-    DivergenceReportDto, FolderGroupDto, ProviderSummaryDto, RepoActionResultDto,
-    RepoPullRequestDto, RepoStatusDto, ResourceCountsDto, SessionDetailDto, SessionListItemDto,
-    SettingsConfigDto, SettingsSessionSummaryDto, SettingsSnapshotDto, TimelineItemDto,
+    DivergenceReportDto, ExternalCredentialDto, FolderGroupDto, ProviderSummaryDto,
+    RepoActionResultDto, RepoPullRequestDto, RepoStatusDto, ResourceCountsDto, SessionDetailDto,
+    SessionListItemDto, SettingsConfigDto, SettingsSessionSummaryDto, SettingsSnapshotDto,
+    TimelineItemDto,
 };
 
 /// Runs one hidden desktop JSON command for SSH-backed desktop integrations.
@@ -207,7 +211,23 @@ pub(crate) fn list_grouped_sessions(session_store: &SessionStore) -> Result<Vec<
             }
         })
         .collect::<Vec<_>>();
-    folders.sort_by(|left, right| left.folder_label.cmp(&right.folder_label));
+    folders.sort_by(|left, right| {
+        let left_latest = left
+            .sessions
+            .iter()
+            .map(|session| session.updated_at_ms)
+            .max()
+            .unwrap_or(0);
+        let right_latest = right
+            .sessions
+            .iter()
+            .map(|session| session.updated_at_ms)
+            .max()
+            .unwrap_or(0);
+        right_latest
+            .cmp(&left_latest)
+            .then_with(|| left.folder_label.cmp(&right.folder_label))
+    });
     Ok(folders)
 }
 
@@ -222,7 +242,7 @@ pub(crate) fn load_session_detail(
         .to_string();
     let diff_history = diff_history(&record);
     let latest_diff = diff_history.first().cloned();
-    let repo_status = repo_status(&record.metadata.id.to_string(), &record.metadata.cwd);
+    let repo_status = deferred_repo_status(&record.metadata.id.to_string(), &record.metadata.cwd);
     let agent_diff = build_agent_diff(&record);
     let divergence = compute_divergence(&agent_diff, latest_diff.as_ref(), &record.metadata.cwd);
     Ok(SessionDetailDto {
@@ -258,6 +278,30 @@ pub(crate) fn load_session_cwd(session_store: &SessionStore, session_id: &str) -
     let session_uuid = Uuid::parse_str(session_id).context("invalid session id")?;
     let record = session_store.load_session(session_uuid)?;
     Ok(record.metadata.cwd)
+}
+
+fn deferred_repo_status(session_id: &str, cwd: &Path) -> RepoStatusDto {
+    RepoStatusDto {
+        session_id: session_id.to_string(),
+        cwd: cwd.display().to_string(),
+        repo_root: None,
+        branch: None,
+        head_sha: None,
+        is_clean: true,
+        status_lines: Vec::new(),
+        has_gh: false,
+        gh_authenticated: false,
+        can_create_pull_request: false,
+        can_merge_pull_request: false,
+        create_pull_request_reason: Some(
+            "Repository status has not been refreshed yet.".to_string(),
+        ),
+        merge_pull_request_reason: Some(
+            "Repository status has not been refreshed yet.".to_string(),
+        ),
+        open_pull_request: None,
+        warnings: Vec::new(),
+    }
 }
 
 pub(crate) fn load_settings_snapshot(
@@ -402,6 +446,103 @@ pub(crate) fn store_api_key(
         .context("failed to save auth store")
 }
 
+/// Lists importable `.claude` and `.codex` credentials for all compatible providers.
+pub(crate) fn list_external_credentials(
+    providers: &ProviderRegistry,
+) -> Result<Vec<ExternalCredentialDto>> {
+    let mut out = Vec::new();
+    for entry in providers.provider_entries() {
+        let Some(family) = import_family(&entry.descriptor.default_api) else {
+            continue;
+        };
+        let candidates = detect_import_candidates(family).unwrap_or_default();
+        for candidate in candidates {
+            out.push(ExternalCredentialDto {
+                provider_id: entry.descriptor.id.clone(),
+                source: source_label(candidate.source).to_string(),
+                kind: credential_kind(&candidate.credential).to_string(),
+                description: candidate.description.clone(),
+                source_path: candidate.source_path.display().to_string(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Imports a `.claude` or `.codex` credential into Puffer's auth store.
+pub(crate) fn import_external_credential(
+    paths: &ConfigPaths,
+    auth_store: &mut AuthStore,
+    providers: &ProviderRegistry,
+    auth_path: &Path,
+    provider_id: &str,
+    source: &str,
+) -> Result<()> {
+    let provider = providers
+        .provider(provider_id)
+        .with_context(|| format!("unknown provider `{provider_id}`"))?;
+    let family = import_family(&provider.default_api)
+        .with_context(|| format!("provider `{provider_id}` has no importable credential family"))?;
+    let source_kind = match source {
+        "claude" => ExternalImportSource::Claude,
+        "codex" => ExternalImportSource::Codex,
+        other => anyhow::bail!("unknown import source `{other}`"),
+    };
+    let candidate = detect_import_candidates(family)?
+        .into_iter()
+        .find(|candidate| candidate.source == source_kind)
+        .with_context(|| {
+            format!("no `{source}` credential available on disk for provider `{provider_id}`")
+        })?;
+    apply_imported_credential(paths, auth_store, provider_id, candidate)?;
+    auth_store
+        .save(auth_path)
+        .context("failed to save auth store")
+}
+
+/// Ensures a freshly authenticated provider becomes the default route when needed.
+pub(crate) fn ensure_default_routing(
+    paths: &ConfigPaths,
+    providers: &ProviderRegistry,
+    auth_store: &AuthStore,
+    just_authed: &str,
+) -> Result<()> {
+    let mut config = load_config(paths)?;
+    let mut changed = false;
+
+    let default_has_creds = config
+        .default_provider
+        .as_deref()
+        .map(|id| auth_store.get(id).is_some())
+        .unwrap_or(false);
+    if !default_has_creds {
+        config.default_provider = Some(just_authed.to_string());
+        changed = true;
+    }
+
+    let default_provider_id = config.default_provider.clone().unwrap_or_default();
+    let provider_models = providers
+        .provider(&default_provider_id)
+        .map(|provider| provider.models.clone())
+        .unwrap_or_default();
+    let default_model_belongs = config
+        .default_model
+        .as_deref()
+        .map(|model_id| provider_models.iter().any(|model| model.id == model_id))
+        .unwrap_or(false);
+    if !default_model_belongs {
+        if let Some(first) = provider_models.first() {
+            config.default_model = Some(first.id.clone());
+            changed = true;
+        }
+    }
+
+    if changed {
+        save_user_config(paths, &config)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn logout_provider(
     auth_store: &mut AuthStore,
     auth_path: &Path,
@@ -411,6 +552,58 @@ pub(crate) fn logout_provider(
     auth_store
         .save(auth_path)
         .context("failed to save auth store")
+}
+
+fn import_family(default_api: &str) -> Option<ExternalImportFamily> {
+    match default_api {
+        "anthropic-messages" => Some(ExternalImportFamily::Anthropic),
+        "openai-responses"
+        | "openai-completions"
+        | "openai-codex-responses"
+        | "azure-openai-responses" => Some(ExternalImportFamily::OpenAi),
+        _ => None,
+    }
+}
+
+fn source_label(source: ExternalImportSource) -> &'static str {
+    match source {
+        ExternalImportSource::Claude => "claude",
+        ExternalImportSource::Codex => "codex",
+    }
+}
+
+fn credential_kind(credential: &StoredCredential) -> &'static str {
+    match credential {
+        StoredCredential::ApiKey { .. } => "api_key",
+        StoredCredential::OAuth(_) => "oauth",
+    }
+}
+
+fn apply_imported_credential(
+    paths: &ConfigPaths,
+    auth_store: &mut AuthStore,
+    provider_id: &str,
+    candidate: ExternalImportCandidate,
+) -> Result<()> {
+    let openai_base_url = candidate.openai_base_url.clone();
+    let openai_headers = candidate.openai_headers.clone();
+    let openai_query_params = candidate.openai_query_params.clone();
+    match candidate.credential {
+        StoredCredential::ApiKey { key } => {
+            auth_store.set_api_key(provider_id.to_string(), key);
+        }
+        StoredCredential::OAuth(credential) => {
+            auth_store.set_oauth(provider_id.to_string(), credential);
+        }
+    }
+    if provider_id == "openai" {
+        let mut config = load_config(paths)?;
+        config.openai_base_url = openai_base_url;
+        config.openai_headers = openai_headers;
+        config.openai_query_params = openai_query_params;
+        save_user_config(paths, &config)?;
+    }
+    Ok(())
 }
 
 fn store_credential(
@@ -445,7 +638,7 @@ fn store_credential(
 }
 
 fn session_group_root(cwd: &Path) -> PathBuf {
-    cwd.parent().unwrap_or(cwd).to_path_buf()
+    cwd.to_path_buf()
 }
 
 fn session_title(
@@ -576,10 +769,15 @@ fn agent_edit_intent(tool_id: &str, raw_input: &str) -> Option<AgentEditIntent> 
     let value: Value = serde_json::from_str(raw_input).ok()?;
     let obj = value.as_object()?;
     match tool_id {
-        "write_file" => {
-            let path = obj.get("path").and_then(Value::as_str)?.to_string();
+        "write_file" | "Write" => {
+            let path = obj
+                .get("path")
+                .or_else(|| obj.get("file_path"))
+                .and_then(Value::as_str)?
+                .to_string();
             let contents = obj
                 .get("contents")
+                .or_else(|| obj.get("content"))
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
@@ -589,18 +787,24 @@ fn agent_edit_intent(tool_id: &str, raw_input: &str) -> Option<AgentEditIntent> 
                 summary: render_write_summary(&contents),
             })
         }
-        "replace_in_file" | "edit_file" => {
-            let path = obj.get("path").and_then(Value::as_str)?.to_string();
+        "replace_in_file" | "edit_file" | "Edit" => {
+            let path = obj
+                .get("path")
+                .or_else(|| obj.get("file_path"))
+                .and_then(Value::as_str)?
+                .to_string();
             // `replace_in_file` uses old/new; some custom tools mirror
             // the Anthropic-style old_string/new_string. Accept both.
             let old = obj
                 .get("old")
                 .or_else(|| obj.get("old_string"))
+                .or_else(|| obj.get("oldText"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
             let new_text = obj
                 .get("new")
                 .or_else(|| obj.get("new_string"))
+                .or_else(|| obj.get("newText"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
             Some(AgentEditIntent {

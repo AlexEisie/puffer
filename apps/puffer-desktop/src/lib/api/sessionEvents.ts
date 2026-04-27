@@ -57,6 +57,13 @@ export type SessionStreamEvent =
       reason: string | null;
       replay?: boolean;
     }
+  | {
+      type: "user-question-request";
+      turnId: string;
+      requestId: string;
+      questions: unknown[];
+      replay?: boolean;
+    }
   | { type: "turn-complete"; turnId: string; assistantText: string; replay?: boolean }
   | { type: "turn-error"; turnId: string; error: string; replay?: boolean };
 

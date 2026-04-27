@@ -179,16 +179,9 @@ impl RuntimePermissionContext {
                     reason: None,
                 }
             }),
-            "AskUserQuestion" => Some(if self.plan_mode {
-                ToolPermissionDecision {
-                    behavior: ToolPermissionBehavior::Allow,
-                    reason: None,
-                }
-            } else {
-                ToolPermissionDecision {
-                    behavior: ToolPermissionBehavior::Ask,
-                    reason: Some("answer questions?".to_string()),
-                }
+            "AskUserQuestion" => Some(ToolPermissionDecision {
+                behavior: ToolPermissionBehavior::Allow,
+                reason: None,
             }),
             "WebSearch" => Some(ToolPermissionDecision {
                 behavior: ToolPermissionBehavior::Ask,
@@ -759,7 +752,7 @@ mod tests {
     }
 
     #[test]
-    fn ask_user_question_requires_approval() {
+    fn ask_user_question_runs_without_permission_gate() {
         let context = RuntimePermissionContext {
             permissions: PermissionsSettings::default(),
             sandbox: SandboxSettings::from_mode("workspace-write"),
@@ -771,7 +764,7 @@ mod tests {
             &question,
             &serde_json::json!({"questions":[{"question":"Pick one","header":"Choice","options":[{"label":"A","description":"A"},{"label":"B","description":"B"}]}]}),
         );
-        assert_eq!(decision.behavior, ToolPermissionBehavior::Ask);
+        assert_eq!(decision.behavior, ToolPermissionBehavior::Allow);
     }
 
     #[test]

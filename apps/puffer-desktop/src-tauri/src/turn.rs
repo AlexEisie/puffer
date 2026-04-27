@@ -17,8 +17,9 @@ use anyhow::{Context, Result};
 use indexmap::IndexMap;
 use puffer_config::{ensure_workspace_dirs, load_config, ConfigPaths};
 use puffer_core::{
-    execute_user_turn_streaming_with_permissions, AppState, MessageRole,
-    PermissionPromptAction, PermissionPromptRequest, TurnStreamEvent,
+    execute_user_turn_streaming_with_permissions, with_user_question_prompt_handler, AppState,
+    MessageRole, PermissionPromptAction, PermissionPromptRequest, TurnStreamEvent,
+    UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::load_resources;
@@ -43,6 +44,7 @@ pub(crate) struct TurnRegistry {
 struct TurnEntry {
     cancel: Arc<AtomicBool>,
     pending: Arc<Mutex<HashMap<String, mpsc::Sender<PermissionPromptAction>>>>,
+    pending_questions: Arc<Mutex<HashMap<String, mpsc::Sender<UserQuestionPromptResponse>>>>,
     // Tracks the next permission-request id so the callback thread can
     // hand the UI a stable label to reply to.
     next_request_id: Arc<AtomicU64>,
@@ -116,6 +118,12 @@ enum EmittedEvent {
         reason: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
+    UserQuestionRequest {
+        turn_id: String,
+        request_id: String,
+        questions: serde_json::Value,
+    },
+    #[serde(rename_all = "camelCase")]
     TurnComplete {
         turn_id: String,
         assistant_text: String,
@@ -147,6 +155,8 @@ pub(crate) fn run_agent_turn(
     let cancel = Arc::new(AtomicBool::new(false));
     let pending: Arc<Mutex<HashMap<String, mpsc::Sender<PermissionPromptAction>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let pending_questions: Arc<Mutex<HashMap<String, mpsc::Sender<UserQuestionPromptResponse>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let next_request_id = Arc::new(AtomicU64::new(0));
 
     registry.insert(
@@ -154,6 +164,7 @@ pub(crate) fn run_agent_turn(
         TurnEntry {
             cancel: cancel.clone(),
             pending: pending.clone(),
+            pending_questions: pending_questions.clone(),
             next_request_id: next_request_id.clone(),
         },
     );
@@ -183,6 +194,7 @@ pub(crate) fn run_agent_turn(
             state,
             cancel,
             pending,
+            pending_questions,
             next_request_id,
         );
 
@@ -229,12 +241,40 @@ pub(crate) fn resolve_permission(
         other => return Err(format!("unknown permission action `{other}`")),
     };
     let responder = registry
-        .with(&turn_id, |entry| entry.pending.lock().unwrap().remove(&request_id))
+        .with(&turn_id, |entry| {
+            entry.pending.lock().unwrap().remove(&request_id)
+        })
         .flatten()
-        .ok_or_else(|| format!("no pending permission request `{request_id}` on turn `{turn_id}`"))?;
+        .ok_or_else(|| {
+            format!("no pending permission request `{request_id}` on turn `{turn_id}`")
+        })?;
     responder
         .send(decoded)
         .map_err(|_| "agent worker already released the permission channel".to_string())
+}
+
+/// Resolves a pending `AskUserQuestion` prompt for an in-flight turn.
+pub(crate) fn resolve_user_question(
+    registry: Arc<TurnRegistry>,
+    turn_id: String,
+    request_id: String,
+    answers: serde_json::Map<String, serde_json::Value>,
+    annotations: serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let responder = registry
+        .with(&turn_id, |entry| {
+            entry.pending_questions.lock().unwrap().remove(&request_id)
+        })
+        .flatten()
+        .ok_or_else(|| {
+            format!("no pending user question request `{request_id}` on turn `{turn_id}`")
+        })?;
+    responder
+        .send(UserQuestionPromptResponse {
+            answers,
+            annotations,
+        })
+        .map_err(|_| "agent worker already released the user question channel".to_string())
 }
 
 /// Best-effort cancel: flips the cancel flag and denies any outstanding
@@ -247,6 +287,13 @@ pub(crate) fn cancel_turn(registry: Arc<TurnRegistry>, turn_id: String) -> Resul
             let mut pending = entry.pending.lock().unwrap();
             for (_, tx) in pending.drain() {
                 let _ = tx.send(PermissionPromptAction::Deny);
+            }
+            let mut pending_questions = entry.pending_questions.lock().unwrap();
+            for (_, tx) in pending_questions.drain() {
+                let _ = tx.send(UserQuestionPromptResponse {
+                    answers: serde_json::Map::new(),
+                    annotations: serde_json::Map::new(),
+                });
             }
         })
         .ok_or_else(|| format!("no active turn `{turn_id}`"))
@@ -271,6 +318,7 @@ fn drive_turn(
     mut state: AppState,
     _cancel: Arc<AtomicBool>,
     pending: Arc<Mutex<HashMap<String, mpsc::Sender<PermissionPromptAction>>>>,
+    pending_questions: Arc<Mutex<HashMap<String, mpsc::Sender<UserQuestionPromptResponse>>>>,
     next_request_id: Arc<AtomicU64>,
 ) -> Result<String> {
     // Persist the user message to the session transcript before the turn
@@ -387,16 +435,48 @@ fn drive_turn(
         rx.recv().unwrap_or(PermissionPromptAction::Deny)
     };
 
-    let outcome = execute_user_turn_streaming_with_permissions(
-        &mut state,
-        &resources,
-        &providers,
-        &mut auth_store,
-        &message,
-        None,
-        on_event,
-        on_permission,
-    )
+    let on_question_app = app.clone();
+    let on_question_channel = event_channel.clone();
+    let on_question_turn_id = turn_id.clone();
+    let on_question_pending = pending_questions.clone();
+    let on_question_next_id = next_request_id.clone();
+    let on_user_question = move |request: UserQuestionPromptRequest| -> UserQuestionPromptResponse {
+        let request_id = on_question_next_id
+            .fetch_add(1, Ordering::SeqCst)
+            .to_string();
+        let (tx, rx) = mpsc::channel::<UserQuestionPromptResponse>();
+        on_question_pending
+            .lock()
+            .unwrap()
+            .insert(request_id.clone(), tx);
+
+        let _ = on_question_app.emit(
+            &on_question_channel,
+            EmittedEvent::UserQuestionRequest {
+                turn_id: on_question_turn_id.clone(),
+                request_id,
+                questions: request.questions,
+            },
+        );
+
+        rx.recv().unwrap_or(UserQuestionPromptResponse {
+            answers: serde_json::Map::new(),
+            annotations: serde_json::Map::new(),
+        })
+    };
+
+    let outcome = with_user_question_prompt_handler(on_user_question, || {
+        execute_user_turn_streaming_with_permissions(
+            &mut state,
+            &resources,
+            &providers,
+            &mut auth_store,
+            &message,
+            None,
+            on_event,
+            on_permission,
+        )
+    })
     .with_context(|| format!("run_agent_turn: session={session_id}"))?;
 
     // Persist the assistant message + tool invocations so reloads see them.
@@ -422,8 +502,11 @@ fn drive_turn(
         )?;
     }
     for trace in &outcome.reflection_traces {
-        session_store
-            .append_trace_event(session_uuid, puffer_session_store::TRACE_RUNTIME, trace)?;
+        session_store.append_trace_event(
+            session_uuid,
+            puffer_session_store::TRACE_RUNTIME,
+            trace,
+        )?;
     }
 
     Ok(outcome.assistant_text)
@@ -481,7 +564,14 @@ fn load_context(
     let session_uuid = Uuid::parse_str(session_id).context("invalid session id")?;
     let record = session_store.load_session(session_uuid)?;
     let state = AppState::from_session_record(config.clone(), record);
-    Ok((config, resources, providers, auth_store, session_store, state))
+    Ok((
+        config,
+        resources,
+        providers,
+        auth_store,
+        session_store,
+        state,
+    ))
 }
 
 // Anchor the `json!` import so clippy doesn't trim it while we iterate.

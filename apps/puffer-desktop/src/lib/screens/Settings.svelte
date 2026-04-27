@@ -2,8 +2,11 @@
   import "../design/settings.css";
 
   import Icon, { type IconName } from "../design/Icon.svelte";
+  import LoginView from "../components/LoginView.svelte";
   import { currentDaemonClient } from "../api/daemonClient";
+  import type { AccentKey, DensityKey, FontMixKey, ThemeKey, Tweaks } from "../shell/tweaks";
   import {
+    addMcpServer,
     isDaemonReachable,
     listMcpServers,
     listPermissions,
@@ -16,7 +19,7 @@
   } from "../api/desktop";
   import type {
     DesktopPreferences,
-    ProviderSummary,
+    ExternalCredential,
     RemoteOperation,
     SettingsSnapshot
   } from "../types";
@@ -24,6 +27,7 @@
   type Props = {
     snapshot: SettingsSnapshot | null;
     loading: boolean;
+    tweaks: Tweaks;
     preferences: DesktopPreferences;
     remoteEnabled: boolean;
     remotePassword: string;
@@ -32,9 +36,17 @@
     onPreferenceChange: <K extends keyof DesktopPreferences>(key: K, value: DesktopPreferences[K]) => void;
     onRemotePasswordChange: (value: string) => void;
     onResetPreferences: () => void;
+    onTweakChange: <K extends keyof Tweaks>(key: K, value: Tweaks[K]) => void;
+    onResetAppearance: () => void;
     onRefresh: () => void;
     onLogout: (providerId: string) => void;
+    onLoginOauth?: (providerId: string) => void;
     onApiKeyLogin?: (providerId: string, apiKey: string) => void;
+    onImportExternal?: (providerId: string, source: "claude" | "codex") => void;
+    busyProviderId?: string | null;
+    authError?: string | null;
+    externals?: ExternalCredential[];
+    busyImportKey?: string | null;
     onRunRemoteBash: (command: string) => void;
     onReadRemoteFile: (path: string) => void;
     onWriteRemoteFile: (path: string, contents: string) => void;
@@ -42,12 +54,12 @@
 
   let props: Props = $props();
 
-  type Section = "general" | "models" | "permissions" | "mcp" | "git" | "appearance" | "shortcuts";
+  type Section = "general" | "providers" | "permissions" | "mcp" | "git" | "appearance" | "shortcuts";
   let section = $state<Section>("general");
 
   const navItems: { id: Section; label: string; icon: IconName }[] = [
     { id: "general",     label: "General",    icon: "settings" },
-    { id: "models",      label: "Models",     icon: "cpu" },
+    { id: "providers",   label: "Providers",  icon: "plug" },
     { id: "permissions", label: "Permissions", icon: "bolt" },
     { id: "mcp",         label: "MCP Servers", icon: "plug" },
     { id: "git",         label: "Git & PRs",  icon: "git" },
@@ -64,14 +76,25 @@
   let permissionError = $state<string | null>(null);
   let permissionDirty = $state(false);
 
-  // MCP servers discovered on disk. Read-only list — we surface what's
-  // loaded so the user can confirm their resource roots were picked up.
+  // MCP servers discovered on disk plus a small manifest writer for new
+  // workspace/user entries.
   let mcpServers = $state<McpServerInfo[]>([]);
   let mcpLoading = $state(false);
+  let mcpSaving = $state(false);
   let mcpError = $state<string | null>(null);
+  let mcpSaved = $state<string | null>(null);
+  let mcpForm = $state({
+    id: "",
+    displayName: "",
+    transport: "stdio" as "stdio" | "sse" | "http",
+    commandOrUrl: "",
+    args: "",
+    description: "",
+    scope: "local" as "local" | "user"
+  });
 
   // Per-provider model listings cached by providerId. Populated on demand
-  // when the user expands the Models pane.
+  // when the user expands the Providers pane.
   let providerModels = $state<Record<string, ModelDescriptorInfo[]>>({});
   let modelPickerProvider = $state<string>("");
   let modelPickerModel = $state<string>("");
@@ -104,6 +127,48 @@
       mcpError = (e as Error).message ?? String(e);
     } finally {
       mcpLoading = false;
+    }
+  }
+
+  function mcpTargetValue(): string {
+    const command = mcpForm.commandOrUrl.trim();
+    if (mcpForm.transport !== "stdio") return command;
+    const args = mcpForm.args.trim();
+    return args ? `${command} ${args}` : command;
+  }
+
+  async function saveMcpServer() {
+    const id = mcpForm.id.trim();
+    const targetOrUrl = mcpTargetValue();
+    if (!id || !targetOrUrl) return;
+    mcpSaving = true;
+    mcpError = null;
+    mcpSaved = null;
+    try {
+      mcpServers = await addMcpServer({
+        id,
+        displayName: mcpForm.displayName.trim() || undefined,
+        description: mcpForm.description.trim() || undefined,
+        transport: mcpForm.transport,
+        endpoint: mcpForm.transport === "stdio" ? undefined : targetOrUrl,
+        target: mcpForm.transport === "stdio" ? targetOrUrl : undefined,
+        scope: mcpForm.scope
+      });
+      mcpSaved = `Added ${id}`;
+      mcpForm = {
+        id: "",
+        displayName: "",
+        transport: "stdio",
+        commandOrUrl: "",
+        args: "",
+        description: "",
+        scope: mcpForm.scope
+      };
+      props.onRefresh();
+    } catch (e) {
+      mcpError = (e as Error).message ?? String(e);
+    } finally {
+      mcpSaving = false;
     }
   }
 
@@ -188,40 +253,7 @@
     }
   }
 
-  // Providers the user can log in to with an api key. Pulled from the real
-  // registry — if the user hasn't refreshed yet the list is empty.
-  let apiKeyProviders = $derived<ProviderSummary[]>(
-    (props.snapshot?.providers ?? []).filter((p) => p.authModes.includes("api_key"))
-  );
-
-  // The id of the provider currently selected for the "Add API key" form.
-  // Defaults to the config's default_provider when present, otherwise the
-  // first api_key-capable provider.
-  let loginProviderId = $state<string>("");
-  let loginApiKey = $state<string>("");
-  $effect(() => {
-    if (loginProviderId) return;
-    const fromConfig = props.snapshot?.config.defaultProvider ?? "";
-    if (fromConfig && apiKeyProviders.some((p) => p.id === fromConfig)) {
-      loginProviderId = fromConfig;
-      return;
-    }
-    if (apiKeyProviders[0]) {
-      loginProviderId = apiKeyProviders[0].id;
-    }
-  });
-
-  function submitApiKey() {
-    if (!props.onApiKeyLogin || !loginProviderId) return;
-    const trimmed = loginApiKey.trim();
-    if (!trimmed) return;
-    props.onApiKeyLogin(loginProviderId, trimmed);
-    loginApiKey = "";
-  }
-
-  function authedProviderIds(): Set<string> {
-    return new Set((props.snapshot?.auth ?? []).map((a) => a.providerId));
-  }
+  let authedProviderIds = $derived(new Set((props.snapshot?.auth ?? []).map((a) => a.providerId)));
 
   // The shared daemon client's handshake — shows the actual URL + workspace
   // root the frontend is talking to. Undefined until the first connect.
@@ -245,8 +277,22 @@
   // Well-known git providers we surface on the Git & PRs pane. If the user
   // is logged in to one of these we show their auth status inline.
   const GIT_PROVIDER_IDS: string[] = ["github", "gitlab"];
+  const themes: ThemeKey[] = ["light", "dark"];
+  const accents: { k: AccentKey; c: string }[] = [
+    { k: "violet", c: "oklch(0.55 0.22 295)" },
+    { k: "cyan", c: "oklch(0.62 0.14 215)" },
+    { k: "amber", c: "oklch(0.72 0.18 70)" },
+    { k: "rose", c: "oklch(0.62 0.22 15)" },
+    { k: "lime", c: "oklch(0.72 0.18 130)" },
+    { k: "mono", c: "oklch(0.205 0 0)" }
+  ];
+  const fonts: { k: FontMixKey; label: string }[] = [
+    { k: "sans-mono", label: "sans + mono" },
+    { k: "all-mono", label: "all mono" }
+  ];
+  const densities: DensityKey[] = ["compact", "comfortable", "airy"];
 
-  // Seed the model-picker from the snapshot so switching to the Models tab
+  // Seed the model-picker from the snapshot so switching to the Providers tab
   // shows the currently-persisted default without a refetch.
   $effect(() => {
     if (!modelPickerProvider) {
@@ -272,7 +318,7 @@
     if (section === "mcp" && mcpServers.length === 0 && !mcpLoading) {
       void loadMcpServers();
     }
-    if (section === "models" && modelPickerProvider) {
+    if (section === "providers" && modelPickerProvider) {
       void loadModelsForProvider(modelPickerProvider);
     }
   });
@@ -392,9 +438,9 @@
         </div>
       </div>
 
-    {:else if section === "models"}
-      <h2>Models</h2>
-      <p class="lead">Providers discovered from the workspace config. Connect one with an API key to activate it.</p>
+    {:else if section === "providers"}
+      <h2>Providers</h2>
+      <p class="lead">Connect providers, review their available models, and choose the default route for new turns.</p>
 
       {#if !daemonReachable}
         <div class="pf-settings-note">
@@ -456,69 +502,19 @@
         </div>
       </div>
 
-      {#if props.onApiKeyLogin && apiKeyProviders.length > 0}
-        <div class="pf-api-form">
-          <div class="pf-api-form-row">
-            <label>Provider
-              <select class="sc-input" bind:value={loginProviderId}>
-                {#each apiKeyProviders as p (p.id)}
-                  <option value={p.id}>{p.displayName} ({p.id})</option>
-                {/each}
-              </select>
-            </label>
-            <label>API key
-              <input
-                class="sc-input"
-                type="password"
-                placeholder="sk-…"
-                bind:value={loginApiKey}
-                onkeydown={(e) => { if (e.key === "Enter") submitApiKey(); }}
-              />
-            </label>
-            <button type="button" class="sc-btn" data-variant="default" data-size="sm" onclick={submitApiKey}>
-              Save key
-            </button>
-          </div>
-          <div class="pf-api-form-help">
-            Stored at <code>{props.snapshot?.authStoreFile ?? "~/.config/puffer/auth.json"}</code>.
-          </div>
-        </div>
-      {/if}
-
-      <div class="pf-model-list">
-        {#each props.snapshot?.providers ?? [] as p (p.id)}
-          {@const authed = authedProviderIds().has(p.id)}
-          <div class="pf-model-row">
-            <div>
-              <div class="pf-model-name">{p.displayName}
-                <span class="pf-model-id">{p.id}</span>
-              </div>
-              <div class="pf-model-meta">
-                {p.modelCount} model{p.modelCount === 1 ? "" : "s"}
-                · {p.defaultApi}
-                · auth: {p.authModes.join(", ") || "—"}
-                {#if p.sourceKind}
-                  · {p.sourceKind}
-                {/if}
-              </div>
-            </div>
-            <div class="pf-model-status">
-              {#if authed}
-                <span class="pf-model-badge ok">
-                  <span class="dot"></span>signed in
-                </span>
-              {:else if p.authModes.includes("api_key")}
-                <span class="pf-model-badge muted">not signed in</span>
-              {:else}
-                <span class="pf-model-badge muted">oauth only</span>
-              {/if}
-            </div>
-          </div>
-        {/each}
-        {#if (props.snapshot?.providers ?? []).length === 0}
-          <div class="pf-empty">No providers discovered. Check your workspace config.</div>
-        {/if}
-      </div>
+      <LoginView
+        snapshot={props.snapshot}
+        loading={props.loading}
+        remoteEnabled={props.remoteEnabled}
+        busyProviderId={props.busyProviderId ?? null}
+        errorMessage={props.authError ?? null}
+        externals={props.externals ?? []}
+        busyImportKey={props.busyImportKey ?? null}
+        onLoginOauth={props.onLoginOauth ?? (() => {})}
+        onLoginApiKey={props.onApiKeyLogin ?? (() => {})}
+        onImportExternal={props.onImportExternal ?? (() => {})}
+        onRefresh={props.onRefresh}
+      />
 
     {:else if section === "permissions"}
       <h2>Permissions</h2>
@@ -613,15 +609,116 @@
       {#if mcpError}
         <div class="pf-settings-note warn">{mcpError}</div>
       {/if}
+      {#if mcpSaved}
+        <div class="pf-settings-note">{mcpSaved}</div>
+      {/if}
       <div class="pf-settings-note">
         {#if !daemonReachable}
           Preview mode — launch Puffer in the desktop app to see your workspace's MCP servers.
         {:else if mcpLoading}
           Loading MCP servers…
         {:else}
-          {mcpServers.length} MCP server{mcpServers.length === 1 ? "" : "s"} discovered across this workspace's resource roots. Add or remove servers by editing the TOML files in your resource directories.
+          {mcpServers.length} MCP server{mcpServers.length === 1 ? "" : "s"} discovered across this workspace's resource roots.
         {/if}
       </div>
+
+      <div class="pf-settings-row" style="align-items: start;">
+        <div class="meta">
+          <div class="label">Add server</div>
+          <div class="desc">Create a declarative MCP manifest in this workspace or your user resource directory.</div>
+        </div>
+        <div class="pf-mcp-form">
+          <div class="pf-mcp-form-grid">
+            <label>
+              ID
+              <input
+                class="sc-input"
+                placeholder="github"
+                value={mcpForm.id}
+                oninput={(e) => (mcpForm.id = (e.currentTarget as HTMLInputElement).value)}
+              />
+            </label>
+            <label>
+              Name
+              <input
+                class="sc-input"
+                placeholder="GitHub"
+                value={mcpForm.displayName}
+                oninput={(e) => (mcpForm.displayName = (e.currentTarget as HTMLInputElement).value)}
+              />
+            </label>
+            <label>
+              Transport
+              <select
+                class="sc-input"
+                value={mcpForm.transport}
+                onchange={(e) =>
+                  (mcpForm.transport = (e.currentTarget as HTMLSelectElement).value as "stdio" | "sse" | "http")}
+              >
+                <option value="stdio">stdio</option>
+                <option value="sse">sse</option>
+                <option value="http">http</option>
+              </select>
+            </label>
+            <label>
+              Scope
+              <select
+                class="sc-input"
+                value={mcpForm.scope}
+                onchange={(e) =>
+                  (mcpForm.scope = (e.currentTarget as HTMLSelectElement).value as "local" | "user")}
+              >
+                <option value="local">workspace</option>
+                <option value="user">user</option>
+              </select>
+            </label>
+          </div>
+          <label>
+            {mcpForm.transport === "stdio" ? "Command" : "URL"}
+            <input
+              class="sc-input"
+              placeholder={mcpForm.transport === "stdio"
+                ? "npx @modelcontextprotocol/server-github"
+                : "http://127.0.0.1:3000/mcp"}
+              value={mcpForm.commandOrUrl}
+              oninput={(e) => (mcpForm.commandOrUrl = (e.currentTarget as HTMLInputElement).value)}
+            />
+          </label>
+          {#if mcpForm.transport === "stdio"}
+            <label>
+              Arguments
+              <input
+                class="sc-input"
+                placeholder="--flag value"
+                value={mcpForm.args}
+                oninput={(e) => (mcpForm.args = (e.currentTarget as HTMLInputElement).value)}
+              />
+            </label>
+          {/if}
+          <label>
+            Description
+            <input
+              class="sc-input"
+              placeholder="Optional note"
+              value={mcpForm.description}
+              oninput={(e) => (mcpForm.description = (e.currentTarget as HTMLInputElement).value)}
+            />
+          </label>
+          <div style="display: flex; justify-content: flex-end;">
+            <button
+              type="button"
+              class="sc-btn"
+              data-variant="default"
+              data-size="sm"
+              disabled={!daemonReachable || mcpSaving || !mcpForm.id.trim() || !mcpTargetValue()}
+              onclick={saveMcpServer}
+            >
+              <Icon name="plus" size={12} />{mcpSaving ? "Adding…" : "Add server"}
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div class="pf-mcp-list">
         {#each mcpServers as s (s.id)}
           <div class="pf-mcp-card">
@@ -666,7 +763,7 @@
           <div class="label">Forge accounts</div>
           <div class="desc">
             Git-hosting providers Puffer recognizes. To add one, connect it from the
-            Models pane using an API key.
+            Providers pane using an API key.
           </div>
         </div>
         <div style="display: flex; flex-direction: column; gap: 6px; justify-self: end; align-items: flex-end;">
@@ -681,7 +778,7 @@
               {/if}
             </div>
           {/each}
-          {#if !GIT_PROVIDER_IDS.some((id) => authedProviderIds().has(id))}
+          {#if !GIT_PROVIDER_IDS.some((id) => authedProviderIds.has(id))}
             <div style="color: var(--muted-foreground); font-size: 11.5px; max-width: 260px; text-align: right;">
               No git provider connected. PR creation still works via <code>gh</code> if it's
               authenticated on the host shell.
@@ -702,20 +799,84 @@
       <h2>Appearance</h2>
       <p class="lead">Theme, accent, density, and font mixing.</p>
 
-      <div class="pf-settings-note">
-        The theme, accent, density, and font-mix controls live in the floating
-        <strong>Tweaks</strong> panel — open it from the bottom-right pill. We
-        kept them there so you can preview changes without leaving the
-        surface you're working on.
+      <div class="pf-settings-row">
+        <div class="meta">
+          <div class="label">Theme</div>
+          <div class="desc">Choose the base color mode for the app shell.</div>
+        </div>
+        <div class="pf-appearance-control">
+          {#each themes as t (t)}
+            <button
+              type="button"
+              class="pf-choice-pill"
+              data-active={props.tweaks.theme === t}
+              onclick={() => props.onTweakChange("theme", t)}
+            >{t}</button>
+          {/each}
+        </div>
+      </div>
+
+      <div class="pf-settings-row">
+        <div class="meta">
+          <div class="label">Accent</div>
+          <div class="desc">Set the accent color used for selection and emphasis.</div>
+        </div>
+        <div class="pf-appearance-control">
+          {#each accents as a (a.k)}
+            <button
+              type="button"
+              class="pf-color-swatch"
+              data-active={props.tweaks.accent === a.k}
+              style="background: {a.c};"
+              onclick={() => props.onTweakChange("accent", a.k)}
+              aria-label={a.k}
+              title={a.k}
+            ></button>
+          {/each}
+        </div>
+      </div>
+
+      <div class="pf-settings-row">
+        <div class="meta">
+          <div class="label">Density</div>
+          <div class="desc">Adjust spacing for list-heavy and repeated workflows.</div>
+        </div>
+        <div class="pf-appearance-control">
+          {#each densities as d (d)}
+            <button
+              type="button"
+              class="pf-choice-pill"
+              data-active={props.tweaks.density === d}
+              onclick={() => props.onTweakChange("density", d)}
+            >{d}</button>
+          {/each}
+        </div>
+      </div>
+
+      <div class="pf-settings-row">
+        <div class="meta">
+          <div class="label">Font mix</div>
+          <div class="desc">Choose whether interface text stays mixed or uses mono throughout.</div>
+        </div>
+        <div class="pf-appearance-control">
+          {#each fonts as f (f.k)}
+            <button
+              type="button"
+              class="pf-choice-pill"
+              data-active={props.tweaks.fontMix === f.k}
+              onclick={() => props.onTweakChange("fontMix", f.k)}
+            >{f.label}</button>
+          {/each}
+        </div>
       </div>
 
       <div class="pf-settings-row" style="border-bottom: 0;">
         <div class="meta">
           <div class="label">Reset appearance</div>
-          <div class="desc">Restore the default desktop tweaks (theme, accent, density, font mix, sidebar).</div>
+          <div class="desc">Restore the default theme, accent, density, and font mix.</div>
         </div>
         <div style="display: flex; justify-content: flex-end;">
-          <button type="button" class="sc-btn" data-variant="outline" data-size="sm" onclick={props.onResetPreferences}>
+          <button type="button" class="sc-btn" data-variant="outline" data-size="sm" onclick={props.onResetAppearance}>
             Reset
           </button>
         </div>
@@ -806,67 +967,6 @@
     border-radius: 4px;
     color: var(--foreground);
   }
-  .pf-api-form {
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 12px 14px;
-    margin-bottom: 18px;
-    background: var(--background);
-  }
-  .pf-api-form-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr auto;
-    gap: 10px;
-    align-items: end;
-  }
-  .pf-api-form-row label {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    font-size: 11.5px;
-    color: var(--muted-foreground);
-  }
-  .pf-api-form-help {
-    font-size: 11px;
-    color: var(--muted-foreground);
-    margin-top: 8px;
-  }
-  .pf-api-form-help code {
-    font-family: var(--font-mono);
-  }
-  .pf-model-list {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .pf-model-row {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    align-items: center;
-    padding: 10px 14px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    gap: 12px;
-    background: var(--background);
-  }
-  .pf-model-name {
-    font-weight: 500;
-    font-size: 13.5px;
-    display: inline-flex;
-    align-items: baseline;
-    gap: 8px;
-  }
-  .pf-model-id {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--muted-foreground);
-    font-weight: 400;
-  }
-  .pf-model-meta {
-    font-size: 11.5px;
-    color: var(--muted-foreground);
-    margin-top: 2px;
-  }
   .pf-model-badge {
     display: inline-flex;
     align-items: center;
@@ -879,10 +979,6 @@
   .pf-model-badge.ok {
     background: color-mix(in oklab, oklch(0.7 0.18 145) 16%, transparent);
     color: oklch(0.42 0.15 145);
-  }
-  .pf-model-badge.muted {
-    background: color-mix(in oklab, var(--muted) 55%, transparent);
-    color: var(--muted-foreground);
   }
   .pf-model-badge .dot {
     width: 6px;
@@ -925,5 +1021,48 @@
   .pf-shortcut-action {
     color: var(--muted-foreground);
     font-size: 12.5px;
+  }
+  .pf-appearance-control {
+    justify-self: end;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    flex-wrap: wrap;
+    max-width: 360px;
+  }
+  .pf-choice-pill {
+    padding: 4px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: transparent;
+    font-size: 11px;
+    cursor: pointer;
+    color: var(--foreground);
+    font-family: var(--font-mono);
+    font-weight: 500;
+  }
+  .pf-choice-pill:hover {
+    background: var(--accent);
+  }
+  .pf-choice-pill[data-active="true"] {
+    background: var(--foreground);
+    color: var(--background);
+    border-color: var(--foreground);
+  }
+  .pf-color-swatch {
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    cursor: pointer;
+    position: relative;
+  }
+  .pf-color-swatch[data-active="true"]::after {
+    content: "";
+    position: absolute;
+    inset: -4px;
+    border: 2px solid var(--foreground);
+    border-radius: 11px;
   }
 </style>

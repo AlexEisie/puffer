@@ -1,35 +1,21 @@
 <script lang="ts">
-  import Puffer from "../../design/Puffer.svelte";
-  import Icon from "../../design/Icon.svelte";
-  import { AGENT_STATE_LABELS, agentPufferState, type MockAgent } from "../../data/mockProjects";
+  import { AGENT_STATE_LABELS, type MockAgent } from "../../data/mockProjects";
 
   type Props = { a: MockAgent; onOpen?: () => void };
   let { a, onOpen }: Props = $props();
+
+  let title = $derived(a.title || a.name || "New Session");
+  let clippedTitle = $derived(title.length > 80 ? `${title.slice(0, 77)}...` : title);
+  let statusLabel = $derived(AGENT_STATE_LABELS[a.status] ?? a.status);
 </script>
 
-<button class="pf-pw-agent" data-status={a.status} onclick={onOpen}>
-  <div class="head">
-    <Puffer size={22} state={agentPufferState(a.status)} />
-    <div class="identity">
-      <span class="name">{a.name}</span>
-      <span class="model">{a.model}</span>
-    </div>
-    <span class="status-pill" data-status={a.status}>{AGENT_STATE_LABELS[a.status] ?? a.status}</span>
-  </div>
-  <div class="title">{a.title}</div>
-  <div class="branch-row">
-    <Icon name="branch" size={10} />
-    <span class="branch">{a.branch}</span>
-  </div>
-  {#if a.status === "running"}
-    <div class="progress">
-      <div class="bar" style="width: {a.progress}%;"></div>
-    </div>
-  {/if}
-  <div class="step">{a.step}</div>
-  <div class="meta">
-    <span><Icon name="bolt" size={10} />{a.tools}</span>
-    <span><Icon name="clock" size={10} />{a.elapsed}</span>
-    <span class="worktree" title="worktree">{a.worktree}</span>
-  </div>
+<button
+  class="pf-pw-agent"
+  data-status={a.status}
+  onclick={onOpen}
+  title={`${title} - ${statusLabel} - ${a.elapsed}`}
+>
+  <span class="title">{clippedTitle}</span>
+  <span class="status-pill" data-status={a.status}>{statusLabel}</span>
+  <span class="activity">{a.elapsed}</span>
 </button>

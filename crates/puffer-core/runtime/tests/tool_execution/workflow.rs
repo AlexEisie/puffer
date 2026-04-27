@@ -325,6 +325,43 @@ fn ask_user_question_rejects_duplicate_question_text() {
 }
 
 #[test]
+fn ask_user_question_uses_prompt_handler_answers() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let output = crate::runtime::with_user_question_prompt_handler(
+        |_request| crate::runtime::UserQuestionPromptResponse {
+            answers: serde_json::Map::from_iter([(
+                "Where is Lily?".to_string(),
+                json!("In the garden"),
+            )]),
+            annotations: serde_json::Map::new(),
+        },
+        || {
+            crate::runtime::claude_tools::workflow::ask_user_question::execute_ask_user_question(
+                &mut state,
+                &cwd,
+                json!({
+                    "questions": [
+                        {
+                            "question": "Where is Lily?",
+                            "header": "Location",
+                            "options": [
+                                {"label": "In the garden", "description": "Lily is outside"},
+                                {"label": "In the kitchen", "description": "Lily is inside"}
+                            ]
+                        }
+                    ]
+                }),
+            )
+        },
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(parsed["pending"], false);
+    assert_eq!(parsed["answers"]["Where is Lily?"], "In the garden");
+}
+
+#[test]
 fn team_create_makes_dirs_and_team_delete_removes_them() {
     let tempdir = tempfile::tempdir().unwrap();
     let _lock = puffer_home_lock().lock().unwrap();

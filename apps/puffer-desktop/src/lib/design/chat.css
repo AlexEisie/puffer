@@ -18,6 +18,26 @@
 .pf-msg[data-role="agent"] .pf-msg-avatar {
   background: color-mix(in oklab, var(--puffer-accent) 12%, var(--background));
 }
+.pf-msg[data-role="system"] {
+  opacity: 0.78;
+}
+.pf-msg[data-role="system"] .pf-msg-avatar {
+  background: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.pf-msg[data-role="system"][data-error="true"] {
+  opacity: 1;
+}
+.pf-msg[data-role="system"][data-error="true"] .pf-msg-avatar {
+  background: color-mix(in oklab, oklch(0.62 0.22 25) 18%, var(--background));
+  color: oklch(0.45 0.18 25);
+  border: 1px solid color-mix(in oklab, oklch(0.62 0.22 25) 28%, var(--border));
+}
+.pf-msg[data-role="system"][data-error="true"] .pf-msg-text {
+  color: oklch(0.45 0.18 25);
+}
 .pf-msg-body { min-width: 0; padding-top: 6px; }
 .pf-msg-meta {
   display: flex; align-items: baseline; gap: 8px;

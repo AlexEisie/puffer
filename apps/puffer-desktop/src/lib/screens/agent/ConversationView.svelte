@@ -8,13 +8,15 @@
   import ToolCard from "./ToolCard.svelte";
   import DiffCard from "./DiffCard.svelte";
   import Approval from "./Approval.svelte";
+  import QuestionPrompt from "./QuestionPrompt.svelte";
   import type {
     PermissionTimelineItem,
     SessionListItem,
     TimelineItem,
     ToolTimelineItem,
     DiffTimelineItem,
-    MessageTimelineItem
+    MessageTimelineItem,
+    UserQuestionTimelineItem
   } from "../../types";
   import type { AgentState } from "../../shell/tweaks";
 
@@ -24,13 +26,22 @@
     agentState?: AgentState;
     timeline: TimelineItem[];
     pendingPermissions: PermissionTimelineItem[];
+    pendingQuestions: UserQuestionTimelineItem[];
     loading: boolean;
     /** True while an agent turn is running on the current session. Flips
      *  the composer's send button into a red "Stop" so the user can
      *  interrupt a runaway loop. */
     turnRunning?: boolean;
+    turnStartedAtMs?: number | null;
+    turnThinking?: boolean;
+    turnStatusHint?: string | null;
     onSubmitMessage: (message: string) => void;
     onResolvePermission: (permissionId: string, choice: string) => void;
+    onResolveUserQuestion: (
+      questionId: string,
+      answers: Record<string, string | string[]>,
+      annotations?: Record<string, Record<string, string>>
+    ) => void;
     onCancelTurn?: () => void;
   };
 
@@ -40,16 +51,22 @@
     agentState = "idle",
     timeline,
     pendingPermissions,
+    pendingQuestions,
     loading,
     turnRunning = false,
+    turnStartedAtMs = null,
+    turnThinking = false,
+    turnStatusHint = null,
     onSubmitMessage,
     onResolvePermission,
+    onResolveUserQuestion,
     onCancelTurn
   }: Props = $props();
 
   let draft = $state("");
   let threadEl: HTMLDivElement | undefined;
   let lastSessionId: string | null = null;
+  let nowMs = $state(Date.now());
 
   // Rolled-up thread: we group consecutive tool / diff items under the most
   // recent assistant message so the design's "assistant speaks, then shows its
@@ -62,6 +79,7 @@
         item: MessageTimelineItem | null;
         children: (ToolTimelineItem | DiffTimelineItem)[];
         approvals: PermissionTimelineItem[];
+        questions: UserQuestionTimelineItem[];
       };
 
   function buildRows(items: TimelineItem[]): RowKind[] {
@@ -82,21 +100,29 @@
           kind: "agent",
           item: item as MessageTimelineItem,
           children: [],
-          approvals: []
+          approvals: [],
+          questions: []
         };
       } else if (item.kind === "tool") {
-        if (!current) current = { kind: "agent", item: null, children: [], approvals: [] };
+        if (!current) current = { kind: "agent", item: null, children: [], approvals: [], questions: [] };
         current.children.push(item as ToolTimelineItem);
       } else if (item.kind === "diff") {
-        if (!current) current = { kind: "agent", item: null, children: [], approvals: [] };
+        if (!current) current = { kind: "agent", item: null, children: [], approvals: [], questions: [] };
         current.children.push(item as DiffTimelineItem);
+      } else if (item.kind === "question") {
+        if (!current) current = { kind: "agent", item: null, children: [], approvals: [], questions: [] };
+        current.questions.push(item as UserQuestionTimelineItem);
       }
     }
     if (current) rows.push(current);
     return rows;
   }
 
-  let rows = $derived(buildRows(timeline.filter((i) => i.kind !== "permission")));
+  let rows = $derived(
+    buildRows(
+      timeline.filter((i) => i.kind !== "permission" && !(i.kind === "question" && i.status === "pending"))
+    )
+  );
 
   function formatTime(ms: number | undefined): string {
     if (!ms) return "";
@@ -107,12 +133,27 @@
     return `${hh}:${m}`;
   }
 
+  function formatElapsed(startedAtMs: number | null): string {
+    if (!startedAtMs) return "";
+    const elapsed = Math.max(0, nowMs - startedAtMs) / 1000;
+    return elapsed < 10 ? `${elapsed.toFixed(1)}s` : `${Math.floor(elapsed)}s`;
+  }
+
   $effect(() => {
     // On session change, reset scroll to top so users see the start.
     if (session?.id !== lastSessionId) {
       lastSessionId = session?.id ?? null;
       void tick().then(() => threadEl?.scrollTo({ top: 0, behavior: "auto" }));
     }
+  });
+
+  $effect(() => {
+    if (!turnRunning || !turnStartedAtMs) return;
+    nowMs = Date.now();
+    const interval = window.setInterval(() => {
+      nowMs = Date.now();
+    }, 100);
+    return () => window.clearInterval(interval);
   });
 
   async function submit() {
@@ -135,7 +176,7 @@
   // approval prompt sits with the tool call it's asking about.
   let distributedRows = $derived.by(() => {
     const out = [...rows];
-    if (!pendingPermissions.length) return out;
+    if (!pendingPermissions.length && !pendingQuestions.length) return out;
     // attach to the last agent row (or append a synthetic one)
     const lastAgentIdx = (() => {
       for (let i = out.length - 1; i >= 0; i--) if (out[i].kind === "agent") return i;
@@ -143,17 +184,32 @@
     })();
     if (lastAgentIdx >= 0 && out[lastAgentIdx].kind === "agent") {
       const prev = out[lastAgentIdx] as Extract<RowKind, { kind: "agent" }>;
-      out[lastAgentIdx] = { ...prev, approvals: [...prev.approvals, ...pendingPermissions] };
+      out[lastAgentIdx] = {
+        ...prev,
+        approvals: [...prev.approvals, ...pendingPermissions],
+        questions: [...prev.questions, ...pendingQuestions]
+      };
     } else {
-      out.push({ kind: "agent", item: null, children: [], approvals: [...pendingPermissions] });
+      out.push({
+        kind: "agent",
+        item: null,
+        children: [],
+        approvals: [...pendingPermissions],
+        questions: [...pendingQuestions]
+      });
     }
     return out;
   });
 
   let typingLabel = $derived.by(() => {
-    if (agentState === "thinking") return `${agentName} is thinking…`;
-    if (agentState === "running") return `${agentName} is running a tool…`;
-    if (agentState === "awaiting") return `${agentName} paused — waiting for your approval`;
+    const elapsed = formatElapsed(turnStartedAtMs);
+    const suffix = elapsed ? ` (${elapsed})` : "";
+    if (turnRunning) {
+      if (turnStatusHint) return `${turnStatusHint}${suffix}`;
+      if (turnThinking) return `Thinking${suffix}`;
+      return `Running${suffix}`;
+    }
+    if (agentState === "awaiting") return `${agentName} paused - waiting for your response`;
     return null;
   });
 </script>
@@ -161,9 +217,9 @@
 <div class="pf-chat">
   <div class="pf-chat-thread" bind:this={threadEl}>
     <div class="pf-chat-thread-inner">
-      {#if loading}
+      {#if loading && rows.length === 0}
         <div class="state">Loading conversation…</div>
-      {:else if rows.length === 0}
+      {:else if rows.length === 0 && !typingLabel}
         <div class="state">No messages in this session yet. Send a prompt to get started.</div>
       {:else}
         {#each distributedRows as row, idx (idx)}
@@ -181,9 +237,15 @@
               </div>
             </div>
           {:else if row.kind === "system"}
-            <div class="pf-msg" data-role="system" style="opacity: 0.75;">
-              <div class="pf-msg-avatar" style="background: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;">sys</div>
+            {@const isError = row.item.status === "error" || row.item.meta.includes("error")}
+            <div class="pf-msg" data-role="system" data-error={isError}>
+              <div class="pf-msg-avatar">{isError ? "err" : "sys"}</div>
               <div class="pf-msg-body">
+                {#if isError}
+                  <div class="pf-msg-meta">
+                    <span class="name">{row.item.title || "Error"}</span>
+                  </div>
+                {/if}
                 <div class="pf-msg-text">
                   <MessageBody body={row.item.body} />
                 </div>
@@ -201,7 +263,7 @@
                     <MessageBody body={row.item.body} />
                   </div>
                 {/if}
-                {#if row.children.length || row.approvals.length}
+                {#if row.children.length || row.approvals.length || row.questions.length}
                   <div class="agent-tools">
                     {#each row.children as child (child.id)}
                       {#if child.kind === "tool"}
@@ -212,6 +274,9 @@
                     {/each}
                     {#each row.approvals as p (p.id)}
                       <Approval item={p} onResolve={onResolvePermission} />
+                    {/each}
+                    {#each row.questions as q (q.id)}
+                      <QuestionPrompt item={q} onResolve={onResolveUserQuestion} />
                     {/each}
                   </div>
                 {/if}

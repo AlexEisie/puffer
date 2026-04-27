@@ -4,6 +4,7 @@
   import Icon from "../design/Icon.svelte";
   import ProjectRow from "./workspace/ProjectRow.svelte";
   import ConnectProjectModal from "./workspace/ConnectProjectModal.svelte";
+  import { sessionDisplayName, sessionDisplayTitle } from "../sessionDisplay";
   import type { MockAgent, MockProject } from "../data/mockProjects";
   import type { FolderGroup, SessionListItem } from "../types";
 
@@ -25,6 +26,8 @@
     /** User clicked the workspace-cwd chip in the header — the parent
      *  should open the WorkspacePicker. */
     onOpenWorkspacePicker?: () => void;
+    pinnedWorkspacePaths?: string[];
+    onToggleWorkspacePin?: (path: string, pinned: boolean) => void;
   };
 
   let {
@@ -35,7 +38,9 @@
     onOpenBoard,
     onNewAgent,
     onSessionReady,
-    onOpenWorkspacePicker
+    onOpenWorkspacePicker,
+    pinnedWorkspacePaths = [],
+    onToggleWorkspacePin
   }: Props = $props();
 
   let showConnect = $state(false);
@@ -83,13 +88,13 @@
     return {
       id: session.id,
       project: projectId,
-      name: session.displayName?.trim() || session.slug || `session ${session.id.slice(0, 6)}`,
-      title: session.title,
+      name: sessionDisplayName(session),
+      title: sessionDisplayTitle(session),
       worktree: "",
       branch: "",
       status: "idle",
       progress: 0,
-      step: session.note ?? "",
+      step: session.note ?? (session.eventCount > 0 ? `${session.eventCount} transcript events` : "Ready to start"),
       tools: session.eventCount,
       elapsed: formatAge(session.updatedAtMs),
       model: ""
@@ -142,16 +147,6 @@
       <button
         type="button"
         class="sc-btn"
-        data-variant="default"
-        data-size="sm"
-        onclick={() => handleNewAgent(defaultWorkspaceCwd)}
-        disabled={!onNewAgent}
-      >
-        <Icon name="plus" size={13} />New agent
-      </button>
-      <button
-        type="button"
-        class="sc-btn"
         data-variant="outline"
         data-size="sm"
         onclick={() => (showConnect = true)}
@@ -182,16 +177,6 @@
             {#if defaultWorkspaceCwd}<code>{defaultWorkspaceCwd}</code>{/if}
             — you'll land in a blank chat wired straight to Puffer.
           </p>
-          <button
-            type="button"
-            class="sc-btn"
-            data-variant="default"
-            data-size="sm"
-            onclick={() => handleNewAgent(defaultWorkspaceCwd)}
-            disabled={!onNewAgent}
-          >
-            <Icon name="plus" size={13} />New agent
-          </button>
         </div>
       </div>
     {/if}
@@ -199,9 +184,11 @@
       <ProjectRow
         project={p}
         agents={agents.filter((a) => a.project === p.id)}
+        pinned={pinnedWorkspacePaths.includes(p.path) || pinnedWorkspacePaths.includes(p.id)}
         {onOpenAgent}
         {onOpenBoard}
         onNewAgent={onNewAgent ? () => handleNewAgent(p.path) : undefined}
+        onTogglePin={onToggleWorkspacePin ? () => onToggleWorkspacePin(p.path, !(pinnedWorkspacePaths.includes(p.path) || pinnedWorkspacePaths.includes(p.id))) : undefined}
       />
     {/each}
   </div>

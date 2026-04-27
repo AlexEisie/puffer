@@ -1,5 +1,5 @@
 use puffer_tools::ToolDefinition;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::cell::RefCell;
 
 /// Describes one runtime permission request that may need user approval.
@@ -8,6 +8,19 @@ pub struct PermissionPromptRequest {
     pub tool_id: String,
     pub summary: String,
     pub reason: Option<String>,
+}
+
+/// Describes one `AskUserQuestion` request that may need user answers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserQuestionPromptRequest {
+    pub questions: Value,
+}
+
+/// Describes the answers collected for one `AskUserQuestion` request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserQuestionPromptResponse {
+    pub answers: Map<String, Value>,
+    pub annotations: Map<String, Value>,
 }
 
 /// Describes how the user responded to a runtime permission prompt.
@@ -21,6 +34,8 @@ pub enum PermissionPromptAction {
 
 thread_local! {
     static PERMISSION_PROMPT_HANDLER: RefCell<Option<Box<dyn FnMut(PermissionPromptRequest) -> PermissionPromptAction>>> =
+        const { RefCell::new(None) };
+    static USER_QUESTION_PROMPT_HANDLER: RefCell<Option<Box<dyn FnMut(UserQuestionPromptRequest) -> UserQuestionPromptResponse>>> =
         const { RefCell::new(None) };
 }
 
@@ -39,6 +54,21 @@ pub fn with_permission_prompt_handler<R>(
     })
 }
 
+/// Runs a closure while the current thread can answer `AskUserQuestion` prompts.
+pub fn with_user_question_prompt_handler<R>(
+    handler: impl FnMut(UserQuestionPromptRequest) -> UserQuestionPromptResponse + 'static,
+    run: impl FnOnce() -> R,
+) -> R {
+    USER_QUESTION_PROMPT_HANDLER.with(|slot| {
+        let previous = slot.borrow_mut().take();
+        *slot.borrow_mut() = Some(Box::new(handler));
+        let result = run();
+        let _ = slot.borrow_mut().take();
+        *slot.borrow_mut() = previous;
+        result
+    })
+}
+
 pub(crate) fn prompt_for_permission(request: PermissionPromptRequest) -> PermissionPromptAction {
     PERMISSION_PROMPT_HANDLER.with(|slot| {
         let mut borrowed = slot.borrow_mut();
@@ -46,6 +76,15 @@ pub(crate) fn prompt_for_permission(request: PermissionPromptRequest) -> Permiss
             return PermissionPromptAction::Deny;
         };
         handler(request)
+    })
+}
+
+pub(crate) fn prompt_for_user_question(
+    request: UserQuestionPromptRequest,
+) -> Option<UserQuestionPromptResponse> {
+    USER_QUESTION_PROMPT_HANDLER.with(|slot| {
+        let mut borrowed = slot.borrow_mut();
+        borrowed.as_mut().map(|handler| handler(request))
     })
 }
 

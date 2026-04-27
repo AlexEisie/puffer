@@ -342,10 +342,24 @@ fn resolve_permission(
 }
 
 #[tauri::command]
-fn cancel_turn(
+fn resolve_user_question(
     registry: State<'_, Arc<TurnRegistry>>,
     turn_id: String,
+    request_id: String,
+    answers: serde_json::Map<String, serde_json::Value>,
+    annotations: serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), String> {
+    turn::resolve_user_question(
+        registry.inner().clone(),
+        turn_id,
+        request_id,
+        answers,
+        annotations,
+    )
+}
+
+#[tauri::command]
+fn cancel_turn(registry: State<'_, Arc<TurnRegistry>>, turn_id: String) -> Result<(), String> {
     turn::cancel_turn(registry.inner().clone(), turn_id)
 }
 
@@ -353,9 +367,7 @@ fn cancel_turn(
 /// its WebSocket URL + auth token so the frontend can connect directly.
 /// The daemon dies with the Tauri parent process.
 #[tauri::command]
-fn start_local_daemon(
-    launcher: State<'_, Arc<DaemonLauncher>>,
-) -> Result<DaemonHandshake, String> {
+fn start_local_daemon(launcher: State<'_, Arc<DaemonLauncher>>) -> Result<DaemonHandshake, String> {
     launcher
         .inner()
         .ensure_started()
@@ -452,6 +464,7 @@ pub fn run() {
             write_remote_file,
             run_agent_turn,
             resolve_permission,
+            resolve_user_question,
             cancel_turn,
             start_local_daemon,
             start_ssh_daemon,

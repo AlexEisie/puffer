@@ -1,6 +1,7 @@
 <script lang="ts">
   import Puffer from "../../design/Puffer.svelte";
   import Icon from "../../design/Icon.svelte";
+  import HighlightedLine from "../../components/HighlightedLine.svelte";
   import ConversationView from "./ConversationView.svelte";
   import DiffView from "../../components/DiffView.svelte";
   import FilesPane from "./FilesPane.svelte";
@@ -11,12 +12,14 @@
     agentPufferState,
     type AgentStatus
   } from "../../data/mockProjects";
+  import { sessionDisplayName, sessionDisplayTitle } from "../../sessionDisplay";
   import type {
     PermissionTimelineItem,
     SessionDetail,
     SessionListItem,
     SettingsSnapshot,
-    TimelineItem
+    TimelineItem,
+    UserQuestionTimelineItem
   } from "../../types";
   import type { AgentState } from "../../shell/tweaks";
 
@@ -26,12 +29,21 @@
     sessionDetail: SessionDetail | null;
     timeline: TimelineItem[];
     pendingPermissions: PermissionTimelineItem[];
+    pendingQuestions: UserQuestionTimelineItem[];
     loading: boolean;
     turnRunning?: boolean;
+    turnStartedAtMs?: number | null;
+    turnThinking?: boolean;
+    turnStatusHint?: string | null;
     settingsSnapshot?: SettingsSnapshot | null;
     onBack: () => void;
     onSubmitMessage: (message: string) => void;
     onResolvePermission: (permissionId: string, choice: string) => void;
+    onResolveUserQuestion: (
+      questionId: string,
+      answers: Record<string, string | string[]>,
+      annotations?: Record<string, Record<string, string>>
+    ) => void;
     onCancelTurn?: () => void;
     onModelChange?: (providerId: string, modelId: string) => void;
   };
@@ -41,12 +53,17 @@
     sessionDetail,
     timeline,
     pendingPermissions,
+    pendingQuestions,
     loading,
     turnRunning = false,
+    turnStartedAtMs = null,
+    turnThinking = false,
+    turnStatusHint = null,
     settingsSnapshot = null,
     onBack,
     onSubmitMessage,
     onResolvePermission,
+    onResolveUserQuestion,
     onCancelTurn,
     onModelChange
   }: Props = $props();
@@ -58,10 +75,11 @@
 
   // Header identity comes straight from the live session record. No
   // local board persona — the daemon is the source of truth.
-  let displayName = $derived(session?.displayName ?? session?.title ?? "Session");
-  let displayTitle = $derived(session?.title ?? session?.note ?? "");
+  let displayName = $derived(sessionDisplayName(session));
+  let displayTitle = $derived(sessionDisplayTitle(session));
   let displayBranch = $derived(sessionDetail?.repoStatus?.branch ?? "");
   let displayProject = $derived(session?.folderPath?.split("/").pop() ?? "");
+  let projectCwd = $derived(sessionDetail?.repoStatus?.cwd ?? session?.cwd ?? "");
   let displayWorktree = $derived("");
   let status = $derived<AgentStatus>(inferStatusFromSession(sessionDetail));
 
@@ -74,7 +92,22 @@
     return "idle";
   }
 
-  let pufferState = $derived<AgentState>(agentPufferState(status));
+  let pufferState = $derived<AgentState>(
+    pendingPermissions.length > 0 || pendingQuestions.length > 0
+      ? "awaiting"
+      : turnRunning
+        ? turnThinking
+          ? "thinking"
+          : "running"
+        : agentPufferState(status)
+  );
+  let statusLabel = $derived(
+    turnRunning
+      ? turnThinking
+        ? "thinking"
+        : "running"
+      : AGENT_STATE_LABELS[status] ?? status
+  );
   let diffCount = $derived(timeline.filter((t) => t.kind === "diff").length);
   let agentDiff = $derived(sessionDetail?.agentDiff ?? { files: [], entries: [] });
   let divergence = $derived(
@@ -133,10 +166,10 @@
       />
     {/if}
     <span class="pf-agent-status-pill" data-status={status}>
-      {#if status === "running"}
+      {#if pufferState === "running"}
         <span class="pip"></span>
       {/if}
-      {AGENT_STATE_LABELS[status] ?? status}
+      {statusLabel}
     </span>
     <div class="pf-agent-tabs">
       <button class="pf-agent-tab" class:on={tab === "chat"} onclick={() => (tab = "chat")}>
@@ -165,10 +198,15 @@
         agentState={pufferState}
         timeline={timeline}
         pendingPermissions={pendingPermissions}
+        pendingQuestions={pendingQuestions}
         loading={loading}
         turnRunning={turnRunning}
+        turnStartedAtMs={turnStartedAtMs}
+        turnThinking={turnThinking}
+        turnStatusHint={turnStatusHint}
         onSubmitMessage={onSubmitMessage}
         onResolvePermission={onResolvePermission}
+        onResolveUserQuestion={onResolveUserQuestion}
         onCancelTurn={onCancelTurn}
       />
     {:else if tab === "diff"}
@@ -226,7 +264,7 @@
                       <span class="count">×{file.editCount}</span>
                     {/if}
                   </header>
-                  <pre class="diff-snippet"><code>{file.latestSummary}</code></pre>
+                  <pre class="diff-snippet"><code>{#each file.latestSummary.split("\n") as line, i (i)}<span><HighlightedLine text={line || " "} path={file.path} /></span>{/each}</code></pre>
                 </article>
               {/each}
             </div>
@@ -309,9 +347,9 @@
         </div>
       {/if}
     {:else if tab === "terminal"}
-      <TerminalPane cwd={session?.cwd ?? displayProject} />
+      <TerminalPane cwd={projectCwd} />
     {:else if tab === "files"}
-      <FilesPane cwd={session?.cwd ?? displayProject} />
+      <FilesPane cwd={projectCwd} />
     {/if}
   </div>
 </div>
@@ -575,6 +613,9 @@
     overflow-x: auto;
   }
   .diff-snippet code { color: inherit; }
+  .diff-snippet code > span {
+    display: block;
+  }
 
   .divergence-pane {
     padding: 14px 16px;
