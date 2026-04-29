@@ -47,6 +47,8 @@ fn usage_command_reports_runtime_and_resource_counts() {
             max_output_tokens: 8_192,
             supports_reasoning: true,
             compat: None,
+            input: vec![puffer_provider_registry::Modality::Text],
+            cost: None,
         }],
     });
     let mut auth_store = AuthStore::default();
@@ -375,6 +377,8 @@ fn anthropic_provider() -> ProviderDescriptor {
             max_output_tokens: 8_192,
             supports_reasoning: true,
             compat: None,
+            input: vec![puffer_provider_registry::Modality::Text],
+            cost: None,
         }],
     }
 }
@@ -398,6 +402,8 @@ fn openai_provider() -> ProviderDescriptor {
             max_output_tokens: 16_384,
             supports_reasoning: true,
             compat: None,
+            input: vec![puffer_provider_registry::Modality::Text],
+            cost: None,
         }],
     }
 }

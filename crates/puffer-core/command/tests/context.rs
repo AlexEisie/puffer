@@ -83,6 +83,8 @@ fn context_command_renders_anthropic_context_breakdown() {
             max_output_tokens: 8_192,
             supports_reasoning: true,
             compat: None,
+            input: vec![puffer_provider_registry::Modality::Text],
+            cost: None,
         }],
     });
 
@@ -159,6 +161,8 @@ fn context_command_renders_openai_context_breakdown() {
             max_output_tokens: 16_384,
             supports_reasoning: true,
             compat: None,
+            input: vec![puffer_provider_registry::Modality::Text],
+            cost: None,
         }],
     });
 

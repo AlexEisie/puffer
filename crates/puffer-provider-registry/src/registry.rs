@@ -341,6 +341,8 @@ mod tests {
                 max_output_tokens: 8_192,
                 supports_reasoning: true,
                 compat: None,
+                input: vec![puffer_provider_registry::Modality::Text],
+                cost: None,
             }],
         }
     }
@@ -578,6 +580,8 @@ mod tests {
             max_output_tokens: 16_384,
             supports_reasoning: true,
             compat: None,
+            input: vec![puffer_provider_registry::Modality::Text],
+            cost: None,
         }];
 
         let mut registry = ProviderRegistry::new();

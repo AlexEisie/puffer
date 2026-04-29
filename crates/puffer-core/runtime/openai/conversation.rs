@@ -1663,6 +1663,8 @@ mod tests {
                 max_output_tokens: max_output,
                 supports_reasoning: false,
                 compat: None,
+                input: vec![puffer_provider_registry::Modality::Text],
+                cost: None,
             }],
         }
     }

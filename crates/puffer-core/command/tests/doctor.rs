@@ -32,6 +32,8 @@ fn provider(id: &str, auth_modes: Vec<AuthMode>) -> ProviderDescriptor {
             max_output_tokens: 8_192,
             supports_reasoning: true,
             compat: None,
+            input: vec![puffer_provider_registry::Modality::Text],
+            cost: None,
         }],
     }
 }

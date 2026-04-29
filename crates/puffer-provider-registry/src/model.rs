@@ -50,6 +50,13 @@ pub struct ProviderSource {
 }
 
 /// Describes one provider model exposed to the rest of the application.
+///
+/// Mirrors pi-mono's `Model<TApi>` shape (see
+/// `pi-mono/packages/ai/src/types.ts:426-451`) — `id`, `display_name`,
+/// `api`, `context_window`, `max_output_tokens`, `supports_reasoning`,
+/// `input` modalities, optional `cost` and `compat`. The fields beyond
+/// the original puffer set are all `Option<…>` / serde-default so
+/// existing yamls keep parsing without churn.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelDescriptor {
     pub id: String,
@@ -60,6 +67,20 @@ pub struct ModelDescriptor {
     pub max_output_tokens: u32,
     #[serde(default)]
     pub supports_reasoning: bool,
+    /// Modalities the model accepts as input. Defaults to text-only when
+    /// unset — parity with pi-mono's
+    /// `input: ("text" | "image")[]` (see `types.ts:433`). Used by the
+    /// runtime to decide whether to downgrade image content blocks to
+    /// placeholder text before sending to a text-only model.
+    #[serde(default = "default_input_modalities")]
+    pub input: Vec<Modality>,
+    /// Per-million-token pricing. Used by the cost tracker — when set,
+    /// `command_summary` reports an actual USD figure instead of the
+    /// historical `unavailable` placeholder. Mirrors pi-mono's
+    /// `cost: { input, output, cacheRead, cacheWrite }` (see
+    /// `types.ts:434-439`).
+    #[serde(default)]
+    pub cost: Option<ModelCost>,
     /// Optional declarative API-shape compat overrides. When `None` (the
     /// common case), runtime helpers in `puffer-core` auto-detect each
     /// flag from `base_url` / `provider.id` to preserve historical
@@ -71,6 +92,52 @@ pub struct ModelDescriptor {
     /// `Model<TApi>.compat?` field.
     #[serde(default)]
     pub compat: Option<ModelCompat>,
+}
+
+/// Input modality a model accepts. Defaults to `[Text]` when omitted.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Modality {
+    Text,
+    Image,
+}
+
+fn default_input_modalities() -> Vec<Modality> {
+    vec![Modality::Text]
+}
+
+/// Per-million-token pricing in USD. All four fields are positive
+/// floats; zero means "free for this stream."
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct ModelCost {
+    /// USD per million input (prompt) tokens.
+    pub input: f64,
+    /// USD per million output (completion) tokens.
+    pub output: f64,
+    /// USD per million cache-read tokens (Anthropic-style cache hit).
+    #[serde(default)]
+    pub cache_read: f64,
+    /// USD per million cache-write tokens (Anthropic-style ephemeral
+    /// or 1-hour cache write).
+    #[serde(default)]
+    pub cache_write: f64,
+}
+
+// ModelCost holds floats so we accept default `Eq` impl loss; provide
+// a manual one so the surrounding `ModelDescriptor` keeps `PartialEq`
+// clean when callers compare.
+impl Eq for ModelCost {}
+
+impl ModelCost {
+    /// Computes the total USD cost for the given token mix.
+    pub fn total(&self, input_tokens: u64, output_tokens: u64, cache_read_tokens: u64, cache_write_tokens: u64) -> f64 {
+        let scale = 1.0 / 1_000_000.0;
+        (self.input * input_tokens as f64
+            + self.output * output_tokens as f64
+            + self.cache_read * cache_read_tokens as f64
+            + self.cache_write * cache_write_tokens as f64)
+            * scale
+    }
 }
 
 /// API-discriminated declarative compat override. The `api` tag mirrors

@@ -11,8 +11,8 @@ pub use import::{
     detect_import_candidates, ExternalImportCandidate, ExternalImportFamily, ExternalImportSource,
 };
 pub use model::{
-    AnthropicMessagesCompat, ModelCompat, ModelDescriptor, ModelDiscoveryConfig,
-    ModelDiscoveryFormat, OpenAiCompletionsCompat, OpenAiResponsesCompat, ProviderDescriptor,
-    ProviderSource, ProviderSourceKind, RegisteredProvider, ResponsesPath,
+    AnthropicMessagesCompat, Modality, ModelCompat, ModelCost, ModelDescriptor,
+    ModelDiscoveryConfig, ModelDiscoveryFormat, OpenAiCompletionsCompat, OpenAiResponsesCompat,
+    ProviderDescriptor, ProviderSource, ProviderSourceKind, RegisteredProvider, ResponsesPath,
 };
 pub use registry::ProviderRegistry;

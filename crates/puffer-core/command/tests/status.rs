@@ -39,6 +39,8 @@ fn status_command_reports_richer_session_and_resource_status() {
             max_output_tokens: 8_192,
             supports_reasoning: true,
             compat: None,
+            input: vec![puffer_provider_registry::Modality::Text],
+            cost: None,
         }],
     });
     let mut auth_store = AuthStore::default();

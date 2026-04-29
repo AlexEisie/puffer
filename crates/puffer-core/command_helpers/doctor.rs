@@ -670,6 +670,8 @@ mod tests {
                 max_output_tokens: 8_192,
                 supports_reasoning: true,
                 compat: None,
+                input: vec![puffer_provider_registry::Modality::Text],
+                cost: None,
             }],
         }
     }
