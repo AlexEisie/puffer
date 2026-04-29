@@ -139,11 +139,24 @@ pub fn extract_chat_completions_text(response: &OpenAIChatCompletionsResponse) -
 /// the field) return `None`. Used by the agent loop to surface a
 /// `ThinkingDelta` event so the TUI's thinking block stays populated for
 /// reasoning-capable Chat Completions providers (Moonshot Kimi, Deepseek,
-/// OpenRouter relays).
+/// OpenRouter relays). Tries the dedicated `reasoning_content` /
+/// `reasoning` field first, then falls back to a `<think>…</think>`
+/// block inside `content` (DeepSeek-R1 distill convention).
 pub fn extract_chat_completions_reasoning(
     response: &OpenAIChatCompletionsResponse,
 ) -> Option<String> {
     response::extract_chat_completions_reasoning(response)
+}
+
+/// Returns the visible-to-user portion of the assistant message — same
+/// as `extract_chat_completions_text` but additionally strips a leading
+/// `<think>…</think>` block when one is embedded in `content`. Pair
+/// with `extract_chat_completions_reasoning` so the same prose doesn't
+/// land in both the thinking card and the answer card.
+pub fn extract_chat_completions_visible_text(
+    response: &OpenAIChatCompletionsResponse,
+) -> String {
+    response::extract_chat_completions_visible_text(response)
 }
 
 /// Extracts tool calls from a parsed OpenAI Responses API payload.

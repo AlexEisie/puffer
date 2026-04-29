@@ -14,7 +14,7 @@
 use anyhow::Result;
 use puffer_provider_openai::{
     build_chat_completions_request, extract_chat_completions_reasoning,
-    extract_chat_completions_text, extract_chat_completions_tool_calls,
+    extract_chat_completions_tool_calls, extract_chat_completions_visible_text,
     parse_chat_completions_response, OpenAIChatCompletionsRequest, OpenAIChatCompletionTool,
     OpenAIChatResponseFormat, OpenAIRequestConfig, OpenAIResponsesToolChoiceMode,
 };
@@ -183,7 +183,10 @@ impl OpenAICompletionsTurnSession {
             })
             .collect();
 
-        let assistant_text_from_msg = extract_chat_completions_text(&parsed);
+        // Strip any inline `<think>…</think>` block from the visible
+        // text so it doesn't double-render alongside the thinking card
+        // emitted from `extract_chat_completions_reasoning`.
+        let assistant_text_from_msg = extract_chat_completions_visible_text(&parsed);
         let reasoning_chain = extract_chat_completions_reasoning(&parsed);
 
         let mut pre_tool_items: Vec<ConversationItem> = Vec::new();
