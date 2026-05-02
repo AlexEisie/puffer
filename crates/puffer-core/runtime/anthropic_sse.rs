@@ -41,7 +41,33 @@ where
         // Ignore "event:" lines — we parse type from data payload
     }
 
-    // Stream ended without message_stop
+    // EOF: flush any pending data lines that lacked a trailing blank line.
+    // Some upstreams (and `BufReader::lines()` swallowing the final newline)
+    // can leave the terminal `data: {message_stop}` event in the buffer
+    // without a separator. Without this flush we would mis-classify a fully
+    // delivered stream as truncated. Pi-mono parity:
+    // `pi-mono/.../anthropic.ts:353,371` consume the trailing buffer too.
+    if !data_lines.is_empty() {
+        let done = flush_anthropic_event(&data_lines, &mut state, on_event)?;
+        data_lines.clear();
+        if done {
+            return Ok(state.into_response());
+        }
+    }
+
+    // Stream ended without `message_stop`. Pi-mono parity
+    // (`pi-mono/packages/ai/src/providers/anthropic.ts` 83592bb2): when
+    // we saw `message_start` we know the upstream is a real Anthropic
+    // stream — a missing `message_stop` means it was truncated mid-flight
+    // (transport drop, gateway timeout, OOM at the relay). Returning the
+    // partial state silently would feed a half-built thinking block (no
+    // signature, possibly truncated mid-token) into the next turn's
+    // replay, where it would either fail upstream verification or drop
+    // its chain-of-thought silently. Bail loudly so retry / surfacing
+    // can decide what to do.
+    if state.response.is_some() {
+        bail!("Anthropic SSE stream ended before message_stop");
+    }
     if state.has_content() {
         Ok(state.into_response())
     } else {
@@ -133,6 +159,26 @@ where
                                     Value::String(existing + thinking);
                             }
                             on_event(TurnStreamEvent::ThinkingDelta(thinking.to_string()));
+                        }
+                    }
+                    "signature_delta" => {
+                        // Anthropic emits the thinking block's signature
+                        // separately from `thinking_delta`. The signature
+                        // is required to round-trip the thinking block on
+                        // multi-turn tool flows — without it providers
+                        // like `kimi-coding/k2p5` reject with
+                        // "reasoning_content is missing in assistant tool
+                        // call message".
+                        if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
+                            if index < state.content_blocks.len() {
+                                let existing = state.content_blocks[index]
+                                    .get("signature")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string();
+                                state.content_blocks[index]["signature"] =
+                                    Value::String(existing + signature);
+                            }
                         }
                     }
                     _ => {}
@@ -241,5 +287,113 @@ mod tests {
         assert_eq!(deltas, vec!["Hello", " world"]);
         assert_eq!(result["content"][0]["text"], "Hello world");
         assert_eq!(result["stop_reason"], "end_turn");
+    }
+
+    #[test]
+    fn parse_thinking_block_accumulates_text_and_signature() {
+        // Verifies the SSE parser preserves both the `thinking` text and
+        // the `signature` token on the reconstructed thinking block.
+        // Without `signature_delta` accumulation the round-trip into the
+        // next request would drop the thinking block (no signature →
+        // unverifiable replay) and trigger "reasoning_content is missing
+        // in assistant tool call message".
+        let stream = concat!(
+            "event:message_start\n",
+            "data:{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "event:content_block_start\n",
+            "data:{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+            "event:content_block_delta\n",
+            "data:{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Step 1.\"}}\n\n",
+            "event:content_block_delta\n",
+            "data:{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" Step 2.\"}}\n\n",
+            "event:content_block_delta\n",
+            "data:{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-part-A\"}}\n\n",
+            "event:content_block_delta\n",
+            "data:{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"-part-B\"}}\n\n",
+            "event:content_block_stop\n",
+            "data:{\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event:message_stop\n",
+            "data:{\"type\":\"message_stop\"}\n\n",
+        );
+
+        let mut thinking_deltas = Vec::new();
+        let result = parse_anthropic_sse(stream.as_bytes(), &mut |event| {
+            if let TurnStreamEvent::ThinkingDelta(d) = event {
+                thinking_deltas.push(d);
+            }
+        })
+        .unwrap();
+
+        assert_eq!(thinking_deltas, vec!["Step 1.", " Step 2."]);
+        assert_eq!(result["content"][0]["type"], "thinking");
+        assert_eq!(result["content"][0]["thinking"], "Step 1. Step 2.");
+        assert_eq!(result["content"][0]["signature"], "sig-part-A-part-B");
+    }
+
+    /// Pi-mono parity (`pi-mono/.../anthropic.ts` 83592bb2):
+    /// truncated streams that started but never reached `message_stop`
+    /// must bail. Previously we silently returned the partial state,
+    /// feeding a half-built thinking block (no signature, possibly
+    /// truncated mid-token) into the next turn — caller would then
+    /// fail upstream signature verification or lose chain-of-thought.
+    #[test]
+    fn truncated_stream_after_message_start_bails() {
+        let stream = concat!(
+            "event:message_start\n",
+            "data:{\"type\":\"message_start\",\"message\":{\"id\":\"msg_t\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "event:content_block_start\n",
+            "data:{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event:content_block_delta\n",
+            "data:{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n",
+            // EOF here — gateway dropped the connection. No
+            // content_block_stop, no message_delta, no message_stop.
+        );
+
+        let result = parse_anthropic_sse(stream.as_bytes(), &mut |_| {});
+        let err = result.expect_err("truncated stream must bail");
+        assert!(
+            err.to_string().contains("ended before message_stop"),
+            "expected truncation error, got: {err}"
+        );
+    }
+
+    /// Streams that never started (no `message_start`) AND have no
+    /// content fall through the legacy "no message_stop" branch and
+    /// bail — same as before this change. Locks in that we did not
+    /// regress the empty-stream path.
+    #[test]
+    fn empty_stream_with_no_message_start_still_bails() {
+        let stream = "";
+        let result = parse_anthropic_sse(stream.as_bytes(), &mut |_| {});
+        let err = result.expect_err("empty stream must bail");
+        assert!(err.to_string().contains("without message_stop"), "got: {err}");
+    }
+
+    /// Pi-mono parity: when the upstream delivers the final
+    /// `data: message_stop` event but the trailing blank-line separator
+    /// is missing (relay framing quirk, or `BufReader::lines()`
+    /// swallowing the last newline), the EOF flush must still observe
+    /// the terminal event instead of mis-classifying it as truncation.
+    /// Codex review caught this: previously we only flushed on empty
+    /// lines, so the last event sat in `data_lines` until EOF and was
+    /// then discarded.
+    #[test]
+    fn message_stop_without_trailing_blank_line_is_accepted() {
+        let stream = concat!(
+            "event:message_start\n",
+            "data:{\"type\":\"message_start\",\"message\":{\"id\":\"msg_e\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "event:content_block_start\n",
+            "data:{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event:content_block_delta\n",
+            "data:{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+            "event:content_block_stop\n",
+            "data:{\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event:message_stop\n",
+            "data:{\"type\":\"message_stop\"}\n",
+            // EOF here — no trailing blank line.
+        );
+        let result = parse_anthropic_sse(stream.as_bytes(), &mut |_| {})
+            .expect("trailing message_stop without blank line must succeed");
+        assert_eq!(result["content"][0]["text"], "hi");
     }
 }

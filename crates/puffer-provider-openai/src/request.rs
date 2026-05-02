@@ -27,6 +27,28 @@ pub struct OpenAIChatCompletionsRequest {
     pub tool_choice: Option<OpenAIResponsesToolChoiceMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<OpenAIChatResponseFormat>,
+    /// Top-level `reasoning_effort` (canonical OpenAI shape, also
+    /// honored by Moonshot Kimi and DeepSeek V4 alongside their own
+    /// thinking flag). Maps to one of the puffer effort levels (or
+    /// the per-model `reasoning_effort_map` override).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// OpenRouter-style nested reasoning param: `{ "effort": "..." }`.
+    /// Mutually exclusive with `reasoning_effort` in practice; both
+    /// are emitted only when the model's compat says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Value>,
+    /// DeepSeek V4 style `thinking: { type: "enabled" }` plus
+    /// `reasoning_effort` at the top level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<Value>,
+    /// Z.ai / Qwen style `enable_thinking: true` at the top level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_thinking: Option<bool>,
+    /// Qwen via vLLM / chat-template style
+    /// `chat_template_kwargs: { enable_thinking: true }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_template_kwargs: Option<Value>,
 }
 
 /// A message item accepted by the OpenAI Chat Completions API.
@@ -39,6 +61,13 @@ pub struct OpenAIChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<OpenAIChatToolCall>,
+    /// Empty `reasoning_content` injected on assistant messages when
+    /// the provider's compat specifies
+    /// `requires_reasoning_content_on_assistant_messages: true`.
+    /// DeepSeek V4 rejects multi-turn requests without this. Other
+    /// providers ignore the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 /// A tool-call item emitted or replayed through Chat Completions messages.
@@ -92,10 +121,18 @@ pub struct OpenAIResponsesToolRequest {
     pub text: Option<OpenAIResponsesTextConfig>,
 }
 
-/// Structured output configuration for the OpenAI Responses API.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Top-level `text` block on the OpenAI Responses API. Carries
+/// either a structured-output `format` (used for JSON-schema
+/// coercion) or a `verbosity` knob, or both. Codex CLI sets
+/// `verbosity` to one of `low` / `medium` / `high` to control how
+/// terse the assistant's prose is. Pi-mono parity:
+/// `pi-mono/packages/ai/src/providers/openai-codex-responses.ts:328`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct OpenAIResponsesTextConfig {
-    pub format: OpenAIResponsesTextFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<OpenAIResponsesTextFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verbosity: Option<String>,
 }
 
 /// One structured output format accepted by the OpenAI Responses API.
@@ -255,25 +292,50 @@ fn build_request_to_path<T: Serialize>(
     accept_event_stream: bool,
 ) -> anyhow::Result<BuiltOpenAIRequest> {
     let normalized_path = normalized_path(&config.base_url, path);
-    let mut headers = vec![
-        ("Content-Type".to_string(), "application/json".to_string()),
-        (
-            "User-Agent".to_string(),
-            codex_user_agent(&config.version, &config.originator),
-        ),
-        ("originator".to_string(), config.originator.clone()),
-    ];
+    // Build the workspace yaml's `headers:` overrides first so we can
+    // skip any default that would collide. A relay like Kimi For Coding
+    // gates on the *first* `User-Agent` header it sees and rejects
+    // `codex_cli_rs/...`; the user supplies `User-Agent: claude-code/1.0`
+    // in the provider yaml to satisfy the gate. Sending both headers
+    // (the previous behavior) made the relay still see our default
+    // first and 403 the request.
+    let custom_keys: std::collections::HashSet<String> = config
+        .custom_headers
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect();
+    let mut headers = Vec::new();
+    let mut push_default = |headers: &mut Vec<(String, String)>, name: &str, value: String| {
+        if !custom_keys.contains(&name.to_ascii_lowercase()) {
+            headers.push((name.to_string(), value));
+        }
+    };
+    push_default(
+        &mut headers,
+        "Content-Type",
+        "application/json".to_string(),
+    );
+    push_default(
+        &mut headers,
+        "User-Agent",
+        codex_user_agent(&config.version, &config.originator),
+    );
+    push_default(&mut headers, "originator", config.originator.clone());
     if normalized_path.ends_with("/responses") && accept_event_stream {
-        headers.push(("Accept".to_string(), "text/event-stream".to_string()));
+        push_default(&mut headers, "Accept", "text/event-stream".to_string());
     }
     if let Some(session_id) = config.session_id.as_deref() {
-        headers.push(("session_id".to_string(), session_id.to_string()));
+        push_default(&mut headers, "session_id", session_id.to_string());
         if normalized_path.ends_with("/responses") {
-            headers.push(("x-client-request-id".to_string(), session_id.to_string()));
+            push_default(
+                &mut headers,
+                "x-client-request-id",
+                session_id.to_string(),
+            );
         }
     }
     if let Some(account_id) = config.account_id.as_deref() {
-        headers.push(("ChatGPT-Account-ID".to_string(), account_id.to_string()));
+        push_default(&mut headers, "ChatGPT-Account-ID", account_id.to_string());
     }
     headers.extend(config.custom_headers.iter().cloned());
     match &config.auth {
@@ -462,6 +524,7 @@ mod tests {
                     content: Some(json!("hello")),
                     tool_call_id: None,
                     tool_calls: Vec::new(),
+                    reasoning_content: None,
                 }],
                 tools: vec![OpenAIChatCompletionTool {
                     kind: "function".to_string(),
@@ -474,6 +537,11 @@ mod tests {
                 }],
                 tool_choice: Some(OpenAIResponsesToolChoiceMode::Auto),
                 response_format: None,
+                reasoning_effort: None,
+                reasoning: None,
+                thinking: None,
+                enable_thinking: None,
+                chat_template_kwargs: None,
             },
         )
         .unwrap();
@@ -505,9 +573,15 @@ mod tests {
                     content: Some(json!("hello")),
                     tool_call_id: None,
                     tool_calls: Vec::new(),
+                    reasoning_content: None,
                 }],
                 tools: Vec::new(),
                 tool_choice: None,
+                reasoning_effort: None,
+                reasoning: None,
+                thinking: None,
+                enable_thinking: None,
+                chat_template_kwargs: None,
                 response_format: Some(OpenAIChatResponseFormat {
                     kind: "json_schema".to_string(),
                     json_schema: OpenAIChatResponseJsonSchema {
@@ -556,7 +630,8 @@ mod tests {
                 tool_choice: None,
                 previous_response_id: None,
                 text: Some(OpenAIResponsesTextConfig {
-                    format: OpenAIResponsesTextFormat {
+                    verbosity: None,
+                    format: Some(OpenAIResponsesTextFormat {
                         kind: "json_schema".to_string(),
                         name: "answer".to_string(),
                         description: Some("Structured answer".to_string()),
@@ -568,7 +643,7 @@ mod tests {
                             "required": ["value"]
                         }),
                         strict: true,
-                    },
+                    }),
                 }),
             },
         )
@@ -685,5 +760,60 @@ mod tests {
 
         let body: Value = serde_json::from_str(&request.body).unwrap();
         assert!(body["tools"][0].get("strict").is_none());
+    }
+
+    /// Custom-headers from a workspace provider yaml must override the
+    /// per-crate defaults instead of being appended after them. Kimi
+    /// For Coding gates on the *first* `User-Agent` header it sees and
+    /// rejects the default `codex_cli_rs/...`; users supply
+    /// `User-Agent: claude-code/1.0` in the yaml to satisfy the gate.
+    /// Sending both headers (the previous behavior) made Kimi still
+    /// see our default first and 403 the request.
+    #[test]
+    fn custom_header_overrides_default() {
+        let request = build_chat_completions_request(
+            &OpenAIRequestConfig {
+                base_url: "https://api.example.com".to_string(),
+                version: "0.1.0".to_string(),
+                auth: OpenAIAuth::ApiKey("sk-test".to_string()),
+                originator: "codex_cli_rs".to_string(),
+                session_id: None,
+                account_id: None,
+                custom_headers: vec![(
+                    "User-Agent".to_string(),
+                    "claude-code/1.0".to_string(),
+                )],
+                query_params: Vec::new(),
+            },
+            &OpenAIChatCompletionsRequest {
+                model: "k2p5".to_string(),
+                messages: vec![OpenAIChatMessage {
+                    role: "user".to_string(),
+                    content: Some(json!("hi")),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    reasoning_content: None,
+                }],
+                tools: Vec::new(),
+                tool_choice: None,
+                response_format: None,
+                reasoning_effort: None,
+                reasoning: None,
+                thinking: None,
+                enable_thinking: None,
+                chat_template_kwargs: None,
+            },
+        )
+        .unwrap();
+
+        // Exactly one User-Agent header, value taken from custom_headers.
+        let user_agents: Vec<&str> = request
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("User-Agent"))
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(user_agents.len(), 1, "headers: {:?}", request.headers);
+        assert_eq!(user_agents[0], "claude-code/1.0");
     }
 }
