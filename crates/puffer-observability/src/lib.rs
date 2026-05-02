@@ -42,14 +42,14 @@ mod redaction;
 mod tests;
 
 pub use attributes::{
-    AttributeBag, GenAiSystem, ObservationKind, LANGFUSE_OBSERVATION_INPUT,
-    LANGFUSE_OBSERVATION_OUTPUT, LANGFUSE_TRACE_INPUT, LANGFUSE_TRACE_OUTPUT, LANGFUSE_TRACE_TAGS,
-    PUFFER_API, PUFFER_CWD, PUFFER_PROVIDER_ID, PUFFER_SESSION_ID, PUFFER_TOOL_CALL_ID,
-    PUFFER_TOOL_PARALLEL,
+    AttributeBag, GenAiSystem, ObservationKind, GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM,
+    LANGFUSE_OBSERVATION_INPUT, LANGFUSE_OBSERVATION_OUTPUT, LANGFUSE_TRACE_INPUT,
+    LANGFUSE_TRACE_OUTPUT, LANGFUSE_TRACE_TAGS, PUFFER_API, PUFFER_CWD, PUFFER_PROVIDER_ID,
+    PUFFER_SESSION_ID, PUFFER_TOOL_CALL_ID, PUFFER_TOOL_PARALLEL,
 };
 pub use hooks::{
     start_agent_loop_span, start_compaction_span, start_provider_span, start_reflection_span,
-    start_tool_span, start_turn_span, SpanGuard,
+    start_subagent_generation_span, start_tool_span, start_turn_span, SpanGuard,
 };
 pub use opentelemetry::Context as OtelContext;
 pub use redaction::{redact, ContentKind, RedactionPolicy};

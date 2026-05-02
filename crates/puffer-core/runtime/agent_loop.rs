@@ -176,6 +176,13 @@ pub(crate) fn run_streaming_loop(
         cwd.to_string_lossy().as_ref(),
     );
     agent_span.set_str(puffer_observability::PUFFER_PROVIDER_ID, inputs.provider.id.clone());
+    // When this run is a spawned subagent (Agent / teammate tool),
+    // surface the parent's session id so Langfuse can render the
+    // pivot link. Also stamp the subagent kind so filtering works.
+    if let Some(parent_sid) = inputs.state.parent_session_id.clone() {
+        agent_span.set_str("puffer.parent.session_id", parent_sid);
+        agent_span.set_str("puffer.subagent.kind", "agent_tool");
+    }
     // Langfuse renders the trace's Input/Output panes from the
     // `langfuse.trace.input` / `langfuse.trace.output` keys (any other
     // attribute lands in the metadata blob). Same content also keeps a
@@ -208,6 +215,16 @@ pub(crate) fn run_streaming_loop(
         );
         if !did {
             compaction_span.set_str("puffer.compaction.skipped", "true");
+        } else {
+            // Summary LLM fired — child subagent GENERATION span so the
+            // LLM call shows up as an observation, not just a wrapper.
+            let mut span = puffer_observability::start_subagent_generation_span(
+                inputs.observability.as_ref(),
+                compaction_span.context(),
+                "compaction_summary",
+            );
+            span.set_str("puffer.compaction.phase", "0");
+            span.end();
         }
         did
     };
@@ -333,6 +350,16 @@ pub(crate) fn run_streaming_loop(
                 Some(u.output_tokens),
                 Some(u.cache_read_tokens),
             );
+            // Cache hit ratio = cache_read / input. Surfaces a single
+            // top-line metric in Langfuse without making the viewer do
+            // the arithmetic.
+            if u.input_tokens > 0 {
+                let ratio = u.cache_read_tokens as f64 / u.input_tokens as f64;
+                provider_span.set_str(
+                    "puffer.cache.hit_ratio",
+                    format!("{ratio:.2}"),
+                );
+            }
         }
         let turn = match result {
             Ok(turn) => turn,
@@ -468,11 +495,14 @@ pub(crate) fn run_streaming_loop(
             inputs.observability.as_ref(),
             turn_span.context(),
         );
-        reflection_span.set_str("puffer.subagent.kind", "reflection_judge");
         reflection_span.set_str(
             "puffer.reflection.config.enabled",
             inputs.reflection_config.is_some().to_string(),
         );
+        // Inner subagent generation span — only created if the LLM
+        // judge actually fires. Cached lazily so the reflection
+        // wrapper stays a plain SPAN when nothing of substance happens.
+        let mut judge_gen_span: Option<puffer_observability::SpanGuard> = None;
         if let Some(observation) = reflection.as_mut().and_then(|tracker| {
             tracker.observe_batch_with_judge(
                 &new_invocations,
@@ -551,28 +581,35 @@ pub(crate) fn run_streaming_loop(
                         model,
                         context_scope,
                         prompt_chars,
+                        prompt,
                         ..
                     } => {
-                        reflection_span.set_str(
-                            "puffer.reflection.llm_judge.fired",
-                            "true",
+                        // First evidence the judge actually fired:
+                        // create the inner subagent generation span.
+                        let mut span = puffer_observability::start_subagent_generation_span(
+                            inputs.observability.as_ref(),
+                            reflection_span.context(),
+                            "reflection_judge",
                         );
                         if let Some(p) = provider {
-                            reflection_span
-                                .set_str("puffer.reflection.llm_judge.provider", p.clone());
+                            span.set_str(puffer_observability::GEN_AI_SYSTEM, p.clone());
                         }
                         if let Some(m) = model {
-                            reflection_span
-                                .set_str("puffer.reflection.llm_judge.model", m.clone());
+                            span.set_str(puffer_observability::GEN_AI_REQUEST_MODEL, m.clone());
                         }
-                        reflection_span.set_str(
-                            "puffer.reflection.llm_judge.context_scope",
-                            context_scope.clone(),
-                        );
-                        reflection_span.set_str(
-                            "puffer.reflection.llm_judge.prompt_chars",
+                        span.set_str("puffer.reflection.context_scope", context_scope.clone());
+                        span.set_str(
+                            "puffer.reflection.prompt_chars",
                             prompt_chars.to_string(),
                         );
+                        span.set_content(
+                            puffer_observability::LANGFUSE_OBSERVATION_INPUT,
+                            puffer_observability::ContentKind::Prompt,
+                            prompt,
+                        );
+                        judge_gen_span = Some(span);
+                        reflection_span
+                            .set_str("puffer.reflection.llm_judge.fired", "true");
                     }
                     ReflectionTraceEvent::LlmJudgeResponse {
                         decision,
@@ -582,36 +619,56 @@ pub(crate) fn run_streaming_loop(
                         input_tokens,
                         output_tokens,
                         cached_input_tokens,
+                        raw_response_text,
                         ..
                     } => {
+                        if let Some(span) = judge_gen_span.as_mut() {
+                            span.set_str("puffer.reflection.decision", decision.clone());
+                            if let Some(c) = confidence {
+                                span.set_str("puffer.reflection.confidence", c.clone());
+                            }
+                            span.set_str("puffer.reflection.next_action", next_action.clone());
+                            span.set_token_usage(
+                                *input_tokens,
+                                *output_tokens,
+                                *cached_input_tokens,
+                            );
+                            span.set_content(
+                                puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
+                                puffer_observability::ContentKind::Output,
+                                raw_response_text,
+                            );
+                            // Cache hit ratio: derive locally so the
+                            // viewer sees the percentage even when
+                            // upstream doesn't surface it directly.
+                            if let Some(in_tok) = input_tokens {
+                                if *in_tok > 0 {
+                                    let ratio = cached_input_tokens.unwrap_or(0) as f64
+                                        / *in_tok as f64;
+                                    span.set_str(
+                                        "puffer.cache.hit_ratio",
+                                        format!("{ratio:.2}"),
+                                    );
+                                }
+                            }
+                        }
                         reflection_span.set_str(
                             "puffer.reflection.llm_judge.decision",
                             decision.clone(),
                         );
-                        if let Some(c) = confidence {
-                            reflection_span
-                                .set_str("puffer.reflection.llm_judge.confidence", c.clone());
-                        }
                         reflection_span.set_str(
                             "puffer.reflection.llm_judge.reason",
                             reason.clone(),
                         );
-                        reflection_span.set_str(
-                            "puffer.reflection.llm_judge.next_action",
-                            next_action.clone(),
-                        );
-                        reflection_span.set_token_usage(
-                            *input_tokens,
-                            *output_tokens,
-                            *cached_input_tokens,
-                        );
                     }
                     ReflectionTraceEvent::LlmJudgeError { stage, error, .. } => {
+                        if let Some(span) = judge_gen_span.as_mut() {
+                            span.mark_error(error.clone());
+                        }
                         reflection_span.set_str(
                             "puffer.reflection.llm_judge.error_stage",
                             stage.clone(),
                         );
-                        reflection_span.mark_error(error.clone());
                     }
                     ReflectionTraceEvent::FinalDecision {
                         selected_source,
@@ -641,6 +698,9 @@ pub(crate) fn run_streaming_loop(
         } else {
             reflection_span.set_str("puffer.reflection.observed", "false");
         }
+        if let Some(span) = judge_gen_span {
+            span.end();
+        }
         reflection_span.end();
 
         // Post-iteration compaction. The compaction trigger itself
@@ -667,6 +727,18 @@ pub(crate) fn run_streaming_loop(
         if compacted {
             inject_post_compact_context(&mut items, &cwd);
             session.notify_compacted();
+            // The summary LLM actually fired — emit a child subagent
+            // GENERATION span so Langfuse shows it as an LLM
+            // observation. Token usage isn't surfaced from
+            // `compact_conversation_with` today, so the inner span is
+            // a duration-only marker that the call happened.
+            let mut span = puffer_observability::start_subagent_generation_span(
+                inputs.observability.as_ref(),
+                post_compaction_span.context(),
+                "compaction_summary",
+            );
+            span.set_str("puffer.compaction.phase", "1");
+            span.end();
         } else {
             post_compaction_span.set_str("puffer.compaction.skipped", "true");
         }

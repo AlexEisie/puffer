@@ -336,7 +336,41 @@ pub fn start_reflection_span(
                 LANGFUSE_OBSERVATION_TYPE,
                 ObservationKind::Reflection.langfuse_observation_type(),
             )
-            .str("puffer.subagent.kind", "reflection_judge")
+            .build(),
+    );
+    let span = tracer.build_with_context(builder, &parent_ctx);
+    SpanGuard::active(span, parent_ctx, handle.clone())
+}
+
+/// Start a `subagent.<kind>` GENERATION span. Use this *inside* a
+/// reflection / compaction wrapper when an LLM round-trip actually
+/// fires, so the inner generation observation carries
+/// `langfuse.observation.type=generation` (with token usage) while the
+/// outer wrapper stays a plain SPAN. `kind` is also surfaced as
+/// `puffer.subagent.kind` for filtering.
+///
+/// Mental model:
+/// - Outer wrapper SPAN: control/decision logic — always present.
+/// - Inner subagent GENERATION: actual LLM call — only present when
+///   the wrapper decided to make the call. So the absence of an inner
+///   subagent span means "no LLM round-trip happened here".
+pub fn start_subagent_generation_span(
+    handle: Option<&ObservabilityHandle>,
+    parent: Option<&OtelContext>,
+    kind: &'static str,
+) -> SpanGuard {
+    let Some(handle) = handle else {
+        return SpanGuard::Disabled;
+    };
+    let tracer = handle.tracer();
+    let parent_ctx = parent.cloned().unwrap_or_else(OtelContext::current);
+    let mut builder = tracer
+        .span_builder(format!("subagent.{kind}"))
+        .with_kind(SpanKind::Internal);
+    builder.attributes = Some(
+        AttributeBag::new()
+            .str(LANGFUSE_OBSERVATION_TYPE, "generation")
+            .str("puffer.subagent.kind", kind)
             .build(),
     );
     let span = tracer.build_with_context(builder, &parent_ctx);
@@ -364,7 +398,6 @@ pub fn start_compaction_span(
                 LANGFUSE_OBSERVATION_TYPE,
                 ObservationKind::Compaction.langfuse_observation_type(),
             )
-            .str("puffer.subagent.kind", "compaction_summary")
             .build(),
     );
     let span = tracer.build_with_context(builder, &parent_ctx);
