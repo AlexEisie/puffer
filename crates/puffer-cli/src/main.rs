@@ -153,7 +153,7 @@ fn main() -> Result<()> {
         None
     };
 
-    match cli.subcommand {
+    let result = match cli.subcommand {
         Some(Command::Subscriber { .. }) => {
             // Already handled above; here only to satisfy exhaustiveness.
             unreachable!("__subscriber dispatched before main match")
@@ -452,7 +452,14 @@ fn main() -> Result<()> {
                 }
             }
         }
-    }
+    };
+
+    // Force-flush observability spans (and other runtime services) before
+    // process exit. Without this, short-running commands like
+    // `benchmark-run` can race the OTLP exporter and lose the last few
+    // spans in transit.
+    let _ = puffer_core::shutdown_runtime_services();
+    result
 }
 
 fn should_start_background_runtimes(subcommand: &Option<Command>) -> bool {
