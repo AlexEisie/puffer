@@ -10,6 +10,7 @@ members = [
     "crates/puffer-connector-telegram",
     "crates/puffer-connector-webhook",
     "crates/puffer-core",
+    "crates/puffer-observability",
     "crates/puffer-provider-openai",
     "crates/puffer-provider-registry",
     "crates/puffer-resources",

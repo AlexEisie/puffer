@@ -44,7 +44,7 @@ use super::tool_executor::{
 use crate::workspace_paths;
 use super::{
     enforce_tool_result_budget, process_tool_result, run_turn_hooks, CancelToken, ToolCallRequest,
-    ToolInvocation, TurnExecution, TurnStreamEvent, MAX_TOOL_RESULT_CHARS,
+    ToolInvocation, TurnExecution, TurnStreamEvent, TurnUsageReport, MAX_TOOL_RESULT_CHARS,
 };
 use crate::AppState;
 
@@ -138,6 +138,15 @@ pub(crate) struct LoopInputs<'a> {
     /// the loop runs uninterruptibly. Mirrors pi-mono's `signal:
     /// AbortSignal` (`pi-mono/packages/ai/src/types.ts:70`).
     pub cancel: Option<&'a CancelToken>,
+    /// Optional observability handle. When `Some`, the loop wraps
+    /// each turn / provider call / tool batch in OTel spans and pushes
+    /// them to the configured OTLP endpoint (e.g. Langfuse). When
+    /// `None`, every span helper short-circuits to `Disabled` —
+    /// strictly zero-cost. Owned (Arc-backed) so the loop can clone
+    /// it across `thread::scope` parallel-tool branches. See
+    /// `crates/puffer-observability` and
+    /// `docs/observability/langfuse-design.md`.
+    pub observability: Option<puffer_observability::ObservabilityHandle>,
 }
 
 /// Streaming turn loop. Drives the conversation until the model stops
@@ -159,16 +168,46 @@ pub(crate) fn run_streaming_loop(
         .clone()
         .map(|config| ReflectionTracker::new(inputs.input, config));
 
+    // Root span = `agent_loop`. All subsequent provider / tool /
+    // compaction spans hang under this. Disabled when no handle.
+    let mut agent_span = puffer_observability::start_agent_loop_span(
+        inputs.observability.as_ref(),
+        &inputs.state.session.id.to_string(),
+        cwd.to_string_lossy().as_ref(),
+    );
+    agent_span.set_str(puffer_observability::PUFFER_PROVIDER_ID, inputs.provider.id.clone());
+    agent_span.set_content(
+        "puffer.input",
+        puffer_observability::ContentKind::Prompt,
+        inputs.input,
+    );
+
     // Pre-turn compaction.
     let pre_compacted = {
+        let mut compaction_span = puffer_observability::start_compaction_span(
+            inputs.observability.as_ref(),
+            agent_span.context(),
+            0,
+        );
         let summary_fn = |old: &str, mid: &str| session.generate_summary(old, mid);
-        compact_conversation_with(&mut items, inputs.provider, inputs.model_id, None, &summary_fn)
+        let did = compact_conversation_with(
+            &mut items,
+            inputs.provider,
+            inputs.model_id,
+            None,
+            &summary_fn,
+        );
+        if !did {
+            compaction_span.set_str("puffer.compaction.skipped", "true");
+        }
+        did
     };
     if pre_compacted {
         inject_post_compact_context(&mut items, &cwd);
         session.notify_compacted();
     }
 
+    let mut turn_index: u32 = 0;
     loop {
         // Cancel boundary: check before each turn's provider round-trip.
         if let Some(cancel) = inputs.cancel {
@@ -188,15 +227,79 @@ pub(crate) fn run_streaming_loop(
             items.push(ConversationItem::user_message(&notice));
         }
 
-        // Provider single round-trip.
-        let turn = session.one_turn_streaming(inputs.state, inputs.auth_store, &mut items, on_event)?;
+        // Per-turn span (Langfuse "span"; gen_ai child spans hang
+        // under it). We collect token usage by intercepting Usage
+        // events from the provider's `on_event` callback.
+        let mut turn_span = puffer_observability::start_turn_span(
+            inputs.observability.as_ref(),
+            agent_span.context(),
+            turn_index,
+        );
+        turn_index += 1;
+        // Provider span (Langfuse "generation").
+        let mut provider_span = puffer_observability::start_provider_span(
+            inputs.observability.as_ref(),
+            turn_span.context(),
+            &inputs.provider.id,
+            &inputs.provider.default_api,
+            inputs.model_id,
+        );
+        // We need to capture token usage from the streaming Usage
+        // event without breaking the existing on_event signature for
+        // other consumers. Wrap it.
+        let observability_handle = inputs.observability.clone();
+        let captured_usage = std::cell::RefCell::new(None::<TurnUsageReport>);
+        let result = {
+            let captured_usage_ref = &captured_usage;
+            let mut wrapped = |event: TurnStreamEvent| {
+                if let TurnStreamEvent::Usage(u) = &event {
+                    *captured_usage_ref.borrow_mut() = Some(u.clone());
+                }
+                on_event(event);
+            };
+            session.one_turn_streaming(
+                inputs.state,
+                inputs.auth_store,
+                &mut items,
+                &mut wrapped,
+            )
+        };
+        // Surface usage on the provider span before propagating any
+        // error so failed calls still record their token cost.
+        if let Some(u) = captured_usage.into_inner() {
+            provider_span.set_token_usage(
+                Some(u.input_tokens),
+                Some(u.output_tokens),
+                Some(u.cache_read_tokens),
+            );
+        }
+        let turn = match result {
+            Ok(turn) => turn,
+            Err(error) => {
+                provider_span.mark_error(error.to_string());
+                turn_span.mark_error(error.to_string());
+                agent_span.mark_error(error.to_string());
+                drop(observability_handle);
+                return Err(error);
+            }
+        };
+        provider_span.set_content(
+            "puffer.assistant_text",
+            puffer_observability::ContentKind::Output,
+            &turn.assistant_text,
+        );
+        provider_span.end();
 
         // Cancel boundary: check after the LLM call returns, before
         // tool execution kicks off. This prevents the loop from
         // launching a fresh tool batch when the user already pressed
         // ESC during streaming.
         if let Some(cancel) = inputs.cancel {
-            cancel.check()?;
+            if let Err(error) = cancel.check() {
+                turn_span.mark_cancelled();
+                agent_span.mark_cancelled();
+                return Err(error);
+            }
         }
 
         // No tool calls → final assistant text, run hooks, return.
@@ -206,6 +309,11 @@ pub(crate) fn run_streaming_loop(
                 &cwd,
                 &turn.assistant_text,
                 invocations.len(),
+            );
+            agent_span.set_content(
+                "puffer.output",
+                puffer_observability::ContentKind::Output,
+                &turn.assistant_text,
             );
             return Ok(TurnExecution {
                 assistant_text: turn.assistant_text,
@@ -230,7 +338,13 @@ pub(crate) fn run_streaming_loop(
         }
 
         // Execute tools (sequential — parallel-safe batching is a follow-up).
-        let new_invocations = execute_tool_batch(inputs, session, &cwd, &turn.tool_calls)?;
+        let new_invocations = execute_tool_batch(
+            inputs,
+            session,
+            &cwd,
+            &turn.tool_calls,
+            turn_span.context(),
+        )?;
 
         if !new_invocations.is_empty() {
             on_event(TurnStreamEvent::ToolInvocations(new_invocations.clone()));
@@ -365,7 +479,7 @@ pub(crate) fn run_blocking_loop(
 
         items.extend(turn.pre_tool_items);
 
-        let new_invocations = execute_tool_batch(inputs, session, &cwd, &turn.tool_calls)?;
+        let new_invocations = execute_tool_batch(inputs, session, &cwd, &turn.tool_calls, None)?;
 
         for inv in &new_invocations {
             items.push(ConversationItem::FunctionCallOutput {
@@ -444,6 +558,7 @@ fn execute_tool_batch(
     session: &mut dyn TurnSession,
     cwd: &std::path::Path,
     tool_calls: &[ToolCallRequest],
+    parent_span_ctx: Option<&puffer_observability::OtelContext>,
 ) -> Result<Vec<ToolInvocation>> {
     let parallel_count = tool_calls
         .iter()
@@ -452,7 +567,7 @@ fn execute_tool_batch(
 
     // Serial fast-path: no parallelism gain available.
     if tool_calls.len() <= 1 || parallel_count <= 1 {
-        return execute_tool_batch_serial(inputs, session, cwd, tool_calls);
+        return execute_tool_batch_serial(inputs, session, cwd, tool_calls, parent_span_ctx);
     }
 
     // Phase 1: resolve permissions serially (mutates state on AllowSession).
@@ -484,6 +599,8 @@ fn execute_tool_batch(
 
     let mut results: Vec<Option<(String, bool, bool)>> = vec![None; tool_calls.len()];
 
+    let observability_handle = inputs.observability.clone();
+    let parent_ctx_owned = parent_span_ctx.cloned();
     std::thread::scope(|s| {
         let mut handles: Vec<(usize, std::thread::ScopedJoinHandle<'_, (String, bool, bool)>)> =
             Vec::new();
@@ -512,10 +629,29 @@ fn execute_tool_batch(
             let registry = inputs.registry;
             let working_dirs_ref = &working_dirs;
             let provider_context_ref = &provider_context;
+            let tool_id_owned = tc.tool_id.clone();
+            let call_id_owned = tc.call_id.clone();
+            let input_str_owned = tc.input.clone();
+            let observability_handle = observability_handle.clone();
+            let parent_ctx_clone = parent_ctx_owned.clone();
             handles.push((
                 i,
                 s.spawn(move || {
-                    match claude_tools::execute_parallel_tool(
+                    let mut tool_span = puffer_observability::start_tool_span(
+                        observability_handle.as_ref(),
+                        parent_ctx_clone.as_ref(),
+                        &tool_id_owned,
+                        &call_id_owned,
+                        true,
+                    );
+                    tool_span.set_content(
+                        "puffer.tool.input",
+                        puffer_observability::ContentKind::ToolInput {
+                            tool_id: tool_id_owned.clone(),
+                        },
+                        &input_str_owned,
+                    );
+                    let result = match claude_tools::execute_parallel_tool(
                         &definition,
                         cwd,
                         working_dirs_ref,
@@ -538,7 +674,20 @@ fn execute_tool_batch(
                             (output, exec.success, terminate)
                         }
                         Err(error) => (format!("Tool execution failed: {error}"), false, false),
+                    };
+                    tool_span.set_content(
+                        "puffer.tool.output",
+                        puffer_observability::ContentKind::ToolOutput {
+                            tool_id: tool_id_owned.clone(),
+                        },
+                        &result.0,
+                    );
+                    tool_span.set_str("puffer.tool.success", result.1.to_string());
+                    if !result.1 {
+                        tool_span.mark_error("tool_failed".to_string());
                     }
+                    tool_span.end();
+                    result
                 }),
             ));
         }
@@ -565,6 +714,20 @@ fn execute_tool_batch(
             ));
             continue;
         }
+        let mut tool_span = puffer_observability::start_tool_span(
+            inputs.observability.as_ref(),
+            parent_span_ctx,
+            &tc.tool_id,
+            &tc.call_id,
+            false,
+        );
+        tool_span.set_content(
+            "puffer.tool.input",
+            puffer_observability::ContentKind::ToolInput {
+                tool_id: tc.tool_id.clone(),
+            },
+            &tc.input,
+        );
         let backend = session.tool_execution_backend();
         let args: serde_json::Value =
             serde_json::from_str(&tc.input).unwrap_or(serde_json::Value::Null);
@@ -594,6 +757,18 @@ fn execute_tool_batch(
             }
             Err(error) => (format!("Tool execution failed: {error}"), false, false),
         };
+        tool_span.set_content(
+            "puffer.tool.output",
+            puffer_observability::ContentKind::ToolOutput {
+                tool_id: tc.tool_id.clone(),
+            },
+            &exec.0,
+        );
+        tool_span.set_str("puffer.tool.success", exec.1.to_string());
+        if !exec.1 {
+            tool_span.mark_error("tool_failed".to_string());
+        }
+        tool_span.end();
         results[i] = Some(exec);
     }
 
@@ -629,14 +804,29 @@ fn execute_tool_batch_serial(
     session: &mut dyn TurnSession,
     cwd: &std::path::Path,
     tool_calls: &[ToolCallRequest],
+    parent_span_ctx: Option<&puffer_observability::OtelContext>,
 ) -> Result<Vec<ToolInvocation>> {
     let mut invocations = Vec::with_capacity(tool_calls.len());
 
     for call in tool_calls {
+        let mut tool_span = puffer_observability::start_tool_span(
+            inputs.observability.as_ref(),
+            parent_span_ctx,
+            &call.tool_id,
+            &call.call_id,
+            false,
+        );
+        tool_span.set_content(
+            "puffer.tool.input",
+            puffer_observability::ContentKind::ToolInput {
+                tool_id: call.tool_id.clone(),
+            },
+            &call.input,
+        );
         let backend = session.tool_execution_backend();
         let input_value: serde_json::Value =
             serde_json::from_str(&call.input).unwrap_or(serde_json::Value::Null);
-        let execution = execute_tool_call(
+        let execution = match execute_tool_call(
             inputs.state,
             inputs.resources,
             inputs.providers,
@@ -648,7 +838,14 @@ fn execute_tool_batch_serial(
             inputs.tool_filter,
             &call.tool_id,
             input_value,
-        )?;
+        ) {
+            Ok(exec) => exec,
+            Err(error) => {
+                tool_span.mark_error(error.to_string());
+                tool_span.end();
+                return Err(error);
+            }
+        };
         let terminate = extract_terminate(&execution.output.metadata);
         let raw_output = if execution.output.stderr.is_empty() {
             execution.output.stdout
@@ -662,6 +859,18 @@ fn execute_tool_batch_serial(
             MAX_TOOL_RESULT_CHARS,
             &inputs.state.session.id,
         );
+        tool_span.set_content(
+            "puffer.tool.output",
+            puffer_observability::ContentKind::ToolOutput {
+                tool_id: call.tool_id.clone(),
+            },
+            &output_text,
+        );
+        tool_span.set_str("puffer.tool.success", execution.success.to_string());
+        if !execution.success {
+            tool_span.mark_error("tool_failed".to_string());
+        }
+        tool_span.end();
         invocations.push(ToolInvocation {
             call_id: call.call_id.clone(),
             tool_id: call.tool_id.clone(),

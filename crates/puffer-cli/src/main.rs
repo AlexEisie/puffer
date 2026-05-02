@@ -84,6 +84,19 @@ fn main() -> Result<()> {
     let mut auth_store = AuthStore::load(&auth_path)?;
     let mut resources = load_resources(&paths)?;
 
+    // Observability: opt-in via OTEL_EXPORTER_OTLP_ENDPOINT (+ optional
+    // LANGFUSE_PUBLIC_KEY/SECRET_KEY for Basic auth). When unset,
+    // [`puffer_observability::ObservabilityHandle::try_init_from_env`]
+    // returns `None` and the agent loop's span helpers short-circuit
+    // to no-ops. See `docs/observability/langfuse-design.md`.
+    match puffer_observability::ObservabilityHandle::try_init_from_env() {
+        Ok(Some(handle)) => puffer_core::install_observability(handle),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("warning: observability disabled — {error:?}");
+        }
+    }
+
     let mut providers = ProviderRegistry::new();
     for provider in &resources.providers {
         providers.register_with_source(

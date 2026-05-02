@@ -56,6 +56,28 @@ pub fn subscription_manager() -> Result<std::sync::Arc<puffer_subscriptions::Sub
     claude_tools::workflow::subscription_globals::manager()
 }
 
+/// Installs a process-wide [`puffer_observability::ObservabilityHandle`]
+/// so the streaming entrypoints can pick it up without every caller
+/// plumbing it explicitly. Called once at app boot. Idempotent.
+pub fn install_observability(handle: puffer_observability::ObservabilityHandle) {
+    let mut slot = OBSERVABILITY_HANDLE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    *slot = Some(handle);
+}
+
+/// Returns a clone of the installed observability handle, if any.
+pub fn observability_handle() -> Option<puffer_observability::ObservabilityHandle> {
+    OBSERVABILITY_HANDLE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
+static OBSERVABILITY_HANDLE: std::sync::Mutex<
+    Option<puffer_observability::ObservabilityHandle>,
+> = std::sync::Mutex::new(None);
+
 #[cfg(test)]
 use self::anthropic::{anthropic_tool_schema, execute_anthropic_tool_calls};
 pub(crate) use self::context_usage::render_context_usage_summary;
@@ -92,7 +114,7 @@ const OPENAI_CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const HTTP_RETRY_ATTEMPTS_ENV: &str = "PUFFER_HTTP_RETRY_ATTEMPTS";
 const HTTP_RETRY_DELAY_MS_ENV: &str = "PUFFER_HTTP_RETRY_DELAY_MS";
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 struct TurnRequestOptions<'a> {
     structured_output: Option<&'a StructuredOutputConfig>,
     tool_filter: Option<&'a RequestToolFilter>,
@@ -100,6 +122,12 @@ struct TurnRequestOptions<'a> {
     /// Cooperative cancellation token. When set, the agent loop checks
     /// it at every turn boundary. See [`CancelToken`].
     cancel: Option<&'a CancelToken>,
+    /// Optional observability handle. When set, the agent loop wraps
+    /// each turn / provider call / tool batch in OTel spans and pushes
+    /// them to the configured OTLP endpoint (typically Langfuse).
+    /// Owned (Arc-backed clone) so we can fall back to the
+    /// process-wide handle without lifetime gymnastics.
+    observability: Option<puffer_observability::ObservabilityHandle>,
 }
 
 #[derive(Debug)]
@@ -268,6 +296,7 @@ pub(crate) fn execute_user_prompt_with_tool_filter(
             tool_filter,
             reflection: None,
             cancel: None,
+            observability: None,
         },
     )
 }
@@ -298,6 +327,12 @@ pub fn shutdown_runtime_services() -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(500));
     // Clear the registry.
     teammate_loop::teammate_registry().lock().unwrap().clear();
+    // Flush any buffered observability spans before exit. Codex review
+    // note: bounded by `ObservabilityConfig::shutdown_timeout` so a
+    // hung Langfuse can't block CLI exit.
+    if let Some(handle) = observability_handle() {
+        handle.shutdown();
+    }
     claude_tools::workflow::lsp::shutdown_lsp_services()
 }
 
@@ -322,6 +357,7 @@ pub fn execute_user_prompt_with_structured_output(
             tool_filter: None,
             reflection: None,
             cancel: None,
+            observability: None,
         },
     )
 }
@@ -408,6 +444,7 @@ where
                 tool_filter: None,
                 reflection: None,
                 cancel: None,
+                observability: None,
             },
             &mut on_event,
         )
@@ -447,6 +484,7 @@ where
                 tool_filter: None,
                 reflection: None,
                 cancel: Some(cancel),
+                observability: None,
             },
             &mut on_event,
         )
@@ -478,6 +516,7 @@ where
             tool_filter: None,
             reflection: None,
             cancel: None,
+            observability: None,
         },
         &mut on_event,
     )
@@ -512,6 +551,7 @@ where
             tool_filter: None,
             reflection: None,
             cancel: Some(cancel),
+            observability: None,
         },
         &mut on_event,
     )
@@ -541,6 +581,7 @@ where
             tool_filter: None,
             reflection: Some(reflection),
             cancel: None,
+            observability: None,
         },
         &mut on_event,
     )
@@ -559,6 +600,19 @@ where
     F: FnMut(TurnStreamEvent),
 {
     apply_session_reflection_default(state, &mut options);
+    // Inject the process-wide observability handle when callers
+    // didn't supply one. This means `execute_user_prompt_streaming(...)`
+    // (the most common entry) automatically gets traced once
+    // `install_observability(...)` was called at boot, without
+    // every caller having to plumb the handle through.
+    //
+    // `installed_handle` is a stack local kept alive for the whole
+    // function so the borrow is sound. `options.observability` is
+    // `Option<&'a Handle>`; we shrink the implicit lifetime to the
+    // local binding here.
+    if options.observability.is_none() {
+        options.observability = observability_handle();
+    }
     let (provider, model_id) = resolve_provider_and_model(state, providers)?;
     let api = resolve_model_api(state, providers, provider, &model_id);
     let Some(adapter) = provider_adapter::adapter_for_api(&api) else {

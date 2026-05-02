@@ -27,6 +27,7 @@ tungstenite.workspace = true
 url.workspace = true
 uuid.workspace = true
 puffer-config = { path = "../puffer-config" }
+puffer-observability = { path = "../puffer-observability" }
 puffer-provider-openai = { path = "../puffer-provider-openai" }
 puffer-provider-registry = { path = "../puffer-provider-registry" }
 puffer-resources = { path = "../puffer-resources" }

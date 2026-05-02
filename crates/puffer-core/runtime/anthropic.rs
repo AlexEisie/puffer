@@ -745,6 +745,7 @@ impl super::provider_adapter::ProviderAdapter for AnthropicAdapter {
             tool_filter: options.tool_filter,
             registry: &registry,
             cancel: options.cancel,
+            observability: options.observability.clone(),
         };
         agent_loop::run_blocking_loop(&mut inputs, &mut session)
     }
@@ -777,6 +778,7 @@ impl super::provider_adapter::ProviderAdapter for AnthropicAdapter {
             tool_filter: options.tool_filter,
             registry: &registry,
             cancel: options.cancel,
+            observability: options.observability.clone(),
         };
         agent_loop::run_streaming_loop(&mut inputs, &mut session, on_event)
     }
