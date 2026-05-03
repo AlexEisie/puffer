@@ -1273,10 +1273,11 @@ fn run_responses_attempt(
         tool_filter: options.tool_filter,
         registry: &registry,
         cancel: options.cancel,
+        observability: options.observability.clone(),
     };
     match on_event {
         Some(sink) => super::agent_loop::run_streaming_loop(&mut inputs, &mut session, sink),
-        None => super::agent_loop::run_blocking_loop(&mut inputs, &mut session),
+        None => super::blocking_loop::run_blocking_loop(&mut inputs, &mut session),
     }
 }
 
@@ -1434,9 +1435,10 @@ fn run_completions_attempt(
         tool_filter: options.tool_filter,
         registry: &registry,
         cancel: options.cancel,
+        observability: options.observability.clone(),
     };
     match on_event {
         Some(sink) => super::agent_loop::run_streaming_loop(&mut inputs, &mut session, sink),
-        None => super::agent_loop::run_blocking_loop(&mut inputs, &mut session),
+        None => super::blocking_loop::run_blocking_loop(&mut inputs, &mut session),
     }
 }

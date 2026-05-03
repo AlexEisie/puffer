@@ -39,6 +39,7 @@ pub use runtime::claude_tools::execute_workflow_tool;
 pub use runtime::execute_user_prompt as execute_user_turn;
 pub use runtime::install_subscription_manager;
 pub use runtime::subscription_manager;
+pub use runtime::{install_observability, observability_handle};
 pub use runtime::teammate_loop;
 pub use runtime::{
     execute_side_question, execute_user_prompt_streaming as execute_user_turn_streaming,

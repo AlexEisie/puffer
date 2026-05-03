@@ -84,6 +84,19 @@ fn main() -> Result<()> {
     let mut auth_store = AuthStore::load(&auth_path)?;
     let mut resources = load_resources(&paths)?;
 
+    // Observability: opt-in via OTEL_EXPORTER_OTLP_ENDPOINT (+ optional
+    // LANGFUSE_PUBLIC_KEY/SECRET_KEY for Basic auth). When unset,
+    // [`puffer_observability::ObservabilityHandle::try_init_from_env`]
+    // returns `None` and the agent loop's span helpers short-circuit
+    // to no-ops. See `docs/observability/langfuse-design.md`.
+    match puffer_observability::ObservabilityHandle::try_init_from_env() {
+        Ok(Some(handle)) => puffer_core::install_observability(handle),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("warning: observability disabled — {error:?}");
+        }
+    }
+
     let mut providers = ProviderRegistry::new();
     for provider in &resources.providers {
         providers.register_with_source(
@@ -140,7 +153,7 @@ fn main() -> Result<()> {
         None
     };
 
-    match cli.subcommand {
+    let result = match cli.subcommand {
         Some(Command::Subscriber { .. }) => {
             // Already handled above; here only to satisfy exhaustiveness.
             unreachable!("__subscriber dispatched before main match")
@@ -439,7 +452,14 @@ fn main() -> Result<()> {
                 }
             }
         }
-    }
+    };
+
+    // Force-flush observability spans (and other runtime services) before
+    // process exit. Without this, short-running commands like
+    // `benchmark-run` can race the OTLP exporter and lose the last few
+    // spans in transit.
+    let _ = puffer_core::shutdown_runtime_services();
+    result
 }
 
 fn should_start_background_runtimes(subcommand: &Option<Command>) -> bool {

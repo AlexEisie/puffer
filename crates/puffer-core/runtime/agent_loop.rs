@@ -36,15 +36,11 @@ use super::openai::conversation::{
 };
 use super::reflection::{ReflectionConfig, ReflectionTraceEvent, ReflectionTracker};
 use super::request_tool_filter::RequestToolFilter;
-use super::claude_tools::{self, ProviderToolContext};
-use super::tool_executor::{
-    execute_tool_call, is_parallel_safe_tool, resolve_tool_permission, PermissionOutcome,
-    ToolExecutionBackend,
-};
-use crate::workspace_paths;
+use super::tool_batch::execute_tool_batch;
+use super::tool_executor::ToolExecutionBackend;
 use super::{
     enforce_tool_result_budget, process_tool_result, run_turn_hooks, CancelToken, ToolCallRequest,
-    ToolInvocation, TurnExecution, TurnStreamEvent, MAX_TOOL_RESULT_CHARS,
+    ToolInvocation, TurnExecution, TurnStreamEvent, TurnUsageReport, MAX_TOOL_RESULT_CHARS,
 };
 use crate::AppState;
 
@@ -138,6 +134,15 @@ pub(crate) struct LoopInputs<'a> {
     /// the loop runs uninterruptibly. Mirrors pi-mono's `signal:
     /// AbortSignal` (`pi-mono/packages/ai/src/types.ts:70`).
     pub cancel: Option<&'a CancelToken>,
+    /// Optional observability handle. When `Some`, the loop wraps
+    /// each turn / provider call / tool batch in OTel spans and pushes
+    /// them to the configured OTLP endpoint (e.g. Langfuse). When
+    /// `None`, every span helper short-circuits to `Disabled` —
+    /// strictly zero-cost. Owned (Arc-backed) so the loop can clone
+    /// it across `thread::scope` parallel-tool branches. See
+    /// `crates/puffer-observability` and
+    /// `docs/observability/langfuse-design.md`.
+    pub observability: Option<puffer_observability::ObservabilityHandle>,
 }
 
 /// Streaming turn loop. Drives the conversation until the model stops
@@ -159,20 +164,101 @@ pub(crate) fn run_streaming_loop(
         .clone()
         .map(|config| ReflectionTracker::new(inputs.input, config));
 
-    // Pre-turn compaction.
+    // Root span = `agent_loop`. All subsequent provider / tool /
+    // compaction spans hang under this. The whole block is gated on
+    // `observability.is_some()` so the disabled path does not even
+    // allocate the session-id string or clone the provider id; review
+    // v4 BLOCK #1.
+    let mut agent_span = if let Some(handle) = inputs.observability.as_ref() {
+        let session_str = inputs.state.session.id.to_string();
+        let cwd_str = cwd.to_string_lossy();
+        let mut span = puffer_observability::start_agent_loop_span(
+            Some(handle),
+            &session_str,
+            &cwd_str,
+        );
+        span.set_str(
+            puffer_observability::PUFFER_PROVIDER_ID,
+            inputs.provider.id.clone(),
+        );
+        if let Some(parent_sid) = inputs.state.parent_session_id.clone() {
+            span.set_str("puffer.parent.session_id", parent_sid);
+            span.set_str("puffer.subagent.kind", "agent_tool");
+        }
+        span.set_content(
+            puffer_observability::LANGFUSE_TRACE_INPUT,
+            puffer_observability::ContentKind::Prompt,
+            inputs.input,
+        );
+        span.set_content(
+            "puffer.input",
+            puffer_observability::ContentKind::Prompt,
+            inputs.input,
+        );
+        span
+    } else {
+        puffer_observability::SpanGuard::Disabled
+    };
+
+    // Pre-turn compaction. The summary closure wraps the actual
+    // `session.generate_summary` LLM call in a `subagent.compaction_summary`
+    // GENERATION span so the trace captures the *real* latency and any
+    // error of the round-trip — not a post-hoc marker. Review v3 #4.
     let pre_compacted = {
-        let summary_fn = |old: &str, mid: &str| session.generate_summary(old, mid);
-        compact_conversation_with(&mut items, inputs.provider, inputs.model_id, None, &summary_fn)
+        let mut compaction_span = puffer_observability::start_compaction_span(
+            inputs.observability.as_ref(),
+            agent_span.context(),
+            0,
+        );
+        let observability = inputs.observability.as_ref();
+        let parent_ctx = compaction_span.context();
+        let summary_fn = |old: &str, mid: &str| -> Option<String> {
+            let mut gen_span = puffer_observability::start_subagent_generation_span(
+                observability,
+                parent_ctx,
+                "compaction_summary",
+            );
+            gen_span.set_str("puffer.compaction.phase", "0");
+            let result = session.generate_summary(old, mid);
+            if let Some(ref text) = result {
+                gen_span.set_content(
+                    puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
+                    puffer_observability::ContentKind::Output,
+                    text,
+                );
+            } else {
+                gen_span.mark_error("summary_returned_none".to_string());
+            }
+            gen_span.end();
+            result
+        };
+        let did = compact_conversation_with(
+            &mut items,
+            inputs.provider,
+            inputs.model_id,
+            None,
+            &summary_fn,
+        );
+        if !did {
+            compaction_span.set_str("puffer.compaction.skipped", "true");
+        }
+        did
     };
     if pre_compacted {
         inject_post_compact_context(&mut items, &cwd);
         session.notify_compacted();
     }
 
+    let mut turn_index: u32 = 0;
     loop {
         // Cancel boundary: check before each turn's provider round-trip.
+        // Mark the root span cancelled before bailing so the trace
+        // closes with the right status (review v3 #5).
         if let Some(cancel) = inputs.cancel {
-            cancel.check()?;
+            if let Err(error) = cancel.check() {
+                agent_span.mark_cancelled();
+                return Err(error);
+            }
         }
 
         // Drain completed background tasks and inject as user messages.
@@ -188,15 +274,173 @@ pub(crate) fn run_streaming_loop(
             items.push(ConversationItem::user_message(&notice));
         }
 
-        // Provider single round-trip.
-        let turn = session.one_turn_streaming(inputs.state, inputs.auth_store, &mut items, on_event)?;
+        // Per-turn span (Langfuse "span"; gen_ai child spans hang
+        // under it). We collect token usage by intercepting Usage
+        // events from the provider's `on_event` callback.
+        let mut turn_span = puffer_observability::start_turn_span(
+            inputs.observability.as_ref(),
+            agent_span.context(),
+            turn_index,
+        );
+        turn_index += 1;
+        // Provider span (Langfuse "generation").
+        let mut provider_span = puffer_observability::start_provider_span(
+            inputs.observability.as_ref(),
+            turn_span.context(),
+            &inputs.provider.id,
+            &inputs.provider.default_api,
+            inputs.model_id,
+        );
+        // Langfuse renders the generation Input pane from
+        // `langfuse.observation.input`. Build the messages-array JSON
+        // ONLY when observability is on AND the redaction policy
+        // permits both prompts (envelope) and the tool-I/O (function
+        // call args + tool output text) we'd otherwise embed. This
+        // keeps the disabled path zero-cost and respects the split
+        // include flags so `INCLUDE_PROMPTS=1, INCLUDE_TOOL_IO=0`
+        // does not leak tool data through the LLM input pane.
+        if let Some(handle) = inputs.observability.as_ref() {
+            let policy = handle.redaction();
+            if policy.include_prompts() {
+                let include_tool_io = policy.include_tool_io();
+                let provider_input_json = serde_json::to_string(
+                    &items
+                        .iter()
+                        .map(|item| match item {
+                            ConversationItem::Message { role, content } => {
+                                let text: String = content
+                                    .iter()
+                                    .filter_map(|p| match p {
+                                        super::openai::conversation::ContentPart::Text { text } => {
+                                            Some(text.as_str())
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                serde_json::json!({ "role": role, "content": text })
+                            }
+                            ConversationItem::FunctionCall { name, arguments, .. } => {
+                                let args = if include_tool_io {
+                                    serde_json::Value::String(arguments.clone())
+                                } else {
+                                    serde_json::Value::String(format!(
+                                        "[redacted: {} bytes tool args]",
+                                        arguments.len()
+                                    ))
+                                };
+                                serde_json::json!({
+                                    "role": "assistant",
+                                    "tool_call": { "name": name, "arguments": args }
+                                })
+                            }
+                            ConversationItem::FunctionCallOutput { call_id, output } => {
+                                let body = if include_tool_io {
+                                    serde_json::Value::String(output.text.clone())
+                                } else {
+                                    serde_json::Value::String(format!(
+                                        "[redacted: {} bytes tool output]",
+                                        output.text.len()
+                                    ))
+                                };
+                                serde_json::json!({
+                                    "role": "tool",
+                                    "tool_call_id": call_id,
+                                    "content": body,
+                                    "is_error": output.is_error
+                                })
+                            }
+                            ConversationItem::Reasoning { redacted, .. } => {
+                                serde_json::json!({
+                                    "role": "assistant",
+                                    "reasoning": { "redacted": redacted }
+                                })
+                            }
+                            ConversationItem::Compaction { summary } => {
+                                serde_json::json!({
+                                    "role": "system",
+                                    "compaction_summary": summary
+                                })
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap_or_else(|_| "[]".to_string());
+                provider_span.set_content(
+                    puffer_observability::LANGFUSE_OBSERVATION_INPUT,
+                    puffer_observability::ContentKind::Prompt,
+                    &provider_input_json,
+                );
+            }
+        }
+        // We need to capture token usage from the streaming Usage
+        // event without breaking the existing on_event signature for
+        // other consumers. Wrap it.
+        let observability_handle = inputs.observability.clone();
+        let captured_usage = std::cell::RefCell::new(None::<TurnUsageReport>);
+        let result = {
+            let captured_usage_ref = &captured_usage;
+            let mut wrapped = |event: TurnStreamEvent| {
+                if let TurnStreamEvent::Usage(u) = &event {
+                    *captured_usage_ref.borrow_mut() = Some(u.clone());
+                }
+                on_event(event);
+            };
+            session.one_turn_streaming(
+                inputs.state,
+                inputs.auth_store,
+                &mut items,
+                &mut wrapped,
+            )
+        };
+        // Surface usage on the provider span before propagating any
+        // error so failed calls still record their token cost.
+        if let Some(u) = captured_usage.into_inner() {
+            provider_span.set_token_usage(
+                Some(u.input_tokens),
+                Some(u.output_tokens),
+                Some(u.cache_read_tokens),
+            );
+            // Cache hit ratio = cache_read / input. Surfaces a single
+            // top-line metric in Langfuse without making the viewer do
+            // the arithmetic.
+            if u.input_tokens > 0 {
+                let ratio = u.cache_read_tokens as f64 / u.input_tokens as f64;
+                provider_span.set_f64("puffer.cache.hit_ratio", ratio);
+            }
+        }
+        let turn = match result {
+            Ok(turn) => turn,
+            Err(error) => {
+                provider_span.mark_error(error.to_string());
+                turn_span.mark_error(error.to_string());
+                agent_span.mark_error(error.to_string());
+                drop(observability_handle);
+                return Err(error);
+            }
+        };
+        provider_span.set_content(
+            puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
+            puffer_observability::ContentKind::Output,
+            &turn.assistant_text,
+        );
+        provider_span.set_content(
+            "puffer.assistant_text",
+            puffer_observability::ContentKind::Output,
+            &turn.assistant_text,
+        );
+        provider_span.end();
 
         // Cancel boundary: check after the LLM call returns, before
         // tool execution kicks off. This prevents the loop from
         // launching a fresh tool batch when the user already pressed
         // ESC during streaming.
         if let Some(cancel) = inputs.cancel {
-            cancel.check()?;
+            if let Err(error) = cancel.check() {
+                turn_span.mark_cancelled();
+                agent_span.mark_cancelled();
+                return Err(error);
+            }
         }
 
         // No tool calls → final assistant text, run hooks, return.
@@ -206,6 +450,16 @@ pub(crate) fn run_streaming_loop(
                 &cwd,
                 &turn.assistant_text,
                 invocations.len(),
+            );
+            agent_span.set_content(
+                puffer_observability::LANGFUSE_TRACE_OUTPUT,
+                puffer_observability::ContentKind::Output,
+                &turn.assistant_text,
+            );
+            agent_span.set_content(
+                "puffer.output",
+                puffer_observability::ContentKind::Output,
+                &turn.assistant_text,
             );
             return Ok(TurnExecution {
                 assistant_text: turn.assistant_text,
@@ -230,7 +484,20 @@ pub(crate) fn run_streaming_loop(
         }
 
         // Execute tools (sequential — parallel-safe batching is a follow-up).
-        let new_invocations = execute_tool_batch(inputs, session, &cwd, &turn.tool_calls)?;
+        let new_invocations = match execute_tool_batch(
+            inputs,
+            session,
+            &cwd,
+            &turn.tool_calls,
+            turn_span.context(),
+        ) {
+            Ok(v) => v,
+            Err(error) => {
+                turn_span.mark_error(error.to_string());
+                agent_span.mark_error(error.to_string());
+                return Err(error);
+            }
+        };
 
         if !new_invocations.is_empty() {
             on_event(TurnStreamEvent::ToolInvocations(new_invocations.clone()));
@@ -271,7 +538,26 @@ pub(crate) fn run_streaming_loop(
             });
         }
 
-        // Reflection observation over THIS batch only.
+        // Reflection is the only LLM round-trip puffer makes outside
+        // the main `agent_loop → turn → provider_call` path. Mark it
+        // as a subagent so the Langfuse tree visibly distinguishes it
+        // from regular provider calls (kind attribute + span-name
+        // prefix). Every stage of the reflection pipeline is mirrored
+        // onto attributes so a viewer can tell exactly what happened
+        // (config-disabled / judge-skipped / code-judge-fired /
+        // llm-judge-fired-with-decision-X / checkpoint-injected).
+        let mut reflection_span = puffer_observability::start_reflection_span(
+            inputs.observability.as_ref(),
+            turn_span.context(),
+        );
+        reflection_span.set_str(
+            "puffer.reflection.config.enabled",
+            inputs.reflection_config.is_some().to_string(),
+        );
+        // Inner subagent generation span — only created if the LLM
+        // judge actually fires. Cached lazily so the reflection
+        // wrapper stays a plain SPAN when nothing of substance happens.
+        let mut judge_gen_span: Option<puffer_observability::SpanGuard> = None;
         if let Some(observation) = reflection.as_mut().and_then(|tracker| {
             tracker.observe_batch_with_judge(
                 &new_invocations,
@@ -282,8 +568,187 @@ pub(crate) fn run_streaming_loop(
                 inputs.auth_store,
             )
         }) {
+            reflection_span.set_str("puffer.reflection.observed", "true");
             for trace_event in &observation.trace_events {
                 on_event(TurnStreamEvent::ReflectionTrace(trace_event.clone()));
+                match trace_event {
+                    ReflectionTraceEvent::BatchObserved {
+                        evaluation_score,
+                        evaluation_threshold,
+                        should_evaluate,
+                        skip_reason,
+                        ..
+                    } => {
+                        reflection_span.set_str(
+                            "puffer.reflection.assessment.score",
+                            evaluation_score.to_string(),
+                        );
+                        reflection_span.set_str(
+                            "puffer.reflection.assessment.threshold",
+                            evaluation_threshold.to_string(),
+                        );
+                        reflection_span.set_str(
+                            "puffer.reflection.assessment.should_evaluate",
+                            should_evaluate.to_string(),
+                        );
+                        if let Some(reason) = skip_reason {
+                            reflection_span.set_str(
+                                "puffer.reflection.assessment.skip_reason",
+                                reason.clone(),
+                            );
+                        }
+                    }
+                    ReflectionTraceEvent::CodeJudgeDecision {
+                        triggered,
+                        score,
+                        threshold,
+                        ..
+                    } => {
+                        reflection_span.set_str(
+                            "puffer.reflection.code_judge.triggered",
+                            triggered.to_string(),
+                        );
+                        reflection_span.set_str(
+                            "puffer.reflection.code_judge.score",
+                            score.to_string(),
+                        );
+                        reflection_span.set_str(
+                            "puffer.reflection.code_judge.threshold",
+                            threshold.to_string(),
+                        );
+                    }
+                    ReflectionTraceEvent::LlmJudgeSkipped { mode, reason } => {
+                        reflection_span.set_str(
+                            "puffer.reflection.llm_judge.fired",
+                            "false",
+                        );
+                        reflection_span.set_str(
+                            "puffer.reflection.llm_judge.skip_mode",
+                            mode.clone(),
+                        );
+                        reflection_span.set_str(
+                            "puffer.reflection.llm_judge.skip_reason",
+                            reason.clone(),
+                        );
+                    }
+                    ReflectionTraceEvent::LlmJudgeRequest {
+                        provider,
+                        model,
+                        context_scope,
+                        prompt_chars,
+                        prompt,
+                        ..
+                    } => {
+                        // First evidence the judge actually fired:
+                        // create the inner subagent generation span.
+                        let mut span = puffer_observability::start_subagent_generation_span(
+                            inputs.observability.as_ref(),
+                            reflection_span.context(),
+                            "reflection_judge",
+                        );
+                        if let Some(p) = provider {
+                            span.set_str(puffer_observability::GEN_AI_SYSTEM, p.clone());
+                        }
+                        if let Some(m) = model {
+                            span.set_str(puffer_observability::GEN_AI_REQUEST_MODEL, m.clone());
+                        }
+                        span.set_str("puffer.reflection.context_scope", context_scope.clone());
+                        span.set_str(
+                            "puffer.reflection.prompt_chars",
+                            prompt_chars.to_string(),
+                        );
+                        // Reflection's prompt embeds rendered tool
+                        // calls + outputs (`render_items`), so gating
+                        // on `include_prompts` alone would leak tool
+                        // I/O. Require BOTH flags before emitting the
+                        // raw prompt (review v4 BLOCK #3).
+                        if let Some(handle) = inputs.observability.as_ref() {
+                            let policy = handle.redaction();
+                            if policy.include_prompts() && policy.include_tool_io() {
+                                span.set_content(
+                                    puffer_observability::LANGFUSE_OBSERVATION_INPUT,
+                                    puffer_observability::ContentKind::Prompt,
+                                    prompt,
+                                );
+                            }
+                        }
+                        judge_gen_span = Some(span);
+                        reflection_span
+                            .set_str("puffer.reflection.llm_judge.fired", "true");
+                    }
+                    ReflectionTraceEvent::LlmJudgeResponse {
+                        decision,
+                        confidence,
+                        reason,
+                        next_action,
+                        input_tokens,
+                        output_tokens,
+                        cached_input_tokens,
+                        raw_response_text,
+                        ..
+                    } => {
+                        if let Some(span) = judge_gen_span.as_mut() {
+                            span.set_str("puffer.reflection.decision", decision.clone());
+                            if let Some(c) = confidence {
+                                span.set_str("puffer.reflection.confidence", c.clone());
+                            }
+                            span.set_str("puffer.reflection.next_action", next_action.clone());
+                            span.set_token_usage(
+                                *input_tokens,
+                                *output_tokens,
+                                *cached_input_tokens,
+                            );
+                            span.set_content(
+                                puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
+                                puffer_observability::ContentKind::Output,
+                                raw_response_text,
+                            );
+                            // Cache hit ratio: derive locally so the
+                            // viewer sees the percentage even when
+                            // upstream doesn't surface it directly.
+                            if let Some(in_tok) = input_tokens {
+                                if *in_tok > 0 {
+                                    let ratio = cached_input_tokens.unwrap_or(0) as f64
+                                        / *in_tok as f64;
+                                    span.set_f64("puffer.cache.hit_ratio", ratio);
+                                }
+                            }
+                        }
+                        reflection_span.set_str(
+                            "puffer.reflection.llm_judge.decision",
+                            decision.clone(),
+                        );
+                        reflection_span.set_str(
+                            "puffer.reflection.llm_judge.reason",
+                            reason.clone(),
+                        );
+                    }
+                    ReflectionTraceEvent::LlmJudgeError { stage, error, .. } => {
+                        if let Some(span) = judge_gen_span.as_mut() {
+                            span.mark_error(error.clone());
+                        }
+                        reflection_span.set_str(
+                            "puffer.reflection.llm_judge.error_stage",
+                            stage.clone(),
+                        );
+                    }
+                    ReflectionTraceEvent::FinalDecision {
+                        selected_source,
+                        triggered_checkpoint,
+                        ..
+                    } => {
+                        if let Some(src) = selected_source {
+                            reflection_span.set_str(
+                                "puffer.reflection.final.signal_source",
+                                src.clone(),
+                            );
+                        }
+                        reflection_span.set_str(
+                            "puffer.reflection.final.checkpoint_triggered",
+                            triggered_checkpoint.to_string(),
+                        );
+                    }
+                }
             }
             reflection_traces.extend(observation.trace_events);
             if let Some(checkpoint) = observation.checkpoint {
@@ -292,129 +757,48 @@ pub(crate) fn run_streaming_loop(
                 ));
                 items.push(ConversationItem::user_message(checkpoint.prompt));
             }
+        } else {
+            reflection_span.set_str("puffer.reflection.observed", "false");
         }
+        if let Some(span) = judge_gen_span {
+            span.end();
+        }
+        reflection_span.end();
 
-        // Post-iteration compaction.
+        // Post-iteration compaction. The compaction trigger itself
+        // may issue an LLM round-trip via `session.generate_summary`
+        // — wrapping in a span lets Langfuse see the cost. Most turns
+        // skip compaction (transcript under threshold), so we mark
+        // skipped spans with `puffer.compaction.skipped=true` instead
+        // of suppressing them.
+        let mut post_compaction_span = puffer_observability::start_compaction_span(
+            inputs.observability.as_ref(),
+            turn_span.context(),
+            1,
+        );
         let compacted = {
-            let summary_fn = |old: &str, mid: &str| session.generate_summary(old, mid);
-            compact_conversation_with(
-                &mut items,
-                inputs.provider,
-                inputs.model_id,
-                turn.input_tokens_hint,
-                &summary_fn,
-            )
-        };
-        if compacted {
-            inject_post_compact_context(&mut items, &cwd);
-            session.notify_compacted();
-        }
-    }
-}
-
-/// Non-streaming turn loop. Same shape as streaming but uses
-/// `one_turn_blocking` so providers can route through their non-stream
-/// transport (Anthropic blocking JSON, with 413 recovery).
-pub(crate) fn run_blocking_loop(
-    inputs: &mut LoopInputs<'_>,
-    session: &mut dyn TurnSession,
-) -> Result<TurnExecution> {
-    let cwd = inputs.state.cwd.clone();
-
-    let mut items = transcript_to_items(inputs.state, inputs.input);
-    session.pre_loop_inject(&mut items);
-
-    let mut invocations: Vec<ToolInvocation> = Vec::new();
-    let mut reflection_traces: Vec<ReflectionTraceEvent> = Vec::new();
-    let mut reflection = inputs
-        .reflection_config
-        .clone()
-        .map(|config| ReflectionTracker::new(inputs.input, config));
-
-    {
-        let summary_fn = |old: &str, mid: &str| session.generate_summary(old, mid);
-        if compact_conversation_with(&mut items, inputs.provider, inputs.model_id, None, &summary_fn)
-        {
-            inject_post_compact_context(&mut items, &cwd);
-        }
-    }
-    session.notify_compacted();
-
-    loop {
-        if let Some(cancel) = inputs.cancel {
-            cancel.check()?;
-        }
-        let turn = session.one_turn_blocking(inputs.state, inputs.auth_store, &mut items)?;
-        if let Some(cancel) = inputs.cancel {
-            cancel.check()?;
-        }
-
-        if turn.tool_calls.is_empty() {
-            run_turn_hooks(
-                inputs.resources,
-                &cwd,
-                &turn.assistant_text,
-                invocations.len(),
-            );
-            return Ok(TurnExecution {
-                assistant_text: turn.assistant_text,
-                tool_invocations: invocations,
-                reflection_traces,
-            });
-        }
-
-        items.extend(turn.pre_tool_items);
-
-        let new_invocations = execute_tool_batch(inputs, session, &cwd, &turn.tool_calls)?;
-
-        for inv in &new_invocations {
-            items.push(ConversationItem::FunctionCallOutput {
-                call_id: inv.call_id.clone(),
-                output: if inv.success {
-                    ToolOutputPayload::success(inv.output.clone())
+            let observability = inputs.observability.as_ref();
+            let parent_ctx = post_compaction_span.context();
+            let summary_fn = |old: &str, mid: &str| -> Option<String> {
+                let mut gen_span = puffer_observability::start_subagent_generation_span(
+                    observability,
+                    parent_ctx,
+                    "compaction_summary",
+                );
+                gen_span.set_str("puffer.compaction.phase", "1");
+                let result = session.generate_summary(old, mid);
+                if let Some(ref text) = result {
+                    gen_span.set_content(
+                        puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
+                        puffer_observability::ContentKind::Output,
+                        text,
+                    );
                 } else {
-                    ToolOutputPayload::error(inv.output.clone())
-                },
-            });
-        }
-
-        invocations.extend(new_invocations.iter().cloned());
-
-        // Pi-mono parity: early-terminate on unanimous `terminate: true`.
-        if !new_invocations.is_empty()
-            && new_invocations.iter().all(|inv| inv.terminate)
-        {
-            run_turn_hooks(
-                inputs.resources,
-                &cwd,
-                &turn.assistant_text,
-                invocations.len(),
-            );
-            return Ok(TurnExecution {
-                assistant_text: turn.assistant_text,
-                tool_invocations: invocations,
-                reflection_traces,
-            });
-        }
-
-        if let Some(observation) = reflection.as_mut().and_then(|tracker| {
-            tracker.observe_batch_with_judge(
-                &new_invocations,
-                &items,
-                inputs.state,
-                inputs.resources,
-                inputs.providers,
-                inputs.auth_store,
-            )
-        }) {
-            reflection_traces.extend(observation.trace_events);
-            if let Some(checkpoint) = observation.checkpoint {
-                items.push(ConversationItem::user_message(checkpoint.prompt));
-            }
-        }
-
-        let compacted = {
-            let summary_fn = |old: &str, mid: &str| session.generate_summary(old, mid);
+                    gen_span.mark_error("summary_returned_none".to_string());
+                }
+                gen_span.end();
+                result
+            };
             compact_conversation_with(
                 &mut items,
                 inputs.provider,
@@ -426,9 +810,13 @@ pub(crate) fn run_blocking_loop(
         if compacted {
             inject_post_compact_context(&mut items, &cwd);
             session.notify_compacted();
+        } else {
+            post_compaction_span.set_str("puffer.compaction.skipped", "true");
         }
+        post_compaction_span.end();
     }
 }
+
 
 /// Executes one batch of tool calls produced by a single assistant turn.
 ///
@@ -439,293 +827,6 @@ pub(crate) fn run_blocking_loop(
 /// the rest fall back to serial execution with full `&mut state` access.
 /// Permission resolution always runs serially up front because
 /// `AllowSession` mutates `state`.
-fn execute_tool_batch(
-    inputs: &mut LoopInputs<'_>,
-    session: &mut dyn TurnSession,
-    cwd: &std::path::Path,
-    tool_calls: &[ToolCallRequest],
-) -> Result<Vec<ToolInvocation>> {
-    let parallel_count = tool_calls
-        .iter()
-        .filter(|tc| is_parallel_safe_tool(&tc.tool_id))
-        .count();
-
-    // Serial fast-path: no parallelism gain available.
-    if tool_calls.len() <= 1 || parallel_count <= 1 {
-        return execute_tool_batch_serial(inputs, session, cwd, tool_calls);
-    }
-
-    // Phase 1: resolve permissions serially (mutates state on AllowSession).
-    let mut permissions: Vec<PermissionOutcome> = Vec::with_capacity(tool_calls.len());
-    for tc in tool_calls {
-        let args: serde_json::Value =
-            serde_json::from_str(&tc.input).unwrap_or(serde_json::Value::Null);
-        permissions.push(resolve_tool_permission(
-            inputs.state,
-            inputs.resources,
-            inputs.registry,
-            cwd,
-            &tc.tool_id,
-            &args,
-            inputs.tool_filter,
-        )?);
-    }
-
-    // Phase 2: spawn parallel-safe tools. We snapshot the immutable
-    // bits of state we need so the parallel closures only borrow
-    // refs, never `&mut state`.
-    let working_dirs = inputs.state.working_dirs.clone();
-    let allow_all_paths = workspace_paths::sandbox_allows_all_paths(&inputs.state.sandbox_mode);
-    let session_id = inputs.state.session.id;
-    let provider_context = backend_to_provider_context(
-        session.tool_execution_backend(),
-        inputs.model_id,
-    );
-
-    let mut results: Vec<Option<(String, bool, bool)>> = vec![None; tool_calls.len()];
-
-    std::thread::scope(|s| {
-        let mut handles: Vec<(usize, std::thread::ScopedJoinHandle<'_, (String, bool, bool)>)> =
-            Vec::new();
-        for (i, tc) in tool_calls.iter().enumerate() {
-            if !is_parallel_safe_tool(&tc.tool_id) {
-                continue;
-            }
-            if let PermissionOutcome::Denied(ref denied) = permissions[i] {
-                results[i] = Some((
-                    denied.output.stdout.clone(),
-                    denied.success,
-                    extract_terminate(&denied.output.metadata),
-                ));
-                continue;
-            }
-            let definition = match inputs.registry.definition(&tc.tool_id) {
-                Some(d) => d.clone(),
-                None => {
-                    results[i] = Some((format!("unknown tool {}", tc.tool_id), false, false));
-                    continue;
-                }
-            };
-            let args: serde_json::Value =
-                serde_json::from_str(&tc.input).unwrap_or(serde_json::Value::Null);
-            let resources = inputs.resources;
-            let registry = inputs.registry;
-            let working_dirs_ref = &working_dirs;
-            let provider_context_ref = &provider_context;
-            handles.push((
-                i,
-                s.spawn(move || {
-                    match claude_tools::execute_parallel_tool(
-                        &definition,
-                        cwd,
-                        working_dirs_ref,
-                        allow_all_paths,
-                        &session_id,
-                        args,
-                        resources,
-                        registry,
-                        provider_context_ref,
-                    ) {
-                        Ok(exec) => {
-                            let terminate = extract_terminate(&exec.output.metadata);
-                            let output = if exec.output.stderr.is_empty() {
-                                exec.output.stdout
-                            } else if exec.output.stdout.is_empty() {
-                                exec.output.stderr
-                            } else {
-                                format!("{}\n{}", exec.output.stdout, exec.output.stderr)
-                            };
-                            (output, exec.success, terminate)
-                        }
-                        Err(error) => (format!("Tool execution failed: {error}"), false, false),
-                    }
-                }),
-            ));
-        }
-        for (i, handle) in handles {
-            results[i] = Some(
-                handle
-                    .join()
-                    .unwrap_or_else(|_| ("Tool execution panicked".to_string(), false, false)),
-            );
-        }
-    });
-
-    // Phase 3: serial execution for non-parallel + denied (and unknown
-    // tool fallthroughs that we did not pre-fill above).
-    for (i, tc) in tool_calls.iter().enumerate() {
-        if results[i].is_some() {
-            continue;
-        }
-        if let PermissionOutcome::Denied(ref denied) = permissions[i] {
-            results[i] = Some((
-                denied.output.stdout.clone(),
-                denied.success,
-                extract_terminate(&denied.output.metadata),
-            ));
-            continue;
-        }
-        let backend = session.tool_execution_backend();
-        let args: serde_json::Value =
-            serde_json::from_str(&tc.input).unwrap_or(serde_json::Value::Null);
-        let exec = match execute_tool_call(
-            inputs.state,
-            inputs.resources,
-            inputs.providers,
-            inputs.auth_store,
-            inputs.registry,
-            inputs.model_id,
-            cwd,
-            backend,
-            inputs.tool_filter,
-            &tc.tool_id,
-            args,
-        ) {
-            Ok(exec) => {
-                let terminate = extract_terminate(&exec.output.metadata);
-                let output = if exec.output.stderr.is_empty() {
-                    exec.output.stdout
-                } else if exec.output.stdout.is_empty() {
-                    exec.output.stderr
-                } else {
-                    format!("{}\n{}", exec.output.stdout, exec.output.stderr)
-                };
-                (output, exec.success, terminate)
-            }
-            Err(error) => (format!("Tool execution failed: {error}"), false, false),
-        };
-        results[i] = Some(exec);
-    }
-
-    // Phase 4: assemble in original order with per-tool truncation.
-    let mut invocations = Vec::with_capacity(tool_calls.len());
-    for (i, tc) in tool_calls.iter().enumerate() {
-        let (raw_output, success, terminate) = results[i]
-            .take()
-            .unwrap_or_else(|| ("Tool was not executed".to_string(), false, false));
-        let output_text = process_tool_result(
-            &raw_output,
-            MAX_TOOL_RESULT_CHARS,
-            &inputs.state.session.id,
-        );
-        invocations.push(ToolInvocation {
-            call_id: tc.call_id.clone(),
-            tool_id: tc.tool_id.clone(),
-            input: tc.input.clone(),
-            output: output_text,
-            success,
-            terminate,
-        });
-    }
-
-    enforce_tool_result_budget_in_place(&mut invocations, &inputs.state.session.id);
-    Ok(invocations)
-}
-
-/// Serial fallback used when parallelism would not help. Mirrors the
-/// earlier serial path bit-for-bit.
-fn execute_tool_batch_serial(
-    inputs: &mut LoopInputs<'_>,
-    session: &mut dyn TurnSession,
-    cwd: &std::path::Path,
-    tool_calls: &[ToolCallRequest],
-) -> Result<Vec<ToolInvocation>> {
-    let mut invocations = Vec::with_capacity(tool_calls.len());
-
-    for call in tool_calls {
-        let backend = session.tool_execution_backend();
-        let input_value: serde_json::Value =
-            serde_json::from_str(&call.input).unwrap_or(serde_json::Value::Null);
-        let execution = execute_tool_call(
-            inputs.state,
-            inputs.resources,
-            inputs.providers,
-            inputs.auth_store,
-            inputs.registry,
-            inputs.model_id,
-            cwd,
-            backend,
-            inputs.tool_filter,
-            &call.tool_id,
-            input_value,
-        )?;
-        let terminate = extract_terminate(&execution.output.metadata);
-        let raw_output = if execution.output.stderr.is_empty() {
-            execution.output.stdout
-        } else if execution.output.stdout.is_empty() {
-            execution.output.stderr
-        } else {
-            format!("{}\n{}", execution.output.stdout, execution.output.stderr)
-        };
-        let output_text = process_tool_result(
-            &raw_output,
-            MAX_TOOL_RESULT_CHARS,
-            &inputs.state.session.id,
-        );
-        invocations.push(ToolInvocation {
-            call_id: call.call_id.clone(),
-            tool_id: call.tool_id.clone(),
-            input: call.input.clone(),
-            output: output_text,
-            success: execution.success,
-            terminate,
-        });
-    }
-
-    enforce_tool_result_budget_in_place(&mut invocations, &inputs.state.session.id);
-    Ok(invocations)
-}
-
-/// Extracts a `terminate: true` hint from a tool's `ToolOutput.metadata`.
-/// Honored only when the **entire** tool batch sets it, mirroring
-/// pi-mono's "early terminate when every tool result terminates"
-/// (`pi-mono/packages/agent/src/agent-loop.ts:499`).
-fn extract_terminate(metadata: &serde_json::Value) -> bool {
-    metadata
-        .get("terminate")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-}
-
-fn enforce_tool_result_budget_in_place(
-    invocations: &mut [ToolInvocation],
-    session_id: &uuid::Uuid,
-) {
-    let mut output_strings: Vec<String> = invocations.iter().map(|i| i.output.clone()).collect();
-    enforce_tool_result_budget(&mut output_strings, session_id);
-    for (i, new_output) in output_strings.into_iter().enumerate() {
-        if new_output != invocations[i].output {
-            invocations[i].output = new_output;
-        }
-    }
-}
-
-/// Map the neutral `ToolExecutionBackend` into the
-/// `claude_tools::ProviderToolContext` shape that `execute_parallel_tool`
-/// expects (these are isomorphic — same fields, different name space).
-fn backend_to_provider_context<'a>(
-    backend: ToolExecutionBackend<'a>,
-    model_id: &'a str,
-) -> ProviderToolContext<'a> {
-    match backend {
-        ToolExecutionBackend::OpenAi {
-            request_config,
-            structured_output,
-        } => ProviderToolContext::OpenAI {
-            request_config,
-            model_id,
-            structured_output,
-        },
-        ToolExecutionBackend::Anthropic {
-            request_config,
-            structured_output,
-        } => ProviderToolContext::Anthropic {
-            request_config,
-            model_id,
-            structured_output,
-        },
-    }
-}
 
 #[cfg(test)]
 mod cancel_token_tests {
@@ -790,55 +891,5 @@ mod cancel_token_tests {
         t.cancel();
         worker.join().unwrap();
         assert!(observed.load(Ordering::Relaxed));
-    }
-}
-
-#[cfg(test)]
-mod terminate_tests {
-    use super::extract_terminate;
-    use serde_json::json;
-
-    #[test]
-    fn missing_metadata_field_returns_false() {
-        assert!(!extract_terminate(&json!({})));
-    }
-
-    #[test]
-    fn explicit_true_extracts() {
-        assert!(extract_terminate(&json!({ "terminate": true })));
-    }
-
-    #[test]
-    fn explicit_false_extracts_false() {
-        assert!(!extract_terminate(&json!({ "terminate": false })));
-    }
-
-    #[test]
-    fn non_bool_value_falls_back_to_false() {
-        assert!(!extract_terminate(&json!({ "terminate": "true" })));
-        assert!(!extract_terminate(&json!({ "terminate": 1 })));
-    }
-
-    #[test]
-    fn null_metadata_returns_false() {
-        assert!(!extract_terminate(&serde_json::Value::Null));
-    }
-
-    /// Pi-mono parity: the loop terminates ONLY when every invocation in
-    /// the batch sets `terminate: true`. Locks the predicate that drives
-    /// the early-stop branch in `run_streaming_loop` /
-    /// `run_blocking_loop`.
-    #[test]
-    fn batch_unanimity_predicate() {
-        // Helper closure mirroring the `iter().all(|inv| inv.terminate)`
-        // shape used in the loops, so refactors of the predicate get
-        // caught here.
-        let unanimous = |flags: &[bool]| !flags.is_empty() && flags.iter().all(|f| *f);
-        assert!(unanimous(&[true]));
-        assert!(unanimous(&[true, true, true]));
-        assert!(!unanimous(&[true, false]));
-        assert!(!unanimous(&[false]));
-        // Empty batch → no early stop (loop has no batch to act on).
-        assert!(!unanimous(&[]));
     }
 }

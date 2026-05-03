@@ -296,6 +296,11 @@ fn prepare_agent_execution(
         &agent.value.disallowed_tools,
     );
     let mut nested_state = state.clone();
+    // Carry the parent session id so the teammate's root span can
+    // emit a `puffer.parent.session_id` link attribute. Langfuse
+    // pivots from a parent trace to spawned subagent traces via this
+    // field; mirrors Codex's `parent_task_id`.
+    nested_state.parent_session_id = Some(state.session.id.to_string());
     let mut nested_cwd = nested_cwd;
     let mut worktree = None;
     let effective_isolation = input
