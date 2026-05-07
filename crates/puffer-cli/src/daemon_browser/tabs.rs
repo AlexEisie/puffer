@@ -1,13 +1,13 @@
 //! Session-scoped browser tab metadata for the desktop and agent APIs.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::BrowserState;
 
 /// Public metadata for one managed browser tab.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserTabInfo {
     pub(crate) tab_id: String,
@@ -23,7 +23,7 @@ pub(crate) struct BrowserTabInfo {
 }
 
 /// Public tab list state for one Puffer agent session.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserTabsState {
     pub(crate) active_tab_id: Option<String>,
@@ -56,6 +56,16 @@ impl BrowserTabRegistry {
             .get(root_session_id)
             .map(BrowserTabSet::state)
             .unwrap_or_default()
+    }
+
+    /// Returns one recorded tab by id for the given root browser session.
+    pub(crate) fn tab(&self, root_session_id: &str, tab_id: &str) -> Option<BrowserTabInfo> {
+        self.sessions
+            .get(root_session_id)?
+            .tabs
+            .iter()
+            .find(|tab| tab.tab_id == tab_id)
+            .cloned()
     }
 
     pub(crate) fn open_tab(
@@ -189,6 +199,11 @@ impl BrowserTabRegistry {
             tab.loading = false;
             tab.updated_at_ms = now_ms();
         }
+    }
+
+    /// Removes all tab metadata for one root browser session.
+    pub(crate) fn remove_root(&mut self, root_session_id: &str) {
+        self.sessions.remove(root_session_id);
     }
 }
 
