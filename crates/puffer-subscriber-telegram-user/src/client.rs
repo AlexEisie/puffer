@@ -5,7 +5,7 @@
 //! infinite `next_update` loop that emits ndjson message events.
 
 use anyhow::Context as _;
-use grammers_client::{session::Session, Client, Config, InitParams, Update};
+use grammers_client::{session::Session, Client, Config, Update};
 use puffer_subscriber_runtime::SubscriberCommand;
 use serde_json::json;
 use tracing::{error, info, warn};
@@ -13,7 +13,9 @@ use tracing::{error, info, warn};
 use crate::commands::CommandStream;
 use crate::events::{build_message_event, emit, emit_control};
 use crate::login;
-use crate::state::{resolve_api_hash, resolve_api_id, LoginState, PersistedCredentials, SkillEnv};
+use crate::state::{
+    default_init_params, resolve_api_credentials, LoginState, PersistedCredentials, SkillEnv,
+};
 
 /// Runs the Telegram user subscriber until stdin closes or a fatal error
 /// occurs. The caller is expected to already be inside a Tokio runtime
@@ -143,8 +145,11 @@ pub async fn run() -> anyhow::Result<()> {
         };
         match cmd {
             SubscriberCommand::TelegramLoginSubmitCode { code } => {
-                if login::submit_code(&env, &mut login_state, &client, code).await? {
-                    authorized = true;
+                match submit_code_with_reconnect(&env, &mut client, &mut login_state, code).await? {
+                    login::CodeSubmitOutcome::Complete => authorized = true,
+                    login::CodeSubmitOutcome::AwaitingPassword
+                    | login::CodeSubmitOutcome::Failed
+                    | login::CodeSubmitOutcome::RetryableTransportError { .. } => {}
                 }
             }
             SubscriberCommand::TelegramLoginSubmitPassword { password } => {
@@ -201,22 +206,23 @@ async fn try_resume_session(env: &SkillEnv) -> anyhow::Result<Option<Client>> {
         return Ok(None);
     }
 
-    // Resume needs api credentials for the `Config`. Resolution order:
-    // persisted credentials (written on the last successful login), env
-    // vars, then Telegram Desktop's published default. With the default
-    // baked in the resume path always has *something* to try.
+    // Resume needs the same app credentials used for the original login.
+    // Missing credentials are not fatal here; the login phase can surface an
+    // actionable error if the operator tries to start a fresh login.
     let persisted = PersistedCredentials::load(&env.credentials_path()).unwrap_or_default();
-    let api_id = resolve_api_id(None, &persisted);
-    let api_hash = resolve_api_hash(None, &persisted);
+    let (api_id, api_hash) = match resolve_api_credentials(None, None, &persisted) {
+        Ok(pair) => pair,
+        Err(error) => {
+            warn!(%error, "resume credentials unavailable; falling back to login");
+            return Ok(None);
+        }
+    };
 
     let config = Config {
         session,
         api_id,
         api_hash,
-        params: InitParams {
-            catch_up: true,
-            ..Default::default()
-        },
+        params: default_init_params(),
     };
     let client = match Client::connect(config).await {
         Ok(c) => c,
@@ -281,13 +287,70 @@ async fn run_update_loop(
     }
 }
 
+async fn submit_code_with_reconnect(
+    env: &SkillEnv,
+    client: &mut Client,
+    login_state: &mut LoginState,
+    code: String,
+) -> anyhow::Result<login::CodeSubmitOutcome> {
+    let first = login::submit_code(env, login_state, client, code.clone()).await?;
+    let login::CodeSubmitOutcome::RetryableTransportError { error } = first else {
+        return Ok(first);
+    };
+
+    warn!(%error, "retrying telegram sign_in after reconnect");
+    match reconnect_login_client(env, login_state).await {
+        Ok(reconnected) => {
+            *client = reconnected;
+            login::submit_code(env, login_state, client, code).await
+        }
+        Err(reconnect_error) => {
+            login_state.clear_tokens();
+            emit_control(
+                &env.topic,
+                "login_error",
+                json!({
+                    "error": format!(
+                        "sign_in transport failed and reconnect failed: {reconnect_error}"
+                    ),
+                    "phase": "sign_in_reconnect"
+                }),
+            )?;
+            Ok(login::CodeSubmitOutcome::Failed)
+        }
+    }
+}
+
+async fn reconnect_login_client(
+    env: &SkillEnv,
+    login_state: &LoginState,
+) -> anyhow::Result<Client> {
+    let api_id = login_state
+        .api_id
+        .ok_or_else(|| anyhow::anyhow!("login attempt is missing api_id"))?;
+    let api_hash = login_state
+        .api_hash
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("login attempt is missing api_hash"))?;
+    let session = Session::load_file_or_create(&env.session_path)
+        .with_context(|| format!("load session file {}", env.session_path.display()))?;
+    Client::connect(Config {
+        session,
+        api_id,
+        api_hash,
+        params: default_init_params(),
+    })
+    .await
+    .context("reconnect telegram client for sign_in retry")
+}
+
 /// Handles a stdin command received while the update loop is running.
 ///
 /// Most login-related commands are unexpected here (login already succeeded)
 /// but we still accept them to support re-authentication without a restart.
 async fn handle_runtime_command(
     env: &SkillEnv,
-    client: &Client,
+    client: &mut Client,
     login_state: &mut LoginState,
     cmd: SubscriberCommand,
 ) -> anyhow::Result<()> {
@@ -297,12 +360,25 @@ async fn handle_runtime_command(
             api_id,
             api_hash,
         } => {
-            // Re-request a code on the live client rather than reconnecting.
-            // The effect is that the running session keeps serving updates
-            // until sign_in succeeds and overwrites the auth.
+            match emit_already_authorized(env, client).await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    warn!(%error, "authorized status probe failed; re-requesting login code");
+                }
+            }
             let persisted = PersistedCredentials::load(&env.credentials_path()).unwrap_or_default();
-            let resolved_id = resolve_api_id(api_id, &persisted);
-            let resolved_hash = resolve_api_hash(api_hash, &persisted);
+            let (resolved_id, resolved_hash) =
+                match resolve_api_credentials(api_id, api_hash, &persisted) {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        emit_control(
+                            &env.topic,
+                            "login_error",
+                            json!({ "error": error.to_string(), "phase": "credentials" }),
+                        )?;
+                        return Ok(());
+                    }
+                };
             match client.request_login_code(&phone).await {
                 Ok(token) => {
                     login_state.login_token = Some(token);
@@ -322,7 +398,7 @@ async fn handle_runtime_command(
             }
         }
         SubscriberCommand::TelegramLoginSubmitCode { code } => {
-            login::submit_code(env, login_state, client, code).await?;
+            submit_code_with_reconnect(env, client, login_state, code).await?;
         }
         SubscriberCommand::TelegramLoginSubmitPassword { password } => {
             login::submit_password(env, login_state, client, password).await?;
@@ -345,6 +421,20 @@ async fn handle_runtime_command(
             )?;
         }
     }
+    Ok(())
+}
+
+async fn emit_already_authorized(env: &SkillEnv, client: &Client) -> anyhow::Result<()> {
+    let user = client.get_me().await?;
+    emit_control(
+        &env.topic,
+        "login_complete",
+        json!({
+            "already_authorized": true,
+            "user_id": user.id(),
+            "first_name": user.first_name(),
+        }),
+    )?;
     Ok(())
 }
 

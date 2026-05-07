@@ -22,22 +22,23 @@ use puffer_subscriber_runtime::{Manifest, SubscriberCommand};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::subscription_globals;
 
 const TELEGRAM_USER_TOPIC: &str = "telegram-user";
+const TELEGRAM_LOGIN_EVENT_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Deserialize)]
 struct LoginStartInput {
     /// E.164 phone number including the leading `+`.
     phone: String,
-    /// Optional Telegram `api_id` from my.telegram.org. Omit to use
-    /// Telegram Desktop's published default credentials so the user
-    /// does not have to register an application.
+    /// Optional Telegram `api_id` from my.telegram.org. Omit only when
+    /// persisted credentials or `PUFFER_TELEGRAM_API_ID` are configured.
     #[serde(default)]
     api_id: Option<i32>,
-    /// Optional Telegram `api_hash` from my.telegram.org. Omit when
-    /// `api_id` is omitted.
+    /// Optional Telegram `api_hash` from my.telegram.org. Must be provided
+    /// together with `api_id` unless credentials are already configured.
     #[serde(default)]
     api_hash: Option<String>,
 }
@@ -55,19 +56,42 @@ pub fn execute_telegram_login_start(
         serde_json::from_value(input).context("invalid TelegramLoginStart input")?;
     ensure_subscriber_running()?;
     let manager = subscription_globals::manager()?;
-    manager.send_command(
+    let phone = parsed.phone;
+    let command = SubscriberCommand::TelegramLoginStart {
+        phone: phone.clone(),
+        api_id: parsed.api_id,
+        api_hash: parsed.api_hash,
+    };
+    let event = manager.send_command_and_wait(
         TELEGRAM_USER_TOPIC,
-        &SubscriberCommand::TelegramLoginStart {
-            phone: parsed.phone,
-            api_id: parsed.api_id,
-            api_hash: parsed.api_hash,
-        },
+        TELEGRAM_USER_TOPIC,
+        &command,
+        &["login_awaiting_code", "login_complete", "login_error"],
+        TELEGRAM_LOGIN_EVENT_TIMEOUT,
     )?;
-    Ok(json!({
-        "status": "awaiting_code",
-        "next": "Telegram will text a code to the user's other devices. Ask the user for the code, then call TelegramLoginSubmitCode."
-    })
-    .to_string())
+    match event.event.kind.as_str() {
+        "login_awaiting_code" => Ok(json!({
+            "status": "awaiting_code",
+            "phone": phone,
+            "next": "Telegram accepted the login-code request. Ask the user for the code from Telegram, then call TelegramLoginSubmitCode."
+        })
+        .to_string()),
+        "login_complete" => Ok(json!({
+            "status": "complete",
+            "already_authorized": event
+                .event
+                .payload
+                .get("already_authorized")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            "payload": event.event.payload,
+        })
+        .to_string()),
+        _ => Err(anyhow!(
+            "telegram login failed while requesting code: {}",
+            event_error_message(&event.event.payload)
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,15 +111,31 @@ pub fn execute_telegram_login_submit_code(
     let parsed: SubmitCodeInput =
         serde_json::from_value(input).context("invalid TelegramLoginSubmitCode input")?;
     let manager = subscription_globals::manager()?;
-    manager.send_command(
+    let command = SubscriberCommand::TelegramLoginSubmitCode { code: parsed.code };
+    let event = manager.send_command_and_wait(
         TELEGRAM_USER_TOPIC,
-        &SubscriberCommand::TelegramLoginSubmitCode { code: parsed.code },
+        TELEGRAM_USER_TOPIC,
+        &command,
+        &["login_complete", "login_awaiting_password", "login_error"],
+        TELEGRAM_LOGIN_EVENT_TIMEOUT,
     )?;
-    Ok(json!({
-        "status": "submitted",
-        "next": "Watch for `login_complete` or `login_awaiting_password` from the subscriber."
-    })
-    .to_string())
+    match event.event.kind.as_str() {
+        "login_complete" => Ok(json!({
+            "status": "complete",
+            "payload": event.event.payload,
+        })
+        .to_string()),
+        "login_awaiting_password" => Ok(json!({
+            "status": "awaiting_password",
+            "next": "Telegram requires the user's 2FA cloud password. Ask the user for it, then call TelegramLoginSubmitPassword.",
+            "payload": event.event.payload,
+        })
+        .to_string()),
+        _ => Err(anyhow!(
+            "telegram login failed while submitting code: {}",
+            event_error_message(&event.event.payload)
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,13 +154,35 @@ pub fn execute_telegram_login_submit_password(
     let parsed: SubmitPasswordInput =
         serde_json::from_value(input).context("invalid TelegramLoginSubmitPassword input")?;
     let manager = subscription_globals::manager()?;
-    manager.send_command(
+    let command = SubscriberCommand::TelegramLoginSubmitPassword {
+        password: parsed.password,
+    };
+    let event = manager.send_command_and_wait(
         TELEGRAM_USER_TOPIC,
-        &SubscriberCommand::TelegramLoginSubmitPassword {
-            password: parsed.password,
-        },
+        TELEGRAM_USER_TOPIC,
+        &command,
+        &["login_complete", "login_error"],
+        TELEGRAM_LOGIN_EVENT_TIMEOUT,
     )?;
-    Ok(json!({"status": "submitted"}).to_string())
+    if event.event.kind == "login_complete" {
+        return Ok(json!({
+            "status": "complete",
+            "payload": event.event.payload,
+        })
+        .to_string());
+    }
+    Err(anyhow!(
+        "telegram login failed while submitting password: {}",
+        event_error_message(&event.event.payload)
+    ))
+}
+
+fn event_error_message(payload: &Value) -> String {
+    payload
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown subscriber error")
+        .to_string()
 }
 
 fn ensure_subscriber_running() -> Result<()> {

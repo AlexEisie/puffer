@@ -153,6 +153,10 @@ impl Manifest {
                 ),
             });
         }
+        let dir = std::fs::canonicalize(&dir).map_err(|source| ManifestError::Read {
+            path: dir.clone(),
+            source,
+        })?;
         Ok(Self { dir, spec })
     }
 

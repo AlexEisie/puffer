@@ -11,16 +11,11 @@ use anyhow::Context;
 use grammers_client::types::{LoginToken, PasswordToken};
 use serde::{Deserialize, Serialize};
 
-/// Telegram Desktop's publicly-published `api_id`. Used as the default
-/// when the agent omits `api_id` in `TelegramLoginStart`. Lives in
-/// Telegram Desktop's open-source repo and is in widespread use across
-/// third-party MTProto clients. Trade-off: shared credentials can hit
-/// `FLOOD_WAIT` under heavy load — supply your own pair only if that
-/// happens.
+/// Public Telegram Desktop app id used when the operator does not provide a
+/// custom Telegram app credential pair.
 pub const DEFAULT_API_ID: i32 = 2040;
 
-/// Telegram Desktop's publicly-published `api_hash`. See
-/// [`DEFAULT_API_ID`] for context.
+/// Public Telegram Desktop app hash paired with [`DEFAULT_API_ID`].
 pub const DEFAULT_API_HASH: &str = "b18441a1ff607e10a989891a5462e627";
 
 /// Ambient configuration resolved once at startup from environment variables.
@@ -107,39 +102,61 @@ impl PersistedCredentials {
     }
 }
 
-/// Resolves the API id to use for a login or reconnect, in priority
-/// order: explicit caller value > persisted credentials > env var
-/// (`PUFFER_TELEGRAM_API_ID`) > [`DEFAULT_API_ID`].
-pub fn resolve_api_id(explicit: Option<i32>, persisted: &PersistedCredentials) -> i32 {
-    if let Some(value) = explicit {
-        return value;
+/// Resolves the Telegram API credential pair for login or reconnect.
+///
+/// Priority order is explicit tool input, persisted credentials, then
+/// `PUFFER_TELEGRAM_API_ID`/`PUFFER_TELEGRAM_API_HASH`, then the hardcoded
+/// public Telegram Desktop pair.
+pub fn resolve_api_credentials(
+    explicit_id: Option<i32>,
+    explicit_hash: Option<String>,
+    persisted: &PersistedCredentials,
+) -> anyhow::Result<(i32, String)> {
+    match (explicit_id, nonempty(explicit_hash)) {
+        (Some(api_id), Some(api_hash)) => return Ok((api_id, api_hash)),
+        _ => {}
     }
-    if let Some(value) = persisted.api_id {
-        return value;
+
+    match (persisted.api_id, nonempty(persisted.api_hash.clone())) {
+        (Some(api_id), Some(api_hash)) => return Ok((api_id, api_hash)),
+        _ => {}
     }
-    if let Ok(raw) = std::env::var("PUFFER_TELEGRAM_API_ID") {
-        if let Ok(parsed) = raw.parse::<i32>() {
-            return parsed;
-        }
+
+    let env_id = std::env::var("PUFFER_TELEGRAM_API_ID")
+        .ok()
+        .and_then(|value| nonempty(Some(value)));
+    let env_hash = std::env::var("PUFFER_TELEGRAM_API_HASH")
+        .ok()
+        .and_then(|value| nonempty(Some(value)));
+    if let (Some(raw_id), Some(api_hash)) = (env_id, env_hash) {
+        let api_id = raw_id.parse::<i32>().with_context(|| {
+            format!("PUFFER_TELEGRAM_API_ID must be an integer, got `{raw_id}`")
+        })?;
+        return Ok((api_id, api_hash));
     }
-    DEFAULT_API_ID
+
+    Ok((DEFAULT_API_ID, DEFAULT_API_HASH.to_string()))
 }
 
-/// Resolves the API hash to use for a login or reconnect, in the same
-/// priority order as [`resolve_api_id`].
-pub fn resolve_api_hash(explicit: Option<String>, persisted: &PersistedCredentials) -> String {
-    if let Some(value) = explicit {
-        return value;
+/// Returns default Telegram client identity metadata to match the built-in API
+/// credential pair.
+pub fn default_init_params() -> grammers_client::InitParams {
+    grammers_client::InitParams {
+        device_model: "Desktop".to_string(),
+        system_version: "Linux x86_64".to_string(),
+        app_version: "6.7.6".to_string(),
+        lang_code: "en".to_string(),
+        system_lang_code: "en".to_string(),
+        catch_up: true,
+        ..Default::default()
     }
-    if let Some(value) = persisted.api_hash.clone() {
-        return value;
-    }
-    if let Ok(value) = std::env::var("PUFFER_TELEGRAM_API_HASH") {
-        if !value.is_empty() {
-            return value;
-        }
-    }
-    DEFAULT_API_HASH.to_string()
+}
+
+fn nonempty(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
 }
 
 /// Transient state carried between login-flow commands.
@@ -177,5 +194,55 @@ impl LoginState {
     pub fn clear_tokens(&mut self) {
         self.login_token = None;
         self.password_token = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_api_credentials_uses_hardcoded_default_without_config() {
+        let persisted = PersistedCredentials::default();
+
+        let (api_id, api_hash) = resolve_api_credentials(None, None, &persisted).unwrap();
+
+        assert_eq!(api_id, DEFAULT_API_ID);
+        assert_eq!(api_hash, DEFAULT_API_HASH);
+    }
+
+    #[test]
+    fn resolve_api_credentials_accepts_explicit_pair() {
+        let persisted = PersistedCredentials::default();
+
+        let (api_id, api_hash) =
+            resolve_api_credentials(Some(12345), Some("hash".to_string()), &persisted).unwrap();
+
+        assert_eq!(api_id, 12345);
+        assert_eq!(api_hash, "hash");
+    }
+
+    #[test]
+    fn resolve_api_credentials_ignores_partial_explicit_pair() {
+        let persisted = PersistedCredentials::default();
+
+        let (api_id, api_hash) = resolve_api_credentials(Some(12345), None, &persisted).unwrap();
+
+        assert_eq!(api_id, DEFAULT_API_ID);
+        assert_eq!(api_hash, DEFAULT_API_HASH);
+    }
+
+    #[test]
+    fn resolve_api_credentials_accepts_persisted_pair() {
+        let persisted = PersistedCredentials {
+            api_id: Some(67890),
+            api_hash: Some("saved".to_string()),
+            phone: None,
+        };
+
+        let (api_id, api_hash) = resolve_api_credentials(None, None, &persisted).unwrap();
+
+        assert_eq!(api_id, 67890);
+        assert_eq!(api_hash, "saved");
     }
 }

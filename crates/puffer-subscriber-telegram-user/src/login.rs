@@ -9,12 +9,29 @@
 //! progress without polling.
 
 use anyhow::Context as _;
-use grammers_client::{session::Session, Client, Config, InitParams, SignInError};
+use grammers_client::{session::Session, Client, Config, SignInError};
 use serde_json::json;
 use tracing::{info, warn};
 
 use crate::events::emit_control;
-use crate::state::{resolve_api_hash, resolve_api_id, LoginState, PersistedCredentials, SkillEnv};
+use crate::state::{
+    default_init_params, resolve_api_credentials, LoginState, PersistedCredentials, SkillEnv,
+};
+
+/// Result of a Telegram login-code submission.
+pub enum CodeSubmitOutcome {
+    /// Login completed and the session is authorized.
+    Complete,
+    /// Telegram accepted the code but requires the user's 2FA password.
+    AwaitingPassword,
+    /// The submission failed and the subscriber emitted a terminal error.
+    Failed,
+    /// The submission hit a transient transport failure and can be retried.
+    RetryableTransportError {
+        /// Error text emitted by grammers for diagnostics.
+        error: String,
+    },
+}
 
 /// Starts a login attempt: connects to Telegram (creating a fresh session if
 /// necessary), requests a login code for `phone`, stores the resulting
@@ -22,9 +39,9 @@ use crate::state::{resolve_api_hash, resolve_api_id, LoginState, PersistedCreden
 /// `login_awaiting_code`. Returns the connected [`Client`] so the caller can
 /// reuse it for the subsequent sign-in step.
 ///
-/// `api_id`/`api_hash` may be `None`; the subscriber resolves a working
-/// pair via [`resolve_api_id`] / [`resolve_api_hash`] (persisted creds,
-/// env vars, then Telegram Desktop's published default).
+/// `api_id`/`api_hash` may be `None`; the subscriber resolves a complete
+/// credential pair via [`resolve_api_credentials`] from explicit input,
+/// persisted credentials, or environment variables.
 pub async fn start(
     env: &SkillEnv,
     state: &mut LoginState,
@@ -33,8 +50,18 @@ pub async fn start(
     api_hash: Option<String>,
 ) -> anyhow::Result<Option<Client>> {
     let persisted = PersistedCredentials::load(&env.credentials_path()).unwrap_or_default();
-    let api_id = resolve_api_id(api_id, &persisted);
-    let api_hash = resolve_api_hash(api_hash, &persisted);
+    let (api_id, api_hash) = match resolve_api_credentials(api_id, api_hash, &persisted) {
+        Ok(pair) => pair,
+        Err(error) => {
+            warn!(%error, "telegram api credential resolution failed");
+            emit_control(
+                &env.topic,
+                "login_error",
+                json!({ "error": error.to_string(), "phase": "credentials" }),
+            )?;
+            return Ok(None);
+        }
+    };
     let session = Session::load_file_or_create(&env.session_path)
         .with_context(|| format!("load session file {}", env.session_path.display()))?;
 
@@ -42,10 +69,7 @@ pub async fn start(
         session,
         api_id,
         api_hash: api_hash.clone(),
-        params: InitParams {
-            catch_up: true,
-            ..Default::default()
-        },
+        params: default_init_params(),
     };
 
     let client = match Client::connect(config).await {
@@ -68,6 +92,9 @@ pub async fn start(
             state.phone = Some(phone.clone());
             state.api_id = Some(api_id);
             state.api_hash = Some(api_hash);
+            if let Err(error) = save_session(env, &client) {
+                warn!(error = %error, "failed to persist telegram pre-auth session");
+            }
             emit_control(&env.topic, "login_awaiting_code", json!({ "phone": phone }))?;
             info!(phone = %phone, "login code requested");
             Ok(Some(client))
@@ -87,22 +114,19 @@ pub async fn start(
 /// Handles `TelegramLoginSubmitCode`: completes sign-in with the cached
 /// [`grammers_client::types::LoginToken`], persists the session on success,
 /// and emits the appropriate control event.
-///
-/// Returns `Ok(true)` if the login has fully completed (no 2FA needed),
-/// `Ok(false)` otherwise (error, or 2FA password is now required).
 pub async fn submit_code(
     env: &SkillEnv,
     state: &mut LoginState,
     client: &Client,
     code: String,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<CodeSubmitOutcome> {
     let Some(token) = state.login_token.take() else {
         emit_control(
             &env.topic,
             "login_error",
             json!({ "error": "no login in progress; send telegram_login_start first" }),
         )?;
-        return Ok(false);
+        return Ok(CodeSubmitOutcome::Failed);
     };
 
     match client.sign_in(&token, &code).await {
@@ -119,7 +143,7 @@ pub async fn submit_code(
                 }),
             )?;
             info!(user_id = user.id(), "telegram login complete");
-            Ok(true)
+            Ok(CodeSubmitOutcome::Complete)
         }
         Err(SignInError::PasswordRequired(password_token)) => {
             state.password_token = Some(password_token);
@@ -129,7 +153,7 @@ pub async fn submit_code(
                 json!({ "phone": state.phone.clone().unwrap_or_default() }),
             )?;
             info!("2FA password required");
-            Ok(false)
+            Ok(CodeSubmitOutcome::AwaitingPassword)
         }
         Err(SignInError::InvalidCode) => {
             // Re-arm the token so the operator can retry with a fresh code
@@ -140,17 +164,23 @@ pub async fn submit_code(
                 "login_error",
                 json!({ "error": "invalid code", "phase": "sign_in" }),
             )?;
-            Ok(false)
+            Ok(CodeSubmitOutcome::Failed)
         }
         Err(err) => {
-            warn!(error = %err, "sign_in failed");
+            let error = err.to_string();
+            if is_retryable_sign_in_error_text(&error) {
+                warn!(%error, "sign_in transport failed; preserving login token for retry");
+                state.login_token = Some(token);
+                return Ok(CodeSubmitOutcome::RetryableTransportError { error });
+            }
+            warn!(error = %error, "sign_in failed");
             state.clear_tokens();
             emit_control(
                 &env.topic,
                 "login_error",
-                json!({ "error": format!("sign_in failed: {err}"), "phase": "sign_in" }),
+                json!({ "error": format!("sign_in failed: {error}"), "phase": "sign_in" }),
             )?;
-            Ok(false)
+            Ok(CodeSubmitOutcome::Failed)
         }
     }
 }
@@ -229,5 +259,35 @@ fn persist_credentials_from_state(env: &SkillEnv, state: &LoginState) {
     };
     if let Err(error) = creds.save(&env.credentials_path()) {
         warn!(error = %error, "failed to persist telegram credentials");
+    }
+}
+
+fn is_retryable_sign_in_error_text(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("read 0 bytes")
+        || lower.contains("connection reset")
+        || lower.contains("connection aborted")
+        || lower.contains("broken pipe")
+        || lower.contains("unexpected eof")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retryable_sign_in_error_text_matches_transport_disconnects() {
+        assert!(is_retryable_sign_in_error_text(
+            "request error: read error, IO failed: read 0 bytes"
+        ));
+        assert!(is_retryable_sign_in_error_text(
+            "request error: read error, IO failed: connection reset by peer"
+        ));
+    }
+
+    #[test]
+    fn retryable_sign_in_error_text_rejects_auth_errors() {
+        assert!(!is_retryable_sign_in_error_text("invalid code"));
+        assert!(!is_retryable_sign_in_error_text("PHONE_CODE_INVALID"));
     }
 }

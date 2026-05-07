@@ -8,7 +8,8 @@ use crate::router::SubscriptionRouter;
 use crate::store::SubscriptionStore;
 use anyhow::Result;
 use puffer_subscriber_runtime::{
-    EventBus, Manifest, SubscriberHandle, SubscriberSupervisor, SupervisorConfig,
+    EventBus, EventEnvelope, Manifest, SubscriberCommand, SubscriberHandle, SubscriberSupervisor,
+    SupervisorConfig,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -108,7 +109,7 @@ impl SubscriptionManager {
         }
         let bus = self.bus.clone();
         let handle = self.handle.block_on(async move {
-            SubscriberSupervisor::spawn(manifest, bus, SupervisorConfig::default())
+            SubscriberSupervisor::spawn(manifest, bus, SupervisorConfig::default()).await
         })?;
         guard.insert(id.clone(), handle);
         Ok(id)
@@ -116,11 +117,7 @@ impl SubscriptionManager {
 
     /// Sends a control command to the named subscriber. Returns an error
     /// when the subscriber is unknown or not running.
-    pub fn send_command(
-        &self,
-        subscriber_id: &str,
-        command: &puffer_subscriber_runtime::SubscriberCommand,
-    ) -> Result<()> {
+    pub fn send_command(&self, subscriber_id: &str, command: &SubscriberCommand) -> Result<()> {
         let sender = {
             let guard = self.subscribers.lock().unwrap();
             guard
@@ -131,6 +128,48 @@ impl SubscriptionManager {
         };
         self.handle
             .block_on(async move { sender.send(command).await })
+    }
+
+    /// Sends a control command and waits for the next matching event kind
+    /// on `topic`.
+    pub fn send_command_and_wait(
+        &self,
+        subscriber_id: &str,
+        topic: &str,
+        command: &SubscriberCommand,
+        terminal_kinds: &[&str],
+        timeout: std::time::Duration,
+    ) -> Result<EventEnvelope> {
+        let sender = {
+            let guard = self.subscribers.lock().unwrap();
+            guard
+                .get(subscriber_id)
+                .ok_or_else(|| anyhow::anyhow!("subscriber `{subscriber_id}` is not running"))?
+                .commands
+                .clone()
+        };
+        let mut rx = self.bus.subscribe_topic(topic);
+        let terminal_kinds: Vec<String> =
+            terminal_kinds.iter().map(|kind| kind.to_string()).collect();
+        self.handle.block_on(async move {
+            sender.send(command).await?;
+            let deadline = tokio::time::Instant::now() + timeout;
+            loop {
+                let remaining = deadline
+                    .checked_duration_since(tokio::time::Instant::now())
+                    .ok_or_else(|| anyhow::anyhow!("timed out waiting for subscriber event"))?;
+                let envelope = tokio::time::timeout(remaining, rx.recv())
+                    .await
+                    .map_err(|_| anyhow::anyhow!("timed out waiting for subscriber event"))?
+                    .ok_or_else(|| anyhow::anyhow!("subscriber event bus closed"))?;
+                if terminal_kinds
+                    .iter()
+                    .any(|kind| kind == &envelope.event.kind)
+                {
+                    return Ok(envelope);
+                }
+            }
+        })
     }
 
     /// Returns the ids of currently supervised subscribers.
@@ -153,5 +192,185 @@ impl SubscriptionManager {
         for handle in handles {
             self.handle.block_on(async move { handle.shutdown().await });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use puffer_subscriber_runtime::SubscriberCommand;
+    use serde_json::Value;
+    use tempfile::tempdir;
+
+    #[test]
+    fn start_subscriber_allows_immediate_control_command() {
+        let temp = tempdir().unwrap();
+        let subscriber_dir = temp.path().join("subscriber");
+        std::fs::create_dir_all(&subscriber_dir).unwrap();
+        std::fs::write(
+            subscriber_dir.join("manifest.toml"),
+            r#"manifest_version = 1
+id = "test-subscriber"
+kind = "subscriber"
+topic = "test-topic"
+
+[run]
+cmd = ["sh", "run.sh"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            subscriber_dir.join("run.sh"),
+            r#"IFS= read -r _line || exit 0
+printf '%s\n' '{"topic":"test-topic","kind":"message","text":"ready"}'
+"#,
+        )
+        .unwrap();
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let manager = SubscriptionManagerBuilder::new(temp.path().join("subscriptions.json"))
+            .build(runtime.handle().clone())
+            .unwrap();
+        let mut rx = manager.bus().subscribe_topic("test-topic");
+        let manifest = Manifest::load(&subscriber_dir).unwrap();
+
+        manager.start_subscriber(manifest).unwrap();
+        manager
+            .send_command(
+                "test-subscriber",
+                &SubscriberCommand::Custom {
+                    op: "ping".into(),
+                    args: Value::Null,
+                },
+            )
+            .unwrap();
+
+        let envelope = runtime
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(envelope.subscriber_id, "test-subscriber");
+        assert_eq!(envelope.event.text, "ready");
+
+        manager.shutdown();
+    }
+
+    #[test]
+    fn start_subscriber_passes_absolute_state_dir() {
+        let temp = tempdir().unwrap();
+        let subscriber_dir = temp.path().join("subscriber");
+        std::fs::create_dir_all(&subscriber_dir).unwrap();
+        std::fs::write(
+            subscriber_dir.join("manifest.toml"),
+            r#"manifest_version = 1
+id = "state-subscriber"
+kind = "subscriber"
+topic = "state-topic"
+
+[run]
+cmd = ["sh", "run.sh"]
+
+[state]
+dir = "state"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            subscriber_dir.join("run.sh"),
+            r#"printf '{"topic":"state-topic","kind":"state","text":"%s"}\n' "$PUFFER_SKILL_STATE_DIR"
+"#,
+        )
+        .unwrap();
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let manager = SubscriptionManagerBuilder::new(temp.path().join("subscriptions.json"))
+            .build(runtime.handle().clone())
+            .unwrap();
+        let mut rx = manager.bus().subscribe_topic("state-topic");
+        let original_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+        let manifest = Manifest::load("subscriber").unwrap();
+
+        manager.start_subscriber(manifest).unwrap();
+        std::env::set_current_dir(original_cwd).unwrap();
+
+        let envelope = runtime
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await
+            })
+            .unwrap()
+            .unwrap();
+        assert!(
+            std::path::Path::new(&envelope.event.text).is_absolute(),
+            "state dir should be absolute, got {}",
+            envelope.event.text
+        );
+
+        manager.shutdown();
+    }
+
+    #[test]
+    fn send_command_and_wait_returns_terminal_event() {
+        let temp = tempdir().unwrap();
+        let subscriber_dir = temp.path().join("subscriber");
+        std::fs::create_dir_all(&subscriber_dir).unwrap();
+        std::fs::write(
+            subscriber_dir.join("manifest.toml"),
+            r#"manifest_version = 1
+id = "wait-subscriber"
+kind = "subscriber"
+topic = "wait-topic"
+
+[run]
+cmd = ["sh", "run.sh"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            subscriber_dir.join("run.sh"),
+            r#"IFS= read -r _line || exit 0
+printf '%s\n' '{"topic":"wait-topic","kind":"ignored","text":"first"}'
+printf '%s\n' '{"topic":"wait-topic","kind":"login_error","text":"terminal","payload":{"error":"boom"}}'
+"#,
+        )
+        .unwrap();
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let manager = SubscriptionManagerBuilder::new(temp.path().join("subscriptions.json"))
+            .build(runtime.handle().clone())
+            .unwrap();
+        let manifest = Manifest::load(&subscriber_dir).unwrap();
+
+        manager.start_subscriber(manifest).unwrap();
+        let envelope = manager
+            .send_command_and_wait(
+                "wait-subscriber",
+                "wait-topic",
+                &SubscriberCommand::Custom {
+                    op: "ping".into(),
+                    args: Value::Null,
+                },
+                &["login_awaiting_code", "login_error"],
+                std::time::Duration::from_secs(2),
+            )
+            .unwrap();
+        assert_eq!(envelope.event.kind, "login_error");
+        assert_eq!(envelope.event.payload["error"], "boom");
+
+        manager.shutdown();
     }
 }

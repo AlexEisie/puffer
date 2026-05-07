@@ -3,6 +3,7 @@ target/
 .worktree/
 .worktrees/
 .puffer/
+resources/subscribers/*/state/
 # Generated Terminal Bench harness artifacts.
 benchmark/.venv-harbor/
 benchmark/harbor-cache/

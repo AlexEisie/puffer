@@ -29,10 +29,7 @@ pub enum SubscriberCommand {
     /// on failure.
     ///
     /// `api_id` and `api_hash` are optional. When omitted the subscriber
-    /// uses Telegram Desktop's published credentials, which means the
-    /// user does not need to register an application at my.telegram.org
-    /// for typical usage. Supply your own only if you've hit a
-    /// `FLOOD_WAIT` from sharing the default credentials.
+    /// uses a hardcoded public Telegram client credential pair.
     TelegramLoginStart {
         /// E.164 phone number including the leading '+'.
         phone: String,
