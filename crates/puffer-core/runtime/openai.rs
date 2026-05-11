@@ -146,9 +146,10 @@ where
     F: FnMut(TurnStreamEvent),
 {
     use self::conversation::{
-        append_reasoning_items, append_tool_results, compact_conversation,
-        inject_post_compact_context, insert_managed_system_prompt_1, items_to_responses_input,
-        managed_system_prompt_1_from_env, transcript_to_items, ConversationItem,
+        append_managed_system_prompt_1_to_instructions, append_reasoning_items,
+        append_tool_results, compact_conversation, inject_post_compact_context,
+        items_to_responses_input, managed_system_prompt_1_from_env, transcript_to_items,
+        ConversationItem,
     };
 
     let structured_output = options.structured_output;
@@ -170,7 +171,7 @@ where
         use_native,
         Some(&permission_context),
     )?;
-    let instructions = if options.lightweight_context {
+    let mut instructions = if options.lightweight_context {
         "Reply directly and concisely.".to_string()
     } else {
         let system_prompt = render_runtime_system_prompt(
@@ -191,7 +192,10 @@ where
     } else {
         managed_system_prompt_1_from_env()
     };
-    insert_managed_system_prompt_1(&mut items, managed_system_prompt_1.as_deref());
+    append_managed_system_prompt_1_to_instructions(
+        &mut instructions,
+        managed_system_prompt_1.as_deref(),
+    );
     let mut reflection = options
         .reflection
         .map(|config| super::reflection::ReflectionTracker::new(input, config));

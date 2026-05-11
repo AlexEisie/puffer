@@ -485,6 +485,18 @@ pub(crate) fn managed_system_prompt_1_from_env() -> Option<String> {
         .filter(|prompt| !prompt.is_empty())
 }
 
+pub(crate) fn append_managed_system_prompt_1_to_instructions(
+    instructions: &mut String,
+    prompt: Option<&str>,
+) {
+    if let Some(prompt) = prompt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
+        if !instructions.trim().is_empty() {
+            instructions.push_str("\n\n");
+        }
+        instructions.push_str(prompt);
+    }
+}
+
 pub(crate) fn insert_managed_system_prompt_1(
     items: &mut Vec<ConversationItem>,
     prompt: Option<&str>,
@@ -566,15 +578,18 @@ fn item_to_responses_value(item: &ConversationItem) -> Value {
             let text = content_parts_to_text(content);
             let content_block = if role == "assistant" {
                 json!([{"type": "output_text", "text": text, "annotations": []}])
-            } else if role == "system" {
-                json!(text)
             } else {
                 json!([{"type": "input_text", "text": text}])
+            };
+            let wire_role = if role == "system" {
+                "user"
+            } else {
+                role.as_str()
             };
 
             let mut val = json!({
                 "type": "message",
-                "role": role,
+                "role": wire_role,
                 "content": content_block,
             });
             if role == "assistant" {
@@ -1443,12 +1458,10 @@ mod tests {
         assert_eq!(msgs[3].role, "user");
     }
 
-    /// First-position exemption: a `system_message` at the head of the
-    /// items list represents legitimate model-facing system content
-    /// (e.g. a sub-agent identity prompt pushed by `agents.rs:321`
-    /// after `nested_state.transcript.clear()`). It must NOT be dropped.
+    /// Responses rejects `role:"system"` entries in `input`; legacy leading
+    /// system transcript items are preserved as user-role context instead.
     #[test]
-    fn responses_input_preserves_leading_system_message() {
+    fn responses_input_converts_leading_system_message_to_user_context() {
         let items = vec![
             ConversationItem::system_message("You are the bug-bounty subagent."),
             ConversationItem::user_message("audit this"),
@@ -1456,8 +1469,12 @@ mod tests {
         let value = items_to_responses_input(&items);
         let arr = value.as_array().unwrap();
         assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0]["role"], "system");
-        assert_eq!(arr[0]["content"], "You are the bug-bounty subagent.");
+        assert_eq!(arr[0]["role"], "user");
+        assert_eq!(arr[0]["content"][0]["type"], "input_text");
+        assert_eq!(
+            arr[0]["content"][0]["text"],
+            "You are the bug-bounty subagent."
+        );
         assert_eq!(arr[1]["role"], "user");
     }
 
@@ -1508,11 +1525,12 @@ mod tests {
         let identity_count = arr
             .iter()
             .filter(|m| {
-                m["role"] == "system"
-                    && m["content"]
-                        .as_str()
-                        .map(|s| s.contains("bug-bounty subagent"))
-                        .unwrap_or(false)
+                m["content"]
+                    .get(0)
+                    .and_then(|part| part.get("text"))
+                    .and_then(|text| text.as_str())
+                    .map(|text| text.contains("bug-bounty subagent"))
+                    .unwrap_or(false)
             })
             .count();
         assert_eq!(
@@ -1520,9 +1538,13 @@ mod tests {
             "sub-agent identity prompt must survive the runtime context-reminder prepend: {arr:?}"
         );
         // And the reminder itself must still be present, immediately after
-        // the system identity.
-        assert_eq!(arr[0]["role"], "system");
+        // the legacy identity context.
+        assert_eq!(arr[0]["role"], "user");
         assert_eq!(arr[1]["role"], "user");
+        assert!(
+            !arr.iter().any(|m| m["role"] == "system"),
+            "Responses input must not include system roles: {arr:?}"
+        );
         assert!(
             arr[1]["content"][0]["text"]
                 .as_str()
@@ -1532,9 +1554,8 @@ mod tests {
         );
     }
 
-    /// Mirror of `responses_input_preserves_leading_system_message` for the
-    /// Chat Completions boundary — confirms the first-position exemption
-    /// holds on both paths.
+    /// Chat Completions still accepts leading system messages, so keep that
+    /// boundary unchanged.
     #[test]
     fn chat_messages_preserves_leading_system_message() {
         let items = vec![
@@ -1577,24 +1598,14 @@ mod tests {
     }
 
     #[test]
-    fn managed_system_prompt_1_is_leading_responses_system_item() {
-        let mut items = vec![ConversationItem::user_message("audit this")];
-        insert_managed_system_prompt_1(&mut items, Some("managed system prompt"));
-        insert_context_reminder_preserving_legacy_leading_system(
-            &mut items,
-            "[context: cwd=/foo, ts=...]",
+    fn managed_system_prompt_1_appends_to_responses_instructions() {
+        let mut instructions = "base system prompt".to_string();
+        append_managed_system_prompt_1_to_instructions(
+            &mut instructions,
+            Some("managed system prompt"),
         );
 
-        let value = items_to_responses_input(&items);
-        let arr = value.as_array().unwrap();
-        assert_eq!(arr[0]["role"], "system");
-        assert_eq!(arr[0]["content"], "managed system prompt");
-        assert_eq!(arr[1]["role"], "user");
-        assert!(arr[1]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("context"));
-        assert_eq!(arr[2]["role"], "user");
+        assert_eq!(instructions, "base system prompt\n\nmanaged system prompt");
     }
 
     /// Mid-conversation transient system items get dropped even when a

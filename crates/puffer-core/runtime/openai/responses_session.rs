@@ -23,8 +23,8 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 use super::conversation::{
-    append_reasoning_items, generate_openai_summary,
-    insert_context_reminder_preserving_legacy_leading_system, insert_managed_system_prompt_1,
+    append_managed_system_prompt_1_to_instructions, append_reasoning_items,
+    generate_openai_summary, insert_context_reminder_preserving_legacy_leading_system,
     items_to_responses_input, managed_system_prompt_1_from_env, ConversationItem,
 };
 use super::support::{
@@ -55,7 +55,6 @@ use crate::AppState;
 pub(super) struct OpenAIResponsesTurnSession {
     pub execution: OpenAIExecutionConfig,
     pub instructions: String,
-    pub managed_system_prompt_1: Option<String>,
     pub lightweight_context: bool,
     pub tools: Vec<OpenAIResponsesTool>,
     pub text: Option<OpenAIResponsesTextConfig>,
@@ -380,7 +379,6 @@ impl TurnSession for OpenAIResponsesTurnSession {
         // the front so every Responses request includes it. Static
         // instructions stay in `instructions` — only this dynamic part
         // belongs in `input`.
-        insert_managed_system_prompt_1(items, self.managed_system_prompt_1.as_deref());
         let context_reminder = super::build_context_reminder_message();
         insert_context_reminder_preserving_legacy_leading_system(items, &context_reminder);
     }
@@ -431,13 +429,22 @@ pub(super) fn setup_responses_session(
         .map(|tool| tool.name.clone())
         .filter(|name| !name.is_empty())
         .collect::<std::collections::BTreeSet<_>>();
-    let instructions = if options.lightweight_context {
+    let mut instructions = if options.lightweight_context {
         "Reply directly and concisely.".to_string()
     } else {
         let system_prompt =
             render_runtime_system_prompt(state, resources, &model_id, &enabled_tool_names)?;
         super::openai_request_instructions(state, resources, Some(&system_prompt))?
     };
+    let managed_system_prompt_1 = if options.lightweight_context {
+        None
+    } else {
+        managed_system_prompt_1_from_env()
+    };
+    append_managed_system_prompt_1_to_instructions(
+        &mut instructions,
+        managed_system_prompt_1.as_deref(),
+    );
     let model = provider.models.iter().find(|m| m.id == model_id);
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
     let supports_response_threading =
@@ -446,11 +453,6 @@ pub(super) fn setup_responses_session(
     Ok(OpenAIResponsesTurnSession {
         execution,
         instructions,
-        managed_system_prompt_1: if options.lightweight_context {
-            None
-        } else {
-            managed_system_prompt_1_from_env()
-        },
         lightweight_context: options.lightweight_context,
         tools,
         text,
