@@ -11,6 +11,7 @@ use super::selection::parse_copy_selection_response;
 use super::upload::parse_upload_handle_response;
 use super::upload::upload_input_handle_expression;
 use super::*;
+use crate::daemon_browser::tabs::BrowserCurrentTabStatus;
 
 #[test]
 fn normalizes_empty_and_full_urls() {
@@ -169,6 +170,112 @@ fn cleanup_root_metadata_drops_tab_set_on_root_close() {
 
     assert!(tabs.lock().unwrap().list("root-session").tabs.is_empty());
     assert!(agent_refs.lock().unwrap().is_empty());
+}
+
+#[test]
+fn current_tab_context_reports_no_active_tab() {
+    let registry = BrowserTabRegistry::default();
+    let context = registry
+        .active_tab("root-session")
+        .map(|tab| BrowserCurrentTabContext::from_tab(&tab))
+        .unwrap_or_else(BrowserCurrentTabContext::no_active_tab);
+
+    assert_eq!(context.status, BrowserCurrentTabStatus::NoActiveTab);
+    assert_eq!(context.tab_id, None);
+    assert_eq!(context.url, None);
+    assert_eq!(context.origin, None);
+    assert_eq!(context.host, None);
+    assert_eq!(context.port, None);
+    assert_eq!(context.title, None);
+}
+
+#[test]
+fn current_tab_context_reports_empty_url() {
+    let mut registry = BrowserTabRegistry::default();
+    let tab = registry.open_tab(
+        "root-session",
+        Some("t1".to_string()),
+        None,
+        "root-session:browser:t1".to_string(),
+        BrowserState {
+            url: String::new(),
+            title: "Blank".to_string(),
+            loading: false,
+            width: 960,
+            height: 720,
+        },
+        true,
+    );
+
+    let context = BrowserCurrentTabContext::from_tab(&tab);
+    assert_eq!(context.status, BrowserCurrentTabStatus::EmptyUrl);
+    assert_eq!(context.tab_id.as_deref(), Some("t1"));
+    assert_eq!(context.url.as_deref(), Some(""));
+    assert_eq!(context.origin, None);
+    assert_eq!(context.host, None);
+    assert_eq!(context.port, None);
+    assert_eq!(context.title.as_deref(), Some("Blank"));
+}
+
+#[test]
+fn current_tab_context_reports_about_blank() {
+    let mut registry = BrowserTabRegistry::default();
+    let tab = registry.open_tab(
+        "root-session",
+        Some("t1".to_string()),
+        None,
+        "root-session:browser:t1".to_string(),
+        BrowserState {
+            url: "about:blank".to_string(),
+            title: String::new(),
+            loading: false,
+            width: 960,
+            height: 720,
+        },
+        true,
+    );
+
+    let context = BrowserCurrentTabContext::from_tab(&tab);
+    assert_eq!(context.status, BrowserCurrentTabStatus::AboutBlank);
+    assert_eq!(context.tab_id.as_deref(), Some("t1"));
+    assert_eq!(context.url.as_deref(), Some("about:blank"));
+    assert_eq!(context.origin, None);
+    assert_eq!(context.host, None);
+    assert_eq!(context.port, None);
+}
+
+#[test]
+fn current_tab_context_extracts_origin_host_port_and_title() {
+    let mut registry = BrowserTabRegistry::default();
+    let tab = registry.open_tab(
+        "root-session",
+        Some("t1".to_string()),
+        None,
+        "root-session:browser:t1".to_string(),
+        BrowserState {
+            url: "https://docs.example.com:8443/path?q=1".to_string(),
+            title: "Docs".to_string(),
+            loading: false,
+            width: 960,
+            height: 720,
+        },
+        true,
+    );
+
+    let context = BrowserCurrentTabContext::from_tab(&tab);
+    assert_eq!(context.status, BrowserCurrentTabStatus::Available);
+    assert_eq!(context.tab_id.as_deref(), Some("t1"));
+    assert_eq!(
+        context.url.as_deref(),
+        Some("https://docs.example.com:8443/path?q=1")
+    );
+    assert_eq!(
+        context.origin.as_deref(),
+        Some("https://docs.example.com:8443")
+    );
+    assert_eq!(context.host.as_deref(), Some("docs.example.com"));
+    assert_eq!(context.port, Some(8443));
+    assert_eq!(context.title.as_deref(), Some("Docs"));
 }
 
 #[test]

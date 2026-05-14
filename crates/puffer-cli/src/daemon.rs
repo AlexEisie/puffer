@@ -36,8 +36,9 @@ use puffer_config::{
 };
 use puffer_core::{
     apply_model_preferences, execute_user_turn_streaming_with_permissions_and_cancel,
-    with_user_question_prompt_handler, AppState, CancelToken, MessageRole, PermissionPromptAction,
-    PermissionPromptRequest, TurnStreamEvent, UserQuestionPromptRequest,
+    with_user_question_prompt_handler, AppState, BrowserPermissionPromptActionSet,
+    BrowserPermissionPromptSource, BrowserPermissionPromptTargetClass, CancelToken, MessageRole,
+    PermissionPromptAction, PermissionPromptRequest, TurnStreamEvent, UserQuestionPromptRequest,
     UserQuestionPromptResponse,
 };
 use puffer_provider_openai::{
@@ -714,6 +715,9 @@ async fn dispatch_request(
         "browser_recording" => respond!(detached!(|s, p| {
             crate::daemon_browser::handle_browser_recording(&s, &p)
         })),
+        "browser_current_tab" => respond!(detached!(|s, p| {
+            crate::daemon_browser::handle_browser_current_tab(&s, &p)
+        })),
         "browser_agent" => respond!(detached!(|s, p| {
             crate::daemon_browser::handle_browser_agent(&s, &p)
         })),
@@ -1316,13 +1320,33 @@ fn handle_list_provider_models(state: &DaemonState, params: &Value) -> Result<Va
     Ok(json!({ "providerId": provider_id, "models": models }))
 }
 
-/// Workspace permissions are stored as a TOML map of `tool_id → policy`
-/// (e.g. `bash = "ask"`). We read the file directly so we don't have to
-/// plumb the `pub(crate)` type through puffer-core.
+/// Workspace permissions live in `permissions.toml` with `[tools]` and
+/// `[browser]` sections. The daemon only edits `[tools]`, but it preserves
+/// the Browser section on round-trip.
+#[derive(serde::Deserialize, serde::Serialize, Default)]
+struct BrowserPolicyFileDto {
+    #[serde(default)]
+    deny_target_classes: Vec<String>,
+    #[serde(default)]
+    deny_origins: Vec<String>,
+    #[serde(default)]
+    deny_domains: Vec<String>,
+    #[serde(default)]
+    deny_evaluate_target_classes: Vec<String>,
+    #[serde(default)]
+    allow_target_classes: Vec<String>,
+    #[serde(default)]
+    allow_origins: Vec<String>,
+    #[serde(default)]
+    allow_domains: Vec<String>,
+}
+
 #[derive(serde::Deserialize, serde::Serialize, Default)]
 struct PermissionsFileDto {
     #[serde(default)]
     tools: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    browser: BrowserPolicyFileDto,
 }
 
 fn permissions_file_path(state: &DaemonState) -> std::path::PathBuf {
@@ -1338,9 +1362,14 @@ fn handle_list_permissions(state: &DaemonState) -> Result<Value> {
     } else {
         PermissionsFileDto::default()
     };
+    let tools = loaded
+        .tools
+        .into_iter()
+        .filter(|(tool, _)| !puffer_core::is_browser_tool_selector(tool))
+        .collect::<std::collections::BTreeMap<_, _>>();
     Ok(json!({
         "path": path.display().to_string(),
-        "tools": loaded.tools,
+        "tools": tools,
     }))
 }
 
@@ -1356,14 +1385,29 @@ fn handle_save_permissions(state: &DaemonState, params: &Value) -> Result<Value>
         if t.is_empty() {
             continue;
         }
+        if puffer_core::is_browser_tool_selector(&t) {
+            continue;
+        }
         let p = policy.trim().to_ascii_lowercase();
         if !matches!(p.as_str(), "allow" | "ask" | "deny" | "disabled") {
             anyhow::bail!("invalid policy `{policy}` for `{t}` — expected allow|ask|deny|disabled");
         }
         normalized.insert(t, p);
     }
-    let dto = PermissionsFileDto { tools: normalized };
     let path = permissions_file_path(state);
+    let browser = if path.exists() {
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        toml::from_str::<PermissionsFileDto>(&text)
+            .with_context(|| format!("parse {}", path.display()))?
+            .browser
+    } else {
+        BrowserPolicyFileDto::default()
+    };
+    let dto = PermissionsFileDto {
+        tools: normalized,
+        browser,
+    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -1830,17 +1874,7 @@ fn handle_resolve_permission(state: &DaemonState, params: &Value) -> Result<Valu
         .or_else(|| params.get("request_id"))
         .and_then(|v| v.as_str())
         .context("missing requestId")?;
-    let action_str = params
-        .get("action")
-        .and_then(|v| v.as_str())
-        .context("missing action")?;
-    let action = match action_str {
-        "allow_once" => PermissionPromptAction::AllowOnce,
-        "allow_session" => PermissionPromptAction::AllowSession,
-        "allow_all_session" => PermissionPromptAction::AllowAllSession,
-        "deny" => PermissionPromptAction::Deny,
-        other => anyhow::bail!("unknown action `{other}`"),
-    };
+    let action = parse_permission_action(params)?;
     let responder = {
         let mut turns = state.turns.lock().unwrap();
         turns
@@ -1853,6 +1887,48 @@ fn handle_resolve_permission(state: &DaemonState, params: &Value) -> Result<Valu
         .send(action)
         .map_err(|_| anyhow::anyhow!("worker already released the permission channel"))?;
     Ok(json!({"ok": true}))
+}
+
+fn parse_permission_action(params: &Value) -> Result<PermissionPromptAction> {
+    let action_str = params
+        .get("action")
+        .and_then(|v| v.as_str())
+        .context("missing action")?;
+    Ok(match action_str {
+        "allow_once" => PermissionPromptAction::AllowOnce,
+        "allow_session" => PermissionPromptAction::AllowSession,
+        "allow_all_session" => PermissionPromptAction::AllowAllSession,
+        "deny" => PermissionPromptAction::Deny,
+        other => anyhow::bail!("unknown action `{other}`"),
+    })
+}
+
+fn browser_permission_payload_json(payload: &puffer_core::BrowserPermissionPromptPayload) -> Value {
+    json!({
+        "source": match payload.source {
+            BrowserPermissionPromptSource::BrowserTool => "browser_tool",
+            BrowserPermissionPromptSource::BrowserCliViaShell => "browser_cli_via_shell",
+        },
+        "actionSet": match payload.action_set {
+            BrowserPermissionPromptActionSet::Inspect => "inspect",
+            BrowserPermissionPromptActionSet::Navigate => "navigate",
+            BrowserPermissionPromptActionSet::Interact => "interact",
+            BrowserPermissionPromptActionSet::Evaluate => "evaluate",
+        },
+        "url": payload.url,
+        "origin": payload.origin,
+        "host": payload.host,
+        "targetClass": match payload.target_class {
+            BrowserPermissionPromptTargetClass::LocalDev => "local_dev",
+            BrowserPermissionPromptTargetClass::WorkspaceFile => "workspace_file",
+            BrowserPermissionPromptTargetClass::NonWorkspaceFile => "non_workspace_file",
+            BrowserPermissionPromptTargetClass::DataUrl => "data_url",
+            BrowserPermissionPromptTargetClass::OpenWeb => "open_web",
+            BrowserPermissionPromptTargetClass::Unknown => "unknown",
+        },
+        "tabId": payload.tab_id,
+        "isCrossSession": payload.is_cross_session,
+    })
 }
 
 fn handle_resolve_user_question(state: &DaemonState, params: &Value) -> Result<Value> {
@@ -2191,6 +2267,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                     "toolId": req.tool_id,
                     "summary": req.summary,
                     "reason": req.reason,
+                    "browser": req.browser.as_ref().map(browser_permission_payload_json),
                 }),
             });
 
@@ -2353,7 +2430,9 @@ fn apply_daemon_yolo_mode(app_state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_daemon_yolo_mode, apply_turn_model_override, handle_create_session, DaemonState,
+        apply_daemon_yolo_mode, apply_turn_model_override, handle_create_session,
+        browser_permission_payload_json, handle_list_permissions, handle_save_permissions,
+        DaemonState,
     };
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
@@ -2469,6 +2548,72 @@ mod tests {
 
         assert_eq!(state.sandbox_mode, "danger-full-access");
         assert!(state.session_permission_state().allow_all_tools());
+    }
+
+    #[test]
+    fn desktop_generic_permissions_preserve_browser_section() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        std::fs::write(
+            paths.workspace_config_dir.join("permissions.toml"),
+            "[tools]\nbrowser = \"allow\"\nbash = \"ask\"\n\n[browser]\ndeny_domains = [\"example.com\"]\n",
+        )
+        .expect("write permissions");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let listed = handle_list_permissions(&state).expect("list permissions");
+        assert_eq!(listed["tools"]["bash"], "ask");
+        assert!(listed["tools"].get("browser").is_none());
+
+        let saved = handle_save_permissions(
+            &state,
+            &json!({
+                "tools": {
+                    "browser": "deny",
+                    "bash": "allow"
+                }
+            }),
+        )
+        .expect("save permissions");
+        assert_eq!(saved["tools"]["bash"], "allow");
+        assert!(saved["tools"].get("browser").is_none());
+        let stored: toml::Value = toml::from_str(
+            &std::fs::read_to_string(state.paths.workspace_config_dir.join("permissions.toml"))
+                .expect("read saved permissions"),
+        )
+        .expect("parse saved permissions");
+        assert_eq!(
+            stored["browser"]["deny_domains"][0].as_str(),
+            Some("example.com")
+        );
+    }
+
+    #[test]
+    fn browser_permission_payload_json_exposes_context_only() {
+        let payload = browser_permission_payload_json(&puffer_core::BrowserPermissionPromptPayload {
+            source: puffer_core::BrowserPermissionPromptSource::BrowserTool,
+            action_set: puffer_core::BrowserPermissionPromptActionSet::Navigate,
+            url: Some("https://docs.example.com/a".to_string()),
+            origin: Some("https://docs.example.com".to_string()),
+            host: Some("docs.example.com".to_string()),
+            target_class: puffer_core::BrowserPermissionPromptTargetClass::OpenWeb,
+            tab_id: Some("tab-1".to_string()),
+            is_cross_session: false,
+        });
+
+        assert_eq!(payload["source"], "browser_tool");
+        assert_eq!(payload["actionSet"], "navigate");
+        assert_eq!(payload["host"], "docs.example.com");
+        assert!(payload.get("availableScopes").is_none());
+        assert!(payload.get("suggestedScope").is_none());
     }
 
     fn provider(id: &str, models: &[&str]) -> ProviderDescriptor {

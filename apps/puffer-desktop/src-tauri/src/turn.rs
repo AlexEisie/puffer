@@ -18,8 +18,10 @@ use indexmap::IndexMap;
 use puffer_config::{ensure_workspace_dirs, load_config, ConfigPaths};
 use puffer_core::{
     execute_user_turn_streaming_with_permissions, with_user_question_prompt_handler, AppState,
-    MessageRole, PermissionPromptAction, PermissionPromptRequest, TurnStreamEvent,
-    UserQuestionPromptRequest, UserQuestionPromptResponse,
+    BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
+    BrowserPermissionPromptTargetClass, MessageRole, PermissionPromptAction,
+    PermissionPromptRequest, TurnStreamEvent, UserQuestionPromptRequest,
+    UserQuestionPromptResponse,
 };
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::load_resources;
@@ -116,6 +118,7 @@ enum EmittedEvent {
         tool_id: String,
         summary: String,
         reason: Option<String>,
+        browser: Option<serde_json::Value>,
     },
     #[serde(rename_all = "camelCase")]
     UserQuestionRequest {
@@ -428,6 +431,7 @@ fn drive_turn(
                 tool_id: request.tool_id,
                 summary: request.summary,
                 reason: request.reason,
+                browser: request.browser.as_ref().map(browser_permission_payload_json),
             },
         );
 
@@ -511,6 +515,34 @@ fn drive_turn(
     }
 
     Ok(outcome.assistant_text)
+}
+
+fn browser_permission_payload_json(payload: &puffer_core::BrowserPermissionPromptPayload) -> serde_json::Value {
+    json!({
+        "source": match payload.source {
+            BrowserPermissionPromptSource::BrowserTool => "browser_tool",
+            BrowserPermissionPromptSource::BrowserCliViaShell => "browser_cli_via_shell",
+        },
+        "actionSet": match payload.action_set {
+            BrowserPermissionPromptActionSet::Inspect => "inspect",
+            BrowserPermissionPromptActionSet::Navigate => "navigate",
+            BrowserPermissionPromptActionSet::Interact => "interact",
+            BrowserPermissionPromptActionSet::Evaluate => "evaluate",
+        },
+        "url": payload.url,
+        "origin": payload.origin,
+        "host": payload.host,
+        "targetClass": match payload.target_class {
+            BrowserPermissionPromptTargetClass::LocalDev => "local_dev",
+            BrowserPermissionPromptTargetClass::WorkspaceFile => "workspace_file",
+            BrowserPermissionPromptTargetClass::NonWorkspaceFile => "non_workspace_file",
+            BrowserPermissionPromptTargetClass::DataUrl => "data_url",
+            BrowserPermissionPromptTargetClass::OpenWeb => "open_web",
+            BrowserPermissionPromptTargetClass::Unknown => "unknown",
+        },
+        "tabId": payload.tab_id,
+        "isCrossSession": payload.is_cross_session,
+    })
 }
 
 /// Loads everything the runtime needs, mirroring the setup path in

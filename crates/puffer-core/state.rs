@@ -1,3 +1,5 @@
+use crate::permissions::browser_action::browser_permission_value_for_tool_call;
+use crate::permissions::browser_grants::BrowserGrantScopeKind;
 use crate::permissions::SessionPermissionState;
 use crate::runner_adapter::LocalToolRunner;
 use crate::runtime::ReflectionConfig;
@@ -67,6 +69,12 @@ pub struct TaskRecord {
 pub(crate) struct ClaudeReadState {
     pub(crate) timestamp_ms: u128,
     pub(crate) is_partial_view: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct BrowserUrlCacheKey {
+    root_session_id: String,
+    tab_id: Option<String>,
 }
 
 /// Status of a session goal. Mirrors the four-state machine codex
@@ -208,6 +216,7 @@ pub struct AppState {
     /// Canonical in-memory session permission state used for current-turn
     /// evaluation and worker/UI round-trips.
     pub(crate) session_permission_state: SessionPermissionState,
+    browser_url_cache: HashMap<BrowserUrlCacheKey, String>,
     pub(crate) native_structured_output_unsupported: HashSet<String>,
     pub(crate) status_line_signature: Option<String>,
     pending_query_prompt: Option<String>,
@@ -284,6 +293,7 @@ impl AppState {
             resource_reload_signal: Arc::new(AtomicBool::new(false)),
             claude_read_state: HashMap::new(),
             session_permission_state: SessionPermissionState::default(),
+            browser_url_cache: HashMap::new(),
             native_structured_output_unsupported: HashSet::new(),
             status_line_signature: None,
             pending_query_prompt: None,
@@ -329,9 +339,10 @@ impl AppState {
     ///
     /// Session-store replay currently restores transcript content plus the
     /// persisted UI/runtime snapshot fields carried by
-    /// [`TranscriptEvent::StateSnapshot`]. It does not restore
-    /// `session_permission_state`, because session permission state is not yet
-    /// part of the durable snapshot schema.
+    /// [`TranscriptEvent::StateSnapshot`]. It restores the legacy-compatible
+    /// subset of session permission state from `session_allow_all` plus
+    /// `session_tool_permissions`, but typed-only narrow grants still remain
+    /// outside the durable snapshot schema.
     pub fn from_session_record(config: PufferConfig, session: SessionRecord) -> Self {
         let cwd = session.metadata.cwd.clone();
         let mut state = Self::new(config, cwd, session.metadata);
@@ -566,9 +577,8 @@ impl AppState {
     /// allow-all plus whole-tool approvals. Narrower typed grants such as
     /// Browser action categories still remain in-memory only.
     pub fn snapshot_event(&self) -> TranscriptEvent {
-        let (session_allow_all, session_tool_permissions) = self
-            .session_permission_state
-            .legacy_snapshot_projection();
+        let (session_allow_all, session_tool_permissions) =
+            self.session_permission_state.legacy_snapshot_projection();
         TranscriptEvent::StateSnapshot {
             current_model: self.current_model.clone(),
             current_provider: self.current_provider.clone(),
@@ -643,6 +653,53 @@ impl AppState {
             input,
             &self.session.id,
         );
+    }
+
+    /// Grants Browser session-scoped permission for one tool call using the supplied Browser scope.
+    pub(crate) fn allow_browser_permission_for_tool_call(
+        &mut self,
+        definition: &puffer_tools::ToolDefinition,
+        input: &serde_json::Value,
+        scope: BrowserGrantScopeKind,
+    ) {
+        if browser_permission_value_for_tool_call(&definition.id, input).is_none() {
+            self.allow_permission_for_tool_call(definition, input);
+            return;
+        }
+        self.session_permission_state
+            .grants_mut()
+            .grant_browser_tool_call(definition, input, &self.session.id, scope);
+    }
+
+    /// Stores the last resolved non-blank Browser URL for one root session and optional tab.
+    pub(crate) fn remember_browser_url(
+        &mut self,
+        root_session_id: &str,
+        tab_id: Option<&str>,
+        url: &str,
+    ) {
+        let trimmed = url.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("about:blank") {
+            return;
+        }
+        let key = BrowserUrlCacheKey {
+            root_session_id: root_session_id.to_string(),
+            tab_id: tab_id.map(ToString::to_string),
+        };
+        self.browser_url_cache.insert(key, trimmed.to_string());
+    }
+
+    /// Returns the last resolved non-blank Browser URL for one root session and optional tab.
+    pub(crate) fn remembered_browser_url(
+        &self,
+        root_session_id: &str,
+        tab_id: Option<&str>,
+    ) -> Option<&str> {
+        let key = BrowserUrlCacheKey {
+            root_session_id: root_session_id.to_string(),
+            tab_id: tab_id.map(ToString::to_string),
+        };
+        self.browser_url_cache.get(&key).map(String::as_str)
     }
 
     /// Returns the canonical typed session permission state.
@@ -817,7 +874,11 @@ mod tests {
             "script": "document.title"
         });
 
-        state.allow_permission_for_tool_call(&browser, &input);
+        state.allow_browser_permission_for_tool_call(
+            &browser,
+            &input,
+            BrowserGrantScopeKind::AllowOnce,
+        );
 
         assert!(state.session_permission_state().has_browser_grant());
     }
@@ -845,12 +906,13 @@ mod tests {
             display: puffer_tools::ToolDisplayHints::default(),
         };
         state.allow_tool_for_session("Bash");
-        state.allow_permission_for_tool_call(
+        state.allow_browser_permission_for_tool_call(
             &browser,
             &serde_json::json!({
                 "action": "evaluate",
                 "script": "document.title"
             }),
+            BrowserGrantScopeKind::AllowOnce,
         );
         state.grant_all_tools_for_session();
 
@@ -868,10 +930,7 @@ mod tests {
             restored.session_permission_state(),
             &SessionPermissionState::from_legacy_snapshot_projection(
                 true,
-                &std::collections::HashMap::from([(
-                    "bash".to_string(),
-                    "allow".to_string()
-                )])
+                &std::collections::HashMap::from([("bash".to_string(), "allow".to_string())])
             )
         );
         assert!(!restored.session_permission_state().has_browser_grant());

@@ -1,4 +1,6 @@
 use super::*;
+use crate::permissions::browser_policy::BrowserPolicySettings;
+use crate::permissions::browser_target::browser_permission_context_for_tool;
 
 #[test]
 fn browser_and_bridge_session_grants_feed_profile_categories() {
@@ -8,6 +10,7 @@ fn browser_and_bridge_session_grants_feed_profile_categories() {
         &tool_definition("Browser", "on-request"),
         &serde_json::json!({
             "action": "evaluate",
+            "url": "https://docs.example.com/page",
             "sessionId": "b4f239fd-1493-4be7-a3a1-9e58fe612576",
             "script": "1+1"
         }),
@@ -50,13 +53,17 @@ fn browser_and_bridge_session_grants_feed_profile_categories() {
     );
     assert!(profile.grants.category_grants.iter().any(|grant| matches!(
         grant,
-        PermissionGrantCategory::Browser(BrowserGrantCategory::Action(
-            BrowserActionCategory::Evaluate
-        ))
+        PermissionGrantCategory::Browser(BrowserGrantCategory::AllowActionOnOriginSession {
+            action: BrowserActionCategory::Evaluate,
+            target_origin,
+            ..
+        }) if target_origin == "https://docs.example.com"
     )));
     assert!(profile.grants.category_grants.iter().any(|grant| matches!(
         grant,
-        PermissionGrantCategory::Browser(BrowserGrantCategory::CrossSessionAccess)
+        PermissionGrantCategory::Browser(BrowserGrantCategory::CrossSessionAccess {
+            root_session_id
+        }) if root_session_id == "b4f239fd-1493-4be7-a3a1-9e58fe612576"
     )));
     assert!(profile.grants.category_grants.iter().any(|grant| matches!(
         grant,
@@ -67,7 +74,32 @@ fn browser_and_bridge_session_grants_feed_profile_categories() {
 }
 
 #[test]
-fn coarse_workspace_browser_override_is_still_supported_as_input() {
+fn browser_context_defaults_to_current_session_and_inspect() {
+    let context = runtime_context(
+        PermissionsSettings::default(),
+        SandboxSettings::from_mode("workspace-write"),
+        false,
+        None,
+        PathBuf::from("/tmp"),
+        Vec::new(),
+        SessionPermissionState::default(),
+    );
+
+    let browser_context = context
+        .effective_profile()
+        .browser_context(&serde_json::json!({"action":"snapshot"}));
+
+    assert_eq!(browser_context.action, Some(BrowserActionCategory::Inspect));
+    assert_eq!(
+        browser_context.root_session_id,
+        "2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a".to_string()
+    );
+    assert!(!browser_context.is_cross_session);
+    assert!(browser_context.target.is_none());
+}
+
+#[test]
+fn generic_browser_permission_entries_do_not_affect_browser_decisions() {
     let context = runtime_context(
         PermissionsSettings {
             tools: BTreeMap::from([("browser".to_string(), "allow".to_string())]),
@@ -84,15 +116,20 @@ fn coarse_workspace_browser_override_is_still_supported_as_input() {
         &tool_definition("Browser", "auto"),
         &serde_json::json!({
             "action":"evaluate",
+            "url":"https://docs.example.com/page",
             "script":"document.title"
         }),
     );
 
-    assert_eq!(decision.behavior, ToolPermissionBehavior::Allow);
+    assert_eq!(decision.behavior, ToolPermissionBehavior::Ask);
+    assert!(decision
+        .reason
+        .unwrap_or_default()
+        .contains("executes page JavaScript"));
 }
 
 #[test]
-fn browser_scope_defaults_to_current_session_and_inspect() {
+fn browser_target_classifies_local_dev_url() {
     let context = runtime_context(
         PermissionsSettings::default(),
         SandboxSettings::from_mode("workspace-write"),
@@ -103,20 +140,223 @@ fn browser_scope_defaults_to_current_session_and_inspect() {
         SessionPermissionState::default(),
     );
 
-    let scope = context
+    let browser_context = context
         .effective_profile()
-        .browser_scope(&serde_json::json!({"action":"snapshot"}));
+        .browser_context(&serde_json::json!({
+            "action":"open",
+            "url":"localhost:3000"
+        }));
 
-    assert_eq!(scope.action, Some(BrowserActionCategory::Inspect));
     assert_eq!(
-        scope.root_session_id,
-        "2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a".to_string()
+        browser_context.target.as_ref().unwrap().target_class,
+        BrowserTargetClass::LocalDev
     );
-    assert!(!scope.is_cross_session);
+    assert_eq!(browser_context.target.as_ref().unwrap().scheme, "http");
+    assert_eq!(
+        browser_context.target.as_ref().unwrap().host.as_deref(),
+        Some("localhost")
+    );
+    assert_eq!(
+        browser_context.target.as_ref().unwrap().origin.as_deref(),
+        Some("http://localhost:3000")
+    );
+    assert_eq!(browser_context.target.as_ref().unwrap().port, Some(3000));
 }
 
 #[test]
-fn browser_inspect_is_allowed_but_navigation_and_evaluate_require_approval() {
+fn browser_target_classifies_workspace_file_url() {
+    let (_temp, cwd, nested, outside) = temp_workspace_with_context();
+    let workspace_file = nested.join("index.html");
+    let outside_file = outside.join("other.html");
+    std::fs::write(&workspace_file, "<h1>workspace</h1>").unwrap();
+    std::fs::write(&outside_file, "<h1>outside</h1>").unwrap();
+    let context = runtime_context(
+        PermissionsSettings::default(),
+        SandboxSettings::from_mode("workspace-write"),
+        false,
+        None,
+        cwd.clone(),
+        vec![nested.clone()],
+        SessionPermissionState::default(),
+    );
+
+    let browser_context = context
+        .effective_profile()
+        .browser_context(&serde_json::json!({
+            "action":"open",
+            "url":to_file_url(&workspace_file)
+        }));
+
+    assert_eq!(
+        browser_context.target.as_ref().unwrap().target_class,
+        BrowserTargetClass::WorkspaceFile
+    );
+    assert_eq!(browser_context.target.as_ref().unwrap().scheme, "file");
+    assert_eq!(browser_context.target.as_ref().unwrap().origin, None);
+}
+
+#[test]
+fn browser_target_classifies_non_workspace_file_url() {
+    let (_temp, cwd, nested, outside) = temp_workspace_with_context();
+    let outside_file = outside.join("other.html");
+    std::fs::write(nested.join("index.html"), "<h1>workspace</h1>").unwrap();
+    std::fs::write(&outside_file, "<h1>outside</h1>").unwrap();
+    let context = runtime_context(
+        PermissionsSettings::default(),
+        SandboxSettings::from_mode("workspace-write"),
+        false,
+        None,
+        cwd,
+        vec![nested],
+        SessionPermissionState::default(),
+    );
+
+    let browser_context = context
+        .effective_profile()
+        .browser_context(&serde_json::json!({
+            "action":"open",
+            "url":to_file_url(&outside_file)
+        }));
+
+    assert_eq!(
+        browser_context.target.as_ref().unwrap().target_class,
+        BrowserTargetClass::NonWorkspaceFile
+    );
+    assert_eq!(browser_context.target.as_ref().unwrap().scheme, "file");
+}
+
+#[test]
+fn browser_target_classifies_data_url() {
+    let context = runtime_context(
+        PermissionsSettings::default(),
+        SandboxSettings::from_mode("workspace-write"),
+        false,
+        None,
+        PathBuf::from("/tmp"),
+        Vec::new(),
+        SessionPermissionState::default(),
+    );
+
+    let browser_context = context
+        .effective_profile()
+        .browser_context(&serde_json::json!({
+            "action":"open",
+            "url":"data:text/html,<h1>demo</h1>"
+        }));
+
+    assert_eq!(
+        browser_context.target.as_ref().unwrap().target_class,
+        BrowserTargetClass::DataUrl
+    );
+    assert_eq!(browser_context.target.as_ref().unwrap().scheme, "data");
+    assert_eq!(browser_context.target.as_ref().unwrap().origin, None);
+}
+
+#[test]
+fn browser_target_classifies_open_web_url() {
+    let context = runtime_context(
+        PermissionsSettings::default(),
+        SandboxSettings::from_mode("workspace-write"),
+        false,
+        None,
+        PathBuf::from("/tmp"),
+        Vec::new(),
+        SessionPermissionState::default(),
+    );
+
+    let browser_context = context
+        .effective_profile()
+        .browser_context(&serde_json::json!({
+            "action":"open",
+            "url":"https://docs.example.co.uk/path"
+        }));
+
+    assert_eq!(
+        browser_context.target.as_ref().unwrap().target_class,
+        BrowserTargetClass::OpenWeb
+    );
+    assert_eq!(browser_context.target.as_ref().unwrap().scheme, "https");
+    assert_eq!(
+        browser_context.target.as_ref().unwrap().host.as_deref(),
+        Some("docs.example.co.uk")
+    );
+    assert_eq!(
+        browser_context
+            .target
+            .as_ref()
+            .unwrap()
+            .registrable_domain
+            .as_deref(),
+        Some("example.co.uk")
+    );
+    assert_eq!(
+        browser_context.target.as_ref().unwrap().origin.as_deref(),
+        Some("https://docs.example.co.uk")
+    );
+}
+
+#[test]
+fn browser_target_uses_psl_for_private_suffixes() {
+    let context = runtime_context(
+        PermissionsSettings::default(),
+        SandboxSettings::from_mode("workspace-write"),
+        false,
+        None,
+        PathBuf::from("/tmp"),
+        Vec::new(),
+        SessionPermissionState::default(),
+    );
+
+    let browser_context = context
+        .effective_profile()
+        .browser_context(&serde_json::json!({
+            "action":"open",
+            "url":"https://foo.github.io/demo"
+        }));
+
+    assert_eq!(
+        browser_context
+            .target
+            .as_ref()
+            .unwrap()
+            .registrable_domain
+            .as_deref(),
+        Some("foo.github.io")
+    );
+}
+
+#[test]
+fn browser_target_uses_psl_for_multi_label_suffixes_beyond_hardcoded_list() {
+    let context = runtime_context(
+        PermissionsSettings::default(),
+        SandboxSettings::from_mode("workspace-write"),
+        false,
+        None,
+        PathBuf::from("/tmp"),
+        Vec::new(),
+        SessionPermissionState::default(),
+    );
+
+    let browser_context = context
+        .effective_profile()
+        .browser_context(&serde_json::json!({
+            "action":"open",
+            "url":"https://a.b.example.uk.com/path"
+        }));
+
+    assert_eq!(
+        browser_context
+            .target
+            .as_ref()
+            .unwrap()
+            .registrable_domain
+            .as_deref(),
+        Some("example.uk.com")
+    );
+}
+
+#[test]
+fn browser_inspect_without_target_context_asks_but_targeted_calls_still_gate_by_action() {
     let context = runtime_context(
         PermissionsSettings::default(),
         SandboxSettings::from_mode("workspace-write"),
@@ -148,13 +388,105 @@ fn browser_inspect_is_allowed_but_navigation_and_evaluate_require_approval() {
         }),
     );
 
-    assert_eq!(inspect.behavior, ToolPermissionBehavior::Allow);
+    assert_eq!(inspect.behavior, ToolPermissionBehavior::Ask);
     assert_eq!(navigate.behavior, ToolPermissionBehavior::Ask);
+    assert_eq!(evaluate.behavior, ToolPermissionBehavior::Ask);
+    let evaluate_reason = evaluate.reason.unwrap_or_default();
+    assert!(evaluate_reason.contains("no target URL") || evaluate_reason.contains("page context"));
+}
+
+#[test]
+fn browser_targeted_evaluate_uses_javascript_execution_reason() {
+    let context = runtime_context(
+        PermissionsSettings::default(),
+        SandboxSettings::from_mode("workspace-write"),
+        false,
+        None,
+        PathBuf::from("/tmp"),
+        Vec::new(),
+        SessionPermissionState::default(),
+    );
+
+    let evaluate = context.decision_for_tool_call(
+        &tool_definition("Browser", "auto"),
+        &serde_json::json!({
+            "action":"evaluate",
+            "url":"https://docs.example.com/page",
+            "script":"document.title"
+        }),
+    );
+
     assert_eq!(evaluate.behavior, ToolPermissionBehavior::Ask);
     assert!(evaluate
         .reason
         .unwrap_or_default()
         .contains("executes page JavaScript"));
+}
+
+#[test]
+fn browser_policy_deny_short_circuits_before_reviewer() {
+    let profile = runtime_context(
+        PermissionsSettings::default(),
+        SandboxSettings::from_mode("workspace-write"),
+        false,
+        None,
+        PathBuf::from("/tmp"),
+        Vec::new(),
+        SessionPermissionState::default(),
+    )
+    .effective_profile()
+    .clone();
+    let policy = BrowserPolicySettings {
+        deny_domains: vec!["example.com".to_string()],
+        ..BrowserPolicySettings::default()
+    };
+    let context = profile.browser_context(&serde_json::json!({
+        "action":"navigate",
+        "url":"https://docs.example.com/page"
+    }));
+    let decision = crate::permissions::browser_evaluator::evaluate_browser_permission(
+        &profile, &policy, &context,
+    );
+
+    assert_eq!(
+        decision.decision,
+        crate::permissions::browser_evaluator::BrowserPermissionDecision::Deny
+    );
+    assert!(decision
+        .reason
+        .unwrap_or_default()
+        .contains("denies domain"));
+}
+
+#[test]
+fn browser_policy_explicit_allow_can_allow_target_class() {
+    let profile = runtime_context(
+        PermissionsSettings::default(),
+        SandboxSettings::from_mode("workspace-write"),
+        false,
+        None,
+        PathBuf::from("/tmp"),
+        Vec::new(),
+        SessionPermissionState::default(),
+    )
+    .effective_profile()
+    .clone();
+    let policy = BrowserPolicySettings {
+        allow_target_classes: vec!["local_dev".to_string()],
+        ..BrowserPolicySettings::default()
+    };
+    let context = profile.browser_context(&serde_json::json!({
+        "action":"navigate",
+        "url":"http://localhost:3000"
+    }));
+    let decision = crate::permissions::browser_evaluator::evaluate_browser_permission(
+        &profile, &policy, &context,
+    );
+
+    assert_eq!(
+        decision.decision,
+        crate::permissions::browser_evaluator::BrowserPermissionDecision::Allow
+    );
 }
 
 #[test]
@@ -173,7 +505,8 @@ fn browser_cross_session_access_requires_explicit_approval() {
         &tool_definition("Browser", "auto"),
         &serde_json::json!({
             "action":"snapshot",
-            "sessionId":"b4f239fd-1493-4be7-a3a1-9e58fe612576"
+            "sessionId":"b4f239fd-1493-4be7-a3a1-9e58fe612576",
+            "url":"https://docs.example.com/page"
         }),
     );
 
@@ -208,7 +541,7 @@ fn browser_session_grant_is_scoped_to_action_category_and_cross_session_flag() {
         None,
     );
 
-    assert!(profile.browser_session_grant_allows(&serde_json::json!({
+    assert!(!profile.browser_session_grant_allows(&serde_json::json!({
         "action":"evaluate",
         "script":"window.location.href"
     })));
@@ -219,6 +552,116 @@ fn browser_session_grant_is_scoped_to_action_category_and_cross_session_flag() {
         "action":"evaluate",
         "sessionId":"b4f239fd-1493-4be7-a3a1-9e58fe612576",
         "script":"window.location.href"
+    })));
+}
+
+#[test]
+fn browser_origin_session_grant_does_not_cross_origins_or_actions() {
+    let session_id = Uuid::parse_str("2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a").unwrap();
+    let mut grants = SessionPermissionGrants::default();
+    grants.grant_browser_tool_call(
+        &tool_definition("Browser", "auto"),
+        &serde_json::json!({
+            "action":"navigate",
+            "url":"https://docs.example.com/a"
+        }),
+        &session_id,
+        crate::permissions::browser_grants::BrowserGrantScopeKind::AllowOriginSession,
+    );
+    let profile = EffectivePermissionProfile::from_session_state(
+        PathBuf::from("/repo").as_path(),
+        &[],
+        &PermissionsSettings::default(),
+        &SandboxSettings::from_mode("workspace-write"),
+        &session_id,
+        &SessionPermissionState::new(false, grants),
+        false,
+        None,
+        None,
+    );
+
+    assert!(profile.browser_session_grant_allows(&serde_json::json!({
+        "action":"click",
+        "url":"https://docs.example.com/b"
+    })));
+    assert!(!profile.browser_session_grant_allows(&serde_json::json!({
+        "action":"click",
+        "url":"https://api.example.com/b"
+    })));
+    assert!(!profile.browser_session_grant_allows(&serde_json::json!({
+        "action":"click",
+        "url":"https://docs.other.com/b"
+    })));
+}
+
+#[test]
+fn browser_domain_session_grant_does_not_cross_domains() {
+    let session_id = Uuid::parse_str("2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a").unwrap();
+    let mut grants = SessionPermissionGrants::default();
+    grants.grant_browser_tool_call(
+        &tool_definition("Browser", "auto"),
+        &serde_json::json!({
+            "action":"navigate",
+            "url":"https://docs.example.co.uk/a"
+        }),
+        &session_id,
+        crate::permissions::browser_grants::BrowserGrantScopeKind::AllowDomainSession,
+    );
+    let profile = EffectivePermissionProfile::from_session_state(
+        PathBuf::from("/repo").as_path(),
+        &[],
+        &PermissionsSettings::default(),
+        &SandboxSettings::from_mode("workspace-write"),
+        &session_id,
+        &SessionPermissionState::new(false, grants),
+        false,
+        None,
+        None,
+    );
+
+    assert!(profile.browser_session_grant_allows(&serde_json::json!({
+        "action":"hover",
+        "url":"https://api.example.co.uk/b"
+    })));
+    assert!(!profile.browser_session_grant_allows(&serde_json::json!({
+        "action":"hover",
+        "url":"https://example.com/b"
+    })));
+}
+
+#[test]
+fn browser_tab_session_grant_does_not_cross_tabs() {
+    let session_id = Uuid::parse_str("2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a").unwrap();
+    let mut grants = SessionPermissionGrants::default();
+    grants.grant_browser_tool_call(
+        &tool_definition("Browser", "auto"),
+        &serde_json::json!({
+            "action":"evaluate",
+            "tabId":"t7",
+            "script":"document.title"
+        }),
+        &session_id,
+        crate::permissions::browser_grants::BrowserGrantScopeKind::AllowTabSession,
+    );
+    let profile = EffectivePermissionProfile::from_session_state(
+        PathBuf::from("/repo").as_path(),
+        &[],
+        &PermissionsSettings::default(),
+        &SandboxSettings::from_mode("workspace-write"),
+        &session_id,
+        &SessionPermissionState::new(false, grants),
+        false,
+        None,
+        None,
+    );
+
+    assert!(profile.browser_session_grant_allows(&serde_json::json!({
+        "action":"snapshot",
+        "tabId":"t7"
+    })));
+    assert!(!profile.browser_session_grant_allows(&serde_json::json!({
+        "action":"snapshot",
+        "tabId":"t8"
     })));
 }
 
@@ -248,4 +691,70 @@ fn browser_surface_only_session_grant_does_not_allow_evaluate() {
     );
 
     assert_eq!(decision.behavior, ToolPermissionBehavior::Ask);
+}
+
+#[test]
+fn allow_all_tools_does_not_bypass_browser_evaluator_for_shell_browser_calls() {
+    let context = runtime_context(
+        PermissionsSettings::default(),
+        SandboxSettings::from_mode("workspace-write"),
+        false,
+        None,
+        PathBuf::from("/tmp"),
+        Vec::new(),
+        SessionPermissionState::new(true, SessionPermissionGrants::default()),
+    );
+
+    let decision = context.decision_for_tool_call(
+        &tool_definition("Bash", "on-request"),
+        &serde_json::json!({
+            "command":"puffer browser evaluate document.title"
+        }),
+    );
+
+    assert_eq!(decision.behavior, ToolPermissionBehavior::Ask);
+    assert!(decision.reason.unwrap_or_default().contains("browser"));
+}
+
+#[test]
+fn bash_browser_command_maps_into_same_browser_permission_context() {
+    let session_id = "2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a";
+    let browser = browser_permission_context_for_tool(
+        "Browser",
+        &serde_json::json!({
+            "action":"screenshot",
+            "sessionId":"root-7",
+            "tabId":"t3"
+        }),
+        session_id,
+        &[],
+    );
+    let shell = browser_permission_context_for_tool(
+        "Bash",
+        &serde_json::json!({
+            "command":"puffer browser screenshot --session-id root-7 --tab-id t3"
+        }),
+        session_id,
+        &[],
+    );
+
+    assert_eq!(browser.action, Some(BrowserActionCategory::Inspect));
+    assert_eq!(browser, shell);
+}
+
+#[test]
+fn bash_browser_tab_focus_is_classified_as_navigate() {
+    let context = browser_permission_context_for_tool(
+        "Bash",
+        &serde_json::json!({
+            "command":"puffer browser tab focus t4 --session-id root-9"
+        }),
+        "2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a",
+        &[],
+    );
+
+    assert_eq!(context.action, Some(BrowserActionCategory::Navigate));
+    assert_eq!(context.tab_id.as_deref(), Some("t4"));
+    assert_eq!(context.root_session_id, "root-9");
+    assert!(context.is_cross_session);
 }

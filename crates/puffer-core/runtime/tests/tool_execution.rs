@@ -621,14 +621,17 @@ fn allow_session_persists_runtime_bash_approval_for_the_session() {
     .unwrap();
     assert_eq!(
         permission_context
-            .decision_for_tool_call(registry.definition("Bash").unwrap(), &json!({"command":"pwd"}))
+            .decision_for_tool_call(
+                registry.definition("Bash").unwrap(),
+                &json!({"command":"pwd"})
+            )
             .behavior,
         crate::permissions::ToolPermissionBehavior::Allow
     );
 }
 
 #[test]
-fn allow_session_scopes_browser_approval_to_current_session_evaluate_only() {
+fn allow_session_browser_approval_does_not_expand_without_target_context() {
     let mut tool = loaded_tool("Browser", "Managed browser", "runtime:browser");
     tool.value.approval_policy = Some("auto".to_string());
     tool.value.sandbox_policy = Some("workspace-write".to_string());
@@ -639,6 +642,125 @@ fn allow_session_scopes_browser_approval_to_current_session_evaluate_only() {
     let registry = ToolRegistry::from_resources(&resources);
     let mut providers = ProviderRegistry::new();
     providers.register(openai_provider("http://127.0.0.1".to_string()));
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let session_id = state.session.id.to_string();
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let prompt_log = prompts.clone();
+
+    crate::runtime::local_tools::with_browser_daemon_test_handler(
+        move |method, params| {
+            assert_eq!(method, "browser_current_tab");
+            let request_session = params["sessionId"].as_str().unwrap_or_default();
+            let payload = if request_session == session_id {
+                json!({
+                    "status": "available",
+                    "tabId": "t1",
+                    "url": "https://docs.example.com/page",
+                    "origin": "https://docs.example.com",
+                    "host": "docs.example.com",
+                    "port": 443,
+                    "title": "Docs"
+                })
+            } else {
+                json!({
+                    "status": "available",
+                    "tabId": "t9",
+                    "url": "https://other.example.com/page",
+                    "origin": "https://other.example.com",
+                    "host": "other.example.com",
+                    "port": 443,
+                    "title": "Other"
+                })
+            };
+            Ok(payload)
+        },
+        || {
+            with_permission_prompt_handler(
+                move |request| {
+                    prompt_log.lock().unwrap().push(
+                        request
+                            .reason
+                            .clone()
+                            .unwrap_or_else(|| request.tool_id.clone()),
+                    );
+                    PermissionPromptAction::AllowSession
+                },
+                || {
+                    let first = resolve_tool_permission(
+                        &mut state,
+                        &resources,
+                        &registry,
+                        &cwd,
+                        "Browser",
+                        &json!({"action": "evaluate", "script": "document.title"}),
+                        None,
+                    )
+                    .unwrap();
+                    assert!(matches!(first, PermissionOutcome::Allowed(_)));
+
+                    let second = resolve_tool_permission(
+                        &mut state,
+                        &resources,
+                        &registry,
+                        &cwd,
+                        "Browser",
+                        &json!({"action": "evaluate", "script": "window.location.href"}),
+                        None,
+                    )
+                    .unwrap();
+                    assert!(matches!(second, PermissionOutcome::Allowed(_)));
+
+                    let third = resolve_tool_permission(
+                        &mut state,
+                        &resources,
+                        &registry,
+                        &cwd,
+                        "Browser",
+                        &json!({"action": "navigate", "url": "https://example.com"}),
+                        None,
+                    )
+                    .unwrap();
+                    assert!(matches!(third, PermissionOutcome::Allowed(_)));
+
+                    let fourth = resolve_tool_permission(
+                        &mut state,
+                        &resources,
+                        &registry,
+                        &cwd,
+                        "Browser",
+                        &json!({
+                            "action": "evaluate",
+                            "sessionId": "b4f239fd-1493-4be7-a3a1-9e58fe612576",
+                            "script": "document.title"
+                        }),
+                        None,
+                    )
+                    .unwrap();
+                    assert!(matches!(fourth, PermissionOutcome::Allowed(_)));
+                },
+            )
+        },
+    );
+
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 3);
+    assert!(prompts[0].contains("executes page JavaScript"));
+    assert!(prompts[1].contains("navigation and interaction require approval"));
+    assert!(prompts[2].contains("cross-session browser access"));
+    assert!(state.session_permission_state().has_browser_grant());
+}
+
+#[test]
+fn allow_session_browser_approval_reuses_origin_scope_without_enabling_all_tools() {
+    let mut tool = loaded_tool("Browser", "Managed browser", "runtime:browser");
+    tool.value.approval_policy = Some("auto".to_string());
+    tool.value.sandbox_policy = Some("workspace-write".to_string());
+    let resources = LoadedResources {
+        tools: vec![tool],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -661,7 +783,7 @@ fn allow_session_scopes_browser_approval_to_current_session_evaluate_only() {
                 &registry,
                 &cwd,
                 "Browser",
-                &json!({"action": "evaluate", "script": "document.title"}),
+                &json!({"action":"navigate","url":"https://docs.example.com/a"}),
                 None,
             )
             .unwrap();
@@ -673,7 +795,7 @@ fn allow_session_scopes_browser_approval_to_current_session_evaluate_only() {
                 &registry,
                 &cwd,
                 "Browser",
-                &json!({"action": "evaluate", "script": "window.location.href"}),
+                &json!({"action":"click","url":"https://docs.example.com/b"}),
                 None,
             )
             .unwrap();
@@ -685,36 +807,166 @@ fn allow_session_scopes_browser_approval_to_current_session_evaluate_only() {
                 &registry,
                 &cwd,
                 "Browser",
-                &json!({"action": "navigate", "url": "https://example.com"}),
+                &json!({"action":"click","url":"https://api.example.com/b"}),
                 None,
             )
             .unwrap();
             assert!(matches!(third, PermissionOutcome::Allowed(_)));
+        },
+    );
 
-            let fourth = resolve_tool_permission(
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 2);
+    assert!(!state.session_permission_state().allow_all_tools());
+    assert!(state.session_permission_state().has_browser_grant());
+}
+
+#[test]
+fn browser_permission_prompt_carries_context_without_scope_choices() {
+    let mut tool = loaded_tool("Browser", "Managed browser", "runtime:browser");
+    tool.value.approval_policy = Some("auto".to_string());
+    tool.value.sandbox_policy = Some("workspace-write".to_string());
+    let resources = LoadedResources {
+        tools: vec![tool],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let seen_browser = Arc::new(Mutex::new(None));
+    let seen_browser_clone = Arc::clone(&seen_browser);
+
+    with_permission_prompt_handler(
+        move |request| {
+            *seen_browser_clone.lock().unwrap() = request.browser;
+            PermissionPromptAction::Deny
+        },
+        || {
+            let outcome = resolve_tool_permission(
                 &mut state,
                 &resources,
                 &registry,
                 &cwd,
                 "Browser",
-                &json!({
-                    "action": "evaluate",
-                    "sessionId": "b4f239fd-1493-4be7-a3a1-9e58fe612576",
-                    "script": "document.title"
-                }),
+                &json!({"action":"navigate","url":"https://docs.example.com/a"}),
                 None,
             )
             .unwrap();
-            assert!(matches!(fourth, PermissionOutcome::Allowed(_)));
+            assert!(matches!(outcome, PermissionOutcome::Denied(_)));
         },
     );
 
-    let prompts = prompts.lock().unwrap();
-    assert_eq!(prompts.len(), 3);
-    assert!(prompts[0].contains("executes page JavaScript"));
-    assert!(prompts[1].contains("navigation and interaction require approval"));
-    assert!(prompts[2].contains("cross-session browser access"));
-    assert!(state.session_permission_state().has_browser_grant());
+    let browser = seen_browser.lock().unwrap().clone().expect("browser payload");
+    assert_eq!(
+        browser.source,
+        crate::runtime::BrowserPermissionPromptSource::BrowserTool
+    );
+    assert_eq!(
+        browser.action_set,
+        crate::runtime::BrowserPermissionPromptActionSet::Navigate
+    );
+    assert_eq!(browser.origin.as_deref(), Some("https://docs.example.com"));
+    assert_eq!(browser.host.as_deref(), Some("docs.example.com"));
+    assert_eq!(
+        browser.target_class,
+        crate::runtime::BrowserPermissionPromptTargetClass::OpenWeb
+    );
+}
+
+#[test]
+fn browser_tool_session_grant_is_reused_by_shell_browser_route() {
+    let mut tool = loaded_tool("Browser", "Managed browser", "runtime:browser");
+    tool.value.approval_policy = Some("auto".to_string());
+    tool.value.sandbox_policy = Some("workspace-write".to_string());
+    let mut bash_tool = loaded_tool("Bash", "Run shell", "runtime:claude_bash");
+    bash_tool.value.approval_policy = Some("on-request".to_string());
+    bash_tool.value.sandbox_policy = Some("workspace-write".to_string());
+    let resources = LoadedResources {
+        tools: vec![tool, bash_tool],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+
+    with_permission_prompt_handler(
+        move |_request| {
+            PermissionPromptAction::AllowSession
+        },
+        || {
+            let first = resolve_tool_permission(
+                &mut state,
+                &resources,
+                &registry,
+                &cwd,
+                "Browser",
+                &json!({"action":"navigate","url":"https://docs.example.com/a"}),
+                None,
+            )
+            .unwrap();
+            assert!(matches!(first, PermissionOutcome::Allowed(_)));
+
+            let second = resolve_tool_permission(
+                &mut state,
+                &resources,
+                &registry,
+                &cwd,
+                "Bash",
+                &json!({"command":"puffer browser navigate https://docs.example.com/b"}),
+                None,
+            )
+            .unwrap();
+            assert!(matches!(second, PermissionOutcome::Allowed(_)));
+        },
+    );
+}
+
+#[test]
+fn shell_browser_session_grant_is_reused_by_browser_tool_route() {
+    let mut tool = loaded_tool("Browser", "Managed browser", "runtime:browser");
+    tool.value.approval_policy = Some("auto".to_string());
+    tool.value.sandbox_policy = Some("workspace-write".to_string());
+    let mut bash_tool = loaded_tool("Bash", "Run shell", "runtime:claude_bash");
+    bash_tool.value.approval_policy = Some("on-request".to_string());
+    bash_tool.value.sandbox_policy = Some("workspace-write".to_string());
+    let resources = LoadedResources {
+        tools: vec![tool, bash_tool],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+
+    with_permission_prompt_handler(
+        move |_request| {
+            PermissionPromptAction::AllowSession
+        },
+        || {
+            let first = resolve_tool_permission(
+                &mut state,
+                &resources,
+                &registry,
+                &cwd,
+                "Bash",
+                &json!({"command":"puffer browser navigate https://docs.example.com/a"}),
+                None,
+            )
+            .unwrap();
+            assert!(matches!(first, PermissionOutcome::Allowed(_)));
+
+            let second = resolve_tool_permission(
+                &mut state,
+                &resources,
+                &registry,
+                &cwd,
+                "Browser",
+                &json!({"action":"navigate","url":"https://docs.example.com/b"}),
+                None,
+            )
+            .unwrap();
+            assert!(matches!(second, PermissionOutcome::Allowed(_)));
+        },
+    );
 }
 
 #[test]
@@ -731,29 +983,112 @@ fn cross_session_browser_evaluate_can_be_denied_at_prompt_time() {
     let cwd = state.cwd.clone();
     let other_session = "b4f239fd-1493-4be7-a3a1-9e58fe612576";
 
-    with_permission_prompt_handler(
-        move |_request| PermissionPromptAction::Deny,
+    crate::runtime::local_tools::with_browser_daemon_test_handler(
+        move |method, params| {
+            assert_eq!(method, "browser_current_tab");
+            assert_eq!(params["sessionId"], other_session);
+            Ok(json!({
+                "status": "available",
+                "tabId": "t9",
+                "url": "https://other.example.com/page",
+                "origin": "https://other.example.com",
+                "host": "other.example.com",
+                "port": 443,
+                "title": "Other"
+            }))
+        },
         || {
-            let first = resolve_tool_permission(
-                &mut state,
-                &resources,
-                &registry,
-                &cwd,
-                "Browser",
-                &json!({
-                    "action": "evaluate",
-                    "sessionId": other_session,
-                    "script": "document.title"
-                }),
-                None,
+            with_permission_prompt_handler(
+                move |_request| PermissionPromptAction::Deny,
+                || {
+                    let first = resolve_tool_permission(
+                        &mut state,
+                        &resources,
+                        &registry,
+                        &cwd,
+                        "Browser",
+                        &json!({
+                            "action": "evaluate",
+                            "sessionId": other_session,
+                            "script": "document.title"
+                        }),
+                        None,
+                    )
+                    .unwrap();
+                    let PermissionOutcome::Denied(result) = first else {
+                        panic!("expected denied browser permission outcome");
+                    };
+                    assert!(result.output.stdout.contains("permission denied by user"));
+                },
             )
-            .unwrap();
-            let PermissionOutcome::Denied(result) = first else {
-                panic!("expected denied browser permission outcome");
-            };
-            assert!(result.output.stdout.contains("permission denied by user"));
         },
     );
+}
+
+#[test]
+fn browser_permission_enriches_missing_url_from_daemon_context_before_decision() {
+    let mut tool = loaded_tool("Browser", "Managed browser", "runtime:browser");
+    tool.value.approval_policy = Some("auto".to_string());
+    tool.value.sandbox_policy = Some("workspace-write".to_string());
+    let resources = LoadedResources {
+        tools: vec![tool],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let session_id = state.session.id.to_string();
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let prompt_log = Arc::clone(&prompts);
+    let outcome = crate::runtime::local_tools::with_browser_daemon_test_handler(
+        move |method, params| {
+            assert_eq!(method, "browser_current_tab");
+            assert_eq!(params["sessionId"], session_id);
+            Ok(json!({
+                "status": "available",
+                "tabId": "t4",
+                "url": "https://docs.example.com/page",
+                "origin": "https://docs.example.com",
+                "host": "docs.example.com",
+                "port": 443,
+                "title": "Docs"
+            }))
+        },
+        || {
+            with_permission_prompt_handler(
+                move |request| {
+                    prompt_log
+                        .lock()
+                        .unwrap()
+                        .push(request.reason.unwrap_or_else(|| request.tool_id));
+                    PermissionPromptAction::Deny
+                },
+                || {
+                    resolve_tool_permission(
+                        &mut state,
+                        &resources,
+                        &registry,
+                        &cwd,
+                        "Browser",
+                        &json!({
+                            "action": "evaluate",
+                            "script": "document.title"
+                        }),
+                        None,
+                    )
+                    .unwrap()
+                },
+            )
+        },
+    );
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains("executes page JavaScript"));
+    assert!(!prompts[0].contains("no target URL"));
+    let PermissionOutcome::Denied(result) = outcome else {
+        panic!("expected denied outcome from prompt handler");
+    };
+    assert!(result.output.stdout.contains("permission denied by user"));
 }
 
 #[test]

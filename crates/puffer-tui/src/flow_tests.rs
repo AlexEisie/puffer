@@ -372,7 +372,10 @@ fn poll_pending_submit_preserves_browser_typed_grant_round_trip() {
         .unwrap();
 
         assert!(completed);
-        assert_eq!(env.state.session_permission_state(), &expected_permission_state);
+        assert_eq!(
+            env.state.session_permission_state(),
+            &expected_permission_state
+        );
         assert!(env.state.session_permission_state().has_browser_grant());
     });
 }
@@ -416,7 +419,10 @@ fn handle_prompt_submit_preserves_typed_tool_grant_before_worker_round_trip() {
         )
         .unwrap();
 
-        assert_eq!(env.state.session_permission_state(), &expected_permission_state);
+        assert_eq!(
+            env.state.session_permission_state(),
+            &expected_permission_state
+        );
         assert!(tui.has_pending_submit());
 
         let mut completed = false;
@@ -437,7 +443,10 @@ fn handle_prompt_submit_preserves_typed_tool_grant_before_worker_round_trip() {
         }
 
         assert!(completed);
-        assert_eq!(env.state.session_permission_state(), &expected_permission_state);
+        assert_eq!(
+            env.state.session_permission_state(),
+            &expected_permission_state
+        );
     });
 }
 
@@ -464,7 +473,10 @@ fn handle_prompt_submit_preserves_typed_allow_all_before_worker_round_trip() {
         )
         .unwrap();
 
-        assert_eq!(env.state.session_permission_state(), &expected_permission_state);
+        assert_eq!(
+            env.state.session_permission_state(),
+            &expected_permission_state
+        );
         assert!(env.state.session_permission_state().allow_all_tools());
         assert!(tui.has_pending_submit());
 
@@ -486,7 +498,10 @@ fn handle_prompt_submit_preserves_typed_allow_all_before_worker_round_trip() {
         }
 
         assert!(completed);
-        assert_eq!(env.state.session_permission_state(), &expected_permission_state);
+        assert_eq!(
+            env.state.session_permission_state(),
+            &expected_permission_state
+        );
         assert!(env.state.session_permission_state().allow_all_tools());
     });
 }

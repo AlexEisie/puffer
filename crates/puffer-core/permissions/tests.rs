@@ -1,14 +1,17 @@
+use super::browser_grants::BrowserGrantCategory;
+use super::browser_policy::BrowserPolicySettings;
+use super::browser_target::{BrowserActionCategory, BrowserTargetClass};
 use super::profile::{
-    build_request_tool_filter, classify_tool_permission_surface, BrowserActionCategory,
-    BrowserGrantCategory, EffectiveApprovalPolicy, EffectivePermissionProfile,
-    EffectiveSandboxMode, PermissionGrantCategory, PermissionSurface, SessionPermissionGrants,
-    SessionPermissionState, SurfaceEnforcement,
+    build_request_tool_filter, classify_tool_permission_surface, EffectiveApprovalPolicy,
+    EffectivePermissionProfile, EffectiveSandboxMode, PermissionGrantCategory, PermissionSurface,
+    SessionPermissionGrants, SessionPermissionState, SurfaceEnforcement,
 };
 use super::*;
 use puffer_resources::{LoadedItem, SourceInfo, SourceKind, ToolSpec};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use tempfile::TempDir;
 use uuid::Uuid;
 
 mod browser;
@@ -87,6 +90,7 @@ fn runtime_context_with_inputs(
         inputs.request_tool_filter,
     );
     RuntimePermissionContext {
+        browser_policy: BrowserPolicySettings::default(),
         derived_policy: profile.derived_policy(),
         profile,
         permissions,
@@ -118,11 +122,28 @@ fn runtime_context_with_session_grants(
         inputs.request_tool_filter,
     );
     RuntimePermissionContext {
+        browser_policy: BrowserPolicySettings::default(),
         derived_policy: profile.derived_policy(),
         profile,
         permissions,
         sandbox,
     }
+}
+
+fn to_file_url(path: &Path) -> String {
+    url::Url::from_file_path(path)
+        .expect("file path should convert to url")
+        .to_string()
+}
+
+fn temp_workspace_with_context() -> (TempDir, PathBuf, PathBuf, PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("workspace");
+    let nested = cwd.join("nested");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    (temp, cwd, nested, outside)
 }
 
 #[test]
@@ -152,6 +173,27 @@ fn default_permissions_contents_follow_declared_policy() {
             },
             LoadedItem {
                 value: ToolSpec {
+                    id: "Browser".to_string(),
+                    name: "Browser".to_string(),
+                    description: "Browser".to_string(),
+                    handler: "browser".to_string(),
+                    aliases: Vec::new(),
+                    handler_args: Vec::new(),
+                    approval_policy: Some("auto".to_string()),
+                    sandbox_policy: None,
+                    shared_lib: None,
+                    enabled_if: None,
+                    input_schema: None,
+                    metadata: Default::default(),
+                    display: Default::default(),
+                },
+                source_info: SourceInfo {
+                    path: "browser.yaml".into(),
+                    kind: SourceKind::Builtin,
+                },
+            },
+            LoadedItem {
+                value: ToolSpec {
                     id: "Read".to_string(),
                     name: "Read".to_string(),
                     description: "Read".to_string(),
@@ -176,6 +218,8 @@ fn default_permissions_contents_follow_declared_policy() {
     });
     assert!(contents.contains("bash = \"on-request\""));
     assert!(contents.contains("read = \"auto\""));
+    assert!(!contents.contains("browser = "));
+    assert!(contents.contains("[browser]"));
 }
 
 #[test]
@@ -509,7 +553,6 @@ fn effective_profile_maps_legacy_settings_and_session_grants() {
         PermissionsSettings {
             tools: BTreeMap::from([
                 ("read_file".to_string(), "deny".to_string()),
-                ("browser".to_string(), "ask".to_string()),
                 ("agent".to_string(), "allow".to_string()),
             ]),
         },
@@ -848,5 +891,8 @@ fn custom_sandbox_mode_survives_in_derived_filesystem_policy() {
     );
     let derived = profile.derived_policy();
 
-    assert_eq!(derived.filesystem().sandbox_mode, EffectiveSandboxMode::Custom);
+    assert_eq!(
+        derived.filesystem().sandbox_mode,
+        EffectiveSandboxMode::Custom
+    );
 }

@@ -119,7 +119,9 @@ use self::openai::{
 };
 use self::openai::{is_event_stream, parse_openai_sse_response};
 pub use self::permission_prompt::{
-    with_permission_prompt_handler, with_user_question_prompt_handler, PermissionPromptAction,
+    with_permission_prompt_handler, with_user_question_prompt_handler,
+    BrowserPermissionPromptActionSet, BrowserPermissionPromptPayload,
+    BrowserPermissionPromptSource, BrowserPermissionPromptTargetClass, PermissionPromptAction,
     PermissionPromptRequest, UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 pub use self::reflection::{

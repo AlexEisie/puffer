@@ -20,6 +20,7 @@ fn poll_pending_submit_opens_permission_prompt_overlay() {
         tool_id: "Bash".to_string(),
         summary: "git push origin master".to_string(),
         reason: Some("shell command matches sandbox exclusion `git push`".to_string()),
+        browser: None,
     };
     let (event_tx, event_rx) = mpsc::channel();
     let (response_tx, _response_rx) = mpsc::channel();
@@ -71,6 +72,7 @@ fn permission_prompt_shortcuts_send_response() {
         tool_id: "Config".to_string(),
         summary: "Set theme to \"dark\"".to_string(),
         reason: Some("config writes require approval".to_string()),
+        browser: None,
     };
     let (response_tx, response_rx) = mpsc::channel();
     let mut tui = TuiState {
@@ -106,6 +108,7 @@ fn render_permission_prompt_shows_codex_style_options() {
             tool_id: "Bash".to_string(),
             summary: "git push origin master".to_string(),
             reason: Some("shell command matches sandbox exclusion `git push`".to_string()),
+            browser: None,
         }),
     };
 
@@ -133,4 +136,83 @@ fn render_permission_prompt_shows_codex_style_options() {
     assert!(rendered.contains("Yes, grant these permissions for this session"));
     assert!(rendered.contains("Yes, allow ALL tools for this session"));
     assert!(rendered.contains("No, continue without permissions"));
+}
+
+#[test]
+fn render_browser_permission_prompt_shows_context_with_generic_options() {
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let overlay = OverlayState::PermissionPrompt {
+        overlay: ApprovalOverlay::new(PermissionPromptRequest {
+            tool_id: "Browser".to_string(),
+            summary: "Browser".to_string(),
+            reason: Some("browser navigation and interaction require approval".to_string()),
+            browser: Some(puffer_core::BrowserPermissionPromptPayload {
+                source: puffer_core::BrowserPermissionPromptSource::BrowserTool,
+                action_set: puffer_core::BrowserPermissionPromptActionSet::Navigate,
+                url: Some("https://docs.example.com/a".to_string()),
+                origin: Some("https://docs.example.com".to_string()),
+                host: Some("docs.example.com".to_string()),
+                target_class: puffer_core::BrowserPermissionPromptTargetClass::OpenWeb,
+                tab_id: Some("tab-1".to_string()),
+                is_cross_session: false,
+            }),
+        }),
+    };
+
+    terminal
+        .draw(|frame| {
+            render::set_active_overlay(Some(overlay.clone()));
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "",
+                0,
+                0,
+                0,
+                &supported_commands(),
+            );
+            render::set_active_overlay(None);
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(rendered.contains("Source: "));
+    assert!(rendered.contains("Action Set: "));
+    assert!(rendered.contains("https://docs.example.com/a"));
+    assert!(rendered.contains("Yes, grant these permissions"));
+    assert!(rendered.contains("Yes, allow browser access for this session"));
+    assert!(!rendered.contains("Yes, allow ALL tools for this session"));
+    assert!(!rendered.contains("all for session"));
+}
+
+#[test]
+fn browser_permission_prompt_shortcuts_skip_allow_all_session() {
+    let request = PermissionPromptRequest {
+        tool_id: "Browser".to_string(),
+        summary: "Browser".to_string(),
+        reason: Some("browser navigation and interaction require approval".to_string()),
+        browser: Some(puffer_core::BrowserPermissionPromptPayload {
+            source: puffer_core::BrowserPermissionPromptSource::BrowserTool,
+            action_set: puffer_core::BrowserPermissionPromptActionSet::Navigate,
+            url: Some("https://docs.example.com/a".to_string()),
+            origin: Some("https://docs.example.com".to_string()),
+            host: Some("docs.example.com".to_string()),
+            target_class: puffer_core::BrowserPermissionPromptTargetClass::OpenWeb,
+            tab_id: Some("tab-1".to_string()),
+            is_cross_session: false,
+        }),
+    };
+    let mut overlay = ApprovalOverlay::new(request);
+
+    assert_eq!(
+        overlay.activate_shortcut('A'),
+        Some(PermissionPromptAction::AllowSession)
+    );
 }

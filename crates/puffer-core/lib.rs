@@ -36,7 +36,10 @@ pub use model_preferences::{
     default_effort_level, effort_level_is_supported, normalized_effort_level,
     provider_preference_family, supported_effort_levels, ModelPreferenceFamily,
 };
+pub use permissions::is_browser_tool_selector;
+pub use permissions::BrowserActionSet;
 pub use permissions::SessionPermissionState;
+pub use permissions::{browser_action_set_for_action, browser_action_set_for_shell_command};
 pub use runtime::background_tasks;
 pub use runtime::claude_tools::execute_workflow_tool;
 pub use runtime::execute_user_prompt as execute_user_turn;
@@ -56,11 +59,13 @@ pub use runtime::{
     execute_user_prompt_streaming_with_structured_output as execute_user_turn_streaming_with_structured_output,
     execute_user_prompt_with_structured_output as execute_user_turn_with_structured_output,
     runtime_work_active, shutdown_runtime_services, with_permission_prompt_handler,
-    with_user_question_prompt_handler, CancelToken, CodeJudgeConfig, LlmJudgeConfig,
+    with_user_question_prompt_handler, BrowserPermissionPromptActionSet,
+    BrowserPermissionPromptPayload, BrowserPermissionPromptSource,
+    BrowserPermissionPromptTargetClass, CancelToken, CodeJudgeConfig, LlmJudgeConfig,
     LlmJudgeContextScope, LlmJudgeMode, LlmJudgePromptCacheMode, PermissionPromptAction,
-    PermissionPromptRequest, ReflectionConfig, ReflectionLanguage, ReflectionTraceEvent,
-    StructuredOutputConfig, ToolCallRequest, ToolInvocation, TurnExecution, TurnStreamEvent,
-    TurnUsageReport, UserQuestionPromptRequest, UserQuestionPromptResponse,
+    PermissionPromptRequest, ReflectionConfig, ReflectionLanguage,
+    ReflectionTraceEvent, StructuredOutputConfig, ToolCallRequest, ToolInvocation, TurnExecution,
+    TurnStreamEvent, TurnUsageReport, UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 pub use runtime::{install_observability, observability_handle};
 pub use state::{AppState, MessageRole, RenderedMessage, TaskRecord, TaskStatus};
