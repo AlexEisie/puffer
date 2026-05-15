@@ -8,7 +8,6 @@ pub(crate) enum BrowserGrantScopeKind {
     AllowDomainSession,
     AllowActionOnOriginSession,
     AllowTabSession,
-    CrossSessionAccess,
 }
 
 /// Stores one scoped Browser session grant derived from an approved tool call.
@@ -38,9 +37,6 @@ pub(crate) enum BrowserGrantCategory {
         root_session_id: String,
         tab_id: String,
     },
-    CrossSessionAccess {
-        root_session_id: String,
-    },
 }
 
 /// Returns the Browser typed grants implied by an approved Browser call.
@@ -55,62 +51,62 @@ pub(crate) fn browser_grant_categories_for_scope(
     context: &BrowserPermissionContext,
     scope: BrowserGrantScopeKind,
 ) -> Vec<BrowserGrantCategory> {
-    let mut categories = Vec::new();
-    if context.is_cross_session {
-        categories.push(BrowserGrantCategory::CrossSessionAccess {
-            root_session_id: context.root_session_id.clone(),
-        });
-    }
     let Some(action) = context.action else {
-        return categories;
+        return Vec::new();
     };
     let target = context.target.as_ref();
     match scope {
         BrowserGrantScopeKind::AllowOnce => {
-            categories.push(BrowserGrantCategory::AllowOnce {
+            vec![BrowserGrantCategory::AllowOnce {
                 root_session_id: context.root_session_id.clone(),
                 action,
                 target_origin: target.and_then(|target| target.origin.clone()),
                 target_domain: target.and_then(|target| target.registrable_domain.clone()),
                 tab_id: context.tab_id.clone(),
-            });
+            }]
         }
         BrowserGrantScopeKind::AllowOriginSession => {
             if let Some(origin) = target.and_then(|target| target.origin.clone()) {
-                categories.push(BrowserGrantCategory::AllowOriginSession {
+                vec![BrowserGrantCategory::AllowOriginSession {
                     root_session_id: context.root_session_id.clone(),
                     target_origin: origin,
-                });
+                }]
+            } else {
+                Vec::new()
             }
         }
         BrowserGrantScopeKind::AllowDomainSession => {
             if let Some(domain) = target.and_then(|target| target.registrable_domain.clone()) {
-                categories.push(BrowserGrantCategory::AllowDomainSession {
+                vec![BrowserGrantCategory::AllowDomainSession {
                     root_session_id: context.root_session_id.clone(),
                     target_domain: domain,
-                });
+                }]
+            } else {
+                Vec::new()
             }
         }
         BrowserGrantScopeKind::AllowActionOnOriginSession => {
             if let Some(origin) = target.and_then(|target| target.origin.clone()) {
-                categories.push(BrowserGrantCategory::AllowActionOnOriginSession {
+                vec![BrowserGrantCategory::AllowActionOnOriginSession {
                     root_session_id: context.root_session_id.clone(),
                     action,
                     target_origin: origin,
-                });
+                }]
+            } else {
+                Vec::new()
             }
         }
         BrowserGrantScopeKind::AllowTabSession => {
             if let Some(tab_id) = context.tab_id.clone() {
-                categories.push(BrowserGrantCategory::AllowTabSession {
+                vec![BrowserGrantCategory::AllowTabSession {
                     root_session_id: context.root_session_id.clone(),
                     tab_id,
-                });
+                }]
+            } else {
+                Vec::new()
             }
         }
-        BrowserGrantScopeKind::CrossSessionAccess => {}
     }
-    categories
 }
 
 /// Returns true when the supplied typed grants allow the Browser context.
@@ -118,14 +114,6 @@ pub(crate) fn browser_context_matches_grants(
     context: &BrowserPermissionContext,
     mut has_grant: impl FnMut(&BrowserGrantCategory) -> bool,
 ) -> bool {
-    if context.is_cross_session
-        && !has_grant(&BrowserGrantCategory::CrossSessionAccess {
-            root_session_id: context.root_session_id.clone(),
-        })
-    {
-        return false;
-    }
-
     let Some(action) = context.action else {
         return false;
     };
@@ -203,6 +191,26 @@ pub(crate) fn suggested_browser_grant_scope(
         return BrowserGrantScopeKind::AllowOnce;
     }
 
+    if matches!(context.action, Some(BrowserActionCategory::Navigate))
+        && context.tab_id.is_none()
+        && context
+            .target
+            .as_ref()
+            .is_some_and(|target| target.registrable_domain.is_some())
+    {
+        return BrowserGrantScopeKind::AllowDomainSession;
+    }
+
+    if context.action == Some(BrowserActionCategory::Interact)
+        && context.tab_id.is_some()
+        && context
+            .target
+            .as_ref()
+            .is_some_and(|target| target.origin.is_some() && !browser_target_is_high_risk(target))
+    {
+        return BrowserGrantScopeKind::AllowOriginSession;
+    }
+
     if context.tab_id.is_some() {
         return BrowserGrantScopeKind::AllowTabSession;
     }
@@ -223,4 +231,42 @@ pub(crate) fn suggested_browser_grant_scope(
         return BrowserGrantScopeKind::AllowDomainSession;
     }
     BrowserGrantScopeKind::AllowOnce
+}
+
+fn browser_target_is_high_risk(target: &super::browser_target::BrowserTarget) -> bool {
+    if target.target_class != super::browser_target::BrowserTargetClass::OpenWeb {
+        return true;
+    }
+    if target.scheme == "http" && target.host.as_deref().is_some_and(|host| !is_local_like_host(host)) {
+        return true;
+    }
+    if target.host.as_deref().is_some_and(|host| host.parse::<std::net::IpAddr>().is_ok()) {
+        return true;
+    }
+    if target.port.is_some_and(|port| {
+        (target.scheme == "http" && port != 80) || (target.scheme == "https" && port != 443)
+    }) {
+        return true;
+    }
+    target
+        .host
+        .as_deref()
+        .map(host_looks_encoded_or_punycode)
+        .unwrap_or(false)
+}
+
+fn is_local_like_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host.ends_with(".localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| match ip {
+            std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_unspecified(),
+            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+        })
+}
+
+fn host_looks_encoded_or_punycode(host: &str) -> bool {
+    let lower = host.to_ascii_lowercase();
+    lower.contains("xn--")
+        || host.chars().filter(|ch| ch.is_ascii_digit()).count() >= 8
+        || host.matches('-').count() >= 4
 }

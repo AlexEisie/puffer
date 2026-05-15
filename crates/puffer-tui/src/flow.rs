@@ -359,9 +359,7 @@ pub(crate) fn handle_prompt_submit(
                     let (response_tx, response_rx) = mpsc::channel();
                     let _ = permission_sender
                         .send(PendingSubmitEvent::PermissionRequest(request, response_tx));
-                    response_rx
-                        .recv()
-                        .unwrap_or(PermissionPromptAction::Deny)
+                    response_rx.recv().unwrap_or(PermissionPromptAction::Deny)
                 },
             )
         })

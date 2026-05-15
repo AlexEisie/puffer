@@ -874,7 +874,8 @@ fn agent_output_path(session_cwd: &Path, agent_id: &str) -> Result<PathBuf> {
     Ok(dir.join(format!("{agent_id}.json")))
 }
 
-fn filter_resources_for_agent(
+/// Filters the loaded resource set down to the tool pool allowed for one agent.
+pub(crate) fn filter_resources_for_agent(
     resources: &LoadedResources,
     tools: &[String],
     disallowed_tools: &[String],
@@ -912,7 +913,11 @@ fn tool_matches_selector(tool: &ToolSpec, selector: &str) -> bool {
     tool_spec_matches_selector(tool, selector)
 }
 
-fn build_agent_system_prompt(resources: &LoadedResources, agent: &AgentSpec) -> Result<String> {
+/// Builds the effective system prompt for one declarative agent resource.
+pub(crate) fn build_agent_system_prompt(
+    resources: &LoadedResources,
+    agent: &AgentSpec,
+) -> Result<String> {
     let mut sections = vec![agent.prompt.trim().to_string()];
     for skill_name in &agent.skills {
         let Some(skill) = skill_by_name(resources, skill_name) else {
@@ -930,7 +935,8 @@ fn build_agent_system_prompt(resources: &LoadedResources, agent: &AgentSpec) -> 
     Ok(sections.join("\n\n"))
 }
 
-fn combine_agent_prompt(initial_prompt: Option<&str>, prompt: &str) -> String {
+/// Prepends an agent's optional initial prompt to the user-facing prompt body.
+pub(crate) fn combine_agent_prompt(initial_prompt: Option<&str>, prompt: &str) -> String {
     if let Some(initial_prompt) = initial_prompt
         .map(str::trim)
         .filter(|value| !value.is_empty())

@@ -57,7 +57,6 @@ pub(crate) struct BrowserPermissionContext {
     pub(crate) target: Option<BrowserTarget>,
     pub(crate) tab_id: Option<String>,
     pub(crate) root_session_id: String,
-    pub(crate) is_cross_session: bool,
 }
 
 /// Builds the structured Browser permission context for one tool call.
@@ -91,7 +90,6 @@ pub(crate) fn browser_permission_context_for_tool(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToString::to_string),
-        is_cross_session: root_session_id != current_session_id,
         root_session_id,
     }
 }

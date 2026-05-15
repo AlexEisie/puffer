@@ -61,12 +61,6 @@ fn browser_and_bridge_session_grants_feed_profile_categories() {
     )));
     assert!(profile.grants.category_grants.iter().any(|grant| matches!(
         grant,
-        PermissionGrantCategory::Browser(BrowserGrantCategory::CrossSessionAccess {
-            root_session_id
-        }) if root_session_id == "b4f239fd-1493-4be7-a3a1-9e58fe612576"
-    )));
-    assert!(profile.grants.category_grants.iter().any(|grant| matches!(
-        grant,
         PermissionGrantCategory::Workflow(
             crate::permissions::profile::WorkflowGrantCategory::CrossSessionBridge
         )
@@ -94,7 +88,6 @@ fn browser_context_defaults_to_current_session_and_inspect() {
         browser_context.root_session_id,
         "2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a".to_string()
     );
-    assert!(!browser_context.is_cross_session);
     assert!(browser_context.target.is_none());
 }
 
@@ -424,6 +417,39 @@ fn browser_targeted_evaluate_uses_javascript_execution_reason() {
 }
 
 #[test]
+fn browser_evaluator_allows_explicit_allow_without_reviewer_path() {
+    let profile = runtime_context(
+        PermissionsSettings::default(),
+        SandboxSettings::from_mode("workspace-write"),
+        false,
+        None,
+        PathBuf::from("/tmp"),
+        Vec::new(),
+        SessionPermissionState::default(),
+    )
+    .effective_profile()
+    .clone();
+    let policy = BrowserPolicySettings {
+        allow_domains: vec!["example.com".to_string()],
+        ..BrowserPolicySettings::default()
+    };
+    let context = profile.browser_context(&serde_json::json!({
+        "action":"navigate",
+        "url":"https://docs.example.com/page"
+    }));
+
+    let decision = crate::permissions::browser_evaluator::evaluate_browser_permission(
+        &profile, &policy, &context,
+    );
+
+    assert_eq!(
+        decision.decision,
+        crate::permissions::browser_evaluator::BrowserPermissionDecision::Allow
+    );
+    assert_eq!(decision.reason, None);
+}
+
+#[test]
 fn browser_policy_deny_short_circuits_before_reviewer() {
     let profile = runtime_context(
         PermissionsSettings::default(),
@@ -459,6 +485,80 @@ fn browser_policy_deny_short_circuits_before_reviewer() {
 }
 
 #[test]
+fn browser_evaluator_reuses_origin_session_grant_before_policy_allow() {
+    let session_id = Uuid::parse_str("2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a").unwrap();
+    let mut grants = SessionPermissionGrants::default();
+    grants.grant_browser_tool_call(
+        &tool_definition("Browser", "auto"),
+        &serde_json::json!({
+            "action":"navigate",
+            "url":"https://docs.example.com/a"
+        }),
+        &session_id,
+        crate::permissions::browser_grants::BrowserGrantScopeKind::AllowOriginSession,
+    );
+    let profile = EffectivePermissionProfile::from_session_state(
+        PathBuf::from("/repo").as_path(),
+        &[],
+        &PermissionsSettings::default(),
+        &SandboxSettings::from_mode("workspace-write"),
+        &session_id,
+        &SessionPermissionState::new(false, grants),
+        false,
+        None,
+        None,
+    );
+    let policy = BrowserPolicySettings::default();
+    let context = profile.browser_context(&serde_json::json!({
+        "action":"click",
+        "url":"https://docs.example.com/b"
+    }));
+
+    let decision = crate::permissions::browser_evaluator::evaluate_browser_permission(
+        &profile, &policy, &context,
+    );
+
+    assert_eq!(
+        decision.decision,
+        crate::permissions::browser_evaluator::BrowserPermissionDecision::Allow
+    );
+    assert_eq!(decision.reason, None);
+}
+
+#[test]
+fn browser_evaluator_asks_when_neither_policy_nor_grant_allows() {
+    let profile = runtime_context(
+        PermissionsSettings::default(),
+        SandboxSettings::from_mode("workspace-write"),
+        false,
+        None,
+        PathBuf::from("/tmp"),
+        Vec::new(),
+        SessionPermissionState::default(),
+    )
+    .effective_profile()
+    .clone();
+    let policy = BrowserPolicySettings::default();
+    let context = profile.browser_context(&serde_json::json!({
+        "action":"navigate",
+        "url":"https://docs.example.com/page"
+    }));
+
+    let decision = crate::permissions::browser_evaluator::evaluate_browser_permission(
+        &profile, &policy, &context,
+    );
+
+    assert_eq!(
+        decision.decision,
+        crate::permissions::browser_evaluator::BrowserPermissionDecision::Ask
+    );
+    assert_eq!(
+        decision.reason.as_deref(),
+        Some("browser navigation and interaction require approval")
+    );
+}
+
+#[test]
 fn browser_policy_explicit_allow_can_allow_target_class() {
     let profile = runtime_context(
         PermissionsSettings::default(),
@@ -490,7 +590,7 @@ fn browser_policy_explicit_allow_can_allow_target_class() {
 }
 
 #[test]
-fn browser_cross_session_access_requires_explicit_approval() {
+fn browser_permission_context_keeps_explicit_foreign_root_without_relabeling_reason() {
     let context = runtime_context(
         PermissionsSettings::default(),
         SandboxSettings::from_mode("workspace-write"),
@@ -511,14 +611,14 @@ fn browser_cross_session_access_requires_explicit_approval() {
     );
 
     assert_eq!(decision.behavior, ToolPermissionBehavior::Ask);
-    assert!(decision
-        .reason
-        .unwrap_or_default()
-        .contains("cross-session browser access"));
+    assert_eq!(
+        decision.reason.as_deref(),
+        Some("browser inspection requires approval")
+    );
 }
 
 #[test]
-fn browser_session_grant_is_scoped_to_action_category_and_cross_session_flag() {
+fn browser_session_grant_is_scoped_to_action_category_and_root_session() {
     let session_id = Uuid::parse_str("2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a").unwrap();
     let mut grants = SessionPermissionGrants::default();
     grants.grant_tool_call(
@@ -556,7 +656,7 @@ fn browser_session_grant_is_scoped_to_action_category_and_cross_session_flag() {
 }
 
 #[test]
-fn browser_origin_session_grant_does_not_cross_origins_or_actions() {
+fn browser_origin_session_grant_does_not_cross_origins() {
     let session_id = Uuid::parse_str("2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a").unwrap();
     let mut grants = SessionPermissionGrants::default();
     grants.grant_browser_tool_call(
@@ -666,6 +766,44 @@ fn browser_tab_session_grant_does_not_cross_tabs() {
 }
 
 #[test]
+fn suggested_scope_prefers_origin_for_normal_same_origin_interaction() {
+    let context = browser_permission_context_for_tool(
+        "Browser",
+        &serde_json::json!({
+            "action":"click",
+            "tabId":"t7",
+            "url":"https://docs.example.com/page"
+        }),
+        "2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a",
+        &[],
+    );
+
+    assert_eq!(
+        crate::permissions::browser_grants::suggested_browser_grant_scope(&context),
+        crate::permissions::browser_grants::BrowserGrantScopeKind::AllowOriginSession
+    );
+}
+
+#[test]
+fn suggested_scope_keeps_tab_for_high_risk_interaction_targets() {
+    let context = browser_permission_context_for_tool(
+        "Browser",
+        &serde_json::json!({
+            "action":"click",
+            "tabId":"t7",
+            "url":"http://203.0.113.10:8080/page"
+        }),
+        "2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a",
+        &[],
+    );
+
+    assert_eq!(
+        crate::permissions::browser_grants::suggested_browser_grant_scope(&context),
+        crate::permissions::browser_grants::BrowserGrantScopeKind::AllowTabSession
+    );
+}
+
+#[test]
 fn browser_surface_only_session_grant_does_not_allow_evaluate() {
     let mut grants = SessionPermissionGrants::default();
     grants.grant_surface_for_test(PermissionSurface::Browser);
@@ -756,5 +894,4 @@ fn bash_browser_tab_focus_is_classified_as_navigate() {
     assert_eq!(context.action, Some(BrowserActionCategory::Navigate));
     assert_eq!(context.tab_id.as_deref(), Some("t4"));
     assert_eq!(context.root_session_id, "root-9");
-    assert!(context.is_cross_session);
 }

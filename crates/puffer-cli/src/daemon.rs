@@ -1927,7 +1927,25 @@ fn browser_permission_payload_json(payload: &puffer_core::BrowserPermissionPromp
             BrowserPermissionPromptTargetClass::Unknown => "unknown",
         },
         "tabId": payload.tab_id,
-        "isCrossSession": payload.is_cross_session,
+    })
+}
+
+fn permission_review_payload_json(payload: &puffer_core::PermissionPromptReviewPayload) -> Value {
+    json!({
+        "decision": match payload.decision {
+            puffer_core::BrowserAutoReviewRuntimeResult::AllowOnce => "allow_once",
+            puffer_core::BrowserAutoReviewRuntimeResult::AllowSession => "allow_session",
+            puffer_core::BrowserAutoReviewRuntimeResult::Deny => "deny",
+            puffer_core::BrowserAutoReviewRuntimeResult::NeedsUser => "needs_user",
+            puffer_core::BrowserAutoReviewRuntimeResult::Unavailable => "unavailable",
+        },
+        "risk": payload.risk,
+        "rationale": payload.rationale,
+        "resolvedRootSessionId": payload.resolved_root_session_id,
+        "sessionTargeting": match payload.session_targeting {
+            puffer_core::BrowserAutoReviewSessionTargeting::CurrentSession => "current_session",
+            puffer_core::BrowserAutoReviewSessionTargeting::ExplicitSession => "explicit_session",
+        },
     })
 }
 
@@ -2268,6 +2286,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                     "summary": req.summary,
                     "reason": req.reason,
                     "browser": req.browser.as_ref().map(browser_permission_payload_json),
+                    "review": req.review.as_ref().map(permission_review_payload_json),
                 }),
             });
 
@@ -2430,9 +2449,9 @@ fn apply_daemon_yolo_mode(app_state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_daemon_yolo_mode, apply_turn_model_override, handle_create_session,
-        browser_permission_payload_json, handle_list_permissions, handle_save_permissions,
-        DaemonState,
+        apply_daemon_yolo_mode, apply_turn_model_override, browser_permission_payload_json,
+        handle_create_session, handle_list_permissions, handle_save_permissions,
+        permission_review_payload_json, DaemonState,
     };
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
@@ -2598,22 +2617,42 @@ mod tests {
 
     #[test]
     fn browser_permission_payload_json_exposes_context_only() {
-        let payload = browser_permission_payload_json(&puffer_core::BrowserPermissionPromptPayload {
-            source: puffer_core::BrowserPermissionPromptSource::BrowserTool,
-            action_set: puffer_core::BrowserPermissionPromptActionSet::Navigate,
-            url: Some("https://docs.example.com/a".to_string()),
-            origin: Some("https://docs.example.com".to_string()),
-            host: Some("docs.example.com".to_string()),
-            target_class: puffer_core::BrowserPermissionPromptTargetClass::OpenWeb,
-            tab_id: Some("tab-1".to_string()),
-            is_cross_session: false,
-        });
+        let payload =
+            browser_permission_payload_json(&puffer_core::BrowserPermissionPromptPayload {
+                source: puffer_core::BrowserPermissionPromptSource::BrowserTool,
+                action_set: puffer_core::BrowserPermissionPromptActionSet::Navigate,
+                url: Some("https://docs.example.com/a".to_string()),
+                origin: Some("https://docs.example.com".to_string()),
+                host: Some("docs.example.com".to_string()),
+                target_class: puffer_core::BrowserPermissionPromptTargetClass::OpenWeb,
+                tab_id: Some("tab-1".to_string()),
+            });
 
         assert_eq!(payload["source"], "browser_tool");
         assert_eq!(payload["actionSet"], "navigate");
         assert_eq!(payload["host"], "docs.example.com");
         assert!(payload.get("availableScopes").is_none());
         assert!(payload.get("suggestedScope").is_none());
+    }
+
+    #[test]
+    fn permission_review_payload_json_exposes_reviewer_conclusion() {
+        let payload = permission_review_payload_json(&puffer_core::PermissionPromptReviewPayload {
+            decision: puffer_core::BrowserAutoReviewRuntimeResult::NeedsUser,
+            risk: "medium".to_string(),
+            rationale: "Session targeting is explicit but the destination is ambiguous.".to_string(),
+            resolved_root_session_id: "root-1".to_string(),
+            session_targeting: puffer_core::BrowserAutoReviewSessionTargeting::ExplicitSession,
+        });
+
+        assert_eq!(payload["decision"], "needs_user");
+        assert_eq!(payload["risk"], "medium");
+        assert_eq!(
+            payload["rationale"],
+            "Session targeting is explicit but the destination is ambiguous."
+        );
+        assert_eq!(payload["resolvedRootSessionId"], "root-1");
+        assert_eq!(payload["sessionTargeting"], "explicit_session");
     }
 
     fn provider(id: &str, models: &[&str]) -> ProviderDescriptor {

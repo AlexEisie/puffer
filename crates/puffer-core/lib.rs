@@ -51,7 +51,8 @@ pub use runtime::resource_watcher::ResourceWatcher;
 pub use runtime::subscription_manager;
 pub use runtime::teammate_loop;
 pub use runtime::{
-    execute_side_question, execute_user_prompt_streaming as execute_user_turn_streaming,
+    browser_auto_review_runtime_result_from_json, execute_side_question,
+    execute_user_prompt_streaming as execute_user_turn_streaming,
     execute_user_prompt_streaming_with_cancel as execute_user_turn_streaming_with_cancel,
     execute_user_prompt_streaming_with_permissions as execute_user_turn_streaming_with_permissions,
     execute_user_prompt_streaming_with_permissions_and_cancel as execute_user_turn_streaming_with_permissions_and_cancel,
@@ -59,13 +60,18 @@ pub use runtime::{
     execute_user_prompt_streaming_with_structured_output as execute_user_turn_streaming_with_structured_output,
     execute_user_prompt_with_structured_output as execute_user_turn_with_structured_output,
     runtime_work_active, shutdown_runtime_services, with_permission_prompt_handler,
-    with_user_question_prompt_handler, BrowserPermissionPromptActionSet,
-    BrowserPermissionPromptPayload, BrowserPermissionPromptSource,
-    BrowserPermissionPromptTargetClass, CancelToken, CodeJudgeConfig, LlmJudgeConfig,
-    LlmJudgeContextScope, LlmJudgeMode, LlmJudgePromptCacheMode, PermissionPromptAction,
-    PermissionPromptRequest, ReflectionConfig, ReflectionLanguage,
-    ReflectionTraceEvent, StructuredOutputConfig, ToolCallRequest, ToolInvocation, TurnExecution,
-    TurnStreamEvent, TurnUsageReport, UserQuestionPromptRequest, UserQuestionPromptResponse,
+    with_user_question_prompt_handler, BrowserAutoReviewActionSet, BrowserAutoReviewRawAction,
+    BrowserAutoReviewRequest, BrowserAutoReviewRuntimeResult,
+    BrowserAutoReviewSessionTargeting, BrowserAutoReviewSource,
+    BrowserAutoReviewSuggestedGrantScope, BrowserAutoReviewTargetClass,
+    BrowserAutoReviewUrlSource,
+    BrowserPermissionPromptActionSet, BrowserPermissionPromptPayload,
+    BrowserPermissionPromptSource, BrowserPermissionPromptTargetClass, CancelToken,
+    CodeJudgeConfig, LlmJudgeConfig, LlmJudgeContextScope, LlmJudgeMode, LlmJudgePromptCacheMode,
+    PermissionPromptAction, PermissionPromptRequest, PermissionPromptReviewPayload,
+    ReflectionConfig, ReflectionLanguage, ReflectionTraceEvent, StructuredOutputConfig,
+    ToolCallRequest, ToolInvocation, TurnExecution, TurnStreamEvent, TurnUsageReport,
+    UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 pub use runtime::{install_observability, observability_handle};
 pub use state::{AppState, MessageRole, RenderedMessage, TaskRecord, TaskStatus};

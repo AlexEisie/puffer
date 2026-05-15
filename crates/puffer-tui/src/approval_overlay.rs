@@ -176,74 +176,24 @@ impl ApprovalOverlay {
                 Span::raw(self.request.summary.clone()),
             ]),
         ];
-        if let Some(reason) = &self.request.reason {
-            lines.push(Line::from(vec![
-                Span::styled("Reason: ", Style::default().add_modifier(Modifier::DIM)),
-                Span::raw(reason.clone()),
-            ]));
-        }
-        if let Some(browser) = &self.request.browser {
-            lines.push(Line::from(vec![
-                Span::styled("Source: ", Style::default().add_modifier(Modifier::DIM)),
-                Span::raw(match browser.source {
-                    puffer_core::BrowserPermissionPromptSource::BrowserTool => "Browser tool",
-                    puffer_core::BrowserPermissionPromptSource::BrowserCliViaShell => {
-                        "Browser CLI via shell"
-                    }
-                }),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("Action Set: ", Style::default().add_modifier(Modifier::DIM)),
-                Span::raw(match browser.action_set {
-                    puffer_core::BrowserPermissionPromptActionSet::Inspect => "inspect",
-                    puffer_core::BrowserPermissionPromptActionSet::Navigate => "navigate",
-                    puffer_core::BrowserPermissionPromptActionSet::Interact => "interact",
-                    puffer_core::BrowserPermissionPromptActionSet::Evaluate => "evaluate",
-                }),
-            ]));
-            if let Some(url) = &browser.url {
+        let is_browser_evaluate = self.request.browser.as_ref().is_some_and(|browser| {
+            matches!(
+                browser.action_set,
+                puffer_core::BrowserPermissionPromptActionSet::Evaluate
+            )
+        });
+        if is_browser_evaluate {
+            if let Some(reason) = &self.request.reason {
                 lines.push(Line::from(vec![
-                    Span::styled("URL: ", Style::default().add_modifier(Modifier::DIM)),
-                    Span::raw(url.clone()),
+                    Span::styled("Reason: ", Style::default().add_modifier(Modifier::DIM)),
+                    Span::raw(reason.clone()),
                 ]));
             }
-            if let Some(origin) = &browser.origin {
+        } else if self.request.browser.is_none() {
+            if let Some(reason) = &self.request.reason {
                 lines.push(Line::from(vec![
-                    Span::styled("Origin: ", Style::default().add_modifier(Modifier::DIM)),
-                    Span::raw(origin.clone()),
-                ]));
-            }
-            if let Some(host) = &browser.host {
-                lines.push(Line::from(vec![
-                    Span::styled("Host: ", Style::default().add_modifier(Modifier::DIM)),
-                    Span::raw(host.clone()),
-                ]));
-            }
-            lines.push(Line::from(vec![
-                Span::styled("Target: ", Style::default().add_modifier(Modifier::DIM)),
-                Span::raw(match browser.target_class {
-                    puffer_core::BrowserPermissionPromptTargetClass::LocalDev => "local_dev",
-                    puffer_core::BrowserPermissionPromptTargetClass::WorkspaceFile => {
-                        "workspace_file"
-                    }
-                    puffer_core::BrowserPermissionPromptTargetClass::NonWorkspaceFile => {
-                        "non_workspace_file"
-                    }
-                    puffer_core::BrowserPermissionPromptTargetClass::DataUrl => "data_url",
-                    puffer_core::BrowserPermissionPromptTargetClass::OpenWeb => "open_web",
-                    puffer_core::BrowserPermissionPromptTargetClass::Unknown => "unknown",
-                }),
-            ]));
-            if let Some(tab_id) = &browser.tab_id {
-                lines.push(Line::from(vec![
-                    Span::styled("Tab: ", Style::default().add_modifier(Modifier::DIM)),
-                    Span::raw(tab_id.clone()),
-                ]));
-            }
-            if browser.is_cross_session {
-                lines.push(Line::from(vec![
-                    Span::styled("Access: ", Style::default().add_modifier(Modifier::DIM)),
-                    Span::raw("cross-session"),
+                    Span::styled("Reason: ", Style::default().add_modifier(Modifier::DIM)),
+                    Span::raw(reason.clone()),
                 ]));
             }
         }
@@ -257,15 +207,24 @@ impl ApprovalOverlay {
             Span::styled("a", Style::default().add_modifier(Modifier::BOLD)),
         ];
         if self.request.browser.is_some() {
-            spans.push(Span::raw(" browser for session  "));
+            spans.push(Span::raw(" context for session  "));
         } else {
             spans.push(Span::raw(" tool for session  "));
-            spans.push(Span::styled("A", Style::default().add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(
+                "A",
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
             spans.push(Span::raw(" all for session  "));
         }
-        spans.push(Span::styled("n", Style::default().add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "n",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
         spans.push(Span::raw(" deny  "));
-        spans.push(Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "Esc",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
         spans.push(Span::raw(" deny"));
         Line::from(spans)
     }
@@ -281,7 +240,7 @@ fn permissions_options(request: &PermissionPromptRequest) -> Vec<ApprovalOption>
         },
         ApprovalOption {
             label: if request.browser.is_some() {
-                "Yes, allow browser access for this session".to_string()
+                "Yes, allow this browser context for this session".to_string()
             } else {
                 "Yes, grant these permissions for this session".to_string()
             },

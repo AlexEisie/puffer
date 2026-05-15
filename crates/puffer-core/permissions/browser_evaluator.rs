@@ -1,7 +1,6 @@
-use super::browser_grants::BrowserGrantCategory;
 use super::browser_policy::BrowserPolicySettings;
 use super::browser_target::{BrowserActionCategory, BrowserPermissionContext};
-use super::profile::{EffectivePermissionProfile, PermissionGrantCategory};
+use super::profile::EffectivePermissionProfile;
 
 /// Enumerates the deterministic Browser evaluator outcomes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,19 +43,6 @@ pub(crate) fn evaluate_browser_permission(
 
     if context.target.is_none() {
         return ask("browser action requires page context because no target URL is available");
-    }
-
-    if context.is_cross_session
-        && !profile
-            .grants
-            .category_grants
-            .contains(&PermissionGrantCategory::Browser(
-                BrowserGrantCategory::CrossSessionAccess {
-                    root_session_id: context.root_session_id.clone(),
-                },
-            ))
-    {
-        return ask("cross-session browser access requires explicit approval");
     }
 
     if explicit_allow_matches(policy, context) {

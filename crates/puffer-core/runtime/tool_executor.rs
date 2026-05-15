@@ -1,3 +1,7 @@
+use super::browser_auto_review::{
+    build_browser_auto_review_request, run_browser_auto_review, BrowserAutoReviewRuntimeResult,
+    BrowserAutoReviewSessionTargeting,
+};
 use super::agents::execute_agent_tool;
 use super::claude_tools::{self, ProviderToolContext};
 use super::hook_support::{run_tool_end_hooks, run_tool_start_hooks};
@@ -30,6 +34,8 @@ use puffer_tools::{ToolExecutionResult, ToolOutput, ToolRegistry};
 use puffer_transport_anthropic::AnthropicRequestConfig;
 use serde_json::Value;
 use std::path::Path;
+
+const BROWSER_REVIEW_METADATA_KEY: &str = "__pufferBrowserReview";
 
 /// Identifies which provider loop is currently executing a tool call.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -72,7 +78,7 @@ pub(super) fn execute_tool_call(
             .filter(|definition| definition.id == tool_id)
             .ok_or_else(|| anyhow!("unknown tool {tool_id}"))?,
     };
-    let input = prepare_permission_input(state, cwd, &definition, input)?;
+    let input = prepare_browser_permission_input(state, cwd, &definition, input)?;
     let permission_context = load_runtime_permission_context_with_inputs(
         cwd,
         resources,
@@ -93,49 +99,22 @@ pub(super) fn execute_tool_call(
             ));
         }
         ToolPermissionBehavior::Ask => {
-            let carries_browser_permission =
-                browser_permission_value_for_tool_call(&definition.id, &input).is_some();
-            let browser_session_grant = carries_browser_permission.then(|| {
-                browser_grant_scope_for_prompt_action(
-                    &definition,
-                    &input,
-                    &permission_context.effective_profile().current_session_id,
-                    &permission_context.effective_profile().workspace_roots,
-                )
-            });
-            match prompt_for_permission(build_permission_prompt_request(
+            match resolve_ask_behavior(
+                state,
+                resources,
+                providers,
+                auth_store,
+                cwd,
+                tool_filter,
                 &definition,
                 &input,
                 permission_decision.reason.as_deref(),
                 &permission_context.effective_profile().current_session_id,
                 &permission_context.effective_profile().workspace_roots,
-            )) {
-                PermissionPromptAction::AllowOnce => {}
-                PermissionPromptAction::AllowSession => {
-                    if carries_browser_permission {
-                        state.allow_browser_permission_for_tool_call(
-                            &definition,
-                            &input,
-                            browser_session_grant
-                                .unwrap_or(BrowserGrantScopeKind::AllowOnce),
-                        );
-                    } else {
-                        state.allow_permission_for_tool_call(&definition, &input);
-                    }
-                }
-                PermissionPromptAction::AllowAllSession => {
-                    if carries_browser_permission {
-                        state.allow_browser_permission_for_tool_call(
-                            &definition,
-                            &input,
-                            browser_session_grant
-                                .unwrap_or(BrowserGrantScopeKind::AllowOnce),
-                        );
-                    } else {
-                        state.grant_all_tools_for_session();
-                    }
-                }
-                PermissionPromptAction::Deny => {
+            )? {
+                AskResolution::AllowOnce => {}
+                AskResolution::AllowSession => {}
+                AskResolution::Deny => {
                     return Ok(blocked_runtime_tool(
                         tool_id,
                         ToolPermissionBehavior::Deny,
@@ -234,6 +213,8 @@ pub(super) enum PermissionOutcome {
 pub(super) fn resolve_tool_permission(
     state: &mut AppState,
     resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
     registry: &ToolRegistry,
     cwd: &Path,
     tool_id: &str,
@@ -250,7 +231,7 @@ pub(super) fn resolve_tool_permission(
             )));
         }
     };
-    let input = prepare_permission_input(state, cwd, &definition, input.clone())?;
+    let input = prepare_browser_permission_input(state, cwd, &definition, input.clone())?;
     let permission_context = load_runtime_permission_context_with_inputs(
         cwd,
         resources,
@@ -270,37 +251,23 @@ pub(super) fn resolve_tool_permission(
             permission_decision.reason,
         ))),
         ToolPermissionBehavior::Ask => {
-            let carries_browser_permission =
-                browser_permission_value_for_tool_call(&definition.id, &input).is_some();
-            let browser_session_grant = carries_browser_permission.then(|| {
-                browser_grant_scope_for_prompt_action(
-                    &definition,
-                    &input,
-                    &permission_context.effective_profile().current_session_id,
-                    &permission_context.effective_profile().workspace_roots,
-                )
-            });
-            match prompt_for_permission(build_permission_prompt_request(
+            match resolve_ask_behavior(
+                state,
+                resources,
+                providers,
+                auth_store,
+                cwd,
+                tool_filter,
                 &definition,
                 &input,
                 permission_decision.reason.as_deref(),
                 &permission_context.effective_profile().current_session_id,
                 &permission_context.effective_profile().workspace_roots,
-            )) {
-                PermissionPromptAction::AllowOnce => Ok(PermissionOutcome::Allowed(
+            )? {
+                AskResolution::AllowOnce => Ok(PermissionOutcome::Allowed(
                     permission_context.derived_policy().filesystem().clone(),
                 )),
-                PermissionPromptAction::AllowSession => {
-                    if carries_browser_permission {
-                        state.allow_browser_permission_for_tool_call(
-                            &definition,
-                            &input,
-                            browser_session_grant
-                                .unwrap_or(BrowserGrantScopeKind::AllowOnce),
-                        );
-                    } else {
-                        state.allow_permission_for_tool_call(&definition, &input);
-                    }
+                AskResolution::AllowSession => {
                     remember_browser_target(state, &definition, &input);
                     Ok(PermissionOutcome::Allowed(runtime_filesystem_policy(
                         cwd,
@@ -309,34 +276,116 @@ pub(super) fn resolve_tool_permission(
                         tool_filter,
                     )?))
                 }
-                PermissionPromptAction::AllowAllSession => {
-                    if carries_browser_permission {
-                        state.allow_browser_permission_for_tool_call(
-                            &definition,
-                            &input,
-                            browser_session_grant
-                                .unwrap_or(BrowserGrantScopeKind::AllowOnce),
-                        );
-                    } else {
-                        state.grant_all_tools_for_session();
-                    }
-                    remember_browser_target(state, &definition, &input);
-                    Ok(PermissionOutcome::Allowed(runtime_filesystem_policy(
-                        cwd,
-                        resources,
-                        state,
-                        tool_filter,
-                    )?))
-                }
-                PermissionPromptAction::Deny => {
-                    Ok(PermissionOutcome::Denied(blocked_runtime_tool(
-                        tool_id,
-                        ToolPermissionBehavior::Deny,
-                        Some("permission denied by user".to_string()),
-                    )))
-                }
+                AskResolution::Deny => Ok(PermissionOutcome::Denied(blocked_runtime_tool(
+                    tool_id,
+                    ToolPermissionBehavior::Deny,
+                    Some("permission denied by user".to_string()),
+                ))),
             }
         }
+    }
+}
+
+enum AskResolution {
+    AllowOnce,
+    AllowSession,
+    Deny,
+}
+
+fn resolve_ask_behavior(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
+    cwd: &Path,
+    tool_filter: Option<&RequestToolFilter>,
+    definition: &puffer_tools::ToolDefinition,
+    input: &Value,
+    reason: Option<&str>,
+    current_session_id: &str,
+    workspace_roots: &[std::path::PathBuf],
+) -> Result<AskResolution> {
+    let carries_browser_permission = browser_permission_value_for_tool_call(&definition.id, input).is_some();
+    let browser_session_grant = carries_browser_permission.then(|| {
+        browser_grant_scope_for_prompt_action(
+            definition,
+            input,
+            current_session_id,
+            workspace_roots,
+        )
+    });
+    let prompt_request = build_permission_prompt_request(
+        definition,
+        input,
+        reason,
+        current_session_id,
+        workspace_roots,
+    );
+    if let Some(browser) = prompt_request.browser.as_ref() {
+        let resolved_root_session_id = input
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "current")
+            .unwrap_or(current_session_id)
+            .to_string();
+        let session_targeting = if resolved_root_session_id == current_session_id {
+            BrowserAutoReviewSessionTargeting::CurrentSession
+        } else {
+            BrowserAutoReviewSessionTargeting::ExplicitSession
+        };
+        let review_request = build_browser_auto_review_request(
+            &definition.id,
+            input,
+            prompt_request.summary.clone(),
+            prompt_request.reason.clone(),
+            browser,
+            resolved_root_session_id,
+            session_targeting,
+            browser_session_grant.unwrap_or(BrowserGrantScopeKind::AllowOnce),
+        );
+        match run_browser_auto_review(state, resources, providers, auth_store, &review_request) {
+            BrowserAutoReviewRuntimeResult::AllowOnce => return Ok(AskResolution::AllowOnce),
+            BrowserAutoReviewRuntimeResult::AllowSession => {
+                state.allow_browser_permission_for_tool_call(
+                    definition,
+                    input,
+                    browser_session_grant.unwrap_or(BrowserGrantScopeKind::AllowOnce),
+                );
+                return Ok(AskResolution::AllowSession);
+            }
+            BrowserAutoReviewRuntimeResult::Deny => return Ok(AskResolution::Deny),
+            BrowserAutoReviewRuntimeResult::NeedsUser
+            | BrowserAutoReviewRuntimeResult::Unavailable => {}
+        }
+    }
+    match prompt_for_permission(prompt_request) {
+        PermissionPromptAction::AllowOnce => Ok(AskResolution::AllowOnce),
+        PermissionPromptAction::AllowSession => {
+            if carries_browser_permission {
+                state.allow_browser_permission_for_tool_call(
+                    definition,
+                    input,
+                    browser_session_grant.unwrap_or(BrowserGrantScopeKind::AllowOnce),
+                );
+            } else {
+                state.allow_permission_for_tool_call(definition, input);
+            }
+            Ok(AskResolution::AllowSession)
+        }
+        PermissionPromptAction::AllowAllSession => {
+            if carries_browser_permission {
+                state.allow_browser_permission_for_tool_call(
+                    definition,
+                    input,
+                    browser_session_grant.unwrap_or(BrowserGrantScopeKind::AllowOnce),
+                );
+            } else {
+                state.grant_all_tools_for_session();
+            }
+            Ok(AskResolution::AllowSession)
+        }
+        PermissionPromptAction::Deny => Ok(AskResolution::Deny),
     }
 }
 
@@ -355,13 +404,24 @@ fn browser_grant_scope_for_prompt_action(
     crate::permissions::browser_grants::suggested_browser_grant_scope(&context)
 }
 
-fn prepare_permission_input(
+fn prepare_browser_permission_input(
     state: &AppState,
     cwd: &Path,
     definition: &puffer_tools::ToolDefinition,
     mut input: Value,
 ) -> Result<Value> {
     if let Some(browser_input) = browser_permission_value_for_tool_call(&definition.id, &input) {
+        let raw_action = browser_input
+            .get("action")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .map(str::to_ascii_lowercase);
+        let explicit_requested_url = browser_input
+            .get("url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
         let enriched = enrich_browser_permission_input(cwd, &state.session.id, browser_input)?;
         let current_session_id = state.session.id.to_string();
         let root_session_id = enriched
@@ -372,6 +432,22 @@ fn prepare_permission_input(
             .map(ToString::to_string)
             .unwrap_or(current_session_id);
         let enriched = apply_browser_url_fallback(state, cwd, &root_session_id, enriched)?;
+        let current_tab_url = if explicit_requested_url.is_some()
+            && matches!(raw_action.as_deref(), Some("open" | "new"))
+        {
+            read_current_tab_context(cwd, &root_session_id)
+                .ok()
+                .and_then(|context| context.url)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("about:blank"))
+        } else {
+            None
+        };
+        let enriched = attach_browser_review_metadata(
+            enriched,
+            explicit_requested_url.as_deref(),
+            current_tab_url.as_deref(),
+        );
         if canonical_tool_name(&definition.id) == "browser" {
             return Ok(enriched);
         }
@@ -379,6 +455,41 @@ fn prepare_permission_input(
         return Ok(input);
     }
     Ok(input)
+}
+
+fn attach_browser_review_metadata(
+    input: Value,
+    explicit_requested_url: Option<&str>,
+    current_tab_url: Option<&str>,
+) -> Value {
+    let Some(payload) = input.as_object() else {
+        return input;
+    };
+    let effective_url = payload
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let url_source = match (explicit_requested_url, effective_url.as_deref()) {
+        (Some(requested), Some(effective)) if requested.eq_ignore_ascii_case(effective) => {
+            "explicit"
+        }
+        (Some(_), Some(_)) => "current_tab",
+        (Some(_), None) => "none",
+        (None, Some(_)) => "current_tab",
+        (None, None) => "none",
+    };
+    let mut enriched = payload.clone();
+    enriched.insert(
+        BROWSER_REVIEW_METADATA_KEY.to_string(),
+        serde_json::json!({
+            "urlSource": url_source,
+            "requestedUrl": explicit_requested_url,
+            "currentTabUrl": current_tab_url,
+        }),
+    );
+    Value::Object(enriched)
 }
 
 fn apply_browser_url_fallback(

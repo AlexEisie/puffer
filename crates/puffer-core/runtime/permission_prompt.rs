@@ -3,6 +3,9 @@ use crate::permissions::browser_target::{
     browser_permission_context_for_tool, BrowserActionCategory, BrowserTargetClass,
 };
 use crate::tool_names::canonical_tool_name;
+use super::browser_auto_review::{
+    BrowserAutoReviewRuntimeResult, BrowserAutoReviewSessionTargeting,
+};
 use puffer_tools::ToolDefinition;
 use serde_json::{Map, Value};
 use std::cell::RefCell;
@@ -15,6 +18,7 @@ pub struct PermissionPromptRequest {
     pub summary: String,
     pub reason: Option<String>,
     pub browser: Option<BrowserPermissionPromptPayload>,
+    pub review: Option<PermissionPromptReviewPayload>,
 }
 
 /// Carries the structured Browser approval payload shared across all Browser prompts.
@@ -27,7 +31,16 @@ pub struct BrowserPermissionPromptPayload {
     pub host: Option<String>,
     pub target_class: BrowserPermissionPromptTargetClass,
     pub tab_id: Option<String>,
-    pub is_cross_session: bool,
+}
+
+/// Carries the reviewer conclusion shown when Browser approval falls back to the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionPromptReviewPayload {
+    pub decision: BrowserAutoReviewRuntimeResult,
+    pub risk: String,
+    pub rationale: String,
+    pub resolved_root_session_id: String,
+    pub session_targeting: BrowserAutoReviewSessionTargeting,
 }
 
 /// Identifies how one Browser approval request reached the prompt layer.
@@ -147,6 +160,7 @@ pub(crate) fn build_permission_prompt_request(
         summary: permission_request_summary(definition, input),
         reason: reason.map(str::to_string),
         browser: browser_prompt_payload(definition, input, current_session_id, workspace_roots),
+        review: None,
     }
 }
 
@@ -209,12 +223,12 @@ fn browser_prompt_payload(
         host,
         target_class,
         tab_id: context.tab_id.clone(),
-        is_cross_session: context.is_cross_session,
     })
 }
 
 fn permission_request_summary(definition: &ToolDefinition, input: &Value) -> String {
     match definition.id.as_str() {
+        "Browser" => browser_permission_summary(input),
         "Bash" | "PowerShell" => input
             .get("command")
             .and_then(Value::as_str)
@@ -243,5 +257,58 @@ fn permission_request_summary(definition: &ToolDefinition, input: &Value) -> Str
         "AskUserQuestion" => "Answer questions?".to_string(),
         "ExitPlanMode" => "Exit plan mode?".to_string(),
         _ => definition.id.clone(),
+    }
+}
+
+fn browser_permission_summary(input: &Value) -> String {
+    let context = browser_permission_context_for_tool("Browser", input, "current", &[]);
+    let target = browser_summary_target(&context);
+    match context.action {
+        Some(BrowserActionCategory::Inspect) => {
+            if target == "browser tabs" {
+                "Inspect browser tabs".to_string()
+            } else {
+                format!("Inspect {target}")
+            }
+        }
+        Some(BrowserActionCategory::Navigate) => format!("Open {target}"),
+        Some(BrowserActionCategory::Interact) => {
+            if target == "current browser tab" {
+                "Interact with current browser tab".to_string()
+            } else {
+                format!("Interact with {target}")
+            }
+        }
+        Some(BrowserActionCategory::Evaluate) => {
+            if target == "current browser tab" {
+                "Run JavaScript in current browser tab".to_string()
+            } else {
+                format!("Run JavaScript on {target}")
+            }
+        }
+        None => "Browser".to_string(),
+    }
+}
+
+fn browser_summary_target(
+    context: &crate::permissions::browser_target::BrowserPermissionContext,
+) -> String {
+    if let Some(target) = &context.target {
+        return match target.target_class {
+            BrowserTargetClass::LocalDev => target
+                .raw_url
+                .strip_prefix("http://")
+                .map(str::to_string)
+                .unwrap_or_else(|| target.raw_url.clone()),
+            BrowserTargetClass::WorkspaceFile => "workspace file".to_string(),
+            BrowserTargetClass::NonWorkspaceFile => "file outside workspace".to_string(),
+            BrowserTargetClass::DataUrl => "data URL".to_string(),
+            BrowserTargetClass::OpenWeb => target.raw_url.clone(),
+        };
+    }
+    if context.tab_id.is_some() {
+        "current browser tab".to_string()
+    } else {
+        "browser tabs".to_string()
     }
 }
