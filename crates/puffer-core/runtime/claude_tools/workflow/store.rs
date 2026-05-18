@@ -4,7 +4,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -802,6 +802,27 @@ pub(super) fn resolve_path(cwd: &Path, path: &str) -> PathBuf {
     } else {
         cwd.join(candidate)
     }
+}
+
+pub(super) fn ensure_safe_identifier(value: &str, field: &str) -> Result<()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        bail!("{field} must not be empty");
+    }
+    let path = Path::new(trimmed);
+    if path.is_absolute()
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        bail!("{field} must be a simple identifier without path components");
+    }
+    Ok(())
 }
 
 pub(crate) fn now_ms() -> u64 {

@@ -1,11 +1,11 @@
 use super::store::{
     agents_path, append_agent_message, claude_task_dir, detect_powershell_binary,
-    find_team_for_session, git_ahead_count, git_dirty, git_head_commit, git_toplevel, is_git_repo,
-    load_store, messages_path, next_task_id, now_ms, register_team_member,
-    remove_claude_team_artifacts, resolve_recipients, save_store, shutdown_requests_path,
-    task_output_path, tasks_path, team_lead_agent_id, teams_path, todos_path,
-    validate_ask_user_questions, workflow_root, worktrees_path, write_claude_team_file, AgentInput,
-    AgentStore, AskUserQuestionInput, ClaudeTeamFile, ClaudeTeamMember, ConfigInput,
+    ensure_safe_identifier, find_team_for_session, git_ahead_count, git_dirty, git_head_commit,
+    git_toplevel, is_git_repo, load_store, messages_path, next_task_id, now_ms,
+    register_team_member, remove_claude_team_artifacts, resolve_recipients, save_store,
+    shutdown_requests_path, task_output_path, tasks_path, team_lead_agent_id, teams_path,
+    todos_path, validate_ask_user_questions, workflow_root, worktrees_path, write_claude_team_file,
+    AgentInput, AgentStore, AskUserQuestionInput, ClaudeTeamFile, ClaudeTeamMember, ConfigInput,
     EnterWorktreeInput, ExitWorktreeInput, MessageStore, PendingShutdownRequest, PowerShellInput,
     SendMessageInput, ShutdownRequestStore, StoredAgent, StoredMessage, StoredTask, StoredTeam,
     StoredTodo, StoredWorktree, TaskStore, TeamCreateInput, TeamStore, TodoStore, TodoWriteInput,
@@ -13,8 +13,8 @@ use super::store::{
 };
 use super::task_runtime::{terminal_task_status, validate_todos, wait_for_child_output};
 use crate::config_settings::{
-    config_setting_path, config_setting_scope, get_config_value, persist_config_setting,
-    scope_label, set_config_value,
+    config_setting_path, config_setting_scope, get_config_value, normalize_config_key,
+    persist_config_setting, scope_label, set_config_value,
 };
 use crate::runtime::permission_prompt::{prompt_for_user_question, UserQuestionPromptRequest};
 use crate::AppState;
@@ -468,9 +468,7 @@ pub(super) fn execute_team_create(
     let parsed: TeamCreateInput =
         serde_json::from_value(input).context("invalid TeamCreate input")?;
     let requested_team_name = parsed.team_name.trim();
-    if requested_team_name.is_empty() {
-        bail!("team_name is required for TeamCreate");
-    }
+    ensure_safe_identifier(requested_team_name, "team_name")?;
     let store_cwd = state.session.cwd.as_path();
     if let Some(existing_team_name) = current_team_name(state).map(str::to_string).or_else(|| {
         find_team_for_session(store_cwd, &state.session.id.to_string())
@@ -808,8 +806,10 @@ pub(super) fn execute_enter_worktree(
     }
     let worktree_name = parsed
         .name
-        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
         .unwrap_or_else(|| format!("worktree-{}", Uuid::new_v4().simple()));
+    ensure_safe_identifier(&worktree_name, "worktree name")?;
     if store
         .worktrees
         .iter()
@@ -947,6 +947,10 @@ pub(super) fn execute_config(state: &mut AppState, cwd: &Path, input: Value) -> 
     let storage_path = config_setting_path(&paths, &parsed.setting)?;
     if has_value {
         let value = parsed.value.unwrap_or(Value::Null);
+        if normalize_config_key(&parsed.setting) == Some("status_line_command") && !value.is_null()
+        {
+            bail!("Config tool cannot set executable status_line_command");
+        }
         set_config_value(state, &parsed.setting, value)?;
         let _ = persist_config_setting(&paths, state, &parsed.setting)?;
     }
