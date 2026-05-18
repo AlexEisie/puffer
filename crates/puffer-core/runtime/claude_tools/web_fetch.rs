@@ -7,6 +7,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -29,7 +31,9 @@ Usage notes:
   - For GitHub URLs, prefer using `gh` via Bash (for example `gh pr view`, `gh issue view`, `gh api`)."#;
 
 const MAX_RESULT_CHARS: usize = 100_000;
+const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone)]
 struct CachedFetch {
@@ -80,7 +84,11 @@ pub fn claude_web_fetch_input_schema() -> Value {
 pub fn execute_claude_web_fetch(raw_input: Value) -> Result<Value> {
     let input: ClaudeWebFetchInput =
         serde_json::from_value(raw_input).context("invalid WebFetch input")?;
-    execute_claude_web_fetch_internal(Client::new(), input)
+    let client = Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .context("failed to build WebFetch HTTP client")?;
+    execute_claude_web_fetch_internal(client, input)
 }
 
 fn execute_claude_web_fetch_internal(client: Client, input: ClaudeWebFetchInput) -> Result<Value> {
@@ -127,9 +135,7 @@ fn execute_claude_web_fetch_internal(client: Client, input: ClaudeWebFetchInput)
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let bytes = response
-        .bytes()
-        .context("failed to read web fetch response body")?;
+    let bytes = read_limited_response_body(response)?;
     let content = normalize_web_content(&bytes, content_type.as_deref())?;
     store_cached_fetch(
         &request_url,
@@ -159,7 +165,73 @@ fn normalize_url(raw_url: &str) -> Result<Url> {
         url.set_scheme("https")
             .map_err(|_| anyhow::anyhow!("failed to upgrade URL scheme to https"))?;
     }
+    validate_fetch_target(&url)?;
     Ok(url)
+}
+
+fn validate_fetch_target(url: &Url) -> Result<()> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("WebFetch URL must include a host"))?;
+    let lower = host.to_ascii_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") {
+        bail!("WebFetch cannot access localhost targets");
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if ip_is_private_or_local(ip) {
+            bail!("WebFetch cannot access private or local network targets");
+        }
+    }
+    Ok(())
+}
+
+fn ip_is_private_or_local(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip == Ipv4Addr::UNSPECIFIED
+        }
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || is_ipv6_documentation(ip)
+        }
+    }
+}
+
+fn is_ipv6_documentation(ip: Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xfff0) == 0x2001 && ip.segments()[1] == 0x0db8
+}
+
+fn read_limited_response_body(response: reqwest::blocking::Response) -> Result<Vec<u8>> {
+    if content_length_exceeds_limit(response.content_length()) {
+        bail!(
+            "WebFetch response body is too large (limit {} bytes)",
+            MAX_RESPONSE_BYTES
+        );
+    }
+    let mut limited = response.take((MAX_RESPONSE_BYTES + 1) as u64);
+    let mut bytes = Vec::new();
+    limited
+        .read_to_end(&mut bytes)
+        .context("failed to read web fetch response body")?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        bail!(
+            "WebFetch response body is too large (limit {} bytes)",
+            MAX_RESPONSE_BYTES
+        );
+    }
+    Ok(bytes)
+}
+
+fn content_length_exceeds_limit(length: Option<u64>) -> bool {
+    length.is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
 }
 
 fn host_changed(request_url: &Url, final_url: &Url) -> bool {
@@ -360,6 +432,29 @@ mod tests {
         let url = normalize_url("http://example.com/path").unwrap();
         assert_eq!(url.scheme(), "https");
         assert_eq!(url.host_str(), Some("example.com"));
+    }
+
+    #[test]
+    fn normalize_url_rejects_localhost_targets() {
+        let error = normalize_url("https://localhost/path").unwrap_err();
+        assert!(error.to_string().contains("localhost"));
+    }
+
+    #[test]
+    fn normalize_url_rejects_private_ip_targets() {
+        let error = normalize_url("https://192.168.1.10/path").unwrap_err();
+        assert!(error.to_string().contains("private or local"));
+    }
+
+    #[test]
+    fn content_length_limit_rejects_large_responses() {
+        assert!(content_length_exceeds_limit(Some(
+            (MAX_RESPONSE_BYTES + 1) as u64
+        )));
+        assert!(!content_length_exceeds_limit(Some(
+            MAX_RESPONSE_BYTES as u64
+        )));
+        assert!(!content_length_exceeds_limit(None));
     }
 
     #[test]

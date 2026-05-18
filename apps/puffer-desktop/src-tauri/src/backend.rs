@@ -27,6 +27,10 @@ use uuid::Uuid;
 const DEFAULT_PROVIDER: &str = "codex";
 const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-6";
 const DEFAULT_PUFFER_MODEL: &str = "default";
+const REMOTE_FILE_WRITE_MAX_BYTES: usize = 5 * 1024 * 1024;
+const MAX_UNTRACKED_DIFF_FILES: usize = 128;
+const MAX_UNTRACKED_DIFF_FILE_BYTES: u64 = 256 * 1024;
+const MAX_UNTRACKED_DIFF_PATCH_BYTES: usize = 512 * 1024;
 
 pub(crate) struct BackendState {
     ptys: Arc<pty::PtyRegistry>,
@@ -598,7 +602,8 @@ impl BackendState {
 
     fn read_remote_file(&self, params: Value) -> Result<Value> {
         let path = string_param(&params, &["path"])?;
-        let content = fs::read_to_string(path).context("failed to read file")?;
+        let path = files::validate_path(&self.allowed_roots()?, &path)?;
+        let content = fs::read_to_string(&path).context("failed to read file")?;
         serde_value(json!({"success": true, "stdout": content, "stderr": ""}))
     }
 
@@ -606,7 +611,15 @@ impl BackendState {
         let path = string_param(&params, &["path"])?;
         let encoded = string_param(&params, &["contentsBase64", "contents_base64"])?;
         let bytes = BASE64_STANDARD.decode(encoded).context("invalid base64")?;
-        fs::write(path, bytes).context("failed to write file")?;
+        if bytes.len() > REMOTE_FILE_WRITE_MAX_BYTES {
+            bail!(
+                "file is too large to write ({} bytes, hard limit {} bytes)",
+                bytes.len(),
+                REMOTE_FILE_WRITE_MAX_BYTES
+            );
+        }
+        let path = files::validate_write_path(&self.allowed_roots()?, &path)?;
+        fs::write(&path, bytes).context("failed to write file")?;
         serde_value(json!({"success": true, "stdout": "", "stderr": ""}))
     }
 
@@ -1777,8 +1790,24 @@ fn current_diff_snapshot(session_id: &str, cwd: &str) -> Option<DiffSummaryDto> 
 fn untracked_diff(root: &Path, files: &str) -> (String, String) {
     let mut stat = String::new();
     let mut patch = String::new();
-    for rel in files.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    let mut skipped = 0usize;
+    for rel in files
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(MAX_UNTRACKED_DIFF_FILES)
+    {
         let path = root.join(rel);
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        if meta.len() > MAX_UNTRACKED_DIFF_FILE_BYTES {
+            skipped += 1;
+            continue;
+        }
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
@@ -1793,12 +1822,81 @@ fn untracked_diff(root: &Path, files: &str) -> (String, String) {
             "diff --git a/{display_path} b/{display_path}\nnew file mode 100644\nindex 0000000..0000000\n--- /dev/null\n+++ b/{display_path}\n@@ -0,0 +1,{line_count} @@\n"
         ));
         for line in content.lines() {
+            if patch.len() >= MAX_UNTRACKED_DIFF_PATCH_BYTES {
+                skipped += 1;
+                break;
+            }
             patch.push('+');
             patch.push_str(line);
             patch.push('\n');
         }
+        if patch.len() >= MAX_UNTRACKED_DIFF_PATCH_BYTES {
+            break;
+        }
+    }
+    let total = files.lines().filter(|line| !line.trim().is_empty()).count();
+    if total > MAX_UNTRACKED_DIFF_FILES {
+        skipped += total - MAX_UNTRACKED_DIFF_FILES;
+    }
+    if skipped > 0 {
+        stat.push_str(&format!(
+            " ... {skipped} untracked file(s) omitted by desktop diff limits\n"
+        ));
+        patch.push_str(&format!(
+            "\n# {skipped} untracked file(s) omitted by desktop diff limits\n"
+        ));
     }
     (stat, patch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+
+    #[test]
+    fn untracked_diff_omits_large_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small.txt");
+        let large = dir.path().join("large.txt");
+        fs::write(&small, "hello\n").unwrap();
+        fs::write(
+            &large,
+            vec![b'x'; (MAX_UNTRACKED_DIFF_FILE_BYTES as usize) + 1],
+        )
+        .unwrap();
+
+        let (stat, patch) = untracked_diff(dir.path(), "small.txt\nlarge.txt\n");
+
+        assert!(stat.contains("small.txt"));
+        assert!(patch.contains("+hello"));
+        assert!(stat.contains("omitted by desktop diff limits"));
+        assert!(!patch.contains("large.txt"));
+    }
+
+    #[test]
+    fn validate_remote_write_rejects_paths_outside_allowed_roots() {
+        let allowed = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("secret.txt");
+        let roots = vec![allowed.path().canonicalize().unwrap()];
+
+        let err = files::validate_write_path(&roots, target.to_str().unwrap()).unwrap_err();
+
+        assert!(err.to_string().contains("path escapes allowed roots"));
+    }
+
+    #[test]
+    fn validate_remote_write_accepts_new_file_inside_allowed_root() {
+        let allowed = tempfile::tempdir().unwrap();
+        let target = allowed.path().join("created.txt");
+        let roots = vec![allowed.path().canonicalize().unwrap()];
+
+        let validated = files::validate_write_path(&roots, target.to_str().unwrap()).unwrap();
+        fs::write(&validated, BASE64_STANDARD.decode("b2s=").unwrap()).unwrap();
+
+        assert_eq!(fs::read_to_string(target).unwrap(), "ok");
+    }
 }
 
 fn emit_backend_event(events: &EventEmitter, event: &str, payload: Value) {
