@@ -225,6 +225,7 @@ fn run_agent_turn(
     model_id: Option<String>,
     fast_mode: Option<bool>,
     permission_mode: Option<String>,
+    mode: Option<String>,
 ) -> Result<String, String> {
     let value = backend_call(
         app,
@@ -237,6 +238,7 @@ fn run_agent_turn(
             "modelId": model_id,
             "fastMode": fast_mode.unwrap_or(false),
             "permissionMode": permission_mode,
+            "mode": mode,
         }),
     )?;
     Ok(value

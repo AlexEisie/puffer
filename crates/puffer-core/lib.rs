@@ -42,6 +42,7 @@ pub use model_preferences::{
     provider_preference_family, supported_effort_levels, ModelPreferenceFamily,
 };
 pub use permissions::SessionPermissionState;
+pub use plan_mode::enter_plan_mode;
 pub use runtime::background_tasks;
 pub use runtime::claude_tools::execute_workflow_tool;
 pub use runtime::resource_watcher;
