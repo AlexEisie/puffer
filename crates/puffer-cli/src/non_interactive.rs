@@ -175,6 +175,7 @@ fn append_user_message(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: message.to_string(),
+            actor: Some(state.user_actor()),
         },
     )?;
     Ok(())
@@ -195,6 +196,7 @@ fn run_user_turn(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: prompt.to_string(),
+            actor: Some(state.user_actor()),
         },
     )?;
 
@@ -270,6 +272,7 @@ fn run_user_turn(
                 state.session.id,
                 TranscriptEvent::AssistantMessage {
                     text: turn.assistant_text.clone(),
+                    actor: Some(state.assistant_actor()),
                 },
             )?;
             artifact.outcome = if args.max_tokens.is_some_and(|budget| token_total > budget) {
@@ -319,6 +322,8 @@ fn append_tool_invocations(
                 input: invocation.input.clone(),
                 output: invocation.output.clone(),
                 success: invocation.success,
+                actor: Some(state.assistant_actor()),
+                subject: state.tool_subject_actor(&invocation.tool_id, &invocation.output),
             },
         )?;
     }
@@ -508,17 +513,20 @@ fn apply_transcript_event(
     event: TranscriptEvent,
 ) -> Result<()> {
     match &event {
-        TranscriptEvent::UserMessage { text } => state.push_message(MessageRole::User, text),
-        TranscriptEvent::AssistantMessage { text } => {
+        TranscriptEvent::UserMessage { text, .. } => state.push_message(MessageRole::User, text),
+        TranscriptEvent::AssistantMessage { text, .. } => {
             state.push_message(MessageRole::Assistant, text)
         }
-        TranscriptEvent::SystemMessage { text } => state.push_message(MessageRole::System, text),
+        TranscriptEvent::SystemMessage { text, .. } => {
+            state.push_message(MessageRole::System, text)
+        }
         TranscriptEvent::ToolInvocation {
             call_id,
             tool_id,
             input,
             output,
             success,
+            ..
         } => state.push_tool_invocation(call_id, tool_id, input, output, *success),
         TranscriptEvent::TranscriptRewritten { rewrite } => state.apply_transcript_rewrite(rewrite),
         _ => {}
