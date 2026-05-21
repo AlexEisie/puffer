@@ -4456,6 +4456,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "async-trait",
  "axum 0.8.9",
  "base64",
  "dirs",
@@ -4473,6 +4474,7 @@ dependencies = [
  "puffer-resources",
  "puffer-runner-api",
  "puffer-session-store",
+ "puffer-skill-evolution",
  "puffer-subscriber-runtime",
  "puffer-subscriptions",
  "puffer-tools",
@@ -4496,6 +4498,20 @@ dependencies = [
  "tungstenite 0.24.0",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "puffer-genskill-eval"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4647,6 +4663,19 @@ dependencies = [
  "serde_json",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "puffer-skill-evolution"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
