@@ -63,7 +63,6 @@ fn session_for(cwd: &std::path::Path) -> SessionMetadata {
         note: None,
     }
 }
-
 /// Scripted HTTP server: serves `expected_requests` mock responses,
 /// recording each raw request body so tests can assert on wire shape.
 fn spawn_server<F>(
@@ -85,6 +84,7 @@ where
         while handled < expected_requests && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
                     let mut buffer = vec![0_u8; 65_536];
                     let bytes = stream.read(&mut buffer).unwrap();
                     let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
@@ -185,7 +185,7 @@ fn openai_responses_agent_loop_runs_tool_then_text() {
     );
     state.current_provider = Some("openai".to_string());
     state.current_model = Some("openai/gpt-5".to_string());
-    state.session_allow_all = true;
+    state.grant_all_tools_for_session();
 
     let resources = LoadedResources {
         tools: vec![loaded_tool("read_file", "Read a file", "read_file")],
@@ -290,7 +290,7 @@ fn openai_responses_streaming_agent_loop_runs_tool_then_text() {
     );
     state.current_provider = Some("openai".to_string());
     state.current_model = Some("openai/gpt-5".to_string());
-    state.session_allow_all = true;
+    state.grant_all_tools_for_session();
 
     let resources = LoadedResources {
         tools: vec![loaded_tool("read_file", "Read a file", "read_file")],
@@ -413,7 +413,7 @@ fn openai_responses_streaming_emits_thinking_for_reasoning_summary() {
     );
     state.current_provider = Some("openai".to_string());
     state.current_model = Some("openai/gpt-5".to_string());
-    state.session_allow_all = true;
+    state.grant_all_tools_for_session();
 
     let resources = LoadedResources::default();
 
@@ -542,7 +542,7 @@ fn openai_completions_agent_loop_emits_thinking_for_reasoning_content() {
     );
     state.current_provider = Some("openai-completions-test".to_string());
     state.current_model = Some("openai-completions-test/gpt-5".to_string());
-    state.session_allow_all = true;
+    state.grant_all_tools_for_session();
     let resources = LoadedResources::default();
 
     let mut thinking_deltas = Vec::new();
@@ -599,7 +599,7 @@ fn openai_completions_agent_loop_runs_tool_then_text() {
     );
     state.current_provider = Some("openai-completions-test".to_string());
     state.current_model = Some("openai-completions-test/gpt-5".to_string());
-    state.session_allow_all = true;
+    state.grant_all_tools_for_session();
 
     let resources = LoadedResources {
         tools: vec![loaded_tool("read_file", "Read a file", "read_file")],
@@ -731,7 +731,7 @@ fn anthropic_and_openai_agent_loop_share_outcome_for_same_tool_round() {
     );
     a_state.current_provider = Some("local-anthropic".to_string());
     a_state.current_model = Some("local-anthropic/claude-sonnet-4-5".to_string());
-    a_state.session_allow_all = true;
+    a_state.grant_all_tools_for_session();
     let a_turn = execute_user_prompt(
         &mut a_state,
         &resources,
@@ -754,7 +754,7 @@ fn anthropic_and_openai_agent_loop_share_outcome_for_same_tool_round() {
     );
     o_state.current_provider = Some("openai".to_string());
     o_state.current_model = Some("openai/gpt-5".to_string());
-    o_state.session_allow_all = true;
+    o_state.grant_all_tools_for_session();
     let o_turn = execute_user_prompt(
         &mut o_state,
         &resources,
@@ -816,7 +816,7 @@ fn openai_responses_agent_loop_threads_previous_response_id() {
     );
     state.current_provider = Some("openai".to_string());
     state.current_model = Some("openai/gpt-5".to_string());
-    state.session_allow_all = true;
+    state.grant_all_tools_for_session();
 
     let resources = LoadedResources {
         tools: vec![loaded_tool("read_file", "Read a file", "read_file")],
@@ -946,7 +946,7 @@ fn anthropic_agent_loop_replays_thinking_signature_on_next_turn() {
     );
     state.current_provider = Some("local-anthropic".to_string());
     state.current_model = Some("local-anthropic/claude-sonnet-4-5".to_string());
-    state.session_allow_all = true;
+    state.grant_all_tools_for_session();
 
     let turn = execute_user_prompt(
         &mut state,
@@ -1070,7 +1070,7 @@ fn cancel_token_aborts_agent_loop_between_turns() {
     );
     state.current_provider = Some("openai".to_string());
     state.current_model = Some("openai/gpt-5".to_string());
-    state.session_allow_all = true;
+    state.grant_all_tools_for_session();
 
     let resources = LoadedResources {
         tools: vec![loaded_tool("read_file", "Read a file", "read_file")],

@@ -3,12 +3,19 @@
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_config::ConfigPaths;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::io::ErrorKind;
+use serde_json::{json, Map, Value};
+#[cfg(test)]
+use std::cell::RefCell;
 use std::path::Path;
 use tungstenite::{connect, Message};
 use url::Url;
 use uuid::Uuid;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_DAEMON_HANDLER: RefCell<Option<Box<dyn FnMut(&str, &Value) -> Result<Value>>>> =
+        const { RefCell::new(None) };
+}
 
 /// Executes the model-facing Browser tool against the local Puffer daemon.
 pub(super) fn execute_browser_tool(
@@ -16,12 +23,55 @@ pub(super) fn execute_browser_tool(
     current_session_id: &Uuid,
     input: Value,
 ) -> Result<String> {
+    let input = enrich_browser_permission_input(cwd, current_session_id, input)?;
     let mut params: BrowserToolInput =
         serde_json::from_value(input).context("invalid Browser tool input")?;
     normalize_session_id(&mut params, current_session_id);
-    let handshake = read_handshake(cwd)?;
-    let response = send_daemon_request(&handshake, "browser_agent", serde_json::to_value(params)?)?;
-    Ok(serde_json::to_string_pretty(&response)?)
+    let payload = serde_json::to_value(params)?;
+    let handshakes = read_handshake_candidates(cwd)?;
+    let mut last_error = None;
+    for handshake in &handshakes {
+        match send_daemon_request(handshake, "browser_agent", payload.clone()) {
+            Ok(response) => return Ok(serde_json::to_string_pretty(&response)?),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if let Some(error) = last_error {
+        return Err(error);
+    }
+    bail!("Browser tool found no daemon handshakes")
+}
+
+/// Hydrates Browser permission input with daemon tab context when the action omits a URL.
+pub(crate) fn enrich_browser_permission_input(
+    cwd: &Path,
+    current_session_id: &Uuid,
+    input: Value,
+) -> Result<Value> {
+    let Some(payload) = input.as_object() else {
+        return Ok(input);
+    };
+    if browser_action_uses_explicit_url(payload) || browser_action_has_url(payload) {
+        return Ok(input);
+    }
+
+    let mut enriched = payload.clone();
+    let session_id = normalized_browser_session_id(payload, current_session_id);
+    let tab_context = read_current_tab_context(cwd, &session_id)?;
+    if let Some(tab_id) = tab_context.tab_id.as_deref() {
+        if !enriched.contains_key("tabId") {
+            enriched.insert("tabId".to_string(), Value::String(tab_id.to_string()));
+        }
+    }
+    if matches!(tab_context.status, BrowserCurrentTabStatus::Available) {
+        if let Some(url) = tab_context.url {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                enriched.insert("url".to_string(), Value::String(trimmed.to_string()));
+            }
+        }
+    }
+    Ok(Value::Object(enriched))
 }
 
 fn normalize_session_id(params: &mut BrowserToolInput, current_session_id: &Uuid) {
@@ -69,7 +119,7 @@ struct BrowserToolInput {
     activate: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DaemonHandshake {
     url: String,
@@ -93,43 +143,107 @@ struct DaemonError {
     message: String,
 }
 
-fn read_handshake(cwd: &Path) -> Result<DaemonHandshake> {
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserCurrentTabContext {
+    pub(crate) status: BrowserCurrentTabStatus,
+    pub(crate) tab_id: Option<String>,
+    pub(crate) url: Option<String>,
+    pub(crate) origin: Option<String>,
+    pub(crate) host: Option<String>,
+    pub(crate) port: Option<u16>,
+    pub(crate) title: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BrowserCurrentTabStatus {
+    NoActiveTab,
+    EmptyUrl,
+    AboutBlank,
+    Available,
+}
+
+fn read_handshake_candidates(cwd: &Path) -> Result<Vec<DaemonHandshake>> {
     let paths = ConfigPaths::discover(cwd);
     let workspace_root = canonical_workspace_root(&paths.workspace_root);
     let workspace_path = paths.workspace_config_dir.join("daemon.handshake");
     let user_path = paths.user_config_dir.join("daemon.handshake");
+
     let mut last_error = None;
-    for path in [&workspace_path, &user_path] {
-        match std::fs::read_to_string(path) {
-            Ok(text) => match serde_json::from_str(&text) {
-                Ok(handshake) => {
-                    if handshake_matches_workspace(&handshake, &workspace_root) {
-                        return Ok(handshake);
-                    }
-                }
-                Err(error) => {
-                    last_error = Some(
-                        anyhow!(error)
-                            .context(format!("decode daemon handshake {}", path.display())),
-                    );
-                }
-            },
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => {
-                last_error = Some(
-                    anyhow!(error).context(format!("read daemon handshake {}", path.display())),
-                );
-            }
+    let workspace_handshake = match read_handshake_file(&workspace_path) {
+        Ok(handshake) => handshake,
+        Err(error) => {
+            last_error = Some(error);
+            None
         }
+    };
+    let user_handshake = match read_handshake_file(&user_path) {
+        Ok(handshake) => handshake,
+        Err(error) => {
+            last_error = Some(error);
+            None
+        }
+    };
+    let handshakes = select_handshake_candidates_for_browser(
+        workspace_handshake,
+        user_handshake,
+        &workspace_root,
+    );
+    if !handshakes.is_empty() {
+        return Ok(handshakes);
     }
+
     if let Some(error) = last_error {
         return Err(error);
     }
+
     bail!(
         "Browser tool requires a running Puffer daemon at {} or {}",
         workspace_path.display(),
         user_path.display()
     );
+}
+
+fn read_handshake_file(path: &Path) -> Result<Option<DaemonHandshake>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(anyhow!(error).context(format!("read daemon handshake {}", path.display())));
+        }
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .context(format!("decode daemon handshake {}", path.display()))
+}
+
+#[cfg(test)]
+fn select_handshake_for_browser(
+    workspace_handshake: Option<DaemonHandshake>,
+    user_handshake: Option<DaemonHandshake>,
+    workspace_root: &Path,
+) -> Option<DaemonHandshake> {
+    select_handshake_candidates_for_browser(workspace_handshake, user_handshake, workspace_root)
+        .into_iter()
+        .next()
+}
+
+fn select_handshake_candidates_for_browser(
+    workspace_handshake: Option<DaemonHandshake>,
+    user_handshake: Option<DaemonHandshake>,
+    workspace_root: &Path,
+) -> Vec<DaemonHandshake> {
+    let mut candidates = Vec::new();
+    if let Some(handshake) = workspace_handshake
+        .filter(|handshake| handshake_matches_workspace(handshake, workspace_root))
+    {
+        candidates.push(handshake);
+    }
+    if let Some(handshake) = user_handshake {
+        candidates.push(handshake);
+    }
+    candidates
 }
 
 fn handshake_matches_workspace(handshake: &DaemonHandshake, workspace_root: &Path) -> bool {
@@ -148,6 +262,10 @@ fn canonical_workspace_root(path: &Path) -> std::path::PathBuf {
 }
 
 fn send_daemon_request(handshake: &DaemonHandshake, method: &str, params: Value) -> Result<Value> {
+    #[cfg(test)]
+    if let Some(result) = test_daemon_request(method, &params) {
+        return result;
+    }
     let request_id = Uuid::new_v4().to_string();
     let endpoint = endpoint_with_token(&handshake.url, &handshake.token)?;
     let (mut socket, _) = connect(endpoint.as_str()).context("connect to Puffer daemon")?;
@@ -182,6 +300,94 @@ fn endpoint_with_token(raw: &str, token: &str) -> Result<String> {
     let mut url = Url::parse(raw).context("parse daemon URL")?;
     url.query_pairs_mut().append_pair("token", token);
     Ok(url.to_string())
+}
+
+fn browser_action_uses_explicit_url(payload: &Map<String, Value>) -> bool {
+    payload
+        .get("action")
+        .and_then(Value::as_str)
+        .map(normalize_browser_action)
+        .is_some_and(|action| matches!(action.as_str(), "open" | "new" | "navigate"))
+}
+
+fn browser_action_has_url(payload: &Map<String, Value>) -> bool {
+    payload
+        .get("url")
+        .and_then(Value::as_str)
+        .is_some_and(|url| !url.trim().is_empty())
+}
+
+fn normalized_browser_session_id(
+    payload: &Map<String, Value>,
+    current_session_id: &Uuid,
+) -> String {
+    if let Some(session_id) = payload
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "current")
+    {
+        session_id.to_string()
+    } else {
+        current_session_id.to_string()
+    }
+}
+
+fn normalize_browser_action(action: &str) -> String {
+    action.trim().replace(['_', '-'], "").to_ascii_lowercase()
+}
+
+pub(crate) fn read_current_tab_context(
+    cwd: &Path,
+    session_id: &str,
+) -> Result<BrowserCurrentTabContext> {
+    #[cfg(test)]
+    if let Some(result) =
+        test_daemon_request("browser_current_tab", &json!({ "sessionId": session_id }))
+    {
+        let response = result?;
+        return serde_json::from_value(response).context("decode Browser current tab context");
+    }
+    let payload = json!({ "sessionId": session_id });
+    let handshakes = read_handshake_candidates(cwd)?;
+    let mut last_error = None;
+    for handshake in &handshakes {
+        match send_daemon_request(handshake, "browser_current_tab", payload.clone()) {
+            Ok(response) => {
+                return serde_json::from_value(response)
+                    .context("decode Browser current tab context");
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if let Some(error) = last_error {
+        return Err(error);
+    }
+    bail!("Browser current-tab lookup found no daemon handshakes")
+}
+
+/// Runs a closure while Browser daemon requests are served by a test handler.
+#[cfg(test)]
+pub(crate) fn with_browser_daemon_test_handler<R>(
+    handler: impl FnMut(&str, &Value) -> Result<Value> + 'static,
+    run: impl FnOnce() -> R,
+) -> R {
+    TEST_DAEMON_HANDLER.with(|slot| {
+        let previous = slot.borrow_mut().take();
+        *slot.borrow_mut() = Some(Box::new(handler));
+        let result = run();
+        let _ = slot.borrow_mut().take();
+        *slot.borrow_mut() = previous;
+        result
+    })
+}
+
+#[cfg(test)]
+fn test_daemon_request(method: &str, params: &Value) -> Option<Result<Value>> {
+    TEST_DAEMON_HANDLER.with(|slot| {
+        let mut borrowed = slot.borrow_mut();
+        borrowed.as_mut().map(|handler| handler(method, params))
+    })
 }
 
 #[cfg(test)]
@@ -285,5 +491,81 @@ mod tests {
             workspace_root: Some(other.path().display().to_string()),
         };
         assert!(!handshake_matches_workspace(&handshake, workspace.path()));
+    }
+
+    #[test]
+    fn browser_handshake_prefers_matching_workspace_handshake() {
+        let workspace = tempfile::tempdir().unwrap();
+        let matching = DaemonHandshake {
+            url: "ws://127.0.0.1:1/ws".to_string(),
+            token: "workspace".to_string(),
+            workspace_root: Some(workspace.path().display().to_string()),
+        };
+        let user = DaemonHandshake {
+            url: "ws://127.0.0.1:2/ws".to_string(),
+            token: "user".to_string(),
+            workspace_root: Some("/other/workspace".to_string()),
+        };
+
+        let selected =
+            select_handshake_for_browser(Some(matching), Some(user), workspace.path()).unwrap();
+        assert_eq!(selected.token, "workspace");
+    }
+
+    #[test]
+    fn browser_handshake_keeps_user_fallback_after_matching_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let matching = DaemonHandshake {
+            url: "ws://127.0.0.1:1/ws".to_string(),
+            token: "workspace".to_string(),
+            workspace_root: Some(workspace.path().display().to_string()),
+        };
+        let user = DaemonHandshake {
+            url: "ws://127.0.0.1:2/ws".to_string(),
+            token: "user".to_string(),
+            workspace_root: Some("/desktop/global".to_string()),
+        };
+
+        let selected =
+            select_handshake_candidates_for_browser(Some(matching), Some(user), workspace.path());
+        let tokens = selected
+            .iter()
+            .map(|handshake| handshake.token.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(tokens, vec!["workspace", "user"]);
+    }
+
+    #[test]
+    fn browser_handshake_uses_user_handshake_as_global_fallback() {
+        let workspace = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let mismatched = DaemonHandshake {
+            url: "ws://127.0.0.1:1/ws".to_string(),
+            token: "workspace".to_string(),
+            workspace_root: Some(other.path().display().to_string()),
+        };
+        let user = DaemonHandshake {
+            url: "ws://127.0.0.1:2/ws".to_string(),
+            token: "user".to_string(),
+            workspace_root: Some("/desktop/global".to_string()),
+        };
+
+        let selected =
+            select_handshake_for_browser(Some(mismatched), Some(user), workspace.path()).unwrap();
+        assert_eq!(selected.token, "user");
+    }
+
+    #[test]
+    fn browser_handshake_ignores_mismatched_workspace_without_user_fallback() {
+        let workspace = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let mismatched = DaemonHandshake {
+            url: "ws://127.0.0.1:1/ws".to_string(),
+            token: "workspace".to_string(),
+            workspace_root: Some(other.path().display().to_string()),
+        };
+
+        let selected = select_handshake_for_browser(Some(mismatched), None, workspace.path());
+        assert!(selected.is_none());
     }
 }

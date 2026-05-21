@@ -1,5 +1,7 @@
 use crate::memory::ProjectMemoryContext;
-use crate::permissions::{SessionPermissionGrants, SessionPermissionState};
+use crate::permissions::browser_action::browser_permission_value_for_tool_call;
+use crate::permissions::browser_grants::BrowserGrantScopeKind;
+use crate::permissions::SessionPermissionState;
 use crate::runner_adapter::LocalToolRunner;
 use crate::runtime::ReflectionConfig;
 use puffer_config::PufferConfig;
@@ -69,6 +71,12 @@ pub struct TaskRecord {
 pub(crate) struct ClaudeReadState {
     pub(crate) timestamp_ms: u128,
     pub(crate) is_partial_view: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct BrowserUrlCacheKey {
+    root_session_id: String,
+    tab_id: Option<String>,
 }
 
 /// Status of a session goal. Mirrors the four-state machine codex
@@ -210,10 +218,10 @@ pub struct AppState {
     /// [`AppState::take_reload_request`] before deciding to reload.
     pub resource_reload_signal: Arc<AtomicBool>,
     pub(crate) claude_read_state: HashMap<PathBuf, ClaudeReadState>,
+    /// Canonical in-memory session permission state used for current-turn
+    /// evaluation and worker/UI round-trips.
     pub(crate) session_permission_state: SessionPermissionState,
-    pub session_tool_permissions: HashMap<String, String>,
-    /// When true, all tool permission prompts are auto-allowed for the session.
-    pub session_allow_all: bool,
+    browser_url_cache: HashMap<BrowserUrlCacheKey, String>,
     pub(crate) native_structured_output_unsupported: HashSet<String>,
     pub(crate) status_line_signature: Option<String>,
     pending_query_prompt: Option<String>,
@@ -312,8 +320,7 @@ impl AppState {
             resource_reload_signal: Arc::new(AtomicBool::new(false)),
             claude_read_state: HashMap::new(),
             session_permission_state: SessionPermissionState::default(),
-            session_tool_permissions: HashMap::new(),
-            session_allow_all: false,
+            browser_url_cache: HashMap::new(),
             native_structured_output_unsupported: HashSet::new(),
             status_line_signature: None,
             pending_query_prompt: None,
@@ -356,6 +363,13 @@ impl AppState {
     }
 
     /// Restores application state from a persisted session record.
+    ///
+    /// Session-store replay currently restores transcript content plus the
+    /// persisted UI/runtime snapshot fields carried by
+    /// [`TranscriptEvent::StateSnapshot`]. It restores the legacy-compatible
+    /// subset of session permission state from `session_allow_all` plus
+    /// `session_tool_permissions`, but typed-only narrow grants still remain
+    /// outside the durable snapshot schema.
     pub fn from_session_record(config: PufferConfig, session: SessionRecord) -> Self {
         let cwd = session.metadata.cwd.clone();
         let mut state = Self::new(config, cwd, session.metadata);
@@ -414,6 +428,8 @@ impl AppState {
                     statusline_enabled,
                     working_dirs,
                     claude_read_state,
+                    session_allow_all,
+                    session_tool_permissions,
                 } => {
                     state.current_model = current_model;
                     state.current_provider = current_provider;
@@ -448,6 +464,11 @@ impl AppState {
                             )
                         })
                         .collect();
+                    state.session_permission_state =
+                        SessionPermissionState::from_legacy_snapshot_projection(
+                            session_allow_all,
+                            &session_tool_permissions,
+                        );
                 }
             }
         }
@@ -625,7 +646,14 @@ impl AppState {
     }
 
     /// Builds a persisted snapshot event for the current mutable session state.
+    ///
+    /// This persists a legacy-compatible projection of session permission
+    /// state so resume can restore the subset representable as session-wide
+    /// allow-all plus whole-tool approvals. Narrower typed grants such as
+    /// Browser action categories still remain in-memory only.
     pub fn snapshot_event(&self) -> TranscriptEvent {
+        let (session_allow_all, session_tool_permissions) =
+            self.session_permission_state.legacy_snapshot_projection();
         TranscriptEvent::StateSnapshot {
             current_model: self.current_model.clone(),
             current_provider: self.current_provider.clone(),
@@ -661,6 +689,8 @@ impl AppState {
                     is_partial_view: snapshot.is_partial_view,
                 })
                 .collect(),
+            session_allow_all,
+            session_tool_permissions,
         }
     }
 
@@ -784,6 +814,22 @@ impl AppState {
         &self.tasks
     }
 
+    /// Returns the session id that desktop Browser panes use for this runtime.
+    pub(crate) fn browser_root_session_id(&self) -> uuid::Uuid {
+        self.session.parent_session_id.unwrap_or(self.session.id)
+    }
+
+    fn permission_session_id_for_tool(
+        &self,
+        definition: &puffer_tools::ToolDefinition,
+    ) -> uuid::Uuid {
+        if is_browser_tool_definition(definition) {
+            self.browser_root_session_id()
+        } else {
+            self.session.id
+        }
+    }
+
     pub(crate) fn allow_tool_for_session(&mut self, tool_id: &str) {
         let definition = puffer_tools::ToolDefinition {
             id: tool_id.to_string(),
@@ -803,61 +849,88 @@ impl AppState {
         self.allow_permission_for_tool_call(&definition, &serde_json::Value::Null);
     }
 
-    /// Grants session-scoped permission for one tool call and refreshes the
-    /// legacy projection cache used by older callers.
+    /// Grants session-scoped permission for one tool call.
     pub fn allow_permission_for_tool_call(
         &mut self,
         definition: &puffer_tools::ToolDefinition,
         input: &serde_json::Value,
     ) {
+        let permission_session_id = self.permission_session_id_for_tool(definition);
         self.session_permission_state.grants_mut().grant_tool_call(
             definition,
             input,
-            &self.session.id,
+            &permission_session_id,
         );
-        self.session_tool_permissions = self
-            .session_permission_state
-            .grants()
-            .legacy_tool_permissions();
     }
 
-    /// Rebuilds legacy session tool permissions from the typed session state.
-    pub fn sync_session_tool_permissions_from_state(&mut self) {
-        self.session_tool_permissions = self
-            .session_permission_state
-            .grants()
-            .legacy_tool_permissions();
+    /// Grants Browser session-scoped permission for one tool call using the supplied Browser scope.
+    pub(crate) fn allow_browser_permission_for_tool_call(
+        &mut self,
+        definition: &puffer_tools::ToolDefinition,
+        input: &serde_json::Value,
+        scope: BrowserGrantScopeKind,
+    ) {
+        if browser_permission_value_for_tool_call(&definition.id, input).is_none() {
+            self.allow_permission_for_tool_call(definition, input);
+            return;
+        }
+        let permission_session_id = self.browser_root_session_id();
+        self.session_permission_state
+            .grants_mut()
+            .grant_browser_tool_call(definition, input, &permission_session_id, scope);
     }
 
-    /// Returns the typed session permission state.
+    /// Grants filesystem access to one path prefix for the current session.
+    pub fn allow_path_for_session(&mut self, path: PathBuf) {
+        self.session_permission_state
+            .grants_mut()
+            .grant_path_prefix(path);
+    }
+
+    /// Stores the last resolved non-blank Browser URL for one root session and optional tab.
+    pub(crate) fn remember_browser_url(
+        &mut self,
+        root_session_id: &str,
+        tab_id: Option<&str>,
+        url: &str,
+    ) {
+        let trimmed = url.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("about:blank") {
+            return;
+        }
+        let key = BrowserUrlCacheKey {
+            root_session_id: root_session_id.to_string(),
+            tab_id: tab_id.map(ToString::to_string),
+        };
+        self.browser_url_cache.insert(key, trimmed.to_string());
+    }
+
+    /// Returns the last resolved non-blank Browser URL for one root session and optional tab.
+    pub(crate) fn remembered_browser_url(
+        &self,
+        root_session_id: &str,
+        tab_id: Option<&str>,
+    ) -> Option<&str> {
+        let key = BrowserUrlCacheKey {
+            root_session_id: root_session_id.to_string(),
+            tab_id: tab_id.map(ToString::to_string),
+        };
+        self.browser_url_cache.get(&key).map(String::as_str)
+    }
+
+    /// Returns the canonical typed session permission state.
     pub fn session_permission_state(&self) -> &SessionPermissionState {
         &self.session_permission_state
     }
 
-    /// Replaces the typed session permission state and refreshes the legacy
-    /// projection cache so worker and UI threads stay in sync.
+    /// Replaces the canonical typed session permission state.
     pub fn replace_session_permission_state(&mut self, state: SessionPermissionState) {
         self.session_permission_state = state;
-        self.session_allow_all = self.session_permission_state.allow_all_tools();
-        self.sync_session_tool_permissions_from_state();
     }
 
     /// Grants all tool permissions for the current session.
-    pub fn set_session_allow_all(&mut self) {
-        self.session_allow_all = true;
+    pub fn grant_all_tools_for_session(&mut self) {
         self.session_permission_state.set_allow_all_tools(true);
-    }
-
-    /// Rebuilds the typed session permission state from legacy session fields.
-    ///
-    /// Callers must update `self.session_allow_all` before invoking this helper.
-    /// The typed `allow_all_tools` bit is sourced from that legacy flag and then
-    /// combined with grants projected from `self.session_tool_permissions`.
-    pub(crate) fn sync_session_permission_state(&mut self) {
-        self.session_permission_state = SessionPermissionState::new(
-            self.session_allow_all,
-            SessionPermissionGrants::from_legacy_tool_permissions(&self.session_tool_permissions),
-        );
     }
 
     pub(crate) fn native_structured_output_key(
@@ -912,9 +985,16 @@ impl AppState {
     }
 }
 
+fn is_browser_tool_definition(definition: &puffer_tools::ToolDefinition) -> bool {
+    definition.handler == "runtime:browser"
+        || definition.id.eq_ignore_ascii_case("browser")
+        || definition.name.eq_ignore_ascii_case("browser")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permissions::{EffectivePermissionProfile, PermissionsSettings, SandboxSettings};
     use puffer_session_store::TranscriptEvent;
     use uuid::Uuid;
 
@@ -931,6 +1011,72 @@ mod tests {
             tags: Vec::new(),
             note: None,
         }
+    }
+
+    fn browser_tool_definition() -> puffer_tools::ToolDefinition {
+        puffer_tools::ToolDefinition {
+            id: "Browser".to_string(),
+            name: "Browser".to_string(),
+            description: "Managed browser".to_string(),
+            handler: "runtime:browser".to_string(),
+            aliases: Vec::new(),
+            handler_args: Vec::new(),
+            kind: puffer_tools::ToolKind::Custom,
+            input_schema: puffer_tools::ToolInputSchema::default(),
+            metadata: puffer_tools::ToolMetadata::default(),
+            policy: puffer_tools::ToolPolicyHints::default(),
+            shared_lib: None,
+            enabled_if: None,
+            display: puffer_tools::ToolDisplayHints::default(),
+        }
+    }
+
+    #[test]
+    fn browser_root_session_id_prefers_parent_session() {
+        let parent = Uuid::parse_str("2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a").unwrap();
+        let child = Uuid::parse_str("b4f239fd-1493-4be7-a3a1-9e58fe612576").unwrap();
+        let mut metadata = sample_metadata();
+        metadata.id = child;
+        metadata.parent_session_id = Some(parent);
+        let state = AppState::new(PufferConfig::default(), PathBuf::from("."), metadata);
+
+        assert_eq!(state.browser_root_session_id(), parent);
+    }
+
+    #[test]
+    fn browser_session_grants_use_parent_session_for_nested_agents() {
+        let parent = Uuid::parse_str("2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a").unwrap();
+        let child = Uuid::parse_str("b4f239fd-1493-4be7-a3a1-9e58fe612576").unwrap();
+        let mut metadata = sample_metadata();
+        metadata.id = child;
+        metadata.parent_session_id = Some(parent);
+        let mut state = AppState::new(PufferConfig::default(), PathBuf::from("."), metadata);
+
+        state.allow_permission_for_tool_call(
+            &browser_tool_definition(),
+            &serde_json::json!({"action":"evaluate", "script":"document.title"}),
+        );
+        let profile = EffectivePermissionProfile::from_session_state(
+            Path::new("."),
+            &[],
+            &PermissionsSettings::default(),
+            &SandboxSettings::from_mode("workspace-write"),
+            &parent,
+            state.session_permission_state(),
+            false,
+            None,
+            None,
+        );
+
+        assert!(profile.browser_session_grant_allows(&serde_json::json!({
+            "action":"evaluate",
+            "script":"window.location.href"
+        })));
+        assert!(!profile.browser_session_grant_allows(&serde_json::json!({
+            "action":"evaluate",
+            "sessionId": child.to_string(),
+            "script":"window.location.href"
+        })));
     }
 
     #[test]
@@ -995,6 +1141,95 @@ mod tests {
             .map(|message| message.text.as_str())
             .collect::<Vec<_>>();
         assert_eq!(lines, vec!["before", "done"]);
+    }
+
+    #[test]
+    fn typed_browser_session_grants_remain_in_memory_only() {
+        let mut state = AppState::new(
+            PufferConfig::default(),
+            PathBuf::from("."),
+            sample_metadata(),
+        );
+        let browser = puffer_tools::ToolDefinition {
+            id: "Browser".to_string(),
+            name: "Browser".to_string(),
+            description: String::new(),
+            handler: String::new(),
+            aliases: Vec::new(),
+            handler_args: Vec::new(),
+            kind: puffer_tools::ToolKind::Custom,
+            input_schema: puffer_tools::ToolInputSchema::default(),
+            metadata: puffer_tools::ToolMetadata::default(),
+            policy: puffer_tools::ToolPolicyHints::default(),
+            shared_lib: None,
+            enabled_if: None,
+            display: puffer_tools::ToolDisplayHints::default(),
+        };
+        let input = serde_json::json!({
+            "action": "evaluate",
+            "script": "document.title"
+        });
+
+        state.allow_browser_permission_for_tool_call(
+            &browser,
+            &input,
+            BrowserGrantScopeKind::AllowOnce,
+        );
+
+        assert!(state.session_permission_state().has_browser_grant());
+    }
+
+    #[test]
+    fn session_restore_from_state_snapshot_restores_legacy_compatible_permissions() {
+        let mut state = AppState::new(
+            PufferConfig::default(),
+            PathBuf::from("."),
+            sample_metadata(),
+        );
+        let browser = puffer_tools::ToolDefinition {
+            id: "Browser".to_string(),
+            name: "Browser".to_string(),
+            description: String::new(),
+            handler: String::new(),
+            aliases: Vec::new(),
+            handler_args: Vec::new(),
+            kind: puffer_tools::ToolKind::Custom,
+            input_schema: puffer_tools::ToolInputSchema::default(),
+            metadata: puffer_tools::ToolMetadata::default(),
+            policy: puffer_tools::ToolPolicyHints::default(),
+            shared_lib: None,
+            enabled_if: None,
+            display: puffer_tools::ToolDisplayHints::default(),
+        };
+        state.allow_tool_for_session("Bash");
+        state.allow_browser_permission_for_tool_call(
+            &browser,
+            &serde_json::json!({
+                "action": "evaluate",
+                "script": "document.title"
+            }),
+            BrowserGrantScopeKind::AllowOnce,
+        );
+        state.grant_all_tools_for_session();
+
+        assert!(state.session_permission_state().allow_all_tools());
+        assert!(state.session_permission_state().has_browser_grant());
+
+        let record = SessionRecord {
+            metadata: state.session.clone(),
+            events: vec![state.snapshot_event()],
+        };
+        let restored = AppState::from_session_record(PufferConfig::default(), record);
+
+        assert!(restored.session_permission_state().allow_all_tools());
+        assert_eq!(
+            restored.session_permission_state(),
+            &SessionPermissionState::from_legacy_snapshot_projection(
+                true,
+                &std::collections::HashMap::from([("bash".to_string(), "allow".to_string())])
+            )
+        );
+        assert!(!restored.session_permission_state().has_browser_grant());
     }
 
     #[test]
