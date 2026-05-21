@@ -51,6 +51,20 @@ export type SessionStreamEvent =
       replay?: boolean;
     } & StreamActorFields)
   | ({
+      type: "plan-updated";
+      turnId: string;
+      filePath: string;
+      content: string | null;
+      replay?: boolean;
+    } & StreamActorFields)
+  | ({
+      type: "plan-completed";
+      turnId: string;
+      filePath: string;
+      content: string | null;
+      replay?: boolean;
+    } & StreamActorFields)
+  | ({
       type: "usage";
       turnId: string;
       report: {

@@ -40,6 +40,7 @@ mod openai_sse;
 mod openai_ws;
 pub(crate) mod overflow;
 mod permission_prompt;
+mod plan_events;
 mod provider_adapter;
 pub mod quota;
 mod reflection;
@@ -299,6 +300,16 @@ pub enum TurnStreamEvent {
     TextDelta(String),
     ToolCallsRequested(Vec<ToolCallRequest>),
     ToolInvocations(Vec<ToolInvocation>),
+    /// The active plan file changed during plan mode.
+    PlanUpdated {
+        file_path: String,
+        content: Option<String>,
+    },
+    /// The model exited plan mode and returned the completed plan.
+    PlanCompleted {
+        file_path: String,
+        content: Option<String>,
+    },
     ReflectionTrace(ReflectionTraceEvent),
     ReflectionCheckpoint(String),
     /// A transport-level retry is about to be attempted.

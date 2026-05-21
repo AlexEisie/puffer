@@ -35,7 +35,7 @@ use puffer_config::{
     ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, PufferConfig,
 };
 use puffer_core::{
-    default_effort_level, execute_user_turn_streaming_with_permissions_and_cancel,
+    default_effort_level, enter_plan_mode, execute_user_turn_streaming_with_permissions_and_cancel,
     provider_preference_family, supported_effort_levels, with_user_question_prompt_handler,
     AppState, BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
     BrowserPermissionPromptTargetClass, CancelToken, MessageRole, ModelPreferenceFamily,
@@ -2339,6 +2339,32 @@ fn report_cancelled_turn(
 // and relays events onto the broadcast bus.
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentTurnMode {
+    Default,
+    Plan,
+}
+
+fn parse_agent_turn_mode(params: &Value) -> Result<AgentTurnMode> {
+    let Some(raw_mode) = params
+        .get("mode")
+        .or_else(|| params.get("turnMode"))
+        .or_else(|| params.get("turn_mode"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+    else {
+        return Ok(AgentTurnMode::Default);
+    };
+
+    let raw_mode = raw_mode.to_ascii_lowercase();
+    match raw_mode.as_str() {
+        "default" | "normal" => Ok(AgentTurnMode::Default),
+        "plan" | "plan-mode" | "plan_mode" => Ok(AgentTurnMode::Plan),
+        other => anyhow::bail!("unsupported turn mode `{other}`; expected default or plan"),
+    }
+}
+
 async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let session_id = params
         .get("sessionId")
@@ -2352,6 +2378,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         .context("missing message")?
         .to_string();
     let turn_options = TurnRequestOptions::from_params(&params);
+    let turn_mode = parse_agent_turn_mode(&params)?;
 
     // Parse cheap, non-tokio-touching things synchronously so we can fail
     // fast with a clean error. Anything that builds a runtime (i.e. the
@@ -2413,6 +2440,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let message_for_thread = message.clone();
     let session_id_for_thread = session_id.clone();
     let turn_options_for_thread = turn_options.clone();
+    let turn_mode_for_thread = turn_mode;
     std::thread::spawn(move || {
         setup_state.publish_event(ServerEnvelope::Event {
             event: channel_thread.clone(),
@@ -2595,6 +2623,24 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 });
             }
         }
+        if turn_mode_for_thread == AgentTurnMode::Plan {
+            if let Err(err) = enter_plan_mode(&mut app_state) {
+                publish_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &session_id_for_thread,
+                    &turn_id_thread,
+                    format!("plan mode: {err:#}"),
+                    None,
+                    None,
+                );
+                setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+                return;
+            }
+            let _ = inputs
+                .session_store
+                .append_event(session_uuid, app_state.snapshot_event());
+        }
 
         // Persist the user message before the turn starts so a crash
         // doesn't silently drop it.
@@ -2642,6 +2688,18 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         "output": i.output,
                         "success": i.success,
                     })).collect::<Vec<_>>(),
+                }),
+                TurnStreamEvent::PlanUpdated { file_path, content } => json!({
+                    "type": "plan-updated",
+                    "turnId": ev_turn,
+                    "filePath": file_path,
+                    "content": content,
+                }),
+                TurnStreamEvent::PlanCompleted { file_path, content } => json!({
+                    "type": "plan-completed",
+                    "turnId": ev_turn,
+                    "filePath": file_path,
+                    "content": content,
                 }),
                 TurnStreamEvent::Usage(r) => json!({
                     "type": "usage",
@@ -2789,6 +2847,9 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         trace,
                     );
                 }
+                let _ = inputs
+                    .session_store
+                    .append_event(session_uuid, app_state.snapshot_event());
                 setup_state.publish_event(ServerEnvelope::Event {
                     event: channel_thread.clone(),
                     payload: event_payload_with_actor(
@@ -2811,6 +2872,9 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             }
             Err(err) => {
                 eprintln!("turn {turn_id_thread} failed: {err:#}");
+                let _ = inputs
+                    .session_store
+                    .append_event(session_uuid, app_state.snapshot_event());
                 let (friendly, category) = classify_turn_error(&err);
                 if category == "cancelled" && cancel_reported_thread.load(Ordering::SeqCst) {
                     state_for_thread

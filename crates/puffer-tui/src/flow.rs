@@ -383,6 +383,8 @@ pub(crate) fn handle_prompt_submit(
                     TurnStreamEvent::ToolInvocations(invocations) => {
                         let _ = event_sender.send(PendingSubmitEvent::ToolInvocations(invocations));
                     }
+                    TurnStreamEvent::PlanUpdated { .. } | TurnStreamEvent::PlanCompleted { .. } => {
+                    }
                     TurnStreamEvent::ReflectionCheckpoint(summary) => {
                         let _ =
                             event_sender.send(PendingSubmitEvent::ReflectionCheckpoint(summary));

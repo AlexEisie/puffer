@@ -108,6 +108,20 @@ enum EmittedEvent {
         actor: MessageActor,
     },
     #[serde(rename_all = "camelCase")]
+    PlanUpdated {
+        turn_id: String,
+        file_path: String,
+        content: Option<String>,
+        actor: MessageActor,
+    },
+    #[serde(rename_all = "camelCase")]
+    PlanCompleted {
+        turn_id: String,
+        file_path: String,
+        content: Option<String>,
+        actor: MessageActor,
+    },
+    #[serde(rename_all = "camelCase")]
     Usage {
         turn_id: String,
         report: serde_json::Value,
@@ -408,6 +422,18 @@ fn drive_turn(
                         })
                         .collect(),
                 ),
+                actor: on_event_actor.clone(),
+            },
+            TurnStreamEvent::PlanUpdated { file_path, content } => EmittedEvent::PlanUpdated {
+                turn_id: on_event_turn_id.clone(),
+                file_path,
+                content,
+                actor: on_event_actor.clone(),
+            },
+            TurnStreamEvent::PlanCompleted { file_path, content } => EmittedEvent::PlanCompleted {
+                turn_id: on_event_turn_id.clone(),
+                file_path,
+                content,
                 actor: on_event_actor.clone(),
             },
             TurnStreamEvent::Usage(report) => EmittedEvent::Usage {

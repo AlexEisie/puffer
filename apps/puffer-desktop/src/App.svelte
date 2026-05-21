@@ -3016,6 +3016,16 @@
           }
         }
         break;
+      case "plan-updated":
+        currentTurnId = ev.turnId;
+        turnThinking = false;
+        turnStatusHint = "Planning";
+        break;
+      case "plan-completed":
+        currentTurnId = ev.turnId;
+        turnThinking = false;
+        turnStatusHint = "Plan ready";
+        break;
       case "reflection-checkpoint":
         markTurnActive(sid, ev.turnId);
         turnThinking = true;
