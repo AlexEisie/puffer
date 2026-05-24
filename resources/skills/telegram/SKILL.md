@@ -145,10 +145,10 @@ passcodes, and 2FA passwords, route the user through:
 /connect telegram-login <connection>
 ```
 
-The `/connect` prompt asks the user to choose import, QR, or phone login with
-AskUserQuestion, gathers any required input there, and calls the typed
-Telegram auth helper directly. Do not reproduce the auth flow with Bash or
-stdin flags from this skill.
+The `/connect` command asks the user to choose import, QR, or phone login with
+AskUserQuestion, gathers any required input there, and calls the typed Telegram
+auth helper directly. Do not reproduce the auth flow with Bash or stdin flags
+from this skill.
 After login or import completes, use the returned `connection_slug` in
 workflows and connector actions when the user wants ongoing monitoring or
 outbound side effects.

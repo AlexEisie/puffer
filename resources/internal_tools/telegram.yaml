@@ -4,8 +4,8 @@ aliases:
   - telegram
 description: |-
   Telegram personal-account login, Telegram Desktop import, and peer lookup
-  surface. `/connect telegram-login <connection>` may expose this as a scoped
-  runtime tool for auth; the `telegram` skill exposes the same operations
+  surface. `/connect telegram-login <connection>` calls this typed runtime
+  helper directly for auth; the `telegram` skill exposes the same operations
   through the internal CLI for lookup-oriented work.
 
   The internal CLI sends execution back to the parent Puffer runtime so the

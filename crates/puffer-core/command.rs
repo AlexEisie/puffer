@@ -1,11 +1,11 @@
 use crate::command_helpers::{
     append_tool_invocations, append_trace_events, describe_context, describe_files_in_context,
-    describe_git_diff, emit_system, execute_skill_command, handle_agents_command,
-    handle_branch_command, handle_config_command, handle_copy_command, handle_effort_command,
-    handle_export_command, handle_fast_command, handle_genskill_command, handle_goal_command,
-    handle_hooks_command, handle_ide_command, handle_keybindings_command, handle_mcp_command,
-    handle_memory_command, handle_model_command, handle_permissions_command, handle_plan_command,
-    handle_plugin_command, handle_recap_command, handle_reflect_command,
+    describe_git_diff, emit_system, execute_connect_flow, execute_skill_command,
+    handle_agents_command, handle_branch_command, handle_config_command, handle_copy_command,
+    handle_effort_command, handle_export_command, handle_fast_command, handle_genskill_command,
+    handle_goal_command, handle_hooks_command, handle_ide_command, handle_keybindings_command,
+    handle_mcp_command, handle_memory_command, handle_model_command, handle_permissions_command,
+    handle_plan_command, handle_plugin_command, handle_recap_command, handle_reflect_command,
     handle_remote_control_command, handle_remote_env_command, handle_resume_command,
     handle_sandbox_command, handle_session_command, handle_tag_command, handle_tasks_command,
     handle_terminal_setup_command, list_skills, persist_user_settings, record_command_checkpoint,
@@ -121,7 +121,7 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             &[],
             "Configure a named connector connection",
             Some("<connector-slug> <connection-name>"),
-            CommandKind::Prompt,
+            CommandKind::Local,
         ),
         cmd(
             "context",
@@ -622,9 +622,6 @@ fn execute_prompt_command(
     command: &CommandSpec,
     args: &str,
 ) -> Result<()> {
-    let scoped_resources =
-        crate::command_helpers::prompt::resources_for_prompt_command(resources, &command.name);
-    let resources = scoped_resources.as_ref();
     let preparation = crate::command_helpers::prompt::prepare_prompt_command_specialization(
         state,
         session_store,
@@ -838,6 +835,10 @@ fn execute_local_command(
             render_usage_summary(state, commands, resources, providers, auth_store),
         ),
         "cost" => emit_system(state, session_store, render_cost_summary(state)),
+        "connect" => match execute_connect_flow(state, resources, args) {
+            Ok(turn) => emit_system(state, session_store, turn.assistant_text),
+            Err(error) => emit_system(state, session_store, format!("/connect failed: {error}")),
+        },
         "clear" => {
             session_store.append_transcript_clear(state.session.id)?;
             state.apply_transcript_rewrite(&puffer_session_store::TranscriptRewrite::Clear);

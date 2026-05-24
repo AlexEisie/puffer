@@ -3,8 +3,8 @@ name: Email
 aliases:
   - email
 description: |-
-  Email subscriber configuration surface. `/connect email <connection>` may
-  expose this as a scoped runtime tool for auth; the `email` skill exposes the
+  Email subscriber configuration surface. `/connect email <connection>` calls
+  this typed runtime helper directly for auth; the `email` skill exposes the
   same operation through the internal CLI for lookup-oriented work.
 
   The internal CLI sends execution back to the parent Puffer runtime so the
