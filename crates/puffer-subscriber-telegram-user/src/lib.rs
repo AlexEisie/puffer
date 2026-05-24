@@ -17,10 +17,18 @@
 //!   [`SubscriberCommand`](puffer_subscriber_runtime::SubscriberCommand)
 //!   lines; there is no terminal prompting.
 
+mod actions;
 mod client;
 mod commands;
+mod delivery;
 mod events;
+mod import;
 mod login;
+mod outbound;
+mod peers;
+mod polls;
+mod qr_login;
+mod reply;
 mod state;
 
 pub use crate::client::run;
