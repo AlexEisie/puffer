@@ -344,6 +344,7 @@ fn user_question_dropdown_lines(overlay: &UserQuestionOverlay) -> Vec<Line<'stat
     let mut lines = generic_overlay_dropdown_lines(&OverlayState::UserQuestionPrompt {
         overlay: overlay.clone(),
     });
+    replace_user_question_footer(&mut lines, overlay.footer_hint());
     let Some(preview) = overlay.selected_preview() else {
         return lines;
     };
@@ -368,6 +369,15 @@ fn user_question_dropdown_lines(overlay: &UserQuestionOverlay) -> Vec<Line<'stat
         lines.push(footer);
     }
     lines
+}
+
+fn replace_user_question_footer(lines: &mut [Line<'static>], hint: &'static str) {
+    if let Some(line) = lines.last_mut() {
+        *line = Line::from(Span::styled(
+            hint,
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+    }
 }
 
 fn generic_overlay_dropdown_lines(overlay: &OverlayState) -> Vec<Line<'static>> {

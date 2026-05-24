@@ -67,6 +67,22 @@ fn sample_input_payload() -> serde_json::Value {
     ])
 }
 
+fn sample_searchable_payload() -> serde_json::Value {
+    json!([
+        {
+            "type": "choice",
+            "header": "Connector",
+            "question": "Which connector should Puffer connect?",
+            "searchable": true,
+            "options": [
+                {"label": "email", "description": "Email over IMAP and SMTP"},
+                {"label": "slack-login", "description": "Slack user account"},
+                {"label": "telegram-login", "description": "Telegram personal account"}
+            ]
+        }
+    ])
+}
+
 #[test]
 fn poll_pending_submit_opens_user_question_overlay() {
     let tempdir = tempdir().unwrap();
@@ -145,6 +161,44 @@ fn user_question_enter_sends_selected_answer() {
     let response = response_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     assert_eq!(response.answers["Pick one"], json!("Careful"));
     assert!(response.annotations.is_empty());
+    assert!(tui.overlay.is_none());
+    assert!(tui.pending_user_question_request.is_none());
+}
+
+#[test]
+fn user_question_searchable_choice_filters_and_selects() {
+    let (response_tx, response_rx) = mpsc::channel();
+    let mut tui = TuiState {
+        overlay: Some(OverlayState::UserQuestionPrompt {
+            overlay: UserQuestionOverlay::from_value(sample_searchable_payload()).unwrap(),
+        }),
+        pending_user_question_request: Some(PendingUserQuestionRequest { response_tx }),
+        ..TuiState::default()
+    };
+
+    for ch in "tele".chars() {
+        assert!(handle_user_question_key(
+            KeyEvent::from(KeyCode::Char(ch)),
+            &mut tui
+        ));
+    }
+    let Some(OverlayState::UserQuestionPrompt { overlay }) = &tui.overlay else {
+        panic!("user question overlay should remain open");
+    };
+    let rows = overlay.rows();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].1.contains("telegram-login"));
+    assert_eq!(overlay.custom_answer(), "tele");
+
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Enter),
+        &mut tui
+    ));
+    let response = response_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        response.answers["Which connector should Puffer connect?"],
+        json!("telegram-login")
+    );
     assert!(tui.overlay.is_none());
     assert!(tui.pending_user_question_request.is_none());
 }

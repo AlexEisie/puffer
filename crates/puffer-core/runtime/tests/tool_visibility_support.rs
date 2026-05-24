@@ -496,7 +496,7 @@ fn reference_file_read_schema() -> serde_json::Value {
             },
             "offset": {
                 "type": "integer",
-                "description": "The line number to start reading from. Only provide if the file is too large to read at once",
+                "description": "The line number to start reading from. Only provide if the file is too large to read at once (1-indexed)",
                 "minimum": 0
             },
             "limit": {

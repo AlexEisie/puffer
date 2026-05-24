@@ -794,23 +794,23 @@ fn skill_command_rejects_model_only_skills_for_direct_invocation() {
 #[test]
 fn session_command_can_list_and_update_note() {
     let tempdir = tempdir().unwrap();
-    let paths = ConfigPaths::discover(tempdir.path());
+    let _lock = lock_puffer_home();
+    let home = tempdir.path().join("home");
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    let _home = ScopedPufferHome::set(&home);
+    let paths = ConfigPaths::discover(&workspace);
     ensure_workspace_dirs(&paths).unwrap();
     let session_store = SessionStore::from_paths(&paths).unwrap();
-    let session = session_store
-        .create_session(tempdir.path().to_path_buf())
-        .unwrap();
+    let session = session_store.create_session(workspace.clone()).unwrap();
     let second = session_store
-        .create_session(tempdir.path().join("secondary"))
+        .create_session(workspace.join("secondary"))
         .unwrap();
     session_store
         .rename_session(second.id, "dockyard".to_string())
         .unwrap();
-    let mut state = AppState::new(
-        PufferConfig::default(),
-        tempdir.path().to_path_buf(),
-        session,
-    );
+    let mut state = AppState::new(PufferConfig::default(), workspace, session);
 
     dispatch_command(
         &mut state,
@@ -889,23 +889,24 @@ fn session_command_can_update_note_and_slug() {
 #[test]
 fn session_command_lists_saved_sessions() {
     let tempdir = tempdir().unwrap();
-    let paths = ConfigPaths::discover(tempdir.path());
+    let _lock = lock_puffer_home();
+    let home = tempdir.path().join("home");
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    let _home = ScopedPufferHome::set(&home);
+    let paths = ConfigPaths::discover(&workspace);
     ensure_workspace_dirs(&paths).unwrap();
     let session_store = SessionStore::from_paths(&paths).unwrap();
-    let session = session_store
-        .create_session(tempdir.path().join("current"))
-        .unwrap();
+    let current = workspace.join("current");
+    let session = session_store.create_session(current.clone()).unwrap();
     let listed = session_store
-        .create_session(tempdir.path().join("listed"))
+        .create_session(workspace.join("listed"))
         .unwrap();
     session_store
         .rename_session(listed.id, "dockyard".to_string())
         .unwrap();
-    let mut state = AppState::new(
-        PufferConfig::default(),
-        tempdir.path().join("current"),
-        session,
-    );
+    let mut state = AppState::new(PufferConfig::default(), current, session);
 
     dispatch_command(
         &mut state,
