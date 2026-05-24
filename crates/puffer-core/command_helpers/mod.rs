@@ -5,6 +5,7 @@ mod auth;
 mod branch;
 mod common;
 mod config;
+mod connect;
 mod doctor;
 mod ecosystem;
 mod genskill;
@@ -40,6 +41,7 @@ pub(crate) use config::{
     persist_user_settings, reload_config_from_disk, render_config_summary,
     render_permissions_panel, render_sandbox_actions,
 };
+pub use connect::execute_connect_flow;
 pub(crate) use doctor::{render_doctor_report, run_doctor};
 pub use ecosystem::McpActionEntry;
 pub(crate) use ecosystem::{

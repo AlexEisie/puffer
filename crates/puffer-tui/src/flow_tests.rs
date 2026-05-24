@@ -8,6 +8,7 @@ use puffer_core::{ToolInvocation, TurnExecution};
 use puffer_provider_registry::{AuthMode, ModelDescriptor, ProviderDescriptor};
 use puffer_resources::{LoadedItem, SourceInfo, SourceKind, ToolSpec};
 use puffer_session_store::{SessionMetadata, TranscriptEvent};
+use serde_json::{json, Map};
 use std::sync::mpsc;
 use tempfile::tempdir;
 
@@ -37,6 +38,13 @@ fn transient_session(cwd: &Path) -> SessionMetadata {
         slug: None,
         tags: Vec::new(),
         note: None,
+    }
+}
+
+fn user_question_answer(question: &str, answer: &str) -> UserQuestionPromptResponse {
+    UserQuestionPromptResponse {
+        answers: Map::from_iter([(question.to_string(), json!(answer))]),
+        annotations: Map::new(),
     }
 }
 
@@ -341,6 +349,132 @@ fn handle_prompt_submit_starts_async_provider_turn_and_polls_result() {
     assert!(!tui.has_pending_submit());
     assert!(state.transcript.iter().any(|message| {
         message.role == MessageRole::System && message.text.starts_with("Provider request failed:")
+    }));
+}
+
+#[test]
+fn handle_prompt_submit_routes_connect_through_user_question_worker() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let mut resources = LoadedResources::default();
+    let mut providers = ProviderRegistry::new();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+
+    handle_prompt_submit(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        "/connect".to_string(),
+        true,
+    )
+    .unwrap();
+
+    assert!(tui.has_pending_submit());
+    assert_eq!(
+        tui.pending_submit
+            .as_ref()
+            .and_then(|pending| pending.status_hint.as_deref()),
+        Some("Connecting...")
+    );
+
+    let mut opened_connector_question = false;
+    for _ in 0..100 {
+        let completed = poll_pending_submit(
+            &mut state,
+            &mut auth_store,
+            &auth_path,
+            &session_store,
+            &mut tui,
+        )
+        .unwrap();
+        if let Some(OverlayState::UserQuestionPrompt { overlay }) = &tui.overlay {
+            opened_connector_question = overlay.title().contains("Which connector slug");
+            break;
+        }
+        if completed {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(opened_connector_question);
+    assert!(respond_to_user_question(
+        &mut tui,
+        user_question_answer(
+            "Which connector slug should Puffer connect?",
+            "missing-connector",
+        ),
+    ));
+
+    let mut opened_connection_question = false;
+    for _ in 0..100 {
+        let completed = poll_pending_submit(
+            &mut state,
+            &mut auth_store,
+            &auth_path,
+            &session_store,
+            &mut tui,
+        )
+        .unwrap();
+        if let Some(OverlayState::UserQuestionPrompt { overlay }) = &tui.overlay {
+            opened_connection_question = overlay.title().contains("exact connection name");
+            break;
+        }
+        if completed {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(opened_connection_question);
+    assert!(respond_to_user_question(
+        &mut tui,
+        user_question_answer("What exact connection name should Puffer use?", "work-main"),
+    ));
+
+    let mut completed = false;
+    for _ in 0..100 {
+        if poll_pending_submit(
+            &mut state,
+            &mut auth_store,
+            &auth_path,
+            &session_store,
+            &mut tui,
+        )
+        .unwrap()
+        {
+            completed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert!(completed);
+    assert!(!tui.has_pending_submit());
+    assert!(state.transcript.iter().any(|message| {
+        message.role == MessageRole::Assistant && message.text.starts_with("/connect failed:")
+    }));
+    assert!(!state
+        .transcript
+        .iter()
+        .any(|message| message.text.contains("Provider request failed")));
+    let record = session_store.load_session(state.session.id).unwrap();
+    assert!(record.events.iter().any(|event| {
+        matches!(
+            event,
+            TranscriptEvent::CommandInvoked { name, args, .. }
+                if name == "connect" && args.is_empty()
+        )
     }));
 }
 

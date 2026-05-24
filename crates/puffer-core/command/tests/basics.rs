@@ -41,6 +41,17 @@ fn btw_stays_local_and_compact_runs_as_provider_prompt() {
 }
 
 #[test]
+fn connect_command_is_registered_as_local_command() {
+    let commands = supported_commands();
+    let connect = find_command(&commands, "connect").expect("connect command");
+    assert_eq!(connect.kind, CommandKind::Local);
+    assert_eq!(
+        connect.argument_hint.as_deref(),
+        Some("<connector-slug> <connection-name>")
+    );
+}
+
+#[test]
 fn command_surface_includes_user_invocable_skills_and_skill_aliases() {
     let resources = LoadedResources {
         skills: vec![
