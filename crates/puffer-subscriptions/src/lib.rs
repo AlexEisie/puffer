@@ -16,6 +16,8 @@
 mod action;
 mod catalog;
 mod catalog_store;
+#[cfg(test)]
+mod catalog_tests;
 mod classify;
 mod command_match;
 mod connection;

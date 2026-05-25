@@ -163,6 +163,38 @@ fn workflows_connectors_filter_shows_connect_commands() {
 }
 
 #[test]
+fn workflows_connectors_catalog_includes_serve_connectors_as_non_triggers() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+
+    dispatch_command(
+        &mut state,
+        &supported_commands(),
+        &LoadedResources::default(),
+        &mut ProviderRegistry::new(),
+        &mut AuthStore::default(),
+        &session_store,
+        "/workflows connectors discord",
+    )
+    .unwrap();
+
+    let text = &state.transcript.last().unwrap().text;
+    assert!(text.contains("discord-bot"));
+    assert!(text.contains("connect=/connect discord-bot discord-bot"));
+    assert!(!text.contains("[auth,trigger]"));
+}
+
+#[test]
 fn telegram_command_is_registered_as_local_command() {
     let commands = supported_commands();
     let telegram = find_command(&commands, "telegram").expect("telegram command");
