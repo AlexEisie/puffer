@@ -71,6 +71,15 @@
     searchText: string;
   };
 
+  type WorkflowDraftSource = {
+    slugBase?: string;
+    name?: string;
+    connectionSlug?: string;
+    connectorSlug?: string;
+    connectionName?: string;
+    saveMessage?: string;
+  };
+
   type ConnectorFilterPreset = {
     label: string;
     query: string;
@@ -215,14 +224,18 @@
   let wrapEl = $state<HTMLDivElement | undefined>();
   let scale = $state(0.8);
 
-  function starterWorkflow(): EditableWorkflow {
+  function starterWorkflow(
+    slug = "agent-review-pipeline",
+    name = "Agent review pipeline",
+    enabled = true
+  ): EditableWorkflow {
     return {
       schema: "puffer.workflow.v1",
-      slug: "agent-review-pipeline",
-      enabled: true,
+      slug,
+      enabled,
       trigger: { type: "subscription", source_topic: "workspace.task.created", pattern: "review|implement|ship" },
       pipeline: {
-        name: "Agent review pipeline",
+        name,
         working_dir: "/Users/shou/corbina",
         concurrency: 1,
         nodes: [
@@ -395,6 +408,44 @@
     workflowSlug = slug;
     const next = editorWorkflows.find((item) => item.slug === slug);
     selectedNodeId = next?.pipeline.nodes[0]?.id ?? null;
+  }
+
+  function createWorkflowDraft(source: WorkflowDraftSource = {}) {
+    const slug = uniqueWorkflowSlug(source.slugBase ?? "workflow-draft");
+    const draft = starterWorkflow(slug, source.name ?? "Workflow draft", false);
+    const connection = source.connectionSlug
+      ? connections.find((item) => item.slug === source.connectionSlug)
+      : triggerReadyConnections[0];
+    const connectionSlug = source.connectionSlug ?? connection?.slug;
+    draft.trigger = connection
+      ? { type: "connection", connection_slug: connection.slug, pattern: ".*" }
+      : connectionSlug
+        ? { type: "connection", connection_slug: connectionSlug, pattern: ".*" }
+      : { type: "subscription", source_topic: "workspace.task.created", pattern: ".*" };
+    editorWorkflows = [...editorWorkflows, draft];
+    workflowSlug = slug;
+    selectedNodeId = draft.pipeline.nodes[0]?.id ?? null;
+    if (source.connectorSlug) selectedConnectorSlug = source.connectorSlug;
+    if (source.connectionName ?? connectionSlug) selectedConnectorConnectionName = source.connectionName ?? connectionSlug ?? "";
+    dirtyWorkflowSlugs = Array.from(new Set([...dirtyWorkflowSlugs, slug]));
+    saveNotice = source.saveMessage ?? `Created ${slug} locally. Save to persist this workflow.`;
+  }
+
+  function uniqueWorkflowSlug(base: string): string {
+    const existing = new Set(editorWorkflows.map((item) => item.slug));
+    if (!existing.has(base)) return base;
+    let index = 2;
+    while (existing.has(`${base}-${index}`)) index += 1;
+    return `${base}-${index}`;
+  }
+
+  function titleFromSlug(slug: string): string {
+    const title = slug
+      .split("-")
+      .filter(Boolean)
+      .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+      .join(" ");
+    return title || "Workflow";
   }
 
   function selectRun(idx: number) {
@@ -593,6 +644,53 @@
     if (!existingConnection) {
       saveNotice = `Run ${command} before enabling this workflow trigger.`;
     }
+  }
+
+  function createWorkflowDraftForConnection(connection: WorkflowConnection) {
+    if (!connectionTriggerSupported(connection)) {
+      saveNotice = `${connection.slug} cannot start workflow triggers. Choose an event-capable connection.`;
+      return;
+    }
+    createWorkflowDraft({
+      slugBase: `${connection.slug}-workflow`,
+      name: `${titleFromSlug(connection.slug)} workflow`,
+      connectionSlug: connection.slug,
+      connectorSlug: connection.connector_slug,
+      connectionName: connection.slug,
+      saveMessage: `Created ${connection.slug}-backed workflow locally. Save to persist this workflow.`
+    });
+  }
+
+  function createWorkflowDraftForConnector(connector: WorkflowConnector, plannedConnectionName?: string) {
+    const connectorConnections = connectionsForConnector(connector.connector_slug);
+    const matchingConnection = plannedConnectionName
+      ? connectorConnections.find((connection) => connection.slug === plannedConnectionName)
+      : null;
+    const existingConnection =
+      matchingConnection ?? (plannedConnectionName ? null : connectorConnections[0]);
+    const connectionSlug = plannedConnectionName || existingConnection?.slug || connectorConnectionHint(connector);
+    const command = connectorConnectCommand(connector, connectionSlug);
+    selectedConnectorSlug = connector.connector_slug;
+    selectedConnectorConnectionName = connectionSlug;
+    if (!connectorTriggerSupported(connector)) {
+      saveNotice = `${connector.connector_slug} cannot start workflow triggers yet. ${command} is available for connector setup.`;
+      return;
+    }
+    createWorkflowDraft({
+      slugBase: `${connectionSlug}-workflow`,
+      name: `${titleFromSlug(connectionSlug)} workflow`,
+      connectionSlug,
+      connectorSlug: connector.connector_slug,
+      connectionName: connectionSlug,
+      saveMessage: existingConnection
+        ? `Created ${connectionSlug}-backed workflow locally. Save to persist this workflow.`
+        : `Created ${connectionSlug}-backed workflow locally. Run ${command} before enabling it.`
+    });
+  }
+
+  function createWorkflowDraftForSelectedConnector() {
+    if (!selectedConnector || selectedConnectorConnectionInvalid) return;
+    createWorkflowDraftForConnector(selectedConnector, selectedConnectorConnectionName);
   }
 
   function connectorConnectionHint(connector: WorkflowConnector): string {
@@ -1298,6 +1396,16 @@
       <span class="pf-pipe-save-note">{saveNotice}</span>
     </div>
     <div class="pf-pipe-top-right">
+      <button
+        type="button"
+        class="sc-btn"
+        data-variant="ghost"
+        data-size="sm"
+        aria-label="New workflow"
+        onclick={() => createWorkflowDraft()}
+      >
+        <Icon name="plus" size={12} />New
+      </button>
       {#each providerOptions as provider (provider.id)}
         <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" onclick={() => addAgent(provider.id)}>
           <Icon name="plus" size={12} />{provider.short}
@@ -1637,6 +1745,16 @@
                       </button>
                       <button
                         type="button"
+                        class="pf-icon-btn pf-draft-btn"
+                        aria-label={`Create workflow draft for ${connection.slug}`}
+                        title={`Create workflow draft for ${connection.slug}`}
+                        disabled={!canTrigger}
+                        onclick={() => createWorkflowDraftForConnection(connection)}
+                      >
+                        <Icon name="plus" size={12} />
+                      </button>
+                      <button
+                        type="button"
                         class="pf-icon-btn pf-monitor-btn"
                         aria-label={`Run ${monitorCommand}`}
                         title={monitorCommand}
@@ -1814,6 +1932,16 @@
                       >
                         <Icon name="plug" size={12} />
                       </button>
+                      <button
+                        type="button"
+                        class="pf-icon-btn pf-draft-btn"
+                        aria-label={`Create workflow draft for ${connector.connector_slug}`}
+                        title={`Create workflow draft for ${connector.connector_slug}`}
+                        disabled={!canTrigger}
+                        onclick={() => createWorkflowDraftForConnector(connector)}
+                      >
+                        <Icon name="plus" size={12} />
+                      </button>
                     </div>
                   {/each}
                 </div>
@@ -1857,6 +1985,18 @@
                             onclick={runSelectedConnectorCommand}
                           >
                             <Icon name="play" size={12} />
+                          </button>
+                        {/if}
+                        {#if connectorTriggerSupported(selectedConnector)}
+                          <button
+                            type="button"
+                            class="pf-icon-btn"
+                            aria-label="Create workflow draft for selected connector"
+                            title="Create workflow draft for selected connector"
+                            disabled={selectedConnectorConnectionInvalid}
+                            onclick={createWorkflowDraftForSelectedConnector}
+                          >
+                            <Icon name="plus" size={12} />
                           </button>
                         {/if}
                       </div>
@@ -2606,11 +2746,11 @@
   }
 
   .pf-connection-row-group {
-    grid-template-columns: minmax(0, 1fr) 30px 30px;
+    grid-template-columns: minmax(0, 1fr) 30px 30px 30px;
   }
 
   .pf-connector-row-group {
-    grid-template-columns: minmax(0, 1fr) 30px;
+    grid-template-columns: minmax(0, 1fr) 30px 30px;
   }
 
   .pf-connection-row {
@@ -2624,6 +2764,8 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
+    min-width: 0;
+    overflow: hidden;
     text-align: left;
   }
 
@@ -2668,6 +2810,8 @@
     font: inherit;
     text-align: left;
     cursor: pointer;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .pf-connector-row:hover,
@@ -2718,6 +2862,7 @@
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: 4px;
+    min-width: 0;
     color: var(--muted-foreground);
     font-size: 10px;
     font-weight: 700;
