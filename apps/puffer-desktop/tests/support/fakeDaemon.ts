@@ -379,15 +379,6 @@ export class FakeDaemon {
     ],
     connections: [
       {
-        slug: "telegram-user",
-        connector_slug: "telegram-login",
-        description: "Personal Telegram",
-        state: "authenticated",
-        has_consumer: false,
-        auth_failure_notified: false,
-        can_trigger_workflow: true
-      },
-      {
         slug: "slack-app",
         connector_slug: "slack-app",
         description: "Workspace Slack",
@@ -395,6 +386,15 @@ export class FakeDaemon {
         has_consumer: false,
         auth_failure_notified: false,
         can_trigger_workflow: false
+      },
+      {
+        slug: "telegram-user",
+        connector_slug: "telegram-login",
+        description: "Personal Telegram",
+        state: "authenticated",
+        has_consumer: false,
+        auth_failure_notified: false,
+        can_trigger_workflow: true
       }
     ],
     connector_error: null
