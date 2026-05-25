@@ -400,7 +400,7 @@ fn handle_prompt_submit_routes_connect_through_user_question_worker() {
         )
         .unwrap();
         if let Some(OverlayState::UserQuestionPrompt { overlay }) = &tui.overlay {
-            opened_connector_question = overlay.title().contains("Which connector slug");
+            opened_connector_question = overlay.title().contains("Which connector should");
             break;
         }
         if completed {
@@ -412,8 +412,8 @@ fn handle_prompt_submit_routes_connect_through_user_question_worker() {
     assert!(respond_to_user_question(
         &mut tui,
         user_question_answer(
-            "Which connector slug should Puffer connect?",
-            "missing-connector",
+            "Which connector should Puffer connect?",
+            "missing-connector"
         ),
     ));
 
