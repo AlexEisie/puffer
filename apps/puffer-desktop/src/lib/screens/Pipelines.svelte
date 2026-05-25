@@ -107,6 +107,7 @@
   let workflows = $derived(editorWorkflows);
   let connectors = $derived(snapshot.connectors ?? []);
   let connections = $derived(snapshot.connections ?? []);
+  let triggerReadyConnections = $derived(connections.filter((connection) => connectionTriggerSupported(connection)));
   let filteredConnections = $derived(filterConnections(connections, connectors, connectorQuery));
   let filteredConnectors = $derived(filterConnectors(connectors, connectorQuery));
   let workflow = $derived(
@@ -384,9 +385,13 @@
   }
 
   function defaultConnectionSlug(item: EditableWorkflow): string {
-    if (item.trigger.type === "connection") return item.trigger.connection_slug;
-    if (connections.length > 0) return connections[0].slug;
-    if (item.trigger.type === "subscription") return item.trigger.source_topic;
+    const trigger = item.trigger;
+    if (trigger.type === "connection") {
+      const current = connections.find((connection) => connection.slug === trigger.connection_slug);
+      if (!current || connectionTriggerSupported(current)) return trigger.connection_slug;
+    }
+    if (triggerReadyConnections.length > 0) return triggerReadyConnections[0].slug;
+    if (trigger.type === "subscription") return trigger.source_topic;
     return "telegram-user";
   }
 
@@ -460,6 +465,11 @@
 
   function connectionExists(slug: string): boolean {
     return connections.some((connection) => connection.slug === slug);
+  }
+
+  function connectionOptionLabel(connection: WorkflowConnection): string {
+    const label = `${connection.slug} (${connection.connector_slug})`;
+    return connectionTriggerSupported(connection) ? label : `${label} - no trigger`;
   }
 
   function matchesConnectorQuery(query: string, parts: Array<string | null | undefined>): boolean {
@@ -967,13 +977,15 @@
                 <select
                   aria-label="Workflow connection"
                   value={workflow.trigger.connection_slug}
-                  onchange={(event) => updateTriggerField("connection_slug", event.currentTarget.value)}
+                  onchange={(event) => useConnectionTrigger(event.currentTarget.value)}
                 >
                   {#if !connectionExists(workflow.trigger.connection_slug)}
                     <option value={workflow.trigger.connection_slug}>{workflow.trigger.connection_slug} (planned)</option>
                   {/if}
                   {#each connections as connection (connection.slug)}
-                    <option value={connection.slug}>{connection.slug} ({connection.connector_slug})</option>
+                    <option value={connection.slug} disabled={!connectionTriggerSupported(connection)}>
+                      {connectionOptionLabel(connection)}
+                    </option>
                   {/each}
                 </select>
               </label>

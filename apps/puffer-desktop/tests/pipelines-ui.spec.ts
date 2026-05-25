@@ -110,6 +110,23 @@ test("pipeline connector picker disables connections that cannot trigger workflo
   await expect(page.getByLabel("Trigger type")).toHaveValue("subscription");
 });
 
+test("pipeline connection dropdown skips connections that cannot trigger workflows", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Trigger type").selectOption("connection");
+
+  const connectionSelect = page.getByLabel("Workflow connection");
+  await expect(connectionSelect).toHaveValue("telegram-user");
+
+  const slackOption = connectionSelect.locator('option[value="slack-app"]');
+  await expect(slackOption).toHaveAttribute("disabled", "");
+  await expect(slackOption).toContainText("no trigger");
+});
+
 test("pipeline refresh is disabled while the workflow snapshot loads", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayFailure("workflow_list", () => true, "slow workflow snapshot", 250);
