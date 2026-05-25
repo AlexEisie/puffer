@@ -110,6 +110,25 @@ test("pipeline connector picker disables connections that cannot trigger workflo
   await expect(page.getByLabel("Trigger type")).toHaveValue("subscription");
 });
 
+test("pipeline connector catalog can search serve-mode connectors as unavailable triggers", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("discord");
+
+  const connector = page
+    .locator('[aria-label="Connector catalog"]')
+    .getByRole("button", { name: "discord-bot cannot start workflow triggers" });
+
+  await expect(connector).toBeDisabled();
+  await expect(connector).toContainText("no trigger");
+  await expect(connector).toContainText("auth");
+  await expect(page.getByLabel("Trigger type")).toHaveValue("subscription");
+});
+
 test("pipeline connection dropdown skips connections that cannot trigger workflows", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

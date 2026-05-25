@@ -365,6 +365,18 @@ export class FakeDaemon {
         action_slugs: ["send_message"]
       },
       {
+        connector_slug: "discord-bot",
+        description: "Discord bot connector configured through puffer serve",
+        skill: "discord",
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "discord-bot",
+        connect_command: "/connect discord-bot discord-bot",
+        action_slugs: []
+      },
+      {
         connector_slug: "email",
         description: "Email connector over SMTP and IMAP-compatible polling",
         skill: "email",

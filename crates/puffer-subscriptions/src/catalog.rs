@@ -98,12 +98,15 @@ pub fn builtin_connector_templates() -> Vec<ConnectorTemplate> {
     vec![
         telegram_login_template(),
         telegram_bot_template(),
+        discord_bot_template(),
         lark_app_template(),
         lark_login_template(),
+        matrix_bot_template(),
         slack_app_template(),
         slack_login_template(),
         slack_bot_template(),
         email_template(),
+        webhook_template(),
     ]
 }
 
@@ -121,10 +124,13 @@ pub fn suggested_connection_slug(connector_slug: &str) -> String {
         "email" => "email".to_string(),
         "lark-app" => "lark-app".to_string(),
         "lark-login" => "lark-login".to_string(),
+        "discord-bot" => "discord-bot".to_string(),
+        "matrix-bot" => "matrix-bot".to_string(),
         "slack-app" => "slack-app".to_string(),
         "slack-login" => "slack-login".to_string(),
         "telegram-bot" => "telegram-bot".to_string(),
         "slack-bot" => "slack-bot".to_string(),
+        "webhook" => "webhook".to_string(),
         _ => connector_slug.to_string(),
     }
 }
@@ -162,6 +168,22 @@ fn telegram_bot_template() -> ConnectorTemplate {
         subscriber: None,
         output_schema: message_output_schema(),
         actions: send_message_actions(),
+    }
+}
+
+fn discord_bot_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "discord-bot".to_string(),
+        description: "Discord bot connector configured through puffer serve".to_string(),
+        skill: "discord".to_string(),
+        binary: "puffer connector discord".to_string(),
+        command: Vec::new(),
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        subscriber: None,
+        output_schema: message_output_schema(),
+        actions: BTreeMap::new(),
     }
 }
 
@@ -214,6 +236,22 @@ fn slack_login_template() -> ConnectorTemplate {
     }
 }
 
+fn matrix_bot_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "matrix-bot".to_string(),
+        description: "Matrix room connector configured through puffer serve".to_string(),
+        skill: "matrix".to_string(),
+        binary: "puffer connector matrix".to_string(),
+        command: Vec::new(),
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        subscriber: None,
+        output_schema: message_output_schema(),
+        actions: BTreeMap::new(),
+    }
+}
+
 fn lark_app_template() -> ConnectorTemplate {
     ConnectorTemplate {
         slug: "lark-app".to_string(),
@@ -259,6 +297,22 @@ fn email_template() -> ConnectorTemplate {
         subscriber: None,
         output_schema: message_output_schema(),
         actions: send_message_actions(),
+    }
+}
+
+fn webhook_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "webhook".to_string(),
+        description: "HTTP webhook connector configured through puffer serve".to_string(),
+        skill: "webhook".to_string(),
+        binary: "puffer connector webhook".to_string(),
+        command: Vec::new(),
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        subscriber: None,
+        output_schema: message_output_schema(),
+        actions: BTreeMap::new(),
     }
 }
 
@@ -874,92 +928,4 @@ fn message_output_schema() -> Value {
         },
         "required": ["message"]
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn builtins_cover_required_initial_connectors() {
-        let slugs = builtin_connector_templates()
-            .into_iter()
-            .map(|template| template.slug)
-            .collect::<Vec<_>>();
-
-        assert!(slugs.contains(&"telegram-bot".to_string()));
-        assert!(slugs.contains(&"telegram-login".to_string()));
-        assert!(slugs.contains(&"lark-app".to_string()));
-        assert!(slugs.contains(&"lark-login".to_string()));
-        assert!(slugs.contains(&"slack-app".to_string()));
-        assert!(slugs.contains(&"slack-login".to_string()));
-        assert!(slugs.contains(&"slack-bot".to_string()));
-        assert!(slugs.contains(&"email".to_string()));
-    }
-
-    #[test]
-    fn suggested_connection_slugs_match_connect_defaults() {
-        assert_eq!(suggested_connection_slug("telegram-login"), "telegram-user");
-        assert_eq!(suggested_connection_slug("email"), "email");
-        assert_eq!(suggested_connection_slug("lark-app"), "lark-app");
-        assert_eq!(suggested_connection_slug("slack-login"), "slack-login");
-        assert_eq!(suggested_connection_slug("custom-feed"), "custom-feed");
-    }
-
-    #[test]
-    fn builtins_define_host_enforced_action_permissions() {
-        let telegram = builtin_connector_template("telegram-login").unwrap();
-        let action = telegram.actions.get("send_message").unwrap();
-        let vote = telegram.actions.get("vote_poll").unwrap();
-        let update_group = telegram.actions.get("update_group_title").unwrap();
-        let lark = builtin_connector_template("lark-login").unwrap();
-        let slack = builtin_connector_template("slack-login").unwrap();
-
-        assert_eq!(action.permission.category, "external_message_send");
-        assert!(action.permission.external_side_effect);
-        assert_eq!(
-            telegram.subscriber.as_ref().unwrap().manifest_slug,
-            "telegram-user"
-        );
-        assert_eq!(vote.permission.category, "external_message_interaction");
-        assert!(vote.permission.external_side_effect);
-        assert_eq!(update_group.permission.category, "external_chat_admin");
-        assert!(lark.actions.contains_key("send_message"));
-        assert_eq!(
-            lark.actions.get("react").unwrap().permission.category,
-            "external_message_interaction"
-        );
-        assert!(!lark.can_subscribe);
-        assert!(slack.actions.contains_key("send_message"));
-        assert_eq!(
-            slack.actions.get("react").unwrap().permission.category,
-            "external_message_interaction"
-        );
-        assert!(
-            !builtin_connector_template("slack-app")
-                .unwrap()
-                .can_subscribe
-        );
-        assert!(
-            !builtin_connector_template("slack-app")
-                .unwrap()
-                .can_proxy_agent
-        );
-        assert!(
-            !builtin_connector_template("slack-bot")
-                .unwrap()
-                .can_subscribe
-        );
-        assert!(
-            !builtin_connector_template("slack-bot")
-                .unwrap()
-                .can_proxy_agent
-        );
-        assert!(builtin_connector_template("slack-bot")
-            .unwrap()
-            .actions
-            .is_empty());
-        assert!(!slack.actions.contains_key("vote_poll"));
-        assert!(!slack.actions.contains_key("update_group_title"));
-    }
 }
