@@ -155,6 +155,36 @@ fn render_shows_workflow_subcommand_popup_after_command_space() {
 }
 
 #[test]
+fn render_shows_workflow_monitor_task_subcommand_popup() {
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    terminal
+        .draw(|frame| {
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "/workflows ta",
+                13,
+                0,
+                0,
+                &supported_commands(),
+            )
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(rendered.contains("/workflows tasks"));
+    assert!(rendered.contains("Search connector monitor tasks and task actions"));
+    assert!(rendered.contains("[query]"));
+}
+
+#[test]
 fn render_shows_connect_catalog_popup_after_command_space() {
     let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -211,7 +241,7 @@ fn render_shows_workflow_connector_argument_popup() {
     let rendered = buffer_to_string(terminal.backend().buffer());
     assert!(rendered.contains("/workflows append telegram-user"));
     assert!(rendered.contains("connection=telegram-user"));
-    assert!(rendered.contains("Append events from Telegram personal account"));
+    assert!(rendered.contains("Append events to a file from Telegram personal account"));
 }
 
 #[test]
@@ -241,5 +271,5 @@ fn render_shows_monitor_connector_argument_popup() {
     let rendered = buffer_to_string(terminal.backend().buffer());
     assert!(rendered.contains("/monitor telegram-user"));
     assert!(rendered.contains("connection=telegram-user"));
-    assert!(rendered.contains("Monitor events from Telegram personal account"));
+    assert!(rendered.contains("Create monitor workflow for Telegram personal account"));
 }

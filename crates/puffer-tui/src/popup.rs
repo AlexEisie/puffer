@@ -55,13 +55,13 @@ const WORKFLOW_SUBCOMMANDS: &[WorkflowSubcommand] = &[
         name: "list",
         description: "Show workflow definitions and latest run status",
         hint: Some("[query]"),
-        search_terms: &["show", "workflow", "pipeline", "definition", "status"],
+        search_terms: &["show", "workflow", "definition", "status"],
     },
     WorkflowSubcommand {
         name: "new",
         description: "Create a workflow draft for a trigger-ready connection",
         hint: Some("[slug] [connection-slug] [pattern]"),
-        search_terms: &["create", "draft", "trigger", "pattern", "pipeline"],
+        search_terms: &["create", "draft", "trigger", "pattern", "workflow"],
     },
     WorkflowSubcommand {
         name: "append",
@@ -177,10 +177,7 @@ pub(crate) fn popup_row_matches_input(
         .split_whitespace()
         .collect::<Vec<_>>();
     parts.len() == 2
-        && matches!(
-            parts[0],
-            "workflow" | "workflows" | "pipeline" | "pipelines"
-        )
+        && matches!(parts[0], "workflow" | "workflows")
         && row.name == format!("workflows {}", parts[1])
 }
 
@@ -457,11 +454,11 @@ fn workflow_connector_command_description(
     suggested_connection: &str,
 ) -> String {
     let action = match kind {
-        WorkflowConnectorCommandKind::New => "Create draft",
-        WorkflowConnectorCommandKind::Append => "Append events",
+        WorkflowConnectorCommandKind::New => "Create draft workflow",
+        WorkflowConnectorCommandKind::Append => "Append events to a file",
     };
     format!(
-        "{action} from {}  connection={suggested_connection}; connector={}",
+        "{action} from {}; connection={suggested_connection}; connector={}",
         template.description, template.slug
     )
 }
@@ -508,7 +505,7 @@ fn monitor_connector_description(
     suggested_connection: &str,
 ) -> String {
     format!(
-        "Monitor events from {}  connection={suggested_connection}; connector={}",
+        "Create monitor workflow for {}; connection={suggested_connection}; connector={}",
         template.description, template.slug
     )
 }
@@ -536,7 +533,7 @@ fn monitor_connector_search_text(
 }
 
 fn is_workflows_command(command: &str) -> bool {
-    matches!(command, "workflow" | "workflows" | "pipeline" | "pipelines")
+    matches!(command, "workflow" | "workflows")
 }
 
 fn workflow_subcommand_matches(subcommand: &WorkflowSubcommand, filter: &str) -> bool {

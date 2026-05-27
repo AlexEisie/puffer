@@ -70,7 +70,7 @@ fn workflow_binding_delete_row(binding: WorkflowBindingSpec) -> ConnectorPopupRo
 
 fn workflow_binding_delete_description(binding: &WorkflowBindingSpec) -> String {
     format!(
-        "Delete {} action  connection={}; connector={}; status={}; target={}; filter={}",
+        "Delete {} action; connection={}; connector={}; status={}; target={}; filter={}",
         workflow_action_type(&binding.action),
         binding.connection_slug,
         binding.connector_slug.as_deref().unwrap_or("-"),
@@ -137,7 +137,7 @@ fn search_terms(query: &str) -> Vec<String> {
 }
 
 fn is_workflows_command(command: &str) -> bool {
-    matches!(command, "workflow" | "workflows" | "pipeline" | "pipelines")
+    matches!(command, "workflow" | "workflows")
 }
 
 fn workflow_status_label(status: WorkflowBindingStatus) -> &'static str {

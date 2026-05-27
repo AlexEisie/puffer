@@ -1,5 +1,5 @@
 <script lang="ts">
-  import "../design/pipeline.css";
+  import "../design/workflow.css";
 
   import { onMount } from "svelte";
   import {
@@ -26,11 +26,27 @@
   } from "../types";
 
   type AgentProvider = "codex" | "claude" | "puffer";
+  type NodeKind = AgentProvider | "tool" | "merge" | "fanout";
   type TriggerMode = "subscription" | "connection" | "cron";
-  type EditablePipelineNode = WorkflowPipelineNode & { type: AgentProvider };
+  type EditablePipelineNode = WorkflowPipelineNode & { type: NodeKind };
   type EditableWorkflow = Omit<WorkflowDefinition, "pipeline"> & {
     pipeline: Omit<WorkflowDefinition["pipeline"], "nodes"> & { nodes: EditablePipelineNode[] };
   };
+
+  const TOOL_NAMES = [
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "Grep",
+    "Glob",
+    "WebFetch",
+    "WebSearch",
+    "NotebookEdit",
+    "TodoWrite",
+    "ExitPlanMode"
+  ] as const;
+  type ToolName = (typeof TOOL_NAMES)[number];
 
   type ProviderMeta = {
     id: AgentProvider;
@@ -44,7 +60,7 @@
 
   type GraphNode = {
     id: string;
-    type: "trigger" | "agent";
+    type: "trigger" | "agent" | "tool" | "merge" | "fanout";
     title: string;
     subtitle: string;
     provider?: AgentProvider;
@@ -110,6 +126,8 @@
   type Props = {
     onRunWorkflowCommand?: (command: string) => boolean | Promise<boolean>;
   };
+
+  type WorkflowPage = "overview" | "detail" | "create";
 
   let { onRunWorkflowCommand }: Props = $props();
 
@@ -178,8 +196,6 @@
     "message",
     "messages",
     "on",
-    "pipeline",
-    "pipelines",
     "save",
     "that",
     "to",
@@ -233,8 +249,8 @@
     monitor_task_error: null
   });
   let editorWorkflows = $state<EditableWorkflow[]>([starterWorkflow()]);
-  let workflowSlug = $state("agent-review-pipeline");
-  let selectedNodeId = $state<string | null>("codex-implement");
+  let workflowSlug = $state("agent-review-workflow");
+  let selectedNodeId = $state<string | null>("trigger");
   let workflowQuery = $state("");
   let connectorQuery = $state("");
   let selectedConnectorSlug = $state<string | null>(null);
@@ -261,6 +277,9 @@
   let refreshGeneration = 0;
   let dirtyWorkflowSlugs = $state<string[]>([]);
   let saveNotice = $state("Workflow changes save to the daemon.");
+  let workflowPage = $state<WorkflowPage>("overview");
+  let inspectorOpen = $state(true);
+  let runsSheetOpen = $state(false);
 
   let workflows = $derived(editorWorkflows);
   let workflowQueryTerms = $derived(searchTerms(workflowQuery));
@@ -320,8 +339,9 @@
   let activeNode = $derived(currentNode?.id ?? "");
   let isLive = $derived(run?.status === "running" && stepIdx === null);
   let selectedNode = $derived(
-    workflow?.pipeline.nodes.find((node) => node.id === selectedNodeId) ?? workflow?.pipeline.nodes[0] ?? null
+    workflow?.pipeline.nodes.find((node) => node.id === selectedNodeId) ?? null
   );
+  let triggerSelected = $derived(selectedNodeId === "trigger" && workflow != null);
   let selectedConnector = $derived(connectors.find((connector) => connector.connector_slug === selectedConnectorSlug) ?? null);
   let selectedConnectorConnectionInvalid = $derived(
     selectedConnector !== null && !connectionSlugValid(selectedConnectorConnectionName)
@@ -354,13 +374,21 @@
   );
   let selectedAppendWorkflowPreview = $derived(selectedConnector ? appendWorkflowPreview() : "");
   let workflowDirty = $derived(workflow ? dirtyWorkflowSlugs.includes(workflow.slug) : false);
+  let ongoingRuns = $derived(
+    [...snapshot.runs]
+      .filter((item) => item.status === "running" || item.status === "pending")
+      .sort((a, b) => b.started_at_ms - a.started_at_ms)
+  );
+  let recentRuns = $derived([...snapshot.runs].sort((a, b) => b.started_at_ms - a.started_at_ms).slice(0, 8));
+  let enabledWorkflowCount = $derived(workflows.filter((item) => item.enabled).length);
+  let dirtyWorkflowCount = $derived(dirtyWorkflowSlugs.length);
 
   let wrapEl = $state<HTMLDivElement | undefined>();
   let scale = $state(0.8);
 
   function starterWorkflow(
-    slug = "agent-review-pipeline",
-    name = "Agent review pipeline",
+    slug = "agent-review-workflow",
+    name = "Agent review workflow",
     enabled = true
   ): EditableWorkflow {
     return {
@@ -415,6 +443,29 @@
   }
 
   function normalizeNode(node: WorkflowPipelineNode): EditablePipelineNode {
+    if (node.type === "tool") {
+      const tool = nodeToolName(node as EditablePipelineNode) || "Bash";
+      return {
+        ...node,
+        id: node.id || uniqueNodeId(tool.toLowerCase()),
+        type: "tool",
+        agent: node.agent ?? `${tool} call`,
+        tools: node.tools && node.tools.length > 0 ? node.tools : [tool],
+        prompt: node.prompt ?? defaultToolPrompt(tool),
+        depends_on: [...(node.depends_on ?? [])]
+      };
+    }
+    if (node.type === "merge" || node.type === "fanout") {
+      return {
+        ...node,
+        id: node.id || uniqueNodeId(node.type),
+        type: node.type,
+        agent: node.agent ?? (node.type === "merge" ? "Merge" : "Fanout"),
+        tools: [],
+        prompt: node.prompt ?? "",
+        depends_on: [...(node.depends_on ?? [])]
+      };
+    }
     const type = providerFromNode(node);
     const meta = providerMeta(type);
     return {
@@ -440,6 +491,13 @@
     return providerOptions.find((item) => item.id === provider) ?? providerOptions[0];
   }
 
+  function nodeKindShort(kind: NodeKind): string {
+    if (kind === "tool") return "Tool";
+    if (kind === "merge") return "Merge";
+    if (kind === "fanout") return "Fanout";
+    return providerMeta(kind).short;
+  }
+
   function defaultTools(provider: AgentProvider): string[] {
     if (provider === "claude") return ["read", "diff", "bash"];
     if (provider === "puffer") return ["workflow", "memory", "git"];
@@ -447,9 +505,9 @@
   }
 
   function defaultPrompt(provider: AgentProvider): string {
-    if (provider === "claude") return "Review the upstream result and call out risks before the pipeline proceeds.";
+    if (provider === "claude") return "Review the upstream result and call out risks before the workflow proceeds.";
     if (provider === "puffer") return "Coordinate local runtime state and produce a clean handoff summary.";
-    return "Implement the assigned pipeline step with a focused patch and verification notes.";
+    return "Implement the assigned workflow step with a focused patch and verification notes.";
   }
 
   function measure() {
@@ -531,7 +589,7 @@
     };
     editorWorkflows = merged;
     if (!workflowSlug || !editorWorkflows.some((item) => item.slug === workflowSlug)) {
-      workflowSlug = editorWorkflows[0]?.slug ?? "agent-review-pipeline";
+      workflowSlug = editorWorkflows[0]?.slug ?? "agent-review-workflow";
     }
     const activeWorkflow = editorWorkflows.find((item) => item.slug === workflowSlug) ?? editorWorkflows[0];
     if (!activeWorkflow?.pipeline.nodes.some((node) => node.id === selectedNodeId)) {
@@ -545,9 +603,27 @@
     selectedNodeId = next?.pipeline.nodes[0]?.id ?? null;
   }
 
+  function openWorkflowDetail(slug: string) {
+    selectWorkflow(slug);
+    runsSheetOpen = true;
+    workflowPage = "detail";
+  }
+
+  function openWorkflowRunDetail(item: WorkflowRun) {
+    selectWorkflow(item.workflow_slug);
+    selectRun(item.idx);
+    runsSheetOpen = true;
+    workflowPage = "detail";
+  }
+
+  function backToWorkflowOverview() {
+    workflowPage = "overview";
+  }
+
   function createWorkflowDraft(source: WorkflowDraftSource = {}) {
     const slug = uniqueWorkflowSlug(source.slugBase ?? "workflow-draft");
     const draft = starterWorkflow(slug, source.name ?? "Workflow draft", false);
+    draft.pipeline.nodes = [];
     const pattern = normalizedPattern(source.pattern) ?? ".*";
     const connection = source.connectionSlug
       ? connections.find((item) => item.slug === source.connectionSlug)
@@ -560,12 +636,13 @@
       : { type: "subscription", source_topic: "workspace.task.created", pattern };
     editorWorkflows = [...editorWorkflows, draft];
     workflowSlug = slug;
-    selectedNodeId = draft.pipeline.nodes[0]?.id ?? null;
+    selectedNodeId = "trigger";
     if (source.connectorSlug) selectedConnectorSlug = source.connectorSlug;
     if (source.connectionName ?? connectionSlug) selectedConnectorConnectionName = source.connectionName ?? connectionSlug ?? "";
     dirtyWorkflowSlugs = Array.from(new Set([...dirtyWorkflowSlugs, slug]));
     workflowQuery = "";
-    saveNotice = source.saveMessage ?? `Created ${slug} locally. Save to persist this workflow.`;
+    workflowPage = "create";
+    saveNotice = source.saveMessage ?? `Created ${slug} locally. Add nodes, then save to persist.`;
   }
 
   function uniqueWorkflowSlug(base: string): string {
@@ -588,6 +665,7 @@
   function selectRun(idx: number) {
     runIdx = idx;
     stepIdx = null;
+    runsSheetOpen = true;
   }
 
   function stepToIdx(i: number) {
@@ -614,7 +692,7 @@
     if (!workflow) return;
     const oldSlug = workflow.slug;
     updateCurrentWorkflow((item) => {
-      if (field === "slug") return { ...item, slug: String(value || "pipeline") };
+      if (field === "slug") return { ...item, slug: String(value || "workflow") };
       if (field === "enabled") return { ...item, enabled: Boolean(value) };
       if (field === "name") return { ...item, pipeline: { ...item.pipeline, name: String(value) } };
       if (field === "working_dir") return { ...item, pipeline: { ...item.pipeline, working_dir: String(value) } };
@@ -1779,7 +1857,7 @@
       return {
         workflow: item,
         searchText: buildSearchText([
-          "workflow pipeline",
+          "workflow",
           item.slug,
           item.pipeline.name,
           item.pipeline.working_dir,
@@ -1870,7 +1948,7 @@
   }
 
   function focusProviderButton(provider: AgentProvider) {
-    document.querySelector<HTMLButtonElement>(`[data-pipeline-provider="${provider}"]`)?.focus();
+    document.querySelector<HTMLButtonElement>(`[data-workflow-provider="${provider}"]`)?.focus();
   }
 
   function moveProviderSelection(provider: AgentProvider, offset: number) {
@@ -1922,6 +2000,83 @@
     selectedNodeId = id;
   }
 
+  function addToolNode(tool: ToolName = "Bash") {
+    if (!workflow) return;
+    const id = uniqueNodeId(tool.toLowerCase());
+    const dependency = selectedNodeId ?? workflow.pipeline.nodes.at(-1)?.id;
+    const node: EditablePipelineNode = {
+      id,
+      type: "tool",
+      agent: `${tool} call`,
+      tools: [tool],
+      depends_on: dependency ? [dependency] : [],
+      prompt: defaultToolPrompt(tool)
+    };
+    updateCurrentWorkflow((item) => ({
+      ...item,
+      pipeline: { ...item.pipeline, nodes: [...item.pipeline.nodes, node] }
+    }));
+    selectedNodeId = id;
+  }
+
+  function addMergeNode() {
+    if (!workflow) return;
+    const id = uniqueNodeId("merge");
+    const lastTwo = workflow.pipeline.nodes.slice(-2).map((node) => node.id);
+    const node: EditablePipelineNode = {
+      id,
+      type: "merge",
+      agent: "Merge",
+      tools: [],
+      depends_on: lastTwo,
+      prompt: ""
+    };
+    updateCurrentWorkflow((item) => ({
+      ...item,
+      pipeline: { ...item.pipeline, nodes: [...item.pipeline.nodes, node] }
+    }));
+    selectedNodeId = id;
+  }
+
+  function addFanoutNode() {
+    if (!workflow) return;
+    const id = uniqueNodeId("fanout");
+    const dependency = selectedNodeId ?? workflow.pipeline.nodes.at(-1)?.id;
+    const node: EditablePipelineNode = {
+      id,
+      type: "fanout",
+      agent: "Fanout",
+      tools: [],
+      depends_on: dependency ? [dependency] : [],
+      prompt: ""
+    };
+    updateCurrentWorkflow((item) => ({
+      ...item,
+      pipeline: { ...item.pipeline, nodes: [...item.pipeline.nodes, node] }
+    }));
+    selectedNodeId = id;
+  }
+
+  function defaultToolPrompt(tool: ToolName): string {
+    if (tool === "Bash") return "echo \"hello from workflow\"";
+    if (tool === "Read" || tool === "Write" || tool === "Edit") return "{ \"file_path\": \"\" }";
+    if (tool === "Grep") return "{ \"pattern\": \"\", \"path\": \".\" }";
+    if (tool === "Glob") return "{ \"pattern\": \"**/*\" }";
+    if (tool === "WebFetch") return "{ \"url\": \"\", \"prompt\": \"\" }";
+    if (tool === "WebSearch") return "{ \"query\": \"\" }";
+    return "{}";
+  }
+
+  function nodeToolName(node: EditablePipelineNode): ToolName | "" {
+    const value = node.tools?.[0];
+    if (value && (TOOL_NAMES as readonly string[]).includes(value)) return value as ToolName;
+    return "";
+  }
+
+  function setNodeToolName(id: string, value: ToolName) {
+    updateNode(id, { tools: [value], agent: `${value} call`, prompt: defaultToolPrompt(value) });
+  }
+
   function removeSelectedNode() {
     if (!workflow || !selectedNode) return;
     const removeId = selectedNode.id;
@@ -1968,9 +2123,15 @@
     });
   }
 
-  function uniqueNodeId(provider: AgentProvider): string {
+  function uniqueNodeId(seed: string): string {
     const existing = new Set(editorWorkflows.flatMap((item) => item.pipeline.nodes.map((node) => node.id)));
-    const base = `${provider}-${provider === "claude" ? "review" : provider === "puffer" ? "handoff" : "task"}`;
+    const base = seed === "claude"
+      ? "claude-review"
+      : seed === "puffer"
+        ? "puffer-handoff"
+        : seed === "codex"
+          ? "codex-task"
+          : `${seed}-step`;
     let id = base;
     let i = 2;
     while (existing.has(id)) id = `${base}-${i++}`;
@@ -1985,14 +2146,44 @@
         title: triggerTitle(item),
         subtitle: item.enabled ? "enabled" : "disabled"
       },
-      ...item.pipeline.nodes.map((node) => ({
-        id: node.id,
-        type: "agent" as const,
-        title: node.agent ?? node.id,
-        subtitle: `${providerMeta(node.type).short} · ${node.model ?? "default"}`,
-        provider: node.type,
-        node
-      }))
+      ...item.pipeline.nodes.map((node): GraphNode => {
+        if (node.type === "tool") {
+          const tool = nodeToolName(node) || "Tool";
+          return {
+            id: node.id,
+            type: "tool",
+            title: node.agent ?? `${tool} call`,
+            subtitle: `tool · ${tool}`,
+            node
+          };
+        }
+        if (node.type === "merge") {
+          return {
+            id: node.id,
+            type: "merge",
+            title: node.agent ?? "Merge",
+            subtitle: `merge · ${(node.depends_on ?? []).length} inputs`,
+            node
+          };
+        }
+        if (node.type === "fanout") {
+          return {
+            id: node.id,
+            type: "fanout",
+            title: node.agent ?? "Fanout",
+            subtitle: "fanout · split branches",
+            node
+          };
+        }
+        return {
+          id: node.id,
+          type: "agent",
+          title: node.agent ?? node.id,
+          subtitle: `${providerMeta(node.type).short} · ${node.model ?? "default"}`,
+          provider: node.type,
+          node
+        };
+      })
     ];
   }
 
@@ -2102,6 +2293,9 @@
       if (workflow?.trigger.type === "connection") return "plug";
       return "bolt";
     }
+    if (node.type === "tool") return "terminal";
+    if (node.type === "merge") return "link";
+    if (node.type === "fanout") return "arrow";
     return "panel";
   }
 
@@ -2117,54 +2311,67 @@
 <div class="pf-pipe pf-pipe-editor">
   <div class="pf-pipe-top">
     <div class="pf-pipe-top-id">
-      <span class="pf-pipe-chip">Pipeline editor</span>
-      <strong>{workflow?.pipeline.name ?? "No pipeline"}</strong>
-      {#if workflow}
+      <span class="pf-pipe-chip">
+        {workflowPage === "overview" ? "Workflows" : workflowPage === "create" ? "Create workflow" : "Workflow detail"}
+      </span>
+      <strong>{workflowPage === "overview" ? "Workflow dashboard" : workflow?.pipeline.name ?? "No workflow"}</strong>
+      {#if workflow && workflowPage !== "overview"}
         <span class="pf-pipe-hash">{workflow.slug}</span>
       {/if}
       <span class="pf-pipe-save-note">{saveNotice}</span>
     </div>
     <div class="pf-pipe-top-right">
-      <button
-        type="button"
-        class="sc-btn"
-        data-variant="ghost"
-        data-size="sm"
-        aria-label="New workflow"
-        onclick={() => createWorkflowDraft()}
-      >
-        <Icon name="plus" size={12} />New
-      </button>
-      {#each providerOptions as provider (provider.id)}
-        <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" onclick={() => addAgent(provider.id)}>
-          <Icon name="plus" size={12} />{provider.short}
+      {#if workflowPage !== "overview"}
+        <button
+          type="button"
+          class="sc-btn"
+          data-variant="ghost"
+          data-size="sm"
+          aria-label="Back to workflows"
+          onclick={backToWorkflowOverview}
+        >
+          <Icon name="chevL" size={12} />Back
         </button>
-      {/each}
-      <button
-        type="button"
-        class="sc-btn"
-        data-variant="ghost"
-        data-size="sm"
-        aria-label={workflow?.enabled ? "Pause workflow" : "Resume workflow"}
-        aria-busy={togglingWorkflowSlug === workflow?.slug}
-        disabled={!workflow || workflowDirty || savingWorkflowSlug !== null || togglingWorkflowSlug !== null}
-        title={workflowDirty ? "Save local edits before toggling" : workflow?.enabled ? "Pause workflow" : "Resume workflow"}
-        onclick={toggleCurrentWorkflowEnabled}
-      >
-        <Icon name={workflow?.enabled ? "pause2" : "play"} size={12} />{workflow?.enabled ? "Pause" : "Resume"}
-      </button>
-      <button
-        type="button"
-        class="sc-btn"
-        data-variant="ghost"
-        data-size="sm"
-        aria-label="Save workflow"
-        aria-busy={savingWorkflowSlug === workflow?.slug}
-        disabled={!workflow || !workflowDirty || savingWorkflowSlug !== null}
-        onclick={saveCurrentWorkflow}
-      >
-        <Icon name="check" size={12} />{savingWorkflowSlug === workflow?.slug ? "Saving" : workflowDirty ? "Save" : "Saved"}
-      </button>
+      {/if}
+      {#if workflowPage !== "create"}
+        <button
+          type="button"
+          class="sc-btn"
+          data-variant="ghost"
+          data-size="sm"
+          aria-label="New workflow"
+          onclick={() => createWorkflowDraft()}
+        >
+          <Icon name="plus" size={12} />New workflow
+        </button>
+      {/if}
+      {#if workflowPage !== "overview"}
+        <button
+          type="button"
+          class="sc-btn"
+          data-variant="ghost"
+          data-size="sm"
+          aria-label={workflow?.enabled ? "Pause workflow" : "Resume workflow"}
+          aria-busy={togglingWorkflowSlug === workflow?.slug}
+          disabled={!workflow || workflowDirty || savingWorkflowSlug !== null || togglingWorkflowSlug !== null}
+          title={workflowDirty ? "Save local edits before toggling" : workflow?.enabled ? "Pause workflow" : "Resume workflow"}
+          onclick={toggleCurrentWorkflowEnabled}
+        >
+          <Icon name={workflow?.enabled ? "pause2" : "play"} size={12} />{workflow?.enabled ? "Pause" : "Resume"}
+        </button>
+        <button
+          type="button"
+          class="sc-btn"
+          data-variant="ghost"
+          data-size="sm"
+          aria-label="Save workflow"
+          aria-busy={savingWorkflowSlug === workflow?.slug}
+          disabled={!workflow || !workflowDirty || savingWorkflowSlug !== null}
+          onclick={saveCurrentWorkflow}
+        >
+          <Icon name="check" size={12} />{savingWorkflowSlug === workflow?.slug ? "Saving" : workflowDirty ? "Save" : "Saved"}
+        </button>
+      {/if}
       <button
         type="button"
         class="sc-btn"
@@ -2180,87 +2387,206 @@
     </div>
   </div>
 
-  <div class="pf-pipe-body pf-pipe-editor-body">
-    <div class="pf-pipe-runs pf-pipe-workflows" aria-label="Workflow list">
-      <div class="pf-pipe-runs-head">
-        <span>Workflows</span>
-        <span class="count">{filteredWorkflows.length}/{workflows.length}</span>
-      </div>
-      <label class="pf-workflow-search">
-        <span class="pf-connector-searchbox">
-          <Icon name="search" size={12} />
-          <input
-            aria-label="Search workflows"
-            value={workflowQuery}
-            placeholder="Search workflows"
-            oninput={(event) => (workflowQuery = event.currentTarget.value)}
-          />
-        </span>
-      </label>
-      <div class="pf-workflow-result-summary" aria-label="Workflow search results">
-        {filteredWorkflows.length}/{workflows.length} workflows
-      </div>
-      {#if loading}
-        <div class="pf-pipe-empty">Loading workflows...</div>
-      {:else if error}
-        <div class="pf-pipe-empty">Daemon workflow list unavailable. Editing a local draft.</div>
-      {:else if filteredWorkflows.length === 0}
-        <div class="pf-pipe-empty">No matching workflows.</div>
-      {/if}
-
-      {#each filteredWorkflows as item (item.slug)}
-        {@const latest = workflowLatestRun(item.slug)}
-        <button
-          type="button"
-          class="pf-run-row"
-          data-selected={item.slug === workflow?.slug}
-          data-state={latest?.status ?? "pending"}
-          onclick={() => selectWorkflow(item.slug)}
-        >
-          <div class="pf-run-head">
-            <span class="pf-run-pip {latest?.status ?? 'pending'}"></span>
-            <span class="pf-run-label">{item.slug}</span>
-            <span class="pf-run-when">{item.enabled ? "enabled" : "disabled"}</span>
-          </div>
-          <div class="pf-run-title">{item.pipeline.name}</div>
-          <div class="pf-run-meta">
-            <span>{triggerTitle(item)}</span>
-            <span class="sep">·</span>
-            <span class="mono">{item.pipeline.nodes.length} nodes</span>
-          </div>
-        </button>
-      {/each}
-
-      <div class="pf-provider-palette">
-        <div class="pf-pipe-runs-head compact">
-          <span>Agent lanes</span>
+  {#if workflowPage === "overview"}
+    <div class="pf-workflow-overview" aria-label="Workflow overview">
+      <section class="pf-workflow-summary" aria-label="Workflow summary">
+        <div class="pf-workflow-stat">
+          <span>Ongoing</span>
+          <strong>{ongoingRuns.length}</strong>
         </div>
-        {#each providerOptions as provider (provider.id)}
-          <button type="button" class="pf-provider-card" data-provider={provider.id} onclick={() => addAgent(provider.id)}>
-            <span class="pf-provider-mark" style:--provider-accent={provider.accent}>{provider.short.slice(0, 1)}</span>
-            <span>
-              <strong>{provider.label}</strong>
-              <small>{provider.description}</small>
-            </span>
-          </button>
-        {/each}
-      </div>
-    </div>
+        <div class="pf-workflow-stat">
+          <span>Enabled</span>
+          <strong>{enabledWorkflowCount}</strong>
+        </div>
+        <div class="pf-workflow-stat">
+          <span>Definitions</span>
+          <strong>{workflows.length}</strong>
+        </div>
+        <div class="pf-workflow-stat">
+          <span>Draft edits</span>
+          <strong>{dirtyWorkflowCount}</strong>
+        </div>
+      </section>
 
-    <div class="pf-pipe-main">
+      <section class="pf-workflow-panel pf-workflow-ongoing" aria-label="Ongoing workflows">
+        <div class="pf-workflow-panel-head">
+          <div>
+            <h2>Ongoing workflows</h2>
+            <p>Running and queued runs.</p>
+          </div>
+          <button
+            type="button"
+            class="sc-btn"
+            data-variant="outline"
+            data-size="sm"
+            onclick={() => createWorkflowDraft()}
+          >
+            <Icon name="plus" size={12} />Create workflow
+          </button>
+        </div>
+        {#if loading}
+          <div class="pf-pipe-empty">Loading workflows...</div>
+        {:else if ongoingRuns.length === 0}
+          <div class="pf-workflow-empty">No workflows are running right now.</div>
+        {:else}
+          <div class="pf-workflow-run-grid">
+            {#each ongoingRuns as item (item.idx)}
+              {@const runWorkflow = workflows.find((candidate) => candidate.slug === item.workflow_slug)}
+              <button
+                type="button"
+                class="pf-workflow-run-card"
+                data-state={item.status}
+                onclick={() => openWorkflowRunDetail(item)}
+              >
+                <span class="pf-run-pip {item.status}"></span>
+                <span class="pf-workflow-run-main">
+                  <strong>{runWorkflow?.pipeline.name ?? item.workflow_slug}</strong>
+                  <small>#{item.idx} · {runElapsed(item)} · {item.nodes.length} steps</small>
+                </span>
+                <span class="pf-workflow-run-status">{item.status}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </section>
+
+      <section class="pf-workflow-panel" aria-label="Workflow list">
+        <div class="pf-workflow-panel-head">
+          <div>
+            <h2>Workflows</h2>
+            <p>Definitions, triggers, and agent wiring.</p>
+          </div>
+          <label class="pf-workflow-overview-search">
+            <span class="pf-connector-searchbox">
+              <Icon name="search" size={12} />
+              <input
+                aria-label="Search workflows"
+                value={workflowQuery}
+                placeholder="Search workflows"
+                oninput={(event) => (workflowQuery = event.currentTarget.value)}
+              />
+            </span>
+          </label>
+        </div>
+        <div class="pf-workflow-result-summary" aria-label="Workflow search results">
+          {filteredWorkflows.length}/{workflows.length} workflows
+        </div>
+        <div class="pf-workflow-table">
+          {#if filteredWorkflows.length === 0}
+            <div class="pf-workflow-empty">No matching workflows.</div>
+          {/if}
+          {#each filteredWorkflows as item (item.slug)}
+            {@const latest = workflowLatestRun(item.slug)}
+            <button
+              type="button"
+              class="pf-workflow-row"
+              data-selected={item.slug === workflow?.slug}
+              onclick={() => openWorkflowDetail(item.slug)}
+            >
+              <span class="pf-run-pip {latest?.status ?? 'pending'}"></span>
+              <span class="pf-workflow-row-main">
+                <strong>{item.pipeline.name}</strong>
+                <small>{item.slug} · {triggerTitle(item)}</small>
+              </span>
+              <span class="pf-workflow-row-meta">{item.pipeline.nodes.length} nodes</span>
+              <span class="pf-workflow-row-meta">{latest ? latest.status : "no runs"}</span>
+              <span class="pf-workflow-row-state" data-enabled={item.enabled}>{item.enabled ? "enabled" : "disabled"}</span>
+              <Icon name="chevR" size={14} />
+            </button>
+          {/each}
+        </div>
+      </section>
+
+      <section class="pf-workflow-panel" aria-label="Recent workflow runs">
+        <div class="pf-workflow-panel-head">
+          <div>
+            <h2>Recent runs</h2>
+            <p>Latest completed and failed executions.</p>
+          </div>
+        </div>
+        {#if recentRuns.length === 0}
+          <div class="pf-workflow-empty">No workflow runs recorded yet.</div>
+        {:else}
+          <div class="pf-workflow-recent-list">
+            {#each recentRuns as item (item.idx)}
+              <button
+                type="button"
+                class="pf-workflow-recent-row"
+                data-state={item.status}
+                onclick={() => openWorkflowRunDetail(item)}
+              >
+                <span class="pf-run-pip {item.status}"></span>
+                <span class="pf-workflow-row-main">
+                  <strong>{item.workflow_slug}</strong>
+                  <small>#{item.idx} · {runWhen(item)} · {runElapsed(item)}</small>
+                </span>
+                <span class="pf-workflow-run-status">{item.status}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </section>
+    </div>
+  {:else}
+  <div class="pf-pipe-body pf-pipe-canvas-body" data-page={workflowPage}>
+    <div class="pf-pipe-main pf-canvas-main">
       {#if workflow}
         <div class="pf-run-header pf-editor-header">
           <span class="pf-run-header-pip" style="background: {run ? statusColor(run.status) : 'var(--puffer-accent)'};"></span>
           <span class="pf-run-header-label">{workflow.pipeline.name}</span>
           <span class="pf-run-header-state" data-state={workflow.enabled ? "done" : "skipped"}>{workflow.enabled ? "enabled" : "disabled"}</span>
-          <span class="pf-run-header-title">Wire Codex, Claude Code, and Puffer into one handoff graph.</span>
           <span class="pf-run-header-meta-group">
             <span class="pf-run-header-dim"><Icon name="wrench" size={11} /><span class="mono">{workflow.pipeline.nodes.length} nodes</span></span>
             <span class="pf-run-header-dim"><Icon name="link" size={11} /><span class="mono">{graphEdges.length} wires</span></span>
           </span>
         </div>
 
-        <div class="pf-pipe-graph-wrap pf-editor-graph-wrap">
+        <div class="pf-canvas-stage">
+        <div class="pf-canvas-toolbar" role="group" aria-label="Add node">
+          {#each providerOptions as provider (provider.id)}
+            <button
+              type="button"
+              class="sc-btn"
+              data-variant="outline"
+              data-size="sm"
+              aria-label={`Add ${provider.short} agent`}
+              onclick={() => addAgent(provider.id)}
+            >
+              <Icon name="plus" size={12} />{provider.short}
+            </button>
+          {/each}
+          <button
+            type="button"
+            class="sc-btn"
+            data-variant="outline"
+            data-size="sm"
+            aria-label="Add tool call node"
+            onclick={() => addToolNode()}
+          >
+            <Icon name="plus" size={12} />Tool
+          </button>
+          <button
+            type="button"
+            class="sc-btn"
+            data-variant="outline"
+            data-size="sm"
+            aria-label="Add merge node"
+            onclick={addMergeNode}
+          >
+            <Icon name="plus" size={12} />Merge
+          </button>
+          <button
+            type="button"
+            class="sc-btn"
+            data-variant="outline"
+            data-size="sm"
+            aria-label="Add fanout node"
+            onclick={addFanoutNode}
+          >
+            <Icon name="plus" size={12} />Fanout
+          </button>
+        </div>
+        <div class="pf-pipe-graph-wrap pf-canvas-graph-wrap">
           <div bind:this={wrapEl} class="pf-pipe-graph-scaler" style="height: {graphHeight * scale}px;">
             <div
               class="pf-pipe-graph"
@@ -2302,7 +2628,7 @@
                   data-provider={node.provider ?? "trigger"}
                   data-state={st}
                   aria-pressed={node.id === selectedNodeId}
-                  onclick={() => node.node ? (selectedNodeId = node.id) : null}
+                  onclick={() => (selectedNodeId = node.id)}
                 >
                   <div class="pf-pipe-node-head">
                     {#if node.type === "agent"}
@@ -2328,760 +2654,205 @@
           </div>
         </div>
 
-        <div class="pf-editor-lower">
-          <section class="pf-editor-panel pf-editor-config">
-            <div class="pf-editor-panel-head">
-              <Icon name="settings" size={13} />
-              <span>Pipeline</span>
-            </div>
-            <label>
-              <span>Name</span>
-              <input value={workflow.pipeline.name} oninput={(event) => updateWorkflowField("name", event.currentTarget.value)} />
-            </label>
-            <label>
-              <span>Slug</span>
-              <input value={workflow.slug} oninput={(event) => updateWorkflowField("slug", event.currentTarget.value)} />
-            </label>
-            <label>
-              <span>Working directory</span>
-              <input value={workflow.pipeline.working_dir ?? ""} oninput={(event) => updateWorkflowField("working_dir", event.currentTarget.value)} />
-            </label>
-            <label class="pf-editor-inline">
-              <span>Enabled</span>
-              <input type="checkbox" checked={workflow.enabled} onchange={(event) => updateWorkflowField("enabled", event.currentTarget.checked)} />
-            </label>
-            <label>
-              <span>Trigger type</span>
-              <select value={workflow.trigger.type} onchange={(event) => setTriggerType(event.currentTarget.value as TriggerMode)}>
-                <option value="connection">Connection</option>
-                <option value="subscription">Subscription</option>
-                <option value="cron">Cron</option>
-              </select>
-            </label>
-            {#if workflow.trigger.type === "cron"}
-              <label>
-                <span>Cron</span>
-                <input value={workflow.trigger.cron} oninput={(event) => updateTriggerField("cron", event.currentTarget.value)} />
-              </label>
-            {:else if workflow.trigger.type === "connection"}
-              <label>
-                <span>Connection</span>
-                <select
-                  aria-label="Workflow connection"
-                  value={workflow.trigger.connection_slug}
-                  onchange={(event) => useConnectionTrigger(event.currentTarget.value)}
-                >
-                  {#if !connectionExists(workflow.trigger.connection_slug)}
-                    <option value={workflow.trigger.connection_slug}>{workflow.trigger.connection_slug} (planned)</option>
-                  {/if}
-                  {#each connections as connection (connection.slug)}
-                    <option value={connection.slug} disabled={!connectionTriggerSupported(connection)}>
-                      {connectionOptionLabel(connection)}
-                    </option>
-                  {/each}
-                </select>
-              </label>
-              <label>
-                <span>Pattern</span>
-                <input placeholder=".*" value={workflow.trigger.pattern ?? ""} oninput={(event) => updateTriggerField("pattern", event.currentTarget.value)} />
-              </label>
-            {:else}
-              <label>
-                <span>Source topic</span>
-                <input value={workflow.trigger.source_topic} oninput={(event) => updateTriggerField("source_topic", event.currentTarget.value)} />
-              </label>
-              <label>
-                <span>Pattern</span>
-                <input placeholder=".*" value={workflow.trigger.pattern ?? ""} oninput={(event) => updateTriggerField("pattern", event.currentTarget.value)} />
-              </label>
-            {/if}
-            <div class="pf-connector-picker">
-              <label class="pf-connector-search">
-                <span>Connector</span>
-                <span class="pf-connector-searchbox">
-                  <Icon name="search" size={12} />
-                  <input
-                    aria-label="Search connectors"
-                    value={connectorQuery}
-                    placeholder="Search connectors"
-                    oninput={(event) => (connectorQuery = event.currentTarget.value)}
-                  />
-                </span>
-              </label>
-              <div class="pf-connector-filters" aria-label="Connector filters">
-                {#each connectorFilterPresets as preset (preset.label)}
-                  <button
-                    type="button"
-                    aria-pressed={connectorPresetActive(preset)}
-                    onclick={() => (connectorQuery = preset.query)}
-                  >
-                    {preset.label}
-                  </button>
-                {/each}
-              </div>
-              <div class="pf-connector-result-summary" aria-label="Connector search results">
-                {filteredConnectors.length}/{connectors.length} connectors; {filteredConnections.length}/{connections.length} connections
-              </div>
-              {#if monitorBindings.length > 0}
-                <div class="pf-connector-result-summary" aria-label="Monitor workflow search results">
-                  {filteredMonitorBindings.length}/{monitorBindings.length} monitors
-                </div>
-              {/if}
-              {#if actionBindings.length > 0}
-                <div class="pf-connector-result-summary" aria-label="Workflow action search results">
-                  {filteredActionBindings.length}/{actionBindings.length} actions
-                </div>
-              {/if}
-              {#if activeMonitorTasks.length > 0}
-                <div class="pf-connector-result-summary" aria-label="Monitor task search results">
-                  {filteredMonitorTasks.length}/{activeMonitorTasks.length} monitor tasks
-                </div>
-              {/if}
+        </div>
 
-              {#if snapshot.connector_error}
-                <div class="pf-connector-empty">Connector runtime unavailable.</div>
-              {:else}
-                <div class="pf-connection-list" aria-label="Connections">
-                  {#if filteredConnections.length === 0}
-                    <div class="pf-connector-empty">No matching connections.</div>
-                  {/if}
-                  {#each filteredConnections as connection (connection.slug)}
-                    {@const connector = connectorBySlug(connection.connector_slug)}
-                    {@const canTrigger = connectionTriggerSupported(connection)}
-                    {@const canMonitor = connectionMonitorSupported(connection)}
-                    {@const connectCommand = connectionConnectCommand(connection)}
-                    {@const monitorCommand = connectionMonitorCommand(connection)}
-                    {@const draftCommand = connectionDraftCommand(connection)}
-                    {@const appendCommand = connectionAppendCommand(connection)}
-                    {@const runtimeHints = connectorRuntimeHints(connector)}
-                    {@const actionSlugs = connectorActionSlugs(connector, connectorQueryTerms)}
-                    {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
-                    <div class="pf-connection-row-group">
-                      <button
-                        type="button"
-                        class="pf-connection-row"
-                        data-selected={activeConnectionSlug(workflow) === connection.slug}
-                        data-supported={canTrigger}
-                        aria-label={canTrigger ? `Use ${connection.slug} as workflow trigger` : `${connection.slug} cannot start workflow triggers`}
-                        disabled={!canTrigger}
-                        onclick={() => useConnectionTrigger(connection.slug)}
-                      >
-                        <span class="pf-connector-main">
-                          <strong>{connection.slug}</strong>
-                          <small>{(connector?.description ?? connection.description) || connection.connector_slug}</small>
-                        </span>
-                        <span class="pf-connector-tags">
-                          <span class="pf-connection-state" data-state={connection.state}>{connection.state}</span>
-                          <span>connect</span>
-                          {#if canMonitor}<span>monitor</span>{/if}
-                          {#if !canTrigger}<span>no trigger</span>{/if}
-                          {#each runtimeHints as hint}
-                            <span class="pf-connector-runtime">{hint}</span>
-                          {/each}
-                          {#each actionSlugs as action}
-                            <span class="pf-connector-action">{action}</span>
-                          {/each}
-                          {#if hiddenActions > 0}<span>+{hiddenActions} actions</span>{/if}
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        class="pf-icon-btn pf-connect-btn"
-                        aria-label={`Run ${connectCommand}`}
-                        title={connectCommand}
-                        aria-busy={connectionCommandRunningFor === connection.slug}
-                        disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
-                        onclick={() => runConnectionConnectCommand(connection)}
-                      >
-                        <Icon name="wrench" size={12} />
-                      </button>
-                      <button
-                        type="button"
-                        class="pf-icon-btn pf-draft-btn"
-                        aria-label={`Create workflow draft for ${connection.slug}`}
-                        title={draftCommand}
-                        disabled={!canTrigger}
-                        onclick={() => createWorkflowDraftForConnection(connection)}
-                      >
-                        <Icon name="plus" size={12} />
-                      </button>
-                      <button
-                        type="button"
-                        class="pf-icon-btn pf-append-btn"
-                        aria-label={`Create append workflow for ${connection.slug}`}
-                        title={appendCommand}
-                        aria-busy={creatingConnectionAppendFor === connection.slug}
-                        disabled={!canTrigger || connectorCommandRunnerBusy()}
-                        onclick={() => createAppendWorkflowForConnection(connection)}
-                      >
-                        <Icon name="file" size={12} />
-                      </button>
-                      <button
-                        type="button"
-                        class="pf-icon-btn pf-monitor-btn"
-                        aria-label={`Run ${monitorCommand}`}
-                        title={monitorCommand}
-                        aria-busy={monitorCommandRunningFor === connection.slug}
-                        disabled={!canMonitor || connectorCommandRunnerBusy() || !onRunWorkflowCommand}
-                        onclick={() => runConnectionMonitorCommand(connection)}
-                      >
-                        <Icon name="bot" size={12} />
-                      </button>
-                    </div>
-                  {/each}
-                </div>
-
-                {#if monitorBindings.length > 0 || snapshot.workflow_binding_error}
-                  <div class="pf-monitor-workflows" aria-label="Monitor workflows">
-                    <div class="pf-monitor-tasks-head">
-                      <span><Icon name="bot" size={12} />Connection monitors</span>
-                      <small>{filteredMonitorBindings.length}/{monitorBindings.length}</small>
-                    </div>
-                    {#if snapshot.workflow_binding_error}
-                      <div class="pf-connector-empty">Monitor workflows unavailable.</div>
-                    {:else if filteredMonitorBindings.length === 0}
-                      <div class="pf-connector-empty">No matching monitor workflows.</div>
-                    {/if}
-                    {#each filteredMonitorBindings as binding (binding.slug)}
-                      <div class="pf-monitor-workflow-row" data-enabled={binding.enabled}>
-                        <div class="pf-monitor-workflow-main">
-                          <span class="pf-connector-main">
-                            <strong>{monitorBindingLabel(binding)}</strong>
-                            <small>{binding.slug} - {binding.connection_slug}</small>
-                          </span>
-                          <span class="pf-connector-tags">
-                            <span>{monitorBindingStatus(binding)}</span>
-                            {#if binding.connector_slug}<span>{binding.connector_slug}</span>{/if}
-                            <span>{binding.action_type}</span>
-                            {#if binding.monitor_memory_path}<span>memory</span>{/if}
-                          </span>
-                        </div>
-                        <div class="pf-monitor-row-actions">
-                          <button
-                            type="button"
-                            class="pf-monitor-action-btn"
-                            aria-label={monitorBindingToggleLabel(binding)}
-                            title={monitorBindingToggleLabel(binding)}
-                            aria-busy={togglingWorkflowSlug === binding.slug}
-                            disabled={workflowBindingBusy(binding)}
-                            onclick={() => toggleMonitorBinding(binding)}
-                          >
-                            <Icon name={binding.enabled ? "pause2" : "play"} size={11} />{binding.enabled ? "Pause" : "Resume"}
-                          </button>
-                          <button
-                            type="button"
-                            class="pf-monitor-action-btn pf-monitor-delete-btn"
-                            aria-label={`Delete monitor workflow ${binding.slug}`}
-                            title={`Delete monitor workflow ${binding.slug}`}
-                            aria-busy={deletingWorkflowBindingSlug === binding.slug}
-                            disabled={workflowBindingBusy(binding)}
-                            onclick={() => deleteWorkflowBindingRow(binding)}
-                          >
-                            <Icon name="x" size={11} />Delete
-                          </button>
-                        </div>
-                      </div>
-                    {/each}
-                  </div>
-                {/if}
-
-                {#if actionBindings.length > 0}
-                  <div class="pf-monitor-workflows" aria-label="Workflow actions">
-                    <div class="pf-monitor-tasks-head">
-                      <span><Icon name="file" size={12} />Workflow actions</span>
-                      <small>{filteredActionBindings.length}/{actionBindings.length}</small>
-                    </div>
-                    {#if filteredActionBindings.length === 0}
-                      <div class="pf-connector-empty">No matching workflow actions.</div>
-                    {/if}
-                    {#each filteredActionBindings as binding (binding.slug)}
-                      <div class="pf-monitor-workflow-row" data-enabled={binding.enabled}>
-                        <div class="pf-monitor-workflow-main">
-                          <span class="pf-connector-main">
-                            <strong>{monitorBindingLabel(binding)}</strong>
-                            <small>{binding.slug} - {binding.connection_slug}</small>
-                            {#if binding.action_path}
-                              <span class="pf-monitor-task-detail">{binding.action_path}</span>
-                            {/if}
-                          </span>
-                          <span class="pf-connector-tags">
-                            <span>{monitorBindingStatus(binding)}</span>
-                            {#if binding.connector_slug}<span>{binding.connector_slug}</span>{/if}
-                            <span>{binding.action_type}</span>
-                            {#if binding.filter_pattern}<span>{binding.filter_pattern}</span>{/if}
-                            {#if binding.action_format}<span>{binding.action_format}</span>{/if}
-                          </span>
-                        </div>
-                        <div class="pf-monitor-row-actions">
-                          <button
-                            type="button"
-                            class="pf-monitor-action-btn"
-                            aria-label={`${binding.enabled ? "Pause" : "Resume"} workflow action ${binding.slug}`}
-                            title={`${binding.enabled ? "Pause" : "Resume"} workflow action ${binding.slug}`}
-                            aria-busy={togglingWorkflowSlug === binding.slug}
-                            disabled={workflowBindingBusy(binding)}
-                            onclick={() => toggleMonitorBinding(binding)}
-                          >
-                            <Icon name={binding.enabled ? "pause2" : "play"} size={11} />{binding.enabled ? "Pause" : "Resume"}
-                          </button>
-                          <button
-                            type="button"
-                            class="pf-monitor-action-btn pf-monitor-delete-btn"
-                            aria-label={`Delete workflow action ${binding.slug}`}
-                            title={`Delete workflow action ${binding.slug}`}
-                            aria-busy={deletingWorkflowBindingSlug === binding.slug}
-                            disabled={workflowBindingBusy(binding)}
-                            onclick={() => deleteWorkflowBindingRow(binding)}
-                          >
-                            <Icon name="x" size={11} />Delete
-                          </button>
-                        </div>
-                      </div>
-                    {/each}
-                  </div>
-                {/if}
-
-                {#if activeMonitorTasks.length > 0 || snapshot.monitor_task_error}
-                  <div class="pf-monitor-tasks" aria-label="Monitor tasks">
-                    <div class="pf-monitor-tasks-head">
-                      <span><Icon name="bot" size={12} />Monitor tasks</span>
-                      <small>{filteredMonitorTasks.length}/{activeMonitorTasks.length}</small>
-                    </div>
-                    {#if snapshot.monitor_task_error}
-                      <div class="pf-connector-empty">Monitor tasks unavailable.</div>
-                    {:else if filteredMonitorTasks.length === 0}
-                      <div class="pf-connector-empty">No matching monitor tasks.</div>
-                    {/if}
-                    {#each filteredMonitorTasks as task (task.task_id)}
-                      {@const actions = monitorTaskActions(task)}
-                      {@const reasons = monitorTaskIgnoreReasons(task)}
-                      <div class="pf-monitor-task-row" data-status={task.status}>
-                        <button
-                          type="button"
-                          class="pf-monitor-task-main"
-                          aria-label={`Show ${task.task_id}`}
-                          aria-busy={monitorTaskCommandRunningFor === task.task_id}
-                          disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
-                          onclick={() => runMonitorTaskShowCommand(task)}
-                        >
-                          <span class="pf-connector-main">
-                            <strong>{task.subject || task.task_id}</strong>
-                            <small>{task.task_id}{task.monitor_connection ? ` - ${task.monitor_connection}` : ""}</small>
-                            {#if task.description}
-                              <span class="pf-monitor-task-detail">{task.description}</span>
-                            {/if}
-                          </span>
-                          <span class="pf-connector-tags">
-                            <span>{task.status || "pending"}</span>
-                            {#if task.monitor_connector}<span>{task.monitor_connector}</span>{/if}
-                            {#if task.monitor_connection}<span>{task.monitor_connection}</span>{/if}
-                            {#if actions.length > 0}<span>{actions.length} actions</span>{/if}
-                            {#if reasons.length > 0}<span>{reasons.length} ignores</span>{/if}
-                          </span>
-                        </button>
-                        <div class="pf-monitor-task-actions">
-                          {#each actions as action (action.name)}
-                            <button
-                              type="button"
-                              class="pf-monitor-action-btn"
-                              aria-label={`Run monitor action ${task.task_id} ${action.name}`}
-                              title={action.prompt}
-                              aria-busy={monitorTaskCommandRunningFor === task.task_id}
-                              disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
-                              onclick={() => runMonitorTaskAction(task, action)}
-                            >
-                              <Icon name="play" size={11} />{action.name}
-                            </button>
-                          {/each}
-                          {#each reasons as reason (reason)}
-                            <button
-                              type="button"
-                              class="pf-monitor-action-btn"
-                              aria-label={`Ignore ${task.task_id} ${reason}`}
-                              title={monitorTaskIgnoreCommand(task, reason)}
-                              aria-busy={monitorTaskCommandRunningFor === task.task_id}
-                              disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
-                              onclick={() => runMonitorTaskIgnoreCommand(task, reason)}
-                            >
-                              <Icon name="eyeOff" size={11} />{reason}
-                            </button>
-                          {/each}
-                          {#if reasons.length === 0}
-                            <button
-                              type="button"
-                              class="pf-monitor-action-btn"
-                              aria-label={`Ignore ${task.task_id}`}
-                              title={monitorTaskIgnoreCommand(task)}
-                              aria-busy={monitorTaskCommandRunningFor === task.task_id}
-                              disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
-                              onclick={() => runMonitorTaskIgnoreCommand(task)}
-                            >
-                              <Icon name="eyeOff" size={11} />Ignore
-                            </button>
-                          {/if}
-                        </div>
-                      </div>
-                    {/each}
-                  </div>
-                {/if}
-
-                <div class="pf-connector-catalog" aria-label="Connector catalog">
-                  {#if filteredConnectors.length === 0}
-                    <div class="pf-connector-empty">No matching connectors.</div>
-                  {/if}
-                  {#each filteredConnectors as connector (connector.connector_slug)}
-                    {@const connectorConnections = connectionsForConnector(connector.connector_slug)}
-                    {@const canTrigger = connectorTriggerSupported(connector)}
-                    {@const plannedConnectionName = connectorPlannedConnectionName(connector)}
-                    {@const connectCommand = connectorConnectCommand(connector, plannedConnectionName ?? undefined)}
-                    {@const draftCommand = connectorDraftCommand(connector, plannedConnectionName ?? undefined)}
-                    {@const appendIntent = connectorAppendIntent(connector, connectorConnectionName(connector, plannedConnectionName))}
-                    {@const appendCommand = connectorAppendCommand(connector, plannedConnectionName ?? undefined, appendIntent.path, appendIntent.pattern)}
-                    {@const runtimeHints = connectorRuntimeHints(connector)}
-                    {@const expandActions = filteredConnectors.length === 1 && connectorQueryTerms.length > 0}
-                    {@const actionSlugs = connectorActionSlugs(connector, connectorQueryTerms, expandActions ? null : 3)}
-                    {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
-                    {@const visibleConnections = connectorConnections.slice(0, 2)}
-                    {@const hiddenConnections = Math.max(0, connectorConnections.length - visibleConnections.length)}
-                    <div class="pf-connector-row-group">
-                      <button
-                        type="button"
-                        class="pf-connector-row"
-                        data-selected={selectedConnectorSlug === connector.connector_slug}
-                        data-supported={canTrigger}
-                        aria-label={canTrigger ? `Plan ${connector.connector_slug} workflow trigger` : `Select ${connector.connector_slug} connector setup`}
-                        onclick={() => useConnectorTemplate(connector, plannedConnectionName)}
-                      >
-                        <span class="pf-connector-main">
-                          <strong>{connector.connector_slug}</strong>
-                          <small>{connector.description}</small>
-                        </span>
-                        <span class="pf-connector-tags">
-                          {#if connector.requires_auth}<span>auth</span>{/if}
-                          {#if connector.can_subscribe}<span>events</span>{/if}
-                          {#if canTrigger}<span>trigger</span>{:else}<span>no trigger</span>{/if}
-                          {#if connector.can_proxy_agent}<span>proxy</span>{/if}
-                          {#each runtimeHints as hint}
-                            <span class="pf-connector-runtime">{hint}</span>
-                          {/each}
-                          {#each actionSlugs as action}
-                            <span class="pf-connector-action">{action}</span>
-                          {/each}
-                          {#if hiddenActions > 0}<span>+{hiddenActions} actions</span>{/if}
-                          {#each visibleConnections as connection}
-                            <span class="pf-connector-connection">conn:{connection.slug}</span>
-                          {/each}
-                          {#if hiddenConnections > 0}<span>+{hiddenConnections} conn</span>{/if}
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        class="pf-icon-btn pf-connect-btn"
-                        aria-label={`Run ${connectCommand}`}
-                        title={connectCommand}
-                        aria-busy={connectorCommandRunningFor === connector.connector_slug}
-                        disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
-                        onclick={() => runConnectorSetupCommand(connector, plannedConnectionName)}
-                      >
-                        <Icon name="plug" size={12} />
-                      </button>
-                      <button
-                        type="button"
-                        class="pf-icon-btn pf-draft-btn"
-                        aria-label={`Create workflow draft for ${connector.connector_slug}`}
-                        title={draftCommand}
-                        disabled={!canTrigger}
-                        onclick={() => createWorkflowDraftForConnector(connector, plannedConnectionName ?? undefined)}
-                      >
-                        <Icon name="plus" size={12} />
-                      </button>
-                      <button
-                        type="button"
-                        class="pf-icon-btn pf-append-btn"
-                        aria-label={`Create append workflow for ${connector.connector_slug}`}
-                        title={appendCommand}
-                        aria-busy={creatingConnectorAppendFor === connector.connector_slug}
-                        disabled={!canTrigger || connectorCommandRunnerBusy()}
-                        onclick={() => createAppendWorkflowForConnector(connector, plannedConnectionName)}
-                      >
-                        <Icon name="file" size={12} />
-                      </button>
-                    </div>
-                  {/each}
-                </div>
-
-                {#if selectedConnector}
-                  {@const selectedRuntimeHints = connectorRuntimeHints(selectedConnector)}
-                  {@const selectedActionSlugs = connectorActionSlugs(selectedConnector, [], null)}
-                  <div class="pf-connector-setup">
-                    <div class="pf-connector-detail" aria-label="Selected connector details">
-                      <span class="pf-connector-main">
-                        <strong>{selectedConnector.connector_slug}</strong>
-                        <small>{selectedConnector.description}</small>
-                      </span>
-                      <span class="pf-connector-tags">
-                        <span>{selectedConnector.requires_auth ? "auth" : "no auth"}</span>
-                        {#if connectorTriggerSupported(selectedConnector)}<span>trigger</span>{:else}<span>no trigger</span>{/if}
-                        <span>skill:{selectedConnector.skill}</span>
-                        {#each selectedRuntimeHints as hint}
-                          <span class="pf-connector-runtime">{hint}</span>
-                        {/each}
-                        {#each selectedActionSlugs as action}
-                          <span class="pf-connector-action">{action}</span>
-                        {/each}
-                      </span>
-                    </div>
-                    <label class="pf-connector-name">
-                      <span>Connection name</span>
-                      <input
-                        aria-label="Connector connection name"
-                        aria-invalid={selectedConnectorConnectionInvalid}
-                        value={selectedConnectorConnectionName}
-                        oninput={(event) => updateSelectedConnectorConnectionName(event.currentTarget.value)}
-                      />
-                    </label>
-                    {#if selectedConnectorConnectionInvalid}
-                      <div class="pf-connector-validation">Use lowercase letters, digits, and hyphens.</div>
-                    {/if}
-                    {#if connectorTriggerSupported(selectedConnector)}
-                      <label class="pf-connector-name">
-                        <span>Draft pattern</span>
-                        <input
-                          aria-label="Workflow draft pattern"
-                          placeholder=".*"
-                          value={selectedConnectorDraftPattern}
-                          oninput={(event) => updateSelectedConnectorDraftPattern(event.currentTarget.value)}
-                        />
-                      </label>
-                      <label class="pf-connector-name">
-                        <span>Append path</span>
-                        <input
-                          aria-label="Append file path"
-                          aria-invalid={selectedConnectorAppendPathInvalid}
-                          placeholder="/tmp/hi"
-                          value={selectedConnectorAppendPath}
-                          oninput={(event) => updateSelectedConnectorAppendPath(event.currentTarget.value)}
-                        />
-                      </label>
-                      {#if selectedConnectorAppendPathInvalid}
-                        <div class="pf-connector-validation">Use a relative path or an absolute /tmp path.</div>
-                      {/if}
-                    {/if}
-                    <div class="pf-connector-command" aria-label="Selected connector command">
-                      <Icon name="terminal" size={12} />
-                      <code>{selectedConnectorCommand || "Enter a valid connection name."}</code>
-                      <div class="pf-connector-command-actions">
-                        <button
-                          type="button"
-                          class="pf-icon-btn"
-                          aria-label="Copy connector command"
-                          title="Copy connector command"
-                          disabled={!selectedConnectorCommand}
-                          onclick={copySelectedConnectorCommand}
-                        >
-                          <Icon name="copy" size={12} />
-                        </button>
-                        {#if onRunWorkflowCommand}
-                          <button
-                            type="button"
-                            class="pf-icon-btn"
-                            aria-label="Run connector command"
-                            title="Run connector command"
-                            aria-busy={connectorCommandRunning}
-                            disabled={connectorCommandRunnerBusy() || !selectedConnectorCommand}
-                            onclick={runSelectedConnectorCommand}
-                          >
-                            <Icon name="play" size={12} />
-                          </button>
-                        {/if}
-                        {#if connectorTriggerSupported(selectedConnector)}
-                          <button
-                            type="button"
-                            class="pf-icon-btn"
-                            aria-label="Create workflow draft for selected connector"
-                            title="Create workflow draft for selected connector"
-                            disabled={selectedConnectorConnectionInvalid}
-                            onclick={createWorkflowDraftForSelectedConnector}
-                          >
-                            <Icon name="plus" size={12} />
-                          </button>
-                        {/if}
-                      </div>
-                    </div>
-                    {#if connectorTriggerSupported(selectedConnector)}
-                      <div class="pf-connector-command pf-connector-draft-command" aria-label="Selected workflow draft command">
-                        <Icon name="terminal" size={12} />
-                        <code>{selectedConnectorDraftCommand || "Enter a valid connection name."}</code>
-                        <div class="pf-connector-command-actions">
-                          <button
-                            type="button"
-                            class="pf-icon-btn"
-                            aria-label="Copy workflow draft command"
-                            title="Copy workflow draft command"
-                            disabled={!selectedConnectorDraftCommand}
-                            onclick={copySelectedConnectorDraftCommand}
-                          >
-                            <Icon name="copy" size={12} />
-                          </button>
-                          {#if onRunWorkflowCommand}
-                            <button
-                              type="button"
-                              class="pf-icon-btn"
-                              aria-label="Run workflow draft command"
-                              title="Run workflow draft command"
-                              aria-busy={selectedWorkflowCommandRunningFor === "draft"}
-                              disabled={connectorCommandRunnerBusy() || !selectedConnectorDraftCommand}
-                              onclick={runSelectedConnectorDraftCommand}
-                            >
-                              <Icon name="play" size={12} />
-                            </button>
-                          {/if}
-                        </div>
-                      </div>
-                      <div class="pf-connector-command pf-connector-draft-command" aria-label="Selected append workflow command">
-                        <Icon name="terminal" size={12} />
-                        <code>{selectedConnectorAppendCommand || selectedAppendWorkflowPreview}</code>
-                        <div class="pf-connector-command-actions">
-                          <button
-                            type="button"
-                            class="pf-icon-btn"
-                            aria-label="Copy append workflow command"
-                            title="Copy append workflow command"
-                            disabled={!selectedConnectorAppendCommand}
-                            onclick={copySelectedConnectorAppendCommand}
-                          >
-                            <Icon name="copy" size={12} />
-                          </button>
-                          {#if onRunWorkflowCommand}
-                            <button
-                              type="button"
-                              class="pf-icon-btn"
-                              aria-label="Run append workflow command"
-                              title="Run append workflow command"
-                              aria-busy={selectedWorkflowCommandRunningFor === "append"}
-                              disabled={connectorCommandRunnerBusy() || !selectedConnectorAppendCommand}
-                              onclick={runSelectedConnectorAppendCommand}
-                            >
-                              <Icon name="play" size={12} />
-                            </button>
-                          {/if}
-                          <button
-                            type="button"
-                            class="pf-icon-btn"
-                            aria-label="Create append workflow for selected connector"
-                            title="Create append workflow for selected connector"
-                            aria-busy={creatingWorkflowBinding}
-                            disabled={selectedConnectorConnectionInvalid || selectedConnectorAppendPathInvalid || connectorCommandRunnerBusy()}
-                            onclick={createAppendWorkflowForSelectedConnector}
-                          >
-                            <Icon name="plus" size={12} />
-                          </button>
-                        </div>
-                      </div>
-                    {/if}
-                  </div>
-                {/if}
-              {/if}
-            </div>
-          </section>
-
-          <section class="pf-editor-panel pf-editor-inspector">
+        <div class="pf-canvas-selected" aria-label="Selected node">
+          <section class="pf-canvas-section pf-canvas-section-agent">
             <div class="pf-editor-panel-head">
               <Icon name="panel" size={13} />
-              <span>Selected agent</span>
+              <span>{triggerSelected ? "Trigger & workflow" : "Selected node"}</span>
               {#if selectedNode}
-                <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" onclick={removeSelectedNode} disabled={workflow.pipeline.nodes.length <= 1}>
+                <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" onclick={removeSelectedNode} disabled={workflow.pipeline.nodes.length === 0}>
                   <Icon name="x" size={12} />Remove
                 </button>
               {/if}
             </div>
-            {#if selectedNode}
-              <div class="pf-provider-switcher" role="radiogroup" aria-label="Agent provider">
-                {#each providerOptions as provider (provider.id)}
-                  <button
-                    type="button"
-                    role="radio"
-                    data-selected={selectedNode.type === provider.id}
-                    data-pipeline-provider={provider.id}
-                    aria-checked={selectedNode.type === provider.id}
-                    tabindex={selectedNode.type === provider.id ? 0 : -1}
-                    onclick={() => selectNodeProvider(provider.id)}
-                    onkeydown={(event) => handleProviderKeydown(event, provider.id)}
-                  >
-                    {provider.label}
-                  </button>
-                {/each}
-              </div>
-              <label>
-                <span>Node id</span>
-                <input value={selectedNode.id} disabled />
-              </label>
-              <label>
-                <span>Agent name</span>
-                <input value={selectedNode.agent ?? ""} oninput={(event) => updateNode(selectedNode.id, { agent: event.currentTarget.value })} />
-              </label>
-              <label>
-                <span>Model</span>
-                <input value={selectedNode.model ?? ""} oninput={(event) => updateNode(selectedNode.id, { model: event.currentTarget.value })} />
-              </label>
-              <label>
-                <span>Tools</span>
-                <input value={toolsText(selectedNode)} oninput={(event) => setTools(selectedNode.id, event.currentTarget.value)} />
-              </label>
-              <label>
-                <span>Prompt</span>
-                <textarea rows="5" value={selectedNode.prompt} oninput={(event) => updateNode(selectedNode.id, { prompt: event.currentTarget.value })}></textarea>
-              </label>
-            {:else}
-              <div class="pf-pipe-empty">Select an agent node to edit it.</div>
-            {/if}
-          </section>
-
-          <section class="pf-editor-panel pf-editor-wiring">
-            <div class="pf-editor-panel-head">
-              <Icon name="link" size={13} />
-              <span>Wiring</span>
-            </div>
-            {#if selectedNode}
-              <div class="pf-wire-target">
-                <span>Inputs into</span>
-                <strong>{selectedNode.agent ?? selectedNode.id}</strong>
-              </div>
-              {#each workflow.pipeline.nodes.filter((node) => node.id !== selectedNode?.id) as node (node.id)}
-                <label class="pf-wire-row">
-                  <input
-                    type="checkbox"
-                    checked={(selectedNode.depends_on ?? []).includes(node.id)}
-                    onchange={(event) => toggleDependency(selectedNode.id, node.id, event.currentTarget.checked)}
-                  />
-                  <span class="pf-wire-provider" data-provider={node.type}>{providerMeta(node.type).short}</span>
-                  <span>{node.agent ?? node.id}</span>
+            {#if triggerSelected}
+              <div class="pf-canvas-selected-grid">
+                <label>
+                  <span>Workflow name</span>
+                  <input value={workflow.pipeline.name} oninput={(event) => updateWorkflowField("name", event.currentTarget.value)} />
                 </label>
-              {/each}
-
-              <div class="pf-wire-target outbound">
-                <span>Send selected output to</span>
+                <label>
+                  <span>Slug</span>
+                  <input value={workflow.slug} oninput={(event) => updateWorkflowField("slug", event.currentTarget.value)} />
+                </label>
+                <label>
+                  <span>Working directory</span>
+                  <input value={workflow.pipeline.working_dir ?? ""} oninput={(event) => updateWorkflowField("working_dir", event.currentTarget.value)} />
+                </label>
+                <label class="pf-editor-inline">
+                  <span>Enabled</span>
+                  <input type="checkbox" checked={workflow.enabled} onchange={(event) => updateWorkflowField("enabled", event.currentTarget.checked)} />
+                </label>
+                <label>
+                  <span>Trigger type</span>
+                  <select value={workflow.trigger.type} onchange={(event) => setTriggerType(event.currentTarget.value as TriggerMode)}>
+                    <option value="connection">Connection</option>
+                    <option value="cron">Cron</option>
+                  </select>
+                </label>
+                {#if workflow.trigger.type === "cron"}
+                  <label class="pf-canvas-selected-wide">
+                    <span>Cron</span>
+                    <input value={workflow.trigger.cron} oninput={(event) => updateTriggerField("cron", event.currentTarget.value)} />
+                  </label>
+                {:else if workflow.trigger.type === "connection"}
+                  <label>
+                    <span>Connection</span>
+                    <select
+                      aria-label="Workflow connection"
+                      value={workflow.trigger.connection_slug}
+                      onchange={(event) => useConnectionTrigger(event.currentTarget.value)}
+                    >
+                      {#if !connectionExists(workflow.trigger.connection_slug)}
+                        <option value={workflow.trigger.connection_slug}>{workflow.trigger.connection_slug} (planned)</option>
+                      {/if}
+                      {#each connections as connection (connection.slug)}
+                        <option value={connection.slug} disabled={!connectionTriggerSupported(connection)}>
+                          {connectionOptionLabel(connection)}
+                        </option>
+                      {/each}
+                    </select>
+                  </label>
+                  <label>
+                    <span>Pattern</span>
+                    <input placeholder=".*" value={workflow.trigger.pattern ?? ""} oninput={(event) => updateTriggerField("pattern", event.currentTarget.value)} />
+                  </label>
+                {:else}
+                  <label>
+                    <span>Source topic</span>
+                    <input value={workflow.trigger.source_topic} oninput={(event) => updateTriggerField("source_topic", event.currentTarget.value)} />
+                  </label>
+                  <label>
+                    <span>Pattern</span>
+                    <input placeholder=".*" value={workflow.trigger.pattern ?? ""} oninput={(event) => updateTriggerField("pattern", event.currentTarget.value)} />
+                  </label>
+                {/if}
               </div>
-              {#each workflow.pipeline.nodes.filter((node) => node.id !== selectedNode?.id) as node (node.id)}
-                {@const alreadyConnected = dependsOn(node, selectedNode.id)}
-                <button
-                  type="button"
-                  class="pf-wire-connect"
-                  onclick={() => connectSelectedTo(node.id)}
-                  disabled={alreadyConnected}
-                  aria-pressed={alreadyConnected}
-                >
-                  <Icon name="link" size={12} />
-                  {node.agent ?? node.id}
-                </button>
-              {/each}
+            {:else if selectedNode}
+              <div class="pf-canvas-selected-grid">
+              {#if selectedNode.type === "tool"}
+                <label>
+                  <span>Node id</span>
+                  <input value={selectedNode.id} disabled />
+                </label>
+                <label>
+                  <span>Tool</span>
+                  <select
+                    value={nodeToolName(selectedNode) || "Bash"}
+                    onchange={(event) => setNodeToolName(selectedNode.id, event.currentTarget.value as ToolName)}
+                  >
+                    {#each TOOL_NAMES as tool (tool)}
+                      <option value={tool}>{tool}</option>
+                    {/each}
+                  </select>
+                </label>
+                <label>
+                  <span>Label</span>
+                  <input value={selectedNode.agent ?? ""} oninput={(event) => updateNode(selectedNode.id, { agent: event.currentTarget.value })} />
+                </label>
+                <label class="pf-canvas-selected-wide">
+                  <span>Input{nodeToolName(selectedNode) === "Bash" ? " (bash command)" : " (JSON)"}</span>
+                  <textarea
+                    rows="4"
+                    value={selectedNode.prompt}
+                    oninput={(event) => updateNode(selectedNode.id, { prompt: event.currentTarget.value })}
+                  ></textarea>
+                </label>
+              {:else if selectedNode.type === "merge" || selectedNode.type === "fanout"}
+                <label>
+                  <span>Node id</span>
+                  <input value={selectedNode.id} disabled />
+                </label>
+                <label>
+                  <span>Label</span>
+                  <input value={selectedNode.agent ?? ""} oninput={(event) => updateNode(selectedNode.id, { agent: event.currentTarget.value })} />
+                </label>
+                <div class="pf-pipe-empty pf-canvas-selected-wide">
+                  {selectedNode.type === "merge"
+                    ? "Merge collects all dependency outputs into one JSON array."
+                    : "Fanout passes its upstream output through (parallel branching not yet implemented)."}
+                </div>
+              {:else}
+                <div class="pf-provider-switcher pf-canvas-selected-wide" role="radiogroup" aria-label="Agent provider">
+                  {#each providerOptions as provider (provider.id)}
+                    <button
+                      type="button"
+                      role="radio"
+                      data-selected={selectedNode.type === provider.id}
+                      data-workflow-provider={provider.id}
+                      aria-checked={selectedNode.type === provider.id}
+                      tabindex={selectedNode.type === provider.id ? 0 : -1}
+                      onclick={() => selectNodeProvider(provider.id)}
+                      onkeydown={(event) => handleProviderKeydown(event, provider.id)}
+                    >
+                      {provider.label}
+                    </button>
+                  {/each}
+                </div>
+                <label>
+                  <span>Node id</span>
+                  <input value={selectedNode.id} disabled />
+                </label>
+                <label>
+                  <span>Agent name</span>
+                  <input value={selectedNode.agent ?? ""} oninput={(event) => updateNode(selectedNode.id, { agent: event.currentTarget.value })} />
+                </label>
+                <label>
+                  <span>Model</span>
+                  <input value={selectedNode.model ?? ""} oninput={(event) => updateNode(selectedNode.id, { model: event.currentTarget.value })} />
+                </label>
+                <label>
+                  <span>Tools</span>
+                  <input value={toolsText(selectedNode)} oninput={(event) => setTools(selectedNode.id, event.currentTarget.value)} />
+                </label>
+                <label class="pf-canvas-selected-wide">
+                  <span>Prompt</span>
+                  <textarea rows="4" value={selectedNode.prompt} oninput={(event) => updateNode(selectedNode.id, { prompt: event.currentTarget.value })}></textarea>
+                </label>
+              {/if}
+              </div>
+              {#if workflow.pipeline.nodes.length > 1}
+                <div class="pf-canvas-wiring" aria-label="Node wiring">
+                  <span class="pf-canvas-wiring-label">Inputs from</span>
+                  <div class="pf-canvas-wiring-chips">
+                    {#each workflow.pipeline.nodes.filter((node) => node.id !== selectedNode?.id) as node (node.id)}
+                      <label class="pf-canvas-wiring-chip">
+                        <input
+                          type="checkbox"
+                          checked={(selectedNode.depends_on ?? []).includes(node.id)}
+                          onchange={(event) => toggleDependency(selectedNode.id, node.id, event.currentTarget.checked)}
+                        />
+                        <span class="pf-wire-provider" data-provider={node.type}>{nodeKindShort(node.type)}</span>
+                        <span>{node.agent ?? node.id}</span>
+                      </label>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
             {:else}
-              <div class="pf-pipe-empty">Select a node to wire dependencies.</div>
+              <div class="pf-pipe-empty">Click the trigger to set it up, click any node to edit it, or add one from the toolbar at the top of the canvas.</div>
             {/if}
           </section>
         </div>
 
-        {#if runs.length > 0}
+        <div class="pf-canvas-runs-sheet" data-open={runsSheetOpen}>
+          <button
+            type="button"
+            class="pf-canvas-runs-toggle"
+            aria-expanded={runsSheetOpen}
+            onclick={() => (runsSheetOpen = !runsSheetOpen)}
+          >
+            <Icon name="chevD" size={12} />
+            <span>Runs</span>
+            <span class="pf-pipe-traj-count">{runs.length}</span>
+          </button>
+          {#if runsSheetOpen}
+            <div class="pf-canvas-runs-body">
+            {#if runs.length === 0}
+              <div class="pf-pipe-empty">No runs yet for this workflow.</div>
+            {:else}
           <div class="pf-pipe-traj pf-editor-runs">
             <div class="pf-pipe-traj-head">
               <Icon name="terminal" size={12} />
@@ -3196,11 +2967,15 @@
             {/if}
           </div>
         {/if}
+            </div>
+          {/if}
+        </div>
       {:else}
-        <div class="pf-pipe-empty">Create a pipeline to start wiring agents.</div>
+        <div class="pf-pipe-empty">Create a workflow to start wiring agents.</div>
       {/if}
     </div>
   </div>
+  {/if}
 </div>
 
 <style>
@@ -3219,8 +2994,206 @@
     white-space: nowrap;
   }
 
-  .pf-pipe-editor-body {
+  .pf-pipe-canvas-body {
     grid-template-columns: 230px minmax(0, 1fr);
+  }
+
+  .pf-pipe-canvas-body[data-page="detail"],
+  .pf-pipe-canvas-body[data-page="create"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pf-workflow-overview {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.8fr);
+    grid-template-rows: auto minmax(0, 1fr) minmax(180px, 0.55fr);
+    gap: 12px;
+    padding: 14px;
+    overflow: auto;
+    background: color-mix(in oklab, var(--background) 96%, var(--muted));
+  }
+
+  .pf-workflow-summary {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .pf-workflow-stat {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--background);
+    padding: 12px;
+    display: grid;
+    gap: 4px;
+  }
+
+  .pf-workflow-stat span {
+    color: var(--muted-foreground);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  .pf-workflow-stat strong {
+    color: var(--foreground);
+    font-size: 24px;
+    line-height: 1;
+  }
+
+  .pf-workflow-panel {
+    min-width: 0;
+    min-height: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--background);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .pf-workflow-ongoing {
+    grid-column: 1 / 2;
+  }
+
+  .pf-workflow-panel-head {
+    min-height: 58px;
+    padding: 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .pf-workflow-panel-head h2 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 700;
+  }
+
+  .pf-workflow-panel-head p {
+    margin: 2px 0 0;
+    color: var(--muted-foreground);
+    font-size: 12px;
+  }
+
+  .pf-workflow-overview-search {
+    min-width: min(320px, 42vw);
+  }
+
+  .pf-workflow-run-grid,
+  .pf-workflow-table,
+  .pf-workflow-recent-list {
+    display: grid;
+    gap: 8px;
+    padding: 10px;
+    overflow: auto;
+  }
+
+  .pf-workflow-table {
+    padding-top: 6px;
+  }
+
+  .pf-workflow-run-card,
+  .pf-workflow-row,
+  .pf-workflow-recent-row {
+    all: unset;
+    box-sizing: border-box;
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--foreground);
+    cursor: pointer;
+    min-width: 0;
+  }
+
+  .pf-workflow-run-card,
+  .pf-workflow-recent-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+  }
+
+  .pf-workflow-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+  }
+
+  .pf-workflow-run-card:hover,
+  .pf-workflow-row:hover,
+  .pf-workflow-recent-row:hover,
+  .pf-workflow-run-card:focus-visible,
+  .pf-workflow-row:focus-visible,
+  .pf-workflow-recent-row:focus-visible {
+    border-color: color-mix(in oklab, var(--puffer-accent) 28%, var(--border));
+    background: var(--pf-selected-bg-hover);
+  }
+
+  .pf-workflow-run-main,
+  .pf-workflow-row-main {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .pf-workflow-run-main strong,
+  .pf-workflow-row-main strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+  }
+
+  .pf-workflow-run-main small,
+  .pf-workflow-row-main small,
+  .pf-workflow-row-meta {
+    color: var(--muted-foreground);
+    font-size: 11px;
+    min-width: 0;
+  }
+
+  .pf-workflow-run-status,
+  .pf-workflow-row-state {
+    justify-self: end;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 8px;
+    color: var(--muted-foreground);
+    background: var(--muted);
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  .pf-workflow-row-state[data-enabled="true"],
+  .pf-workflow-run-card[data-state="running"] .pf-workflow-run-status,
+  .pf-workflow-recent-row[data-state="running"] .pf-workflow-run-status {
+    color: var(--puffer-accent);
+    border-color: color-mix(in oklab, var(--puffer-accent) 28%, var(--border));
+    background: color-mix(in oklab, var(--puffer-accent) 9%, var(--card));
+  }
+
+  .pf-workflow-run-card[data-state="failed"] .pf-workflow-run-status,
+  .pf-workflow-recent-row[data-state="failed"] .pf-workflow-run-status {
+    color: var(--pf-run-failed);
+    border-color: color-mix(in oklab, var(--pf-run-failed) 28%, var(--border));
+    background: color-mix(in oklab, var(--pf-run-failed) 9%, var(--card));
+  }
+
+  .pf-workflow-empty {
+    color: var(--muted-foreground);
+    font-size: 12px;
+    padding: 14px;
   }
 
   .pf-pipe-workflows {
@@ -3239,35 +3212,6 @@
     padding: 0 10px 4px;
   }
 
-  .pf-provider-palette {
-    border-top: 1px solid var(--border);
-    margin-top: 10px;
-    padding-top: 8px;
-  }
-
-  .pf-pipe-runs-head.compact {
-    padding-bottom: 6px;
-  }
-
-  .pf-provider-card {
-    all: unset;
-    box-sizing: border-box;
-    display: flex;
-    gap: 9px;
-    width: 100%;
-    padding: 9px 10px;
-    margin-bottom: 4px;
-    border: 1px solid transparent;
-    border-radius: 10px;
-    cursor: pointer;
-  }
-
-  .pf-provider-card:hover {
-    background: var(--pf-selected-bg-hover);
-    border-color: transparent;
-  }
-
-  .pf-provider-mark,
   .pf-provider-avatar {
     width: 24px;
     height: 24px;
@@ -3286,20 +3230,6 @@
   .pf-provider-avatar[data-provider="codex"] { --provider-accent: oklch(0.58 0.18 245); }
   .pf-provider-avatar[data-provider="claude"] { --provider-accent: oklch(0.64 0.17 55); }
   .pf-provider-avatar[data-provider="puffer"] { --provider-accent: var(--puffer-accent); }
-
-  .pf-provider-card strong {
-    display: block;
-    font-size: 12px;
-    line-height: 1.2;
-  }
-
-  .pf-provider-card small {
-    display: block;
-    color: var(--muted-foreground);
-    font-size: 10.8px;
-    line-height: 1.35;
-    margin-top: 2px;
-  }
 
   .pf-editor-header {
     min-height: 52px;
@@ -4061,14 +3991,26 @@
   }
 
   @media (max-width: 1120px) {
-    .pf-pipe-editor-body { grid-template-columns: 190px minmax(0, 1fr); }
+    .pf-pipe-canvas-body { grid-template-columns: 190px minmax(0, 1fr); }
+    .pf-pipe-canvas-body[data-page="detail"],
+    .pf-pipe-canvas-body[data-page="create"] {
+      grid-template-columns: minmax(0, 1fr);
+    }
     .pf-editor-lower { grid-template-columns: 1fr; }
+    .pf-workflow-overview { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto auto; }
+    .pf-workflow-ongoing { grid-column: auto; }
   }
 
   @media (max-width: 880px) {
-    .pf-pipe-editor-body { grid-template-columns: minmax(0, 1fr); }
+    .pf-pipe-canvas-body { grid-template-columns: minmax(0, 1fr); }
     .pf-pipe-workflows { display: none; }
     .pf-pipe-save-note { display: none; }
     .pf-editor-lower { padding: 8px; }
+    .pf-workflow-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .pf-workflow-panel-head { align-items: stretch; flex-direction: column; }
+    .pf-workflow-overview-search { min-width: 0; width: 100%; }
+    .pf-workflow-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+    .pf-workflow-row-meta,
+    .pf-workflow-row-state { display: none; }
   }
 </style>
