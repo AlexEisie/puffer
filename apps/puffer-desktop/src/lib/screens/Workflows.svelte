@@ -73,6 +73,23 @@
     label?: string;
   };
 
+  type NodePosition = {
+    x: number;
+    y: number;
+  };
+
+  type NodeDragState = {
+    nodeId: string;
+    origin: NodePosition;
+    pointer: NodePosition;
+  };
+
+  type EdgeDraftState = {
+    fromId: string;
+    x: number;
+    y: number;
+  };
+
   type ConnectorSearchRow = {
     connector: WorkflowConnector;
     searchText: string;
@@ -101,6 +118,12 @@
   type WorkflowRunSearchRow = {
     run: WorkflowRun;
     searchText: string;
+  };
+
+  type WorkflowRunStats = {
+    runs: number;
+    success: number;
+    failure: number;
   };
 
   type WorkflowDraftSource = {
@@ -250,7 +273,7 @@
   });
   let editorWorkflows = $state<EditableWorkflow[]>([starterWorkflow()]);
   let workflowSlug = $state("agent-review-workflow");
-  let selectedNodeId = $state<string | null>("trigger");
+  let selectedNodeId = $state<string | null>(null);
   let workflowQuery = $state("");
   let connectorQuery = $state("");
   let selectedConnectorSlug = $state<string | null>(null);
@@ -280,6 +303,9 @@
   let workflowPage = $state<WorkflowPage>("overview");
   let inspectorOpen = $state(true);
   let runsSheetOpen = $state(false);
+  let nodePositions = $state<Record<string, Record<string, NodePosition>>>({});
+  let nodeDrag = $state<NodeDragState | null>(null);
+  let edgeDraft = $state<EdgeDraftState | null>(null);
 
   let workflows = $derived(editorWorkflows);
   let workflowQueryTerms = $derived(searchTerms(workflowQuery));
@@ -329,8 +355,10 @@
   let run = $derived(runs.find((item) => item.idx === runIdx) ?? runs[0] ?? null);
   let graphNodes = $derived(workflow ? nodesFor(workflow) : []);
   let graphEdges = $derived(workflow ? edgesFor(workflow) : []);
-  let graphWidth = $derived(PAD_L * 2 + Math.max(0, graphNodes.length - 1) * COL_W + NODE_W);
-  let graphHeight = $derived(PAD_T * 2 + NODE_H);
+  let graphBaseWidth = $derived(PAD_L * 2 + Math.max(0, graphNodes.length - 1) * COL_W + NODE_W);
+  let graphBounds = $derived(graphBoundsFor());
+  let graphWidth = $derived(graphBounds.width);
+  let graphHeight = $derived(graphBounds.height);
   let currentStepIndex = $derived(
     run ? (stepIdx === null ? Math.max(0, run.nodes.length - 1) : Math.min(stepIdx, run.nodes.length - 1)) : 0
   );
@@ -374,15 +402,6 @@
   );
   let selectedAppendWorkflowPreview = $derived(selectedConnector ? appendWorkflowPreview() : "");
   let workflowDirty = $derived(workflow ? dirtyWorkflowSlugs.includes(workflow.slug) : false);
-  let ongoingRuns = $derived(
-    [...snapshot.runs]
-      .filter((item) => item.status === "running" || item.status === "pending")
-      .sort((a, b) => b.started_at_ms - a.started_at_ms)
-  );
-  let recentRuns = $derived([...snapshot.runs].sort((a, b) => b.started_at_ms - a.started_at_ms).slice(0, 8));
-  let enabledWorkflowCount = $derived(workflows.filter((item) => item.enabled).length);
-  let dirtyWorkflowCount = $derived(dirtyWorkflowSlugs.length);
-
   let wrapEl = $state<HTMLDivElement | undefined>();
   let scale = $state(0.8);
 
@@ -511,10 +530,10 @@
   }
 
   function measure() {
-    if (!wrapEl || graphWidth <= 0) return;
+    if (!wrapEl || graphBaseWidth <= 0) return;
     const cw = wrapEl.clientWidth;
     if (!cw) return;
-    scale = Math.min(1, cw / graphWidth);
+    scale = Math.min(1, cw / graphBaseWidth);
   }
 
   onMount(() => {
@@ -538,7 +557,7 @@
 
   $effect(() => {
     workflow;
-    graphWidth;
+    graphBaseWidth;
     setTimeout(measure, 0);
   });
 
@@ -556,7 +575,7 @@
       error = err instanceof Error ? err.message : String(err);
       if (editorWorkflows.length === 0) editorWorkflows = [starterWorkflow()];
       workflowSlug = editorWorkflows[0].slug;
-      selectedNodeId = editorWorkflows[0].pipeline.nodes[0]?.id ?? null;
+      selectedNodeId = null;
     } finally {
       if (generation === refreshGeneration) {
         loading = false;
@@ -592,15 +611,20 @@
       workflowSlug = editorWorkflows[0]?.slug ?? "agent-review-workflow";
     }
     const activeWorkflow = editorWorkflows.find((item) => item.slug === workflowSlug) ?? editorWorkflows[0];
-    if (!activeWorkflow?.pipeline.nodes.some((node) => node.id === selectedNodeId)) {
-      selectedNodeId = activeWorkflow?.pipeline.nodes[0]?.id ?? null;
+    if (!activeWorkflow) {
+      selectedNodeId = null;
+    } else if (
+      selectedNodeId !== null &&
+      selectedNodeId !== "trigger" &&
+      !activeWorkflow.pipeline.nodes.some((node) => node.id === selectedNodeId)
+    ) {
+      selectedNodeId = null;
     }
   }
 
   function selectWorkflow(slug: string) {
     workflowSlug = slug;
-    const next = editorWorkflows.find((item) => item.slug === slug);
-    selectedNodeId = next?.pipeline.nodes[0]?.id ?? null;
+    selectedNodeId = null;
   }
 
   function openWorkflowDetail(slug: string) {
@@ -2089,7 +2113,7 @@
         }));
       return { ...item, pipeline: { ...item.pipeline, nodes } };
     });
-    selectedNodeId = workflow.pipeline.nodes.find((node) => node.id !== removeId)?.id ?? null;
+    selectedNodeId = null;
   }
 
   function toggleDependency(targetId: string, dependencyId: string, checked: boolean) {
@@ -2099,6 +2123,22 @@
     if (checked) deps.add(dependencyId);
     else deps.delete(dependencyId);
     updateNode(targetId, { depends_on: Array.from(deps) });
+  }
+
+  function createGraphEdge(fromId: string, toId: string) {
+    if (!workflow || fromId === toId || toId === "trigger") return;
+    const target = workflow.pipeline.nodes.find((node) => node.id === toId);
+    if (!target) return;
+    if (fromId === "trigger") {
+      updateNode(toId, { depends_on: [] });
+      selectedNodeId = toId;
+      return;
+    }
+    if (!workflow.pipeline.nodes.some((node) => node.id === fromId)) return;
+    const deps = new Set(target.depends_on ?? []);
+    deps.add(fromId);
+    updateNode(toId, { depends_on: Array.from(deps) });
+    selectedNodeId = toId;
   }
 
   function connectSelectedTo(targetId: string) {
@@ -2210,10 +2250,90 @@
     return snapshot.runs.find((item) => item.workflow_slug === slug);
   }
 
-  function nodeXY(id: string) {
+  function workflowRunStats(slug: string): WorkflowRunStats {
+    const items = snapshot.runs.filter((item) => item.workflow_slug === slug);
+    return {
+      runs: items.length,
+      success: items.filter((item) => item.status === "completed").length,
+      failure: items.filter((item) => item.status === "failed").length
+    };
+  }
+
+  function workflowPreviewNodes(item: EditableWorkflow): GraphNode[] {
+    return nodesFor(item).slice(0, 7);
+  }
+
+  function workflowHiddenNodeCount(item: EditableWorkflow): number {
+    return Math.max(0, nodesFor(item).length - workflowPreviewNodes(item).length);
+  }
+
+  function previewNodeLabel(node: GraphNode): string {
+    if (node.type === "trigger") return "Trigger";
+    if (node.provider) return providerMeta(node.provider).short;
+    if (node.type === "tool" && node.node) return nodeToolName(node.node) || "Tool";
+    if (node.type === "merge") return "Merge";
+    if (node.type === "fanout") return "Fanout";
+    return node.title;
+  }
+
+  function previewNodeStyle(node: GraphNode): string {
+    return node.provider ? `--provider-accent: ${providerMeta(node.provider).accent};` : "";
+  }
+
+  function defaultNodePosition(id: string): NodePosition {
     const idx = Math.max(0, graphNodes.findIndex((node) => node.id === id));
-    const x = PAD_L + idx * COL_W;
-    return { x, y: PAD_T, cx: x + NODE_W / 2, cy: PAD_T + NODE_H / 2 };
+    return { x: PAD_L + idx * COL_W, y: PAD_T };
+  }
+
+  function workflowNodePositions(): Record<string, NodePosition> {
+    return nodePositions[workflow?.slug ?? ""] ?? {};
+  }
+
+  function nodePosition(id: string): NodePosition {
+    return workflowNodePositions()[id] ?? defaultNodePosition(id);
+  }
+
+  function nodeXY(id: string) {
+    const { x, y } = nodePosition(id);
+    return { x, y, cx: x + NODE_W / 2, cy: y + NODE_H / 2 };
+  }
+
+  function graphBoundsFor(): { width: number; height: number } {
+    let maxX = PAD_L + Math.max(0, graphNodes.length - 1) * COL_W + NODE_W;
+    let maxY = PAD_T + NODE_H;
+    for (const node of graphNodes) {
+      const pos = nodePosition(node.id);
+      maxX = Math.max(maxX, pos.x + NODE_W);
+      maxY = Math.max(maxY, pos.y + NODE_H);
+    }
+    return {
+      width: Math.max(PAD_L * 2 + NODE_W, maxX + PAD_L),
+      height: Math.max(PAD_T * 2 + NODE_H, maxY + PAD_T)
+    };
+  }
+
+  function setNodePosition(nodeId: string, position: NodePosition) {
+    const slug = workflow?.slug;
+    if (!slug) return;
+    nodePositions = {
+      ...nodePositions,
+      [slug]: {
+        ...(nodePositions[slug] ?? {}),
+        [nodeId]: {
+          x: Math.max(PAD_L, Math.round(position.x)),
+          y: Math.max(PAD_T, Math.round(position.y))
+        }
+      }
+    };
+  }
+
+  function graphPoint(event: PointerEvent): NodePosition {
+    const rect = wrapEl?.getBoundingClientRect();
+    if (!rect) return { x: PAD_L, y: PAD_T };
+    return {
+      x: Math.max(0, (event.clientX - rect.left) / Math.max(scale, 0.01)),
+      y: Math.max(0, (event.clientY - rect.top) / Math.max(scale, 0.01))
+    };
   }
 
   function pathFor(fromId: string, toId: string) {
@@ -2223,6 +2343,16 @@
     const y1 = pa.cy;
     const x2 = pb.x + 4;
     const y2 = pb.cy;
+    const mx = (x1 + x2) / 2;
+    return `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`;
+  }
+
+  function draftPathFor(draft: EdgeDraftState): string {
+    const pa = nodeXY(draft.fromId);
+    const x1 = pa.x + NODE_W - 4;
+    const y1 = pa.cy;
+    const x2 = draft.x;
+    const y2 = draft.y;
     const mx = (x1 + x2) / 2;
     return `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`;
   }
@@ -2257,6 +2387,60 @@
     if (record.status === "skipped") return "blocked";
     if (record.status === "completed") return "visited";
     return visited.has(node.id) ? "queued" : "idle";
+  }
+
+  function handleNodePointerDown(event: PointerEvent, nodeId: string) {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("[data-edge-handle]")) {
+      startEdgeDraft(event, nodeId);
+      return;
+    }
+    startNodeDrag(event, nodeId);
+  }
+
+  function startNodeDrag(event: PointerEvent, nodeId: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    selectedNodeId = nodeId;
+    nodeDrag = {
+      nodeId,
+      origin: nodePosition(nodeId),
+      pointer: graphPoint(event)
+    };
+  }
+
+  function startEdgeDraft(event: PointerEvent, fromId: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    const point = graphPoint(event);
+    selectedNodeId = fromId;
+    edgeDraft = { fromId, x: point.x, y: point.y };
+  }
+
+  function handleGraphPointerMove(event: PointerEvent) {
+    if (nodeDrag) {
+      const point = graphPoint(event);
+      setNodePosition(nodeDrag.nodeId, {
+        x: nodeDrag.origin.x + point.x - nodeDrag.pointer.x,
+        y: nodeDrag.origin.y + point.y - nodeDrag.pointer.y
+      });
+    }
+    if (edgeDraft) {
+      const point = graphPoint(event);
+      edgeDraft = { ...edgeDraft, x: point.x, y: point.y };
+    }
+  }
+
+  function handleGraphPointerUp(event: PointerEvent) {
+    if (edgeDraft) {
+      const target = document
+        .elementFromPoint(event.clientX, event.clientY)
+        ?.closest<HTMLElement>("[data-node-id]");
+      const toId = target?.dataset.nodeId;
+      if (toId) createGraphEdge(edgeDraft.fromId, toId);
+      edgeDraft = null;
+    }
+    nodeDrag = null;
   }
 
   function statusColor(status: WorkflowRunStatus): string {
@@ -2308,19 +2492,43 @@
   }
 </script>
 
+<svelte:window onpointermove={handleGraphPointerMove} onpointerup={handleGraphPointerUp} />
+
 <div class="pf-pipe pf-pipe-editor">
   <div class="pf-pipe-top">
     <div class="pf-pipe-top-id">
-      <span class="pf-pipe-chip">
-        {workflowPage === "overview" ? "Workflows" : workflowPage === "create" ? "Create workflow" : "Workflow detail"}
-      </span>
-      <strong>{workflowPage === "overview" ? "Workflow dashboard" : workflow?.pipeline.name ?? "No workflow"}</strong>
+      {#if workflowPage === "overview"}
+        <strong>Workflows {workflows.length}</strong>
+        {#if workflowQuery.trim()}
+          <span class="pf-pipe-hash">{filteredWorkflows.length} shown</span>
+        {/if}
+      {:else}
+        <span class="pf-pipe-chip">
+          {workflowPage === "create" ? "Create workflow" : "Workflow detail"}
+        </span>
+        <strong>{workflow?.pipeline.name ?? "No workflow"}</strong>
+      {/if}
       {#if workflow && workflowPage !== "overview"}
         <span class="pf-pipe-hash">{workflow.slug}</span>
       {/if}
-      <span class="pf-pipe-save-note">{saveNotice}</span>
+      {#if workflowPage !== "overview"}
+        <span class="pf-pipe-save-note">{saveNotice}</span>
+      {/if}
     </div>
     <div class="pf-pipe-top-right">
+      {#if workflowPage === "overview"}
+        <label class="pf-workflow-top-search">
+          <span class="pf-connector-searchbox">
+            <Icon name="search" size={12} />
+            <input
+              aria-label="Search workflows"
+              value={workflowQuery}
+              placeholder="Search workflows"
+              oninput={(event) => (workflowQuery = event.currentTarget.value)}
+            />
+          </span>
+        </label>
+      {/if}
       {#if workflowPage !== "overview"}
         <button
           type="button"
@@ -2333,7 +2541,7 @@
           <Icon name="chevL" size={12} />Back
         </button>
       {/if}
-      {#if workflowPage !== "create"}
+      {#if workflowPage === "overview"}
         <button
           type="button"
           class="sc-btn"
@@ -2372,175 +2580,78 @@
           <Icon name="check" size={12} />{savingWorkflowSlug === workflow?.slug ? "Saving" : workflowDirty ? "Save" : "Saved"}
         </button>
       {/if}
-      <button
-        type="button"
-        class="sc-btn"
-        data-variant="ghost"
-        data-size="sm"
-        aria-label="Refresh workflows"
-        aria-busy={loading}
-        disabled={loading}
-        onclick={refresh}
-      >
-        <Icon name="refresh" size={12} />{loading ? "Refreshing" : "Refresh"}
-      </button>
     </div>
   </div>
 
   {#if workflowPage === "overview"}
     <div class="pf-workflow-overview" aria-label="Workflow overview">
-      <section class="pf-workflow-summary" aria-label="Workflow summary">
-        <div class="pf-workflow-stat">
-          <span>Ongoing</span>
-          <strong>{ongoingRuns.length}</strong>
-        </div>
-        <div class="pf-workflow-stat">
-          <span>Enabled</span>
-          <strong>{enabledWorkflowCount}</strong>
-        </div>
-        <div class="pf-workflow-stat">
-          <span>Definitions</span>
-          <strong>{workflows.length}</strong>
-        </div>
-        <div class="pf-workflow-stat">
-          <span>Draft edits</span>
-          <strong>{dirtyWorkflowCount}</strong>
-        </div>
-      </section>
-
-      <section class="pf-workflow-panel pf-workflow-ongoing" aria-label="Ongoing workflows">
-        <div class="pf-workflow-panel-head">
-          <div>
-            <h2>Ongoing workflows</h2>
-            <p>Running and queued runs.</p>
-          </div>
-          <button
-            type="button"
-            class="sc-btn"
-            data-variant="outline"
-            data-size="sm"
-            onclick={() => createWorkflowDraft()}
-          >
-            <Icon name="plus" size={12} />Create workflow
-          </button>
-        </div>
-        {#if loading}
-          <div class="pf-pipe-empty">Loading workflows...</div>
-        {:else if ongoingRuns.length === 0}
-          <div class="pf-workflow-empty">No workflows are running right now.</div>
-        {:else}
-          <div class="pf-workflow-run-grid">
-            {#each ongoingRuns as item (item.idx)}
-              {@const runWorkflow = workflows.find((candidate) => candidate.slug === item.workflow_slug)}
-              <button
-                type="button"
-                class="pf-workflow-run-card"
-                data-state={item.status}
-                onclick={() => openWorkflowRunDetail(item)}
-              >
-                <span class="pf-run-pip {item.status}"></span>
-                <span class="pf-workflow-run-main">
-                  <strong>{runWorkflow?.pipeline.name ?? item.workflow_slug}</strong>
-                  <small>#{item.idx} · {runElapsed(item)} · {item.nodes.length} steps</small>
-                </span>
-                <span class="pf-workflow-run-status">{item.status}</span>
-              </button>
-            {/each}
-          </div>
-        {/if}
-      </section>
-
-      <section class="pf-workflow-panel" aria-label="Workflow list">
-        <div class="pf-workflow-panel-head">
-          <div>
-            <h2>Workflows</h2>
-            <p>Definitions, triggers, and agent wiring.</p>
-          </div>
-          <label class="pf-workflow-overview-search">
-            <span class="pf-connector-searchbox">
-              <Icon name="search" size={12} />
-              <input
-                aria-label="Search workflows"
-                value={workflowQuery}
-                placeholder="Search workflows"
-                oninput={(event) => (workflowQuery = event.currentTarget.value)}
-              />
-            </span>
-          </label>
-        </div>
-        <div class="pf-workflow-result-summary" aria-label="Workflow search results">
-          {filteredWorkflows.length}/{workflows.length} workflows
-        </div>
+      <section class="pf-workflow-panel pf-workflow-list-panel" aria-label="Workflow list">
         <div class="pf-workflow-table">
-          {#if filteredWorkflows.length === 0}
+          {#if loading}
+            <div class="pf-pipe-empty">Loading workflows...</div>
+          {:else if filteredWorkflows.length === 0}
             <div class="pf-workflow-empty">No matching workflows.</div>
-          {/if}
-          {#each filteredWorkflows as item (item.slug)}
-            {@const latest = workflowLatestRun(item.slug)}
-            <button
-              type="button"
-              class="pf-workflow-row"
-              data-selected={item.slug === workflow?.slug}
-              onclick={() => openWorkflowDetail(item.slug)}
-            >
-              <span class="pf-run-pip {latest?.status ?? 'pending'}"></span>
-              <span class="pf-workflow-row-main">
-                <strong>{item.pipeline.name}</strong>
-                <small>{item.slug} · {triggerTitle(item)}</small>
-              </span>
-              <span class="pf-workflow-row-meta">{item.pipeline.nodes.length} nodes</span>
-              <span class="pf-workflow-row-meta">{latest ? latest.status : "no runs"}</span>
-              <span class="pf-workflow-row-state" data-enabled={item.enabled}>{item.enabled ? "enabled" : "disabled"}</span>
-              <Icon name="chevR" size={14} />
-            </button>
-          {/each}
-        </div>
-      </section>
-
-      <section class="pf-workflow-panel" aria-label="Recent workflow runs">
-        <div class="pf-workflow-panel-head">
-          <div>
-            <h2>Recent runs</h2>
-            <p>Latest completed and failed executions.</p>
-          </div>
-        </div>
-        {#if recentRuns.length === 0}
-          <div class="pf-workflow-empty">No workflow runs recorded yet.</div>
-        {:else}
-          <div class="pf-workflow-recent-list">
-            {#each recentRuns as item (item.idx)}
+          {:else}
+            {#each filteredWorkflows as item (item.slug)}
+              {@const latest = workflowLatestRun(item.slug)}
+              {@const stats = workflowRunStats(item.slug)}
+              {@const preview = workflowPreviewNodes(item)}
+              {@const hiddenCount = workflowHiddenNodeCount(item)}
               <button
                 type="button"
-                class="pf-workflow-recent-row"
-                data-state={item.status}
-                onclick={() => openWorkflowRunDetail(item)}
+                class="pf-workflow-row"
+                data-selected={item.slug === workflow?.slug}
+                onclick={() => openWorkflowDetail(item.slug)}
               >
-                <span class="pf-run-pip {item.status}"></span>
+                <span class="pf-run-pip {latest?.status ?? 'pending'}"></span>
                 <span class="pf-workflow-row-main">
-                  <strong>{item.workflow_slug}</strong>
-                  <small>#{item.idx} · {runWhen(item)} · {runElapsed(item)}</small>
+                  <strong>{item.pipeline.name}</strong>
+                  <small>{item.slug} · {triggerTitle(item)}</small>
                 </span>
-                <span class="pf-workflow-run-status">{item.status}</span>
+                <span class="pf-workflow-pipeline-preview" aria-label="Pipeline preview">
+                  {#each preview as node, index (node.id)}
+                    <span
+                      class="pf-workflow-node-pill"
+                      data-type={node.type}
+                      style={previewNodeStyle(node)}
+                      title={node.title}
+                    >
+                      {previewNodeLabel(node)}
+                    </span>
+                    {#if index < preview.length - 1}
+                      <span class="pf-workflow-node-arrow">-&gt;</span>
+                    {/if}
+                  {/each}
+                  {#if hiddenCount > 0}
+                    <span class="pf-workflow-node-more">+{hiddenCount}</span>
+                  {/if}
+                </span>
+                <span class="pf-workflow-row-stats" aria-label="Workflow run stats">
+                  <span class="pf-workflow-stat-inline">
+                    <strong>{stats.runs}</strong>
+                    <small>runs</small>
+                  </span>
+                  <span class="pf-workflow-stat-inline" data-kind="success">
+                    <strong>{stats.success}</strong>
+                    <small>success</small>
+                  </span>
+                  <span class="pf-workflow-stat-inline" data-kind="failure">
+                    <strong>{stats.failure}</strong>
+                    <small>failure</small>
+                  </span>
+                </span>
+                <span class="pf-workflow-row-state" data-enabled={item.enabled}>{item.enabled ? "enabled" : "disabled"}</span>
+                <Icon name="chevR" size={14} />
               </button>
             {/each}
-          </div>
-        {/if}
+          {/if}
+        </div>
       </section>
     </div>
   {:else}
   <div class="pf-pipe-body pf-pipe-canvas-body" data-page={workflowPage}>
     <div class="pf-pipe-main pf-canvas-main">
       {#if workflow}
-        <div class="pf-run-header pf-editor-header">
-          <span class="pf-run-header-pip" style="background: {run ? statusColor(run.status) : 'var(--puffer-accent)'};"></span>
-          <span class="pf-run-header-label">{workflow.pipeline.name}</span>
-          <span class="pf-run-header-state" data-state={workflow.enabled ? "done" : "skipped"}>{workflow.enabled ? "enabled" : "disabled"}</span>
-          <span class="pf-run-header-meta-group">
-            <span class="pf-run-header-dim"><Icon name="wrench" size={11} /><span class="mono">{workflow.pipeline.nodes.length} nodes</span></span>
-            <span class="pf-run-header-dim"><Icon name="link" size={11} /><span class="mono">{graphEdges.length} wires</span></span>
-          </span>
-        </div>
-
         <div class="pf-canvas-stage">
         <div class="pf-canvas-toolbar" role="group" aria-label="Add node">
           {#each providerOptions as provider (provider.id)}
@@ -2615,6 +2726,9 @@
                     {/if}
                   </g>
                 {/each}
+                {#if edgeDraft}
+                  <path class="pf-pipe-edge-draft" d={draftPathFor(edgeDraft)} fill="none" stroke-width="1.6" marker-end="url(#pf-pipe-arr)" />
+                {/if}
               </svg>
 
               {#each graphNodes as node (node.id)}
@@ -2627,8 +2741,10 @@
                   data-type={node.type}
                   data-provider={node.provider ?? "trigger"}
                   data-state={st}
+                  data-node-id={node.id}
+                  data-dragging={nodeDrag?.nodeId === node.id}
                   aria-pressed={node.id === selectedNodeId}
-                  onclick={() => (selectedNodeId = node.id)}
+                  onpointerdown={(event) => handleNodePointerDown(event, node.id)}
                 >
                   <div class="pf-pipe-node-head">
                     {#if node.type === "agent"}
@@ -2642,12 +2758,13 @@
                       <span class="name">{node.title}</span>
                       <span class="sub">{node.subtitle}</span>
                     </div>
-                    {#if node.id === selectedNodeId}
-                      <span class="pf-pipe-node-halo"></span>
-                    {/if}
                   </div>
                   <span class="pf-pipe-node-stub left"></span>
-                  <span class="pf-pipe-node-stub right"></span>
+                  <span
+                    class="pf-pipe-node-stub right"
+                    data-edge-handle="out"
+                    title="Drag to connect"
+                  ></span>
                 </button>
               {/each}
             </div>
@@ -2656,16 +2773,22 @@
 
         </div>
 
+        {#if selectedNodeId !== null}
         <div class="pf-canvas-selected" aria-label="Selected node">
           <section class="pf-canvas-section pf-canvas-section-agent">
             <div class="pf-editor-panel-head">
               <Icon name="panel" size={13} />
               <span>{triggerSelected ? "Trigger & workflow" : "Selected node"}</span>
-              {#if selectedNode}
-                <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" onclick={removeSelectedNode} disabled={workflow.pipeline.nodes.length === 0}>
-                  <Icon name="x" size={12} />Remove
-                </button>
-              {/if}
+              <button
+                type="button"
+                class="sc-btn pf-canvas-selected-close"
+                data-variant="ghost"
+                data-size="sm"
+                aria-label="Close selected node panel"
+                onclick={() => (selectedNodeId = null)}
+              >
+                <Icon name="x" size={12} />Close
+              </button>
             </div>
             {#if triggerSelected}
               <div class="pf-canvas-selected-grid">
@@ -2831,11 +2954,17 @@
                   </div>
                 </div>
               {/if}
-            {:else}
-              <div class="pf-pipe-empty">Click the trigger to set it up, click any node to edit it, or add one from the toolbar at the top of the canvas.</div>
+            {/if}
+            {#if selectedNode}
+              <div class="pf-canvas-selected-actions">
+                <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" onclick={removeSelectedNode} disabled={workflow.pipeline.nodes.length === 0}>
+                  <Icon name="x" size={12} />Remove node
+                </button>
+              </div>
             {/if}
           </section>
         </div>
+        {/if}
 
         <div class="pf-canvas-runs-sheet" data-open={runsSheetOpen}>
           <button
@@ -3006,147 +3135,70 @@
   .pf-workflow-overview {
     flex: 1;
     min-height: 0;
-    display: grid;
-    grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.8fr);
-    grid-template-rows: auto minmax(0, 1fr) minmax(180px, 0.55fr);
-    gap: 12px;
-    padding: 14px;
-    overflow: auto;
+    display: flex;
+    padding: 0;
+    overflow: hidden;
     background: color-mix(in oklab, var(--background) 96%, var(--muted));
-  }
-
-  .pf-workflow-summary {
-    grid-column: 1 / -1;
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 10px;
-  }
-
-  .pf-workflow-stat {
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--background);
-    padding: 12px;
-    display: grid;
-    gap: 4px;
-  }
-
-  .pf-workflow-stat span {
-    color: var(--muted-foreground);
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-  }
-
-  .pf-workflow-stat strong {
-    color: var(--foreground);
-    font-size: 24px;
-    line-height: 1;
   }
 
   .pf-workflow-panel {
     min-width: 0;
     min-height: 0;
-    border: 1px solid var(--border);
-    border-radius: 8px;
     background: var(--background);
     display: flex;
     flex-direction: column;
     overflow: hidden;
   }
 
-  .pf-workflow-ongoing {
-    grid-column: 1 / 2;
+  .pf-workflow-list-panel {
+    flex: 1;
   }
 
-  .pf-workflow-panel-head {
-    min-height: 58px;
-    padding: 12px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
+  .pf-workflow-top-search {
+    min-width: min(360px, 42vw);
   }
 
-  .pf-workflow-panel-head h2 {
-    margin: 0;
-    font-size: 14px;
-    font-weight: 700;
-  }
-
-  .pf-workflow-panel-head p {
-    margin: 2px 0 0;
-    color: var(--muted-foreground);
-    font-size: 12px;
-  }
-
-  .pf-workflow-overview-search {
-    min-width: min(320px, 42vw);
-  }
-
-  .pf-workflow-run-grid,
-  .pf-workflow-table,
-  .pf-workflow-recent-list {
-    display: grid;
-    gap: 8px;
-    padding: 10px;
-    overflow: auto;
+  .pf-workflow-top-search .pf-connector-searchbox {
+    width: 100%;
   }
 
   .pf-workflow-table {
-    padding-top: 6px;
+    display: grid;
+    gap: 0;
+    padding: 0;
+    overflow: auto;
   }
 
-  .pf-workflow-run-card,
-  .pf-workflow-row,
-  .pf-workflow-recent-row {
+  .pf-workflow-row {
     all: unset;
     box-sizing: border-box;
     width: 100%;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    background: transparent;
     color: var(--foreground);
     cursor: pointer;
     min-width: 0;
   }
 
-  .pf-workflow-run-card,
-  .pf-workflow-recent-row {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 12px;
-  }
-
   .pf-workflow-row {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
+    grid-template-columns: auto minmax(180px, 0.85fr) minmax(260px, 1.4fr) auto auto auto;
     align-items: center;
     gap: 12px;
-    padding: 10px 12px;
+    padding: 12px;
   }
 
-  .pf-workflow-run-card:hover,
   .pf-workflow-row:hover,
-  .pf-workflow-recent-row:hover,
-  .pf-workflow-run-card:focus-visible,
-  .pf-workflow-row:focus-visible,
-  .pf-workflow-recent-row:focus-visible {
-    border-color: color-mix(in oklab, var(--puffer-accent) 28%, var(--border));
-    background: var(--pf-selected-bg-hover);
+  .pf-workflow-row:focus-visible {
+    background: color-mix(in oklab, var(--puffer-accent) 7%, transparent);
   }
 
-  .pf-workflow-run-main,
   .pf-workflow-row-main {
     display: grid;
     gap: 2px;
     min-width: 0;
   }
 
-  .pf-workflow-run-main strong,
   .pf-workflow-row-main strong {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -3154,62 +3206,117 @@
     font-size: 13px;
   }
 
-  .pf-workflow-run-main small,
-  .pf-workflow-row-main small,
-  .pf-workflow-row-meta {
+  .pf-workflow-row-main small {
     color: var(--muted-foreground);
     font-size: 11px;
     min-width: 0;
-  }
-
-  .pf-workflow-run-status,
-  .pf-workflow-row-state {
-    justify-self: end;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 2px 8px;
-    color: var(--muted-foreground);
-    background: var(--muted);
-    font-size: 11px;
-    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .pf-workflow-row-state[data-enabled="true"],
-  .pf-workflow-run-card[data-state="running"] .pf-workflow-run-status,
-  .pf-workflow-recent-row[data-state="running"] .pf-workflow-run-status {
-    color: var(--puffer-accent);
-    border-color: color-mix(in oklab, var(--puffer-accent) 28%, var(--border));
-    background: color-mix(in oklab, var(--puffer-accent) 9%, var(--card));
+  .pf-workflow-row-state {
+    justify-self: end;
+    color: var(--muted-foreground);
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
   }
 
-  .pf-workflow-run-card[data-state="failed"] .pf-workflow-run-status,
-  .pf-workflow-recent-row[data-state="failed"] .pf-workflow-run-status {
+  .pf-workflow-row-state[data-enabled="true"] {
+    color: var(--puffer-accent);
+  }
+
+  .pf-workflow-pipeline-preview {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow: hidden;
+  }
+
+  .pf-workflow-node-pill,
+  .pf-workflow-node-more {
+    min-width: 0;
+    max-width: 118px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    color: var(--foreground);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 0 1 auto;
+  }
+
+  .pf-workflow-node-pill[data-type="agent"] {
+    color: var(--provider-accent, var(--puffer-accent));
+  }
+
+  .pf-workflow-node-pill[data-type="trigger"] {
+    color: var(--muted-foreground);
+  }
+
+  .pf-workflow-node-arrow {
+    color: var(--muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    flex: 0 0 auto;
+    opacity: 0.65;
+  }
+
+  .pf-workflow-node-more {
+    color: var(--muted-foreground);
+    flex: 0 0 auto;
+  }
+
+  .pf-workflow-row-stats {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(56px, auto));
+    align-items: center;
+    justify-items: end;
+    gap: 8px;
+  }
+
+  .pf-workflow-stat-inline {
+    display: grid;
+    gap: 1px;
+    text-align: right;
+    line-height: 1.1;
+  }
+
+  .pf-workflow-stat-inline strong {
+    color: var(--foreground);
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .pf-workflow-stat-inline small {
+    color: var(--muted-foreground);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .pf-workflow-stat-inline[data-kind="success"] strong {
+    color: var(--pf-run-done);
+  }
+
+  .pf-workflow-stat-inline[data-kind="failure"] strong {
     color: var(--pf-run-failed);
-    border-color: color-mix(in oklab, var(--pf-run-failed) 28%, var(--border));
-    background: color-mix(in oklab, var(--pf-run-failed) 9%, var(--card));
   }
 
   .pf-workflow-empty {
     color: var(--muted-foreground);
     font-size: 12px;
     padding: 14px;
-  }
-
-  .pf-pipe-workflows {
-    padding-bottom: 16px;
-  }
-
-  .pf-workflow-search {
-    display: block;
-    padding: 0 10px 4px;
-  }
-
-  .pf-workflow-result-summary {
-    color: var(--muted-foreground);
-    font-size: 11px;
-    line-height: 1.3;
-    padding: 0 10px 4px;
   }
 
   .pf-provider-avatar {
@@ -3231,17 +3338,13 @@
   .pf-provider-avatar[data-provider="claude"] { --provider-accent: oklch(0.64 0.17 55); }
   .pf-provider-avatar[data-provider="puffer"] { --provider-accent: var(--puffer-accent); }
 
-  .pf-editor-header {
-    min-height: 52px;
-  }
-
   .pf-editor-graph-wrap {
     overflow-x: auto;
   }
 
   .pf-editor-node {
     text-align: left;
-    cursor: pointer;
+    cursor: grab;
   }
 
   .pf-editor-node[data-provider="codex"] {
@@ -3258,9 +3361,7 @@
 
   .pf-editor-node[data-state="active"] {
     border-color: var(--provider-accent, var(--puffer-accent));
-    box-shadow:
-      0 0 0 3px color-mix(in oklab, var(--provider-accent, var(--puffer-accent)) 20%, transparent),
-      0 12px 26px -16px color-mix(in oklab, var(--provider-accent, var(--puffer-accent)) 60%, transparent);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
   }
 
   .pf-editor-lower {
@@ -3352,33 +3453,40 @@
   .pf-provider-switcher {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 6px;
+    gap: 3px;
+    padding: 3px;
+    border: 1px solid color-mix(in oklab, var(--border) 78%, transparent);
+    border-radius: 8px;
+    background: color-mix(in oklab, var(--background) 84%, var(--muted));
   }
 
   .pf-provider-switcher button {
-    border: 1px solid var(--border);
-    background: var(--card);
+    border: 1px solid transparent;
+    background: transparent;
     color: var(--muted-foreground);
-    border-radius: 8px;
-    padding: 7px 8px;
+    border-radius: 6px;
+    padding: 6px 7px;
     cursor: pointer;
     font: inherit;
-    font-size: 11.5px;
+    font-size: 11px;
     font-weight: 600;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .pf-provider-switcher button[data-selected="true"] {
-    border-color: transparent;
+    border-color: color-mix(in oklab, var(--puffer-accent) 20%, var(--border));
     color: var(--foreground);
-    background: var(--pf-selected-bg);
+    background: var(--background);
     font-weight: 700;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
   }
 
   .pf-provider-switcher button:hover {
-    border-color: transparent;
     color: var(--foreground);
-    background: var(--pf-selected-bg-hover);
-    font-weight: 700;
+    background: color-mix(in oklab, var(--background) 72%, var(--muted));
   }
 
   .pf-wire-target {
@@ -3419,13 +3527,13 @@
   .pf-wire-provider {
     display: inline-flex;
     justify-content: center;
-    min-width: 48px;
+    min-width: 44px;
     border-radius: 999px;
-    border: 1px solid var(--border);
-    padding: 2px 7px;
+    border: 1px solid color-mix(in oklab, var(--border) 78%, transparent);
+    padding: 1px 6px;
     font-size: 10px;
     color: var(--muted-foreground);
-    background: var(--muted);
+    background: var(--background);
   }
 
   .pf-wire-provider[data-provider="codex"] { color: oklch(0.58 0.18 245); }
@@ -3997,20 +4105,31 @@
       grid-template-columns: minmax(0, 1fr);
     }
     .pf-editor-lower { grid-template-columns: 1fr; }
-    .pf-workflow-overview { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto auto; }
-    .pf-workflow-ongoing { grid-column: auto; }
+    .pf-workflow-row {
+      grid-template-columns: auto minmax(160px, 0.9fr) minmax(220px, 1.2fr) auto auto;
+    }
+    .pf-workflow-row-state { display: none; }
   }
 
   @media (max-width: 880px) {
     .pf-pipe-canvas-body { grid-template-columns: minmax(0, 1fr); }
-    .pf-pipe-workflows { display: none; }
     .pf-pipe-save-note { display: none; }
     .pf-editor-lower { padding: 8px; }
-    .pf-workflow-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .pf-workflow-panel-head { align-items: stretch; flex-direction: column; }
-    .pf-workflow-overview-search { min-width: 0; width: 100%; }
-    .pf-workflow-row { grid-template-columns: auto minmax(0, 1fr) auto; }
-    .pf-workflow-row-meta,
-    .pf-workflow-row-state { display: none; }
+    .pf-workflow-top-search { min-width: 0; width: min(320px, 48vw); }
+    .pf-workflow-overview { padding: 0; }
+    .pf-workflow-row {
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: start;
+    }
+    .pf-workflow-pipeline-preview {
+      grid-column: 2 / -1;
+      flex-wrap: wrap;
+      overflow: visible;
+    }
+    .pf-workflow-row-stats {
+      grid-column: 2 / -1;
+      justify-content: start;
+      justify-items: start;
+    }
   }
 </style>

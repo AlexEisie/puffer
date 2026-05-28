@@ -19,6 +19,7 @@
   import WorkspacePicker from "./lib/screens/WorkspacePicker.svelte";
   import AgentDetail from "./lib/screens/agent/AgentDetail.svelte";
   import Workflows from "./lib/screens/Workflows.svelte";
+  import Tasks from "./lib/screens/Tasks.svelte";
   import Settings from "./lib/screens/Settings.svelte";
   import Onboarding from "./lib/screens/Onboarding.svelte";
 
@@ -3668,6 +3669,8 @@
             {/if}
           {:else if tweaks.screen === "workflows"}
             <Workflows onRunWorkflowCommand={runWorkflowCommand} />
+          {:else if tweaks.screen === "tasks"}
+            <Tasks onRunTaskCommand={runWorkflowCommand} />
           {:else if tweaks.screen === "settings"}
             <Settings
               snapshot={settingsSnapshot}

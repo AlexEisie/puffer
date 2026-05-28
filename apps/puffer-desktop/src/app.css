@@ -280,8 +280,10 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
   width: var(--pf-sidebar-width, 248px); flex-shrink: 0;
   min-width: 220px;
   max-width: 420px;
-  background: color-mix(in oklab, var(--background) 80%, var(--muted));
-  border-right: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, color-mix(in oklab, var(--background) 94%, var(--puffer-accent) 6%), var(--background) 118px),
+    var(--background);
+  border-right: 1px solid color-mix(in oklab, var(--border) 82%, transparent);
   display: flex; flex-direction: column;
   font-size: 13px;
   position: relative;
@@ -314,79 +316,115 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
 .pf-sidebar[data-resizing="true"] .pf-sidebar-resizer::after {
   background: var(--puffer-accent);
 }
-.pf-sidebar-section { padding: 8px 8px 4px; }
+.pf-sidebar-section { padding: 8px 10px 4px; }
 .pf-sidebar-section:first-child {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
 }
 .pf-sidebar-brand {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 4px 2px 10px;
+  gap: 9px;
+  padding: 6px 3px 12px;
+}
+.pf-sidebar-brand-copy {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 0;
+  line-height: 1.05;
+}
+.pf-sidebar-brand-copy strong {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 750;
+  letter-spacing: 0;
+}
+.pf-sidebar-brand-copy span {
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 .pf-sidebar-collapse {
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid transparent;
+  border: 1px solid color-mix(in oklab, var(--border) 82%, transparent);
   border-radius: 6px;
-  background: transparent;
+  background: color-mix(in oklab, var(--background) 86%, var(--muted));
   color: var(--muted-foreground);
   cursor: pointer;
-  transition: background 120ms, color 120ms, border-color 120ms;
+  transition: background 120ms, color 120ms, border-color 120ms, box-shadow 120ms;
   flex-shrink: 0;
 }
 .pf-sidebar-collapse:hover {
-  background: var(--pf-selected-bg-hover);
-  border-color: transparent;
+  background: var(--background);
+  border-color: color-mix(in oklab, var(--puffer-accent) 24%, var(--border));
   color: var(--foreground);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
 }
-.pf-sidebar-section + .pf-sidebar-section { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 8px; }
+.pf-sidebar-section + .pf-sidebar-section {
+  border-top: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+  margin-top: 6px;
+  padding-top: 10px;
+}
 .pf-sidebar-label {
-  font-size: 10.5px; text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted-foreground); font-weight: 600;
-  padding: 6px 10px 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: color-mix(in oklab, var(--muted-foreground) 88%, var(--foreground));
+  font-weight: 750;
+  padding: 4px 6px 8px;
   display: flex; align-items: center; justify-content: space-between;
 }
 .pf-sidebar-label .count {
-  font-family: var(--font-mono); font-weight: 500; font-size: 10px;
-  padding: 1px 6px; border-radius: 999px;
-  background: var(--muted); color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-weight: 650;
+  font-size: 10px;
+  min-width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--muted) 82%, var(--background));
+  color: var(--muted-foreground);
 }
 .pf-sidebar-item {
   display: flex; align-items: center; gap: 10px;
-  padding: 6px 10px;
-  border-radius: 6px;
+  padding: 7px 9px;
+  border-radius: 7px;
   color: var(--muted-foreground);
   cursor: pointer;
-  transition: color 120ms, border-color 120ms, box-shadow 120ms;
-  min-height: 30px; white-space: nowrap; overflow: hidden;
+  transition: color 120ms, border-color 120ms, box-shadow 120ms, background 120ms;
+  min-height: 34px; white-space: nowrap; overflow: hidden;
   background: transparent; border: 1px solid transparent; width: 100%;
   text-align: left; font-size: inherit;
+  position: relative;
 }
-.pf-sidebar-item > span:not(.pf-meta):not(.pf-task-status) {
+.pf-sidebar-item > span:not(.pf-meta):not(.pf-task-status):not(.pf-sidebar-avatar) {
   overflow: hidden; text-overflow: ellipsis;
 }
 .pf-sidebar-item:hover {
-  background: var(--pf-selected-bg-hover);
-  border-color: transparent;
+  background: color-mix(in oklab, var(--background) 78%, var(--muted));
+  border-color: color-mix(in oklab, var(--border) 70%, transparent);
   color: var(--foreground);
-  font-weight: 700;
 }
 .pf-sidebar-item[data-active="true"] {
-  background: var(--pf-selected-bg);
-  border-color: transparent;
+  background: color-mix(in oklab, var(--puffer-accent) 12%, var(--background));
+  border-color: color-mix(in oklab, var(--puffer-accent) 22%, var(--border));
   color: var(--foreground);
   font-weight: 700;
+  box-shadow: inset 2px 0 0 var(--puffer-accent);
 }
 .pf-sidebar-item[data-active="true"] svg {
-  color: var(--foreground);
+  color: var(--puffer-accent);
 }
 .pf-sidebar-item .pf-row-stack {
   display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0;
@@ -399,28 +437,50 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
 }
 .pf-sidebar-user {
   margin: 0;
+  min-height: 44px;
+  background: color-mix(in oklab, var(--background) 84%, var(--muted));
+  border-color: color-mix(in oklab, var(--border) 82%, transparent);
 }
 .pf-sidebar-user svg {
   margin-left: auto;
   flex-shrink: 0;
 }
+.pf-sidebar-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: color-mix(in oklab, var(--puffer-accent) 15%, var(--background));
+  border: 1px solid color-mix(in oklab, var(--puffer-accent) 20%, transparent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 750;
+  color: var(--puffer-accent);
+  flex-shrink: 0;
+}
+.pf-sidebar-account {
+  padding-bottom: 10px;
+}
 
 .pf-sidebar-agents { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .pf-sidebar-filters {
   display: grid; grid-template-columns: 1fr; gap: 4px;
-  padding: 2px 8px 6px; flex-shrink: 0;
+  padding: 0 0 8px; flex-shrink: 0;
 }
 .pf-sidebar-filters select {
-  font-size: 10.5px; font-family: var(--font-mono);
-  padding: 3px 6px;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: var(--background);
+  font-size: 11px;
+  font-family: var(--font-sans);
+  font-weight: 600;
+  padding: 5px 8px;
+  border-radius: 7px;
+  border: 1px solid color-mix(in oklab, var(--border) 82%, transparent);
+  background: color-mix(in oklab, var(--background) 88%, var(--muted));
   color: var(--muted-foreground);
   appearance: none;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'><path d='M1 3l3 3 3-3' fill='none' stroke='%23888' stroke-width='1.2' stroke-linecap='round' stroke-linejoin='round'/></svg>");
   background-repeat: no-repeat; background-position: right 6px center;
-  padding-right: 18px; cursor: pointer;
+  padding-right: 22px; cursor: pointer;
   min-width: 0; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;
 }
 .pf-sidebar-filters select:hover { color: var(--foreground); }
@@ -429,11 +489,11 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
 .pf-sidebar-project-group {
   display: flex;
   flex-direction: column;
-  margin: 2px 4px;
+  margin: 2px 0;
 }
 .pf-sidebar-project-header {
   display: flex; align-items: center; gap: 6px;
-  padding: 5px 8px;
+  padding: 6px 8px;
   border-radius: 6px;
   background: transparent;
   border: 0;
@@ -458,15 +518,17 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
 .pf-sidebar-project-children {
   display: flex;
   flex-direction: column;
-  padding-left: 14px;
+  padding-left: 10px;
+  margin-left: 6px;
+  border-left: 1px solid color-mix(in oklab, var(--border) 72%, transparent);
 }
 
 .pf-sidebar-agent-row {
   display: flex; align-items: stretch;
-  border-radius: 6px;
+  border-radius: 7px;
   overflow: hidden;
   border: 1px solid transparent;
-  transition: border-color 120ms, box-shadow 120ms;
+  transition: border-color 120ms, box-shadow 120ms, background 120ms;
 }
 .pf-sidebar-agent {
   display: flex; align-items: center; gap: 8px;
@@ -486,13 +548,12 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
   display: flex; align-items: baseline; gap: 8px; min-width: 0;
 }
 .pf-sidebar-agent-row:hover {
-  background: var(--pf-selected-bg-hover);
-  border-color: transparent;
-  font-weight: 700;
+  background: color-mix(in oklab, var(--background) 78%, var(--muted));
+  border-color: color-mix(in oklab, var(--border) 68%, transparent);
 }
 .pf-sidebar-agent-row[data-active="true"] {
-  background: var(--pf-selected-bg);
-  border-color: transparent;
+  background: color-mix(in oklab, var(--puffer-accent) 10%, var(--background));
+  border-color: color-mix(in oklab, var(--puffer-accent) 22%, var(--border));
   font-weight: 700;
 }
 .pf-sidebar-agent-row .pf-pin-button {
@@ -548,7 +609,10 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
   gap: 6px;
   padding-bottom: 8px;
 }
-.pf-sidebar[data-collapsed="true"] .pf-sidebar-item > span:not(.pf-meta):not(.pf-task-status) {
+.pf-sidebar[data-collapsed="true"] .pf-sidebar-brand-copy {
+  display: none;
+}
+.pf-sidebar[data-collapsed="true"] .pf-sidebar-item > span:not(.pf-meta):not(.pf-task-status):not(.pf-sidebar-avatar) {
   display: none;
 }
 .pf-sidebar[data-collapsed="true"] .pf-sidebar-item .pf-row-stack {
@@ -557,6 +621,7 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
 .pf-sidebar[data-collapsed="true"] .pf-sidebar-item {
   justify-content: center;
   padding: 8px;
+  box-shadow: none;
 }
 .pf-sidebar[data-collapsed="true"] .pf-sidebar-label,
 .pf-sidebar[data-collapsed="true"] .pf-sidebar-filters,
@@ -564,10 +629,14 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
   display: none;
 }
 .pf-sidebar-empty {
-  padding: 16px 14px;
+  margin-top: 8px;
+  padding: 18px 10px;
   font-size: 11.5px;
   color: var(--muted-foreground);
   text-align: center;
+  border: 1px dashed color-mix(in oklab, var(--border) 78%, transparent);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--background) 86%, var(--muted));
 }
 
 /* ==========================================================================
@@ -577,7 +646,7 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
 @media (max-width: 960px) {
   .pf-sidebar { width: 56px; }
   .pf-sidebar-brand { padding-bottom: 8px; }
-  .pf-sidebar-item > span:not(.pf-meta):not(.pf-task-status) { display: none; }
+  .pf-sidebar-item > span:not(.pf-meta):not(.pf-task-status):not(.pf-sidebar-avatar) { display: none; }
   .pf-sidebar-item .pf-row-stack { display: none; }
   .pf-sidebar-item { justify-content: center; padding: 8px; }
   .pf-sidebar-label,

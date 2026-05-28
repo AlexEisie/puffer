@@ -258,6 +258,7 @@ mod tests {
             connector_slug: Some("telegram-login".into()),
             status: WorkflowBindingStatus::Enabled,
             filter: None,
+            ignore_filters: Vec::new(),
             classify_prompt: None,
             classify_model: None,
             action: ActionSpec::RunWorkflow {

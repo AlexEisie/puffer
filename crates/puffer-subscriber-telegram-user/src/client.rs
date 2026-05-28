@@ -8,6 +8,8 @@ use anyhow::Context as _;
 use grammers_client::{session::Session, Client, Config, Update};
 use puffer_subscriber_runtime::SubscriberCommand;
 use serde_json::json;
+use std::time::Duration;
+use tokio::time::MissedTickBehavior;
 use tracing::{error, info, warn};
 
 use crate::actions::handle_telegram_act;
@@ -23,6 +25,8 @@ use crate::qr_login;
 use crate::state::{
     default_init_params, resolve_api_credentials, LoginState, PersistedCredentials, SkillEnv,
 };
+
+const TELEGRAM_CATCH_UP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Runs the Telegram user subscriber until stdin closes or a fatal error
 /// occurs. The caller is expected to already be inside a Tokio runtime
@@ -404,6 +408,9 @@ async fn run_update_loop(
 ) -> anyhow::Result<()> {
     emit_control(&env.topic, "ready", json!({}))?;
     catch_up_recent_messages(env, client, delivery_cursor, notification_mutes).await?;
+    let mut catch_up_interval = tokio::time::interval(TELEGRAM_CATCH_UP_INTERVAL);
+    catch_up_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    catch_up_interval.tick().await;
     info!("entering telegram update loop");
 
     loop {
@@ -415,6 +422,16 @@ async fn run_update_loop(
                     return Ok(());
                 };
                 handle_runtime_command(env, client, login_state, qr_state, cmd).await?;
+            }
+            _ = catch_up_interval.tick() => {
+                if let Err(err) = catch_up_recent_messages(
+                    env,
+                    client,
+                    delivery_cursor,
+                    notification_mutes,
+                ).await {
+                    warn!(error = %err, "telegram history catch-up failed");
+                }
             }
             update = client.next_update() => {
                 match update {

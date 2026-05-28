@@ -33,6 +33,11 @@ pub fn install_workflow_runner(runner: Arc<dyn WorkflowActionRunner>) -> Result<
         .map_err(|_| anyhow::anyhow!("workflow runner already installed"))
 }
 
+/// Returns the process-wide workflow action runner, if one is installed.
+pub fn installed_workflow_runner() -> Option<Arc<dyn WorkflowActionRunner>> {
+    global_workflow_runner()
+}
+
 /// Installs the process-wide connector action executor. Returns `Err(_)`
 /// if a different executor has already been installed.
 pub fn install_connector_action_executor(executor: Arc<dyn ConnectorActionExecutor>) -> Result<()> {
@@ -101,6 +106,17 @@ pub trait WorkflowActionRunner: Send + Sync {
     ) -> Result<String> {
         let _ = (prompt, model, trigger);
         anyhow::bail!("workflow agent triage is not installed in this runtime")
+    }
+
+    /// Sends an ignored monitor task to a read-only agent for analysis.
+    fn ignore_analysis_agent(
+        &self,
+        prompt: &str,
+        model: Option<&str>,
+        trigger: serde_json::Value,
+    ) -> Result<String> {
+        let _ = (prompt, model, trigger);
+        anyhow::bail!("workflow ignore analysis is not installed in this runtime")
     }
 }
 

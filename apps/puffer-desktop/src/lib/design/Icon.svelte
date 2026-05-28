@@ -45,6 +45,7 @@
     | "server"
     | "link"
     | "logs"
+    | "listTodo"
     | "external"
     | "copy"
     | "coin"
@@ -87,6 +88,7 @@
   import LinkIcon from "lucide-svelte/icons/link";
   import LockIcon from "lucide-svelte/icons/lock";
   import LogsIcon from "lucide-svelte/icons/logs";
+  import ListTodoIcon from "lucide-svelte/icons/list-todo";
   import MoreHorizontalIcon from "lucide-svelte/icons/more-horizontal";
   import PanelLeftCloseIcon from "lucide-svelte/icons/panel-left-close";
   import PanelLeftOpenIcon from "lucide-svelte/icons/panel-left-open";
@@ -162,6 +164,7 @@
     server: ServerIcon,
     link: LinkIcon,
     logs: LogsIcon,
+    listTodo: ListTodoIcon,
     external: ExternalLinkIcon,
     copy: CopyIcon,
     coin: CoinsIcon,

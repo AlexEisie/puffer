@@ -74,6 +74,7 @@
   const screens: { id: ScreenId; label: string; icon: IconName }[] = [
     { id: "workspace", label: "Project", icon: "sparkles" },
     { id: "workflows", label: "Workflows", icon: "git" },
+    { id: "tasks", label: "Tasks", icon: "listTodo" },
     { id: "settings", label: "Settings", icon: "settings" }
   ];
 
@@ -219,9 +220,13 @@
 </script>
 
 <aside class="pf-sidebar" data-collapsed={collapsed} data-resizing={resizing} style={sidebarStyle}>
-  <div class="pf-sidebar-section">
+  <div class="pf-sidebar-section pf-sidebar-nav">
     <div class="pf-sidebar-brand">
       <BrandLogo size={24} />
+      <div class="pf-sidebar-brand-copy" aria-hidden={collapsed}>
+        <strong>Puffer</strong>
+        <span>Code</span>
+      </div>
       <button
         type="button"
         class="pf-sidebar-collapse"
@@ -318,7 +323,7 @@
   </div>
 
   {#if user}
-    <div class="pf-sidebar-section" style="border-top: 1px solid var(--border);">
+    <div class="pf-sidebar-section pf-sidebar-account">
       <button
         type="button"
         class="pf-sidebar-item pf-sidebar-user"
@@ -326,9 +331,7 @@
         title={`Open account for ${user.name}`}
         onclick={() => onSelectScreen("settings")}
       >
-        <span
-          style="width: 24px; height: 24px; border-radius: 6px; background: color-mix(in oklab, var(--puffer-accent) 18%, var(--background)); display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: var(--puffer-accent); flex-shrink: 0;"
-        >{user.initials}</span>
+        <span class="pf-sidebar-avatar">{user.initials}</span>
         <div class="pf-row-stack">
           <span class="title" style="font-weight: 500;">{user.name}</span>
           <span class="pf-task-status">{user.meta}</span>

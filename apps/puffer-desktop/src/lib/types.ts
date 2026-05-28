@@ -439,6 +439,37 @@ export type WorkflowMonitorTask = {
   updated_at_ms?: number | null;
 };
 
+export type WorkflowTaskSource = "agent" | "monitor";
+
+export type WorkflowTask = {
+  task_id: string;
+  subject: string;
+  description: string;
+  active_form?: string;
+  status: string;
+  source: WorkflowTaskSource;
+  task_scope?: string | null;
+  task_scope_label?: string | null;
+  task_type?: string | null;
+  owner?: string | null;
+  blocks?: string[];
+  blocked_by?: string[];
+  command?: string | null;
+  process_id?: number | null;
+  output_file?: string | null;
+  received_at?: string | null;
+  expires_at?: string | null;
+  started_at_ms?: number | null;
+  updated_at_ms?: number | null;
+  exit_code?: number | null;
+  ignored?: boolean;
+  monitor_connection?: string | null;
+  monitor_connector?: string | null;
+  monitor_memory_path?: string | null;
+  actions?: WorkflowMonitorTaskAction[];
+  possible_ignore_reasons?: string[];
+};
+
 export type WorkflowBinding = {
   slug: string;
   description: string;
@@ -473,8 +504,19 @@ export type WorkflowSnapshot = {
   connector_error?: string | null;
   workflow_bindings?: WorkflowBinding[];
   workflow_binding_error?: string | null;
+  tasks?: WorkflowTask[];
+  task_error?: string | null;
   monitor_tasks?: WorkflowMonitorTask[];
   monitor_task_error?: string | null;
+  monitor_memories?: WorkflowMonitorMemory[];
+  monitor_memory_error?: string | null;
+};
+
+export type WorkflowMonitorMemory = {
+  connection_slug: string;
+  path: string;
+  content: string;
+  truncated?: boolean;
 };
 
 export type ExternalCredential = {

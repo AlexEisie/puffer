@@ -232,6 +232,7 @@ fn workflow_binding(
         connector_slug: connector_slug.map(ToString::to_string),
         status,
         filter: None,
+        ignore_filters: Vec::new(),
         classify_prompt: None,
         classify_model: None,
         action: ActionSpec::RunWorkflow {

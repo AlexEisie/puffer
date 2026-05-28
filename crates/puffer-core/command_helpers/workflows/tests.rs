@@ -259,6 +259,7 @@ mod tests {
                 pattern: "hi".to_string(),
                 case_insensitive: true,
             })),
+            ignore_filters: Vec::new(),
             classify_prompt: None,
             classify_model: None,
             action: serde_json::from_value(json!({

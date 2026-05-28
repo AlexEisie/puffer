@@ -280,7 +280,9 @@ fn merge_outputs(deps: &[String], outputs: &BTreeMap<String, String>) -> String 
     let values: Vec<Value> = deps
         .iter()
         .map(|id| match outputs.get(id) {
-            Some(text) => serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.clone())),
+            Some(text) => {
+                serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.clone()))
+            }
             None => Value::Null,
         })
         .collect();
@@ -560,7 +562,9 @@ mod tests {
     fn fanout_passthrough_rejects_zero_deps() {
         let outputs = BTreeMap::new();
         let err = fanout_passthrough(&[], &outputs).unwrap_err();
-        assert!(err.to_string().contains("fanout node must have one dependency"));
+        assert!(err
+            .to_string()
+            .contains("fanout node must have one dependency"));
     }
 
     #[cfg(unix)]
@@ -577,7 +581,10 @@ mod tests {
         let env = BTreeMap::new();
         let err = run_bash("echo nope >&2; exit 7", &env).unwrap_err();
         let text = format!("{err:#}");
-        assert!(text.contains("status"), "expected exit status in error: {text}");
+        assert!(
+            text.contains("status"),
+            "expected exit status in error: {text}"
+        );
         assert!(text.contains("nope"), "expected stderr in error: {text}");
     }
 
@@ -588,9 +595,7 @@ mod tests {
         node.node_type = Some("tool".into());
         node.tools = vec!["Read".into()];
         let err = run_deterministic(NodeKind::Tool, &node, "{}", &BTreeMap::new()).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("tool `Read` is not yet supported"));
+        assert!(err.to_string().contains("tool `Read` is not yet supported"));
     }
 
     #[cfg(unix)]

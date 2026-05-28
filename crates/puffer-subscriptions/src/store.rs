@@ -169,6 +169,7 @@ mod tests {
                 pattern: r"hello".into(),
                 case_insensitive: true,
             })),
+            ignore_filters: Vec::new(),
             classify_prompt: None,
             classify_model: None,
             action: ActionSpec::SqliteInsert {

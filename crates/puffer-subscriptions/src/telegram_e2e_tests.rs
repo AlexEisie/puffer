@@ -150,6 +150,7 @@ fn telegram_workflow() -> WorkflowBindingSpec {
             pattern: "deploy".into(),
             case_insensitive: true,
         })),
+        ignore_filters: Vec::new(),
         classify_prompt: None,
         classify_model: None,
         action: ActionSpec::Graph {

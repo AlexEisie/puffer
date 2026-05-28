@@ -239,6 +239,9 @@ pub fn process_envelope_result(
         if monitor_binding_should_skip_event(&spec, &envelope.event.payload) {
             continue;
         }
+        if ignore_filter_matches(&spec, &envelope.event.text, &envelope.event.payload) {
+            continue;
+        }
         if !filter_matches(
             spec.filter.as_ref(),
             &envelope.event.text,
@@ -307,6 +310,12 @@ fn monitor_binding_should_skip_event(spec: &WorkflowBindingSpec, payload: &Value
     payload_bool(payload, "notification_muted") || payload_bool(payload, "notification_silent")
 }
 
+fn ignore_filter_matches(spec: &WorkflowBindingSpec, text: &str, payload: &Value) -> bool {
+    spec.ignore_filters
+        .iter()
+        .any(|filter| filter_matches(Some(filter), text, payload))
+}
+
 fn is_monitor_binding(spec: &WorkflowBindingSpec) -> bool {
     spec.slug.starts_with("monitor-")
         || (matches!(spec.action, ActionSpec::TriageAgent { .. })
@@ -363,6 +372,7 @@ mod tests {
                 connector_slug: None,
                 status: WorkflowBindingStatus::Enabled,
                 filter: None,
+                ignore_filters: Vec::new(),
                 classify_prompt: None,
                 classify_model: None,
                 action: ActionSpec::RunWorkflow {
@@ -426,6 +436,7 @@ mod tests {
                 connector_slug: None,
                 status: WorkflowBindingStatus::Enabled,
                 filter: None,
+                ignore_filters: Vec::new(),
                 classify_prompt: None,
                 classify_model: None,
                 action: ActionSpec::ForwardMessage {
@@ -472,6 +483,7 @@ mod tests {
                 connector_slug: Some("telegram-login".into()),
                 status: WorkflowBindingStatus::Enabled,
                 filter: None,
+                ignore_filters: Vec::new(),
                 classify_prompt: None,
                 classify_model: None,
                 action: ActionSpec::TriageAgent {
@@ -520,6 +532,7 @@ mod tests {
                 connector_slug: Some("telegram-login".into()),
                 status: WorkflowBindingStatus::Enabled,
                 filter: None,
+                ignore_filters: Vec::new(),
                 classify_prompt: None,
                 classify_model: None,
                 action: ActionSpec::FileAppend {
@@ -557,6 +570,68 @@ mod tests {
         assert_eq!(result.failed, 0);
     }
 
+    #[test]
+    fn ignore_filters_suppress_matching_events_before_action() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store
+            .create(WorkflowBindingSpec {
+                slug: "monitor-telegram-user".into(),
+                description: "Monitor telegram-user for actionable tasks".into(),
+                connection_slug: "telegram-user".into(),
+                connector_slug: Some("telegram-login".into()),
+                status: WorkflowBindingStatus::Enabled,
+                filter: None,
+                ignore_filters: vec![FilterSpec::Json(serde_json::json!({
+                    "chat_id": 2041550535_i64,
+                    "sender_username": "FuzzlandInternalBot"
+                }))],
+                classify_prompt: None,
+                classify_model: None,
+                action: ActionSpec::TriageAgent {
+                    prompt: "triage".into(),
+                    model: None,
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(BuiltinActionDispatcher::new());
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
+        let mut envelope = EventEnvelope {
+            envelope_id: "env-ignored".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: None,
+                text: "alert".into(),
+                payload: serde_json::json!({
+                    "chat_id": 2041550535_i64,
+                    "sender_username": "FuzzlandInternalBot",
+                    "message": "alert"
+                }),
+            },
+        };
+
+        let ignored =
+            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None);
+        assert!(!ignored.matched);
+        assert_eq!(ignored.acted, 0);
+
+        envelope.envelope_id = "env-other-sender".into();
+        envelope.event.payload = serde_json::json!({
+            "chat_id": 2041550535_i64,
+            "sender_username": "Alice",
+            "message": "alert"
+        });
+        let passed =
+            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None);
+        assert!(passed.matched);
+        assert_eq!(passed.failed, 1);
+    }
+
     #[tokio::test]
     async fn router_receives_event_published_immediately_after_spawn() {
         let dir = tempdir().unwrap();
@@ -569,6 +644,7 @@ mod tests {
                 connector_slug: None,
                 status: WorkflowBindingStatus::Enabled,
                 filter: None,
+                ignore_filters: Vec::new(),
                 classify_prompt: None,
                 classify_model: None,
                 action: ActionSpec::FileAppend {
@@ -639,6 +715,7 @@ mod tests {
                 connector_slug: Some("email".into()),
                 status: WorkflowBindingStatus::Enabled,
                 filter: None,
+                ignore_filters: Vec::new(),
                 classify_prompt: None,
                 classify_model: None,
                 action: ActionSpec::ForwardMessage {

@@ -48,9 +48,7 @@ const DEFAULT_EMAIL_CONNECTION_SLUG: &str = "email";
 /// Dispatches a `puffer connect …` invocation to the matching handler.
 pub(crate) fn run_connect_command(paths: &ConfigPaths, command: ConnectCommand) -> Result<()> {
     match command {
-        ConnectCommand::Telegram { connection_slug } => {
-            run_telegram_repl(paths, &connection_slug)
-        }
+        ConnectCommand::Telegram { connection_slug } => run_telegram_repl(paths, &connection_slug),
         ConnectCommand::Email { command } => run_email_command(paths, command),
     }
 }
@@ -145,9 +143,7 @@ async fn telegram_repl_loop(env: SkillEnv, paths: ConfigPaths) -> Result<()> {
                     Ok(CodeSubmitOutcome::AwaitingPassword)
                     | Ok(CodeSubmitOutcome::Failed)
                     | Ok(CodeSubmitOutcome::RetryableTransportError { .. }) => {}
-                    Err(err) => {
-                        emit_local_error(&env.topic, &format!("submit_code error: {err}"))?
-                    }
+                    Err(err) => emit_local_error(&env.topic, &format!("submit_code error: {err}"))?,
                 }
             }
             TelegramAction::SubmitPassword { password } => {
@@ -289,12 +285,10 @@ fn register_connection(
 ) -> Result<()> {
     let path = connections_store_path(paths);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!("create connections store parent {}", parent.display())
-        })?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create connections store parent {}", parent.display()))?;
     }
-    let store =
-        ConnectionStore::load(&path).with_context(|| format!("load {}", path.display()))?;
+    let store = ConnectionStore::load(&path).with_context(|| format!("load {}", path.display()))?;
     if let Some(existing) = store.get(slug) {
         if existing.connector_slug == connector_slug {
             return Ok(());

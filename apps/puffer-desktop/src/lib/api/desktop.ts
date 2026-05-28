@@ -1108,6 +1108,30 @@ export async function createWorkflowBinding(binding: WorkflowBindingCreateReques
   return client.request<WorkflowSnapshot>("workflow_binding_create", binding);
 }
 
+/** Create or resume a connector monitor and return the refreshed workflow snapshot. */
+export async function createMonitor(connectionSlug: string): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("task_monitor_create", { connection_slug: connectionSlug });
+}
+
+/** Ignore one monitor-created task and return the refreshed workflow snapshot. */
+export async function ignoreMonitorTask(taskId: string, reason?: string): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("task_monitor_ignore", {
+    task_id: taskId,
+    reason: reason?.trim() || undefined
+  });
+}
+
+/** Save one monitor memory file and return the refreshed workflow snapshot. */
+export async function saveMonitorMemory(connectionSlug: string, content: string): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("task_monitor_memory_save", {
+    connection_slug: connectionSlug,
+    content
+  });
+}
+
 /** Delete one connection-triggered workflow binding. */
 export async function deleteWorkflowBinding(slug: string): Promise<WorkflowSnapshot> {
   const client = await ensureLocalDaemonClient();

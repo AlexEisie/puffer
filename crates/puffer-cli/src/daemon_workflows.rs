@@ -2,10 +2,17 @@
 
 mod binding_delete;
 mod connection_delete;
+mod monitor_create;
+mod monitor_memory;
+mod monitor_task_ignore;
 mod planned;
+mod task_snapshot;
 
 pub(crate) use binding_delete::handle_workflow_binding_delete;
 pub(crate) use connection_delete::handle_workflow_connection_delete;
+pub(crate) use monitor_create::handle_monitor_create;
+pub(crate) use monitor_memory::handle_monitor_memory_save;
+pub(crate) use monitor_task_ignore::handle_monitor_task_ignore;
 
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
@@ -25,9 +32,23 @@ use std::fs;
 pub(crate) fn handle_workflow_list(paths: &ConfigPaths) -> Result<Value> {
     let store = WorkflowStore::new(&paths.workspace_config_dir);
     let mut snapshot = serde_json::to_value(store.snapshot()?)?;
+    let ignore_filter_sync_error =
+        monitor_task_ignore::sync_monitor_ignore_filters_from_tasks(paths)
+            .err()
+            .map(|error| error.to_string());
     add_connector_context(paths, &mut snapshot);
     add_workflow_binding_context(paths, &mut snapshot);
     add_monitor_task_context(paths, &mut snapshot);
+    monitor_memory::add_monitor_memory_context(paths, &mut snapshot);
+    task_snapshot::add_task_context(paths, &mut snapshot);
+    if let Some(object) = snapshot.as_object_mut() {
+        object.insert(
+            "monitor_ignore_filter_error".to_string(),
+            ignore_filter_sync_error
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+    }
     Ok(snapshot)
 }
 
@@ -44,6 +65,8 @@ pub(crate) fn handle_workflow_save(paths: &ConfigPaths, params: &Value) -> Resul
     add_connector_context(paths, &mut snapshot);
     add_workflow_binding_context(paths, &mut snapshot);
     add_monitor_task_context(paths, &mut snapshot);
+    monitor_memory::add_monitor_memory_context(paths, &mut snapshot);
+    task_snapshot::add_task_context(paths, &mut snapshot);
     Ok(snapshot)
 }
 
@@ -463,6 +486,7 @@ fn file_append_binding_from_params(
                 case_insensitive: true,
             })
         }),
+        ignore_filters: Vec::new(),
         classify_prompt: None,
         classify_model: None,
         action,
@@ -809,6 +833,7 @@ mod tests {
             connector_slug: Some("telegram-login".to_string()),
             status: WorkflowBindingStatus::Paused,
             filter: None,
+            ignore_filters: Vec::new(),
             classify_prompt: None,
             classify_model: None,
             action: ActionSpec::TriageAgent {

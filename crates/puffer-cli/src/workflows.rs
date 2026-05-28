@@ -209,6 +209,7 @@ fn sync_subscription_trigger(paths: &ConfigPaths, definition: &WorkflowDefinitio
             SubscriptionStatus::Paused
         },
         filter,
+        ignore_filters: Vec::new(),
         classify_prompt,
         classify_model: None,
         action: ActionSpec::RunWorkflow {

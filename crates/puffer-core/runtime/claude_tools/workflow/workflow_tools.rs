@@ -42,7 +42,6 @@ struct WorkflowCreateInput {
     filter: Option<Value>,
     #[serde(default)]
     pattern: Option<String>,
-    #[serde(default)]
     classify_prompt: Option<String>,
     #[serde(default)]
     classify_model: Option<String>,
@@ -151,6 +150,7 @@ pub fn execute_workflow_create(_state: &mut AppState, cwd: &Path, input: Value) 
         connector_slug: Some(connector_slug),
         status: workflow_status(parsed.enabled.unwrap_or(true)),
         filter,
+        ignore_filters: Vec::new(),
         classify_prompt: parsed.classify_prompt,
         classify_model: parsed.classify_model,
         action,

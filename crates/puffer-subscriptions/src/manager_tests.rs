@@ -150,6 +150,7 @@ fn auth_refresh_does_not_degrade_connections_without_checker() {
             connector_slug: Some("email".into()),
             status: WorkflowBindingStatus::Enabled,
             filter: None,
+            ignore_filters: Vec::new(),
             classify_prompt: None,
             classify_model: None,
             action: ActionSpec::RunWorkflow {

@@ -89,6 +89,7 @@ mod tests {
             connector_slug: None,
             status: SubscriptionStatus::Enabled,
             filter: None,
+            ignore_filters: Vec::new(),
             classify_prompt: Some(prompt.into()),
             classify_model: Some("anthropic/claude-haiku-4-5".into()),
             action: ActionSpec::SqliteInsert {

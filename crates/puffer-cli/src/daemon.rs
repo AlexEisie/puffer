@@ -889,6 +889,15 @@ async fn dispatch_request(
         "workflow_binding_create" => respond!(
             crate::daemon_workflows::handle_workflow_binding_create(&state.paths, &params)
         ),
+        "monitor_create" | "task_monitor_create" => respond!(
+            crate::daemon_workflows::handle_monitor_create(&state.paths, &params)
+        ),
+        "monitor_task_ignore" | "task_monitor_ignore" => respond!(
+            crate::daemon_workflows::handle_monitor_task_ignore(&state.paths, &params)
+        ),
+        "monitor_memory_save" | "task_monitor_memory_save" => respond!(
+            crate::daemon_workflows::handle_monitor_memory_save(&state.paths, &params)
+        ),
         "workflow_binding_delete" => respond!(
             crate::daemon_workflows::handle_workflow_binding_delete(&state.paths, &params)
         ),

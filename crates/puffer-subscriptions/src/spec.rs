@@ -43,6 +43,10 @@ pub struct WorkflowBindingSpec {
     /// Optional Puffer-side filter. Legacy JSON may call this `prefilter`.
     #[serde(default, alias = "prefilter", skip_serializing_if = "Option::is_none")]
     pub filter: Option<FilterSpec>,
+    /// Optional Puffer-side filters that suppress matching events before the
+    /// action starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_filters: Vec<FilterSpec>,
     /// Optional LLM classify step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub classify_prompt: Option<String>,
@@ -214,6 +218,9 @@ pub fn validate_workflow_binding(spec: &WorkflowBindingSpec) -> Result<(), Strin
         validate_slug("connector_slug", connector_slug)?;
     }
     if let Some(filter) = &spec.filter {
+        validate_filter(filter)?;
+    }
+    for filter in &spec.ignore_filters {
         validate_filter(filter)?;
     }
     validate_action(&spec.action)
@@ -635,6 +642,7 @@ mod tests {
                 pattern: r"\bIoC\b".into(),
                 case_insensitive: true,
             })),
+            ignore_filters: Vec::new(),
             classify_prompt: None,
             classify_model: None,
             action: ActionSpec::SqliteInsert {
@@ -674,6 +682,7 @@ mod tests {
             connector_slug: None,
             status: WorkflowBindingStatus::Enabled,
             filter: None,
+            ignore_filters: Vec::new(),
             classify_prompt: None,
             classify_model: None,
             action: ActionSpec::SqliteInsert {
@@ -694,6 +703,7 @@ mod tests {
             connector_slug: None,
             status: WorkflowBindingStatus::Enabled,
             filter: None,
+            ignore_filters: Vec::new(),
             classify_prompt: None,
             classify_model: None,
             action: ActionSpec::FileAppend {
