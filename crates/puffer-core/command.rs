@@ -593,6 +593,10 @@ fn execute_local_command(
         }
         "rewind" => rewind_transcript(state, session_store, args),
         "terminal-setup" => handle_terminal_setup_command(state, session_store),
+        "ultrareview" => {
+            let cwd = state.cwd.clone();
+            crate::ultrareview::handle_slash_command(state, session_store, &cwd, args)
+        }
         _ => emit_system(
             state,
             session_store,

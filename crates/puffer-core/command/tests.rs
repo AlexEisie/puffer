@@ -31,6 +31,7 @@ mod tasks;
 mod terminal_setup;
 mod usage_buddy;
 mod workflows;
+mod ultrareview;
 
 pub(super) fn puffer_home_lock() -> &'static Mutex<()> {
     crate::test_locks::env_lock()

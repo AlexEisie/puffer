@@ -18,6 +18,7 @@ mod state;
 #[cfg(test)]
 pub(crate) mod test_locks;
 mod tool_names;
+pub mod ultrareview;
 mod workspace_paths;
 
 pub use agent_catalog::{load_agent_catalog, AgentCatalogEntry};
