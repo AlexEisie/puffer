@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import LoginView from "../components/LoginView.svelte";
+  import LocalModelSetupCard from "../components/LocalModelSetupCard.svelte";
   import BrandLogo from "../design/BrandLogo.svelte";
   import Puffer from "../design/Puffer.svelte";
   import Icon from "../design/Icon.svelte";
@@ -151,6 +152,8 @@
           </div>
         </div>
       </div>
+      <LocalModelSetupCard compact={true} onRefresh={props.onRefresh} />
+
       <div style="display: flex; margin-top: 28px; gap: 10px; justify-content: flex-end;">
         <button type="button" class="sc-btn" data-variant="default" onclick={props.onFinish}>
           Continue<Icon name="arrow" size={14} />
