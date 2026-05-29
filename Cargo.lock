@@ -4347,6 +4347,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs",
+ "ipnet",
  "serde",
  "serde_json",
  "tempfile",
