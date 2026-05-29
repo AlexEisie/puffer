@@ -1649,6 +1649,11 @@ test("providers pane can install and start the local MiniCPM5 behavior model", a
   await expect(card.getByRole("heading", { name: "MiniCPM5 local model" })).toBeVisible();
   await expect(card).toContainText("MiniCPM5-1B runs on-device");
 
+  await card.getByRole("button", { name: "Check status" }).click();
+  await expect(card).toContainText("Status checked at");
+  await expect(card).toContainText("Server health");
+  await expect(card).toContainText("http://127.0.0.1:8088/v1/models");
+
   await card.getByRole("button", { name: /Install MiniCPM5/ }).click();
   const install = await daemon.waitForRequest("install_local_model");
   expect(install.params).toMatchObject({ modelId: "minicpm5" });

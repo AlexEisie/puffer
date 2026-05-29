@@ -2,7 +2,7 @@ use crate::events::EventEmitter;
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::blocking::Client;
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const MINICPM5_ID: &str = "minicpm5";
@@ -35,6 +35,7 @@ pub(crate) struct LocalModelStatus {
     id: String,
     model_id: String,
     display_name: String,
+    checked_at_ms: u64,
     supported: bool,
     recommended: bool,
     installed: bool,
@@ -47,6 +48,17 @@ pub(crate) struct LocalModelStatus {
     install_path: String,
     provider_path: String,
     log_path: String,
+    install_log_path: String,
+    serve_log_path: String,
+    checks: Vec<LocalModelCheck>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LocalModelCheck {
+    label: String,
+    state: String,
+    detail: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,6 +79,11 @@ struct MiniCpm5Paths {
     provider: PathBuf,
     install_log: PathBuf,
     serve_log: PathBuf,
+}
+
+struct MiniCpm5Health {
+    running: bool,
+    detail: String,
 }
 
 impl LocalModelInstaller {
@@ -281,9 +298,16 @@ fn ensure_minicpm5(model_id: &str) -> Result<()> {
 fn build_status(installing: bool) -> LocalModelStatus {
     let paths = minicpm5_paths();
     let supported = supports_minicpm5();
-    let installed = paths.model_config.exists() && paths.python.exists() && paths.shim.exists();
+    let python_exists = paths.python.exists();
+    let mlx_installed = python_exists && python_imports(&paths.python, "mlx_lm");
+    let hub_installed = python_exists && python_imports(&paths.python, "huggingface_hub");
+    let deps_installed = mlx_installed && hub_installed;
+    let model_present = paths.model_config.exists();
+    let shim_present = paths.shim.exists();
+    let installed = model_present && python_exists && deps_installed && shim_present;
     let configured = paths.provider.exists();
-    let running = minicpm5_running();
+    let health = minicpm5_health();
+    let running = health.running;
     let recommended = supported && !installed;
     let reason = if !supported {
         unsupported_reason()
@@ -298,11 +322,23 @@ fn build_status(installing: bool) -> LocalModelStatus {
     } else {
         "macOS Apple Silicon, model not yet installed".to_string()
     };
+    let checks = build_checks(
+        &paths,
+        supported,
+        python_exists,
+        mlx_installed,
+        hub_installed,
+        model_present,
+        shim_present,
+        configured,
+        &health,
+    );
 
     LocalModelStatus {
         id: MINICPM5_ID.to_string(),
         model_id: MINICPM5_MODEL_ID.to_string(),
         display_name: MINICPM5_DISPLAY_NAME.to_string(),
+        checked_at_ms: now_ms(),
         supported,
         recommended,
         installed,
@@ -315,7 +351,124 @@ fn build_status(installing: bool) -> LocalModelStatus {
         install_path: paths.model_dir.display().to_string(),
         provider_path: paths.provider.display().to_string(),
         log_path: paths.serve_log.display().to_string(),
+        install_log_path: paths.install_log.display().to_string(),
+        serve_log_path: paths.serve_log.display().to_string(),
+        checks,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_checks(
+    paths: &MiniCpm5Paths,
+    supported: bool,
+    python_exists: bool,
+    mlx_installed: bool,
+    hub_installed: bool,
+    model_present: bool,
+    shim_present: bool,
+    configured: bool,
+    health: &MiniCpm5Health,
+) -> Vec<LocalModelCheck> {
+    let mut checks = Vec::new();
+    checks.push(check(
+        "Platform",
+        if supported { "ok" } else { "error" },
+        if supported {
+            format!(
+                "{} {} supports MiniCPM5 MLX",
+                env::consts::OS,
+                env::consts::ARCH
+            )
+        } else {
+            unsupported_reason()
+        },
+    ));
+    checks.push(check(
+        "Python venv",
+        if python_exists { "ok" } else { "missing" },
+        if python_exists {
+            format!("found {}", paths.python.display())
+        } else {
+            format!("missing {}", paths.python.display())
+        },
+    ));
+    checks.push(check(
+        "Python deps",
+        if mlx_installed && hub_installed {
+            "ok"
+        } else {
+            "missing"
+        },
+        dependency_detail(python_exists, mlx_installed, hub_installed),
+    ));
+    checks.push(check(
+        "Model weights",
+        if model_present { "ok" } else { "missing" },
+        if model_present {
+            format!("config.json present in {}", paths.model_dir.display())
+        } else {
+            format!("missing {}", paths.model_config.display())
+        },
+    ));
+    checks.push(check(
+        "Shim",
+        if shim_present { "ok" } else { "missing" },
+        file_check_detail(&paths.shim, "shim script"),
+    ));
+    checks.push(check(
+        "Provider YAML",
+        if configured { "ok" } else { "missing" },
+        file_check_detail(&paths.provider, "provider registration"),
+    ));
+    checks.push(check(
+        "Server health",
+        if health.running { "ok" } else { "warning" },
+        health.detail.clone(),
+    ));
+    checks
+}
+
+fn check(label: &str, state: &str, detail: String) -> LocalModelCheck {
+    LocalModelCheck {
+        label: label.to_string(),
+        state: state.to_string(),
+        detail,
+    }
+}
+
+fn dependency_detail(python_exists: bool, mlx_installed: bool, hub_installed: bool) -> String {
+    if !python_exists {
+        return "venv is missing; installer will create it".to_string();
+    }
+    if mlx_installed && hub_installed {
+        return "mlx_lm and huggingface_hub import successfully".to_string();
+    }
+    let mut missing = Vec::new();
+    if !mlx_installed {
+        missing.push("mlx_lm");
+    }
+    if !hub_installed {
+        missing.push("huggingface_hub");
+    }
+    format!("missing imports: {}", missing.join(", "))
+}
+
+fn file_check_detail(path: &PathBuf, label: &str) -> String {
+    match fs::metadata(path) {
+        Ok(metadata) => format!(
+            "{label} present at {} ({} bytes)",
+            path.display(),
+            metadata.len()
+        ),
+        Err(_) => format!("{label} missing at {}", path.display()),
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 fn minicpm5_paths() -> MiniCpm5Paths {
@@ -466,15 +619,59 @@ fn wait_for_minicpm5_ready() -> Result<()> {
 }
 
 fn minicpm5_running() -> bool {
+    minicpm5_health().running
+}
+
+fn minicpm5_health() -> MiniCpm5Health {
     let client = match Client::builder().timeout(Duration::from_secs(2)).build() {
         Ok(client) => client,
-        Err(_) => return false,
+        Err(error) => {
+            return MiniCpm5Health {
+                running: false,
+                detail: format!("failed to build health client: {error}"),
+            };
+        }
     };
-    client
-        .get(MINICPM5_MODELS_URL)
-        .send()
-        .map(|response| response.status().is_success())
-        .unwrap_or(false)
+    let response = match client.get(MINICPM5_MODELS_URL).send() {
+        Ok(response) => response,
+        Err(error) => {
+            return MiniCpm5Health {
+                running: false,
+                detail: format!("{MINICPM5_MODELS_URL} is not reachable: {error}"),
+            };
+        }
+    };
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    if !status.is_success() {
+        return MiniCpm5Health {
+            running: false,
+            detail: format!("{MINICPM5_MODELS_URL} returned HTTP {status}"),
+        };
+    }
+    let model_advertised = serde_json::from_str::<Value>(&body)
+        .ok()
+        .and_then(|value| value.get("data").and_then(Value::as_array).cloned())
+        .map(|models| {
+            models.iter().any(|model| {
+                model
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(|id| id == MINICPM5_MODEL_ID)
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    if model_advertised {
+        return MiniCpm5Health {
+            running: true,
+            detail: format!("{MINICPM5_MODELS_URL} advertises {MINICPM5_MODEL_ID}"),
+        };
+    }
+    MiniCpm5Health {
+        running: false,
+        detail: format!("{MINICPM5_MODELS_URL} answered but did not advertise {MINICPM5_MODEL_ID}"),
+    }
 }
 
 fn emit_model_event(

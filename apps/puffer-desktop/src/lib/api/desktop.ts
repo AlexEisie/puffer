@@ -1856,6 +1856,7 @@ export type LocalModelStatus = {
   id: string;
   modelId: string;
   displayName: string;
+  checkedAtMs: number;
   supported: boolean;
   recommended: boolean;
   installed: boolean;
@@ -1868,6 +1869,15 @@ export type LocalModelStatus = {
   installPath: string;
   providerPath: string;
   logPath: string;
+  installLogPath: string;
+  serveLogPath: string;
+  checks: LocalModelCheck[];
+};
+
+export type LocalModelCheck = {
+  label: string;
+  state: "ok" | "missing" | "warning" | "error" | string;
+  detail: string;
 };
 
 export type LocalModelInstallJob = {

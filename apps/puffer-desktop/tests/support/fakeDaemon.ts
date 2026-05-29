@@ -295,6 +295,7 @@ export class FakeDaemon {
     id: "minicpm5",
     modelId: "minicpm5-1b",
     displayName: "MiniCPM5-1B (local)",
+    checkedAtMs: Date.now(),
     supported: true,
     recommended: true,
     installed: false,
@@ -306,7 +307,10 @@ export class FakeDaemon {
     size: "~589MB",
     installPath: "/tmp/puffer-home/models/minicpm5-1b",
     providerPath: "/tmp/puffer-home/resources/providers/minicpm5.yaml",
-    logPath: "/tmp/puffer-home/minicpm5-serve.log"
+    logPath: "/tmp/puffer-home/minicpm5-serve.log",
+    installLogPath: "/tmp/puffer-home/minicpm5-install.log",
+    serveLogPath: "/tmp/puffer-home/minicpm5-serve.log",
+    checks: []
   };
   private desktopPins: JsonRecord = {
     pinnedAgentIds: [],
@@ -1033,7 +1037,7 @@ export class FakeDaemon {
       case "update_config":
         return this.updateConfig(request.params);
       case "local_model_status":
-        return { ...this.localModelStatus };
+        return this.localModelSnapshot();
       case "install_local_model":
         return this.installLocalModel();
       case "list_permissions":
@@ -1120,7 +1124,7 @@ export class FakeDaemon {
         jobId: "fixture-job",
         phase: "configure",
         message: "Installing shim and registering the Puffer provider",
-        status: { ...this.localModelStatus }
+        status: this.localModelSnapshot()
       });
     }, 20);
     setTimeout(() => {
@@ -1138,10 +1142,63 @@ export class FakeDaemon {
         jobId: "fixture-job",
         phase: "done",
         message: "MiniCPM5 is installed, registered, and running",
-        status: { ...this.localModelStatus }
+        status: this.localModelSnapshot()
       });
     }, 60);
-    return { jobId: "fixture-job", status: { ...this.localModelStatus } };
+    return { jobId: "fixture-job", status: this.localModelSnapshot() };
+  }
+
+  private localModelSnapshot(): JsonRecord {
+    this.localModelStatus = {
+      ...this.localModelStatus,
+      checkedAtMs: Date.now(),
+      checks: this.localModelChecks()
+    };
+    return { ...this.localModelStatus };
+  }
+
+  private localModelChecks(): JsonRecord[] {
+    const installed = this.localModelStatus.installed === true;
+    const configured = this.localModelStatus.configured === true;
+    const running = this.localModelStatus.running === true;
+    return [
+      { label: "Platform", state: "ok", detail: "macos arm64 supports MiniCPM5 MLX" },
+      {
+        label: "Python venv",
+        state: installed ? "ok" : "missing",
+        detail: installed
+          ? "found /tmp/puffer-home/venvs/minicpm5/bin/python"
+          : "missing /tmp/puffer-home/venvs/minicpm5/bin/python"
+      },
+      {
+        label: "Python deps",
+        state: installed ? "ok" : "missing",
+        detail: installed
+          ? "mlx_lm and huggingface_hub import successfully"
+          : "venv is missing; installer will create it"
+      },
+      {
+        label: "Model weights",
+        state: installed ? "ok" : "missing",
+        detail: installed
+          ? "config.json present in /tmp/puffer-home/models/minicpm5-1b"
+          : "missing /tmp/puffer-home/models/minicpm5-1b/config.json"
+      },
+      {
+        label: "Provider YAML",
+        state: configured ? "ok" : "missing",
+        detail: configured
+          ? "provider registration present at /tmp/puffer-home/resources/providers/minicpm5.yaml"
+          : "provider registration missing at /tmp/puffer-home/resources/providers/minicpm5.yaml"
+      },
+      {
+        label: "Server health",
+        state: running ? "ok" : "warning",
+        detail: running
+          ? "http://127.0.0.1:8088/v1/models advertises minicpm5-1b"
+          : "http://127.0.0.1:8088/v1/models is not reachable"
+      }
+    ];
   }
 
   private workflowListResponse(): JsonRecord {

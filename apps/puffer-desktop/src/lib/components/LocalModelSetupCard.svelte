@@ -4,6 +4,7 @@
   import {
     installLocalModel,
     localModelStatus,
+    type LocalModelCheck,
     type LocalModelEvent,
     type LocalModelStatus
   } from "../api/desktop";
@@ -38,9 +39,10 @@
     if (status.installed) return `Model exists at ${status.installPath}; provider registration is missing.`;
     return `Downloads ${status.size}, creates an isolated mlx-lm venv, registers the Puffer provider, and starts the server.`;
   })();
+  $: checkedAtText = status?.checkedAtMs ? `Last checked ${formatCheckedAt(status.checkedAtMs)}` : "";
 
   onMount(() => {
-    void refreshStatus();
+    void refreshStatus(false);
     void subscribeProgress();
   });
 
@@ -48,12 +50,24 @@
     unsubscribe?.();
   });
 
-  async function refreshStatus() {
+  async function refreshStatus(showDiagnostics = true) {
     loading = true;
     error = null;
+    if (showDiagnostics) {
+      progress = [
+        "Checking local files, Python deps, provider YAML, and http://127.0.0.1:8088/v1/models…"
+      ];
+    }
     try {
-      status = await localModelStatus("minicpm5");
-      busy = status.installing;
+      const next = await localModelStatus("minicpm5");
+      status = next;
+      busy = next.installing;
+      if (showDiagnostics) {
+        progress = [
+          `Status checked at ${formatCheckedAt(next.checkedAtMs)}.`,
+          ...next.checks.map(formatCheck)
+        ];
+      }
     } catch (e) {
       error = (e as Error).message ?? String(e);
     } finally {
@@ -85,11 +99,11 @@
       busy = false;
       error = null;
       onRefresh();
-      void refreshStatus();
+      void refreshStatus(false);
     } else if (event.phase === "error") {
       busy = false;
       error = event.message;
-      void refreshStatus();
+      void refreshStatus(false);
     }
   }
 
@@ -107,6 +121,24 @@
       busy = false;
       error = (e as Error).message ?? String(e);
     }
+  }
+
+  function formatCheckedAt(value: number) {
+    if (!value) return "unknown";
+    return new Date(value).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit"
+    });
+  }
+
+  function formatCheck(check: LocalModelCheck) {
+    const prefix =
+      check.state === "ok" ? "OK" :
+      check.state === "warning" ? "WARN" :
+      check.state === "error" ? "ERR" :
+      "MISS";
+    return `${prefix} ${check.label}: ${check.detail}`;
   }
 </script>
 
@@ -135,6 +167,11 @@
     <div class="pf-local-model-detail" data-error={Boolean(error)}>
       {error ?? detailText}
     </div>
+    {#if checkedAtText}
+      <div class="pf-local-model-checked" title={status?.installLogPath ?? status?.serveLogPath}>
+        {checkedAtText}
+      </div>
+    {/if}
     {#if progress.length}
       <div class="pf-local-model-progress" aria-live="polite">
         {#each progress as line, index (`${index}-${line}`)}
@@ -159,7 +196,7 @@
       {:else}
         <Icon name="sparkles" size={13} />
       {/if}
-      {loading ? "Checking…" : actionLabel}
+      {actionLabel}
     </button>
     <button
       type="button"
@@ -167,10 +204,10 @@
       data-variant="ghost"
       data-size="sm"
       disabled={loading || busy || status?.installing}
-      onclick={refreshStatus}
+      onclick={() => refreshStatus(true)}
       title="Check MiniCPM5 install status"
     >
-      Check status
+      {loading ? "Checking…" : "Check status"}
     </button>
   </div>
 </article>
@@ -262,6 +299,12 @@
   }
   .pf-local-model-detail[data-error="true"] {
     color: var(--destructive, #c03232);
+  }
+  .pf-local-model-checked {
+    margin-top: 4px;
+    color: color-mix(in oklab, var(--muted-foreground) 80%, var(--foreground));
+    font-family: var(--font-mono);
+    font-size: 10.5px;
   }
   .pf-local-model-progress {
     margin-top: 8px;
