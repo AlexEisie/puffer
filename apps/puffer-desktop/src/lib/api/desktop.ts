@@ -18,6 +18,8 @@ import type {
   SessionListItem,
   SettingsSnapshot,
   MessageActor,
+  OpenAIRealtimeClientSecret,
+  OpenAIRealtimeClientSecretOptions,
   TimelineItem,
   WorkflowDefinition,
   WorkflowBindingCreateRequest,
@@ -2106,6 +2108,16 @@ export async function listProviderModels(providerId: string): Promise<ModelDescr
     { providerId }
   );
   return result.models;
+}
+
+export async function createOpenAIRealtimeClientSecret(
+  options: OpenAIRealtimeClientSecretOptions = {}
+): Promise<OpenAIRealtimeClientSecret> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<OpenAIRealtimeClientSecret>(
+    "create_openai_realtime_client_secret",
+    options
+  );
 }
 
 export async function listPermissions(): Promise<PermissionsSnapshot> {

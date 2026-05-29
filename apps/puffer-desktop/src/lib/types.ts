@@ -326,6 +326,22 @@ export type ProviderSummary = {
   sourcePath: string | null;
 };
 
+export type OpenAIRealtimeClientSecretOptions = {
+  providerId?: string;
+  model?: string;
+  voice?: string;
+  reasoningEffort?: string;
+  session?: Record<string, unknown>;
+};
+
+export type OpenAIRealtimeClientSecret = {
+  providerId: string;
+  model: string;
+  voice: string;
+  clientSecret: string;
+  expiresAt: number | null;
+};
+
 export type SettingsSnapshot = {
   workspaceRoot: string;
   workspaceConfigFile: string;
