@@ -2020,3 +2020,24 @@ export async function updateConfig(patch: ConfigPatch): Promise<SettingsSnapshot
   const client = await ensureLocalDaemonClient();
   return client.request<SettingsSnapshot>("update_config", patch);
 }
+
+export type Minicpm5Recommendation = {
+  recommend: boolean;
+  reason?: string;
+  display_name?: string;
+  why?: string;
+  size?: string;
+  install_cmd?: string;
+};
+
+/** Ask the desktop backend whether to recommend the local MiniCPM5 model on
+ *  this machine (macOS + Apple Silicon + not yet installed). */
+export async function minicpm5Recommend(): Promise<Minicpm5Recommendation> {
+  return await invoke<Minicpm5Recommendation>("minicpm5_recommend");
+}
+
+/** Kick off the local-model install. Progress streams as `minicpm5://install-log`
+ *  events; completion arrives as `minicpm5://install-done` ({ success }). */
+export async function minicpm5Install(): Promise<void> {
+  await invoke("minicpm5_install");
+}
