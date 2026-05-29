@@ -471,21 +471,26 @@ fn proxy_discovery_client(
     ))
 }
 
-fn proxy_test_target_url(providers: &ProviderRegistry, config: &PufferConfig) -> String {
-    let provider_id = config.default_provider.as_deref().unwrap_or("openai");
-    if let Some(provider) = providers.provider(provider_id) {
-        if let Some(discovery) = provider.discovery.as_ref() {
-            let base = provider.base_url.trim_end_matches('/');
-            let path = if base.ends_with("/v1") && discovery.path.starts_with("/v1/") {
-                discovery.path[3..].to_string()
-            } else {
-                discovery.path.clone()
-            };
-            return format!("{base}{path}");
+fn proxy_connectivity_test_urls() -> &'static [&'static str] {
+    &[
+        "https://www.gstatic.com/generate_204",
+        "https://cp.cloudflare.com/generate_204",
+        "https://www.cloudflare.com/cdn-cgi/trace",
+    ]
+}
+
+fn test_proxy_connectivity(
+    endpoint: &ProxyEndpoint,
+    timeout: Duration,
+) -> Result<(&'static str, puffer_core::ProxyTestOutcome)> {
+    let mut last_error = None;
+    for target_url in proxy_connectivity_test_urls() {
+        match puffer_core::test_proxy_endpoint(endpoint, target_url, timeout) {
+            Ok(outcome) => return Ok((target_url, outcome)),
+            Err(error) => last_error = Some(error),
         }
-        return provider.base_url.clone();
     }
-    "https://api.openai.com/v1/models".to_string()
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no proxy connectivity test URLs configured")))
 }
 
 fn parse_proxy_scheme(value: &str) -> Result<ProxyScheme> {
@@ -1480,23 +1485,25 @@ fn handle_test_proxy(state: &DaemonState, params: &Value) -> Result<Value> {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown proxy `{proxy_id}`"))?
     };
-    let inputs = state.build_runtime_inputs_without_discovery()?;
-    let target_url = proxy_test_target_url(&inputs.providers, &current_config);
-    let result =
-        match puffer_core::test_proxy_endpoint(&endpoint, &target_url, Duration::from_secs(8)) {
-            Ok(latency_ms) => ProxyTestResultDto {
-                proxy_id: Some(endpoint.id.clone()),
-                ok: true,
-                message: format!("Connected to {target_url}"),
-                latency_ms: Some(latency_ms),
-            },
-            Err(error) => ProxyTestResultDto {
-                proxy_id: Some(endpoint.id.clone()),
-                ok: false,
-                message: proxy_test_error_message(&endpoint, &error),
-                latency_ms: None,
-            },
-        };
+    let result = match test_proxy_connectivity(&endpoint, Duration::from_secs(8)) {
+        Ok((target_url, outcome)) => ProxyTestResultDto {
+            proxy_id: Some(endpoint.id.clone()),
+            ok: true,
+            message: format!(
+                "Connected to {target_url} with HTTP {}",
+                outcome.status_code
+            ),
+            latency_ms: Some(outcome.latency_ms),
+            status_code: Some(outcome.status_code),
+        },
+        Err(error) => ProxyTestResultDto {
+            proxy_id: Some(endpoint.id.clone()),
+            ok: false,
+            message: proxy_test_error_message(&endpoint, &error),
+            latency_ms: None,
+            status_code: None,
+        },
+    };
     Ok(serde_json::to_value(result)?)
 }
 
@@ -4129,6 +4136,18 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn proxy_test_uses_public_connectivity_endpoint() {
+        assert_eq!(
+            super::proxy_connectivity_test_urls(),
+            &[
+                "https://www.gstatic.com/generate_204",
+                "https://cp.cloudflare.com/generate_204",
+                "https://www.cloudflare.com/cdn-cgi/trace",
+            ]
+        );
     }
 
     struct DiscoveryCacheEnvGuard {

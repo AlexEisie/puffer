@@ -4,6 +4,15 @@ use reqwest::blocking::Client;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
+/// Describes the outcome of a proxy connectivity request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProxyTestOutcome {
+    /// Elapsed request time in milliseconds.
+    pub latency_ms: u128,
+    /// HTTP status observed from the connectivity target.
+    pub status_code: u16,
+}
+
 /// Describes why an HTTP client is being constructed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpPurpose {
@@ -46,12 +55,12 @@ pub fn blocking_client_for_url(
     }
 }
 
-/// Tests a proxy endpoint against a URL and returns elapsed milliseconds.
+/// Tests a proxy endpoint against a URL and returns the observed response.
 pub fn test_proxy_endpoint(
     endpoint: &ProxyEndpoint,
     target_url: &str,
     timeout: Duration,
-) -> Result<u128> {
+) -> Result<ProxyTestOutcome> {
     let mut config = ProxyConfig::default();
     config.enabled = true;
     config.selected = Some(endpoint.id.clone());
@@ -63,10 +72,10 @@ pub fn test_proxy_endpoint(
         .get(target_url)
         .send()
         .with_context(|| format!("proxy test request to {target_url} failed"))?;
-    if !response.status().is_success() {
-        anyhow::bail!("proxy test failed with HTTP {}", response.status());
-    }
-    Ok(started.elapsed().as_millis())
+    Ok(ProxyTestOutcome {
+        latency_ms: started.elapsed().as_millis(),
+        status_code: response.status().as_u16(),
+    })
 }
 
 /// Returns true when the URL host matches a configured bypass entry.
@@ -197,5 +206,61 @@ mod tests {
         let client =
             blocking_client(&config, HttpPurpose::Model, Duration::from_secs(30)).expect("client");
         let _ = client;
+    }
+
+    #[test]
+    fn proxy_test_treats_http_401_as_connected() {
+        let (port, handle) = spawn_http_proxy_response("401 Unauthorized");
+        let endpoint = ProxyEndpoint {
+            id: "local".to_string(),
+            scheme: ProxyScheme::Http,
+            host: "127.0.0.1".to_string(),
+            port,
+            username: None,
+            password: None,
+        };
+
+        let result = test_proxy_endpoint(
+            &endpoint,
+            "http://example.test/generate_204",
+            Duration::from_secs(2),
+        )
+        .expect("HTTP response proves proxy connectivity");
+
+        assert_eq!(result.status_code, 401);
+        handle.join().expect("proxy thread");
+    }
+
+    fn spawn_http_proxy_response(status: &'static str) -> (u16, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind proxy");
+        let port = listener.local_addr().expect("proxy address").port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept proxy request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let bytes =
+                    std::io::Read::read(&mut stream, &mut chunk).expect("read proxy request");
+                if bytes == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..bytes]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body = b"auth required";
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            std::io::Write::write_all(&mut stream, response.as_bytes())
+                .expect("write proxy response headers");
+            std::io::Write::write_all(&mut stream, body).expect("write proxy response body");
+        });
+        (port, handle)
     }
 }

@@ -9,6 +9,7 @@
   import { saveProxySettings, testProxy } from "../../api/desktop";
   import Icon from "../../design/Icon.svelte";
   import { focusTrap } from "../../focusTrap";
+  import { proxyStatusLabel, proxyStatusState, proxyStatusTitle } from "./proxyStatus";
 
   type Props = {
     snapshot: SettingsSnapshot | null;
@@ -39,6 +40,18 @@
   let editingExisting = $derived(proxy.proxies.some((item) => item.id === editing?.id));
   let editingTitle = $derived(editingExisting ? "Edit proxy" : "Add proxy");
   let editingValidation = $derived(editing ? proxyValidationLabel(editing) : null);
+  let visibleStatus = $derived.by(() =>
+    Object.fromEntries(
+      proxy.proxies.map((item) => [
+        item.id,
+        {
+          label: proxyStatusLabel(item.id, testingId, lastTest),
+          state: proxyStatusState(item.id, testingId, lastTest),
+          title: proxyStatusTitle(item.id, lastTest)
+        }
+      ])
+    )
+  );
   $effect(() => {
     if (!props.snapshot?.networkProxy) return;
     const nextBypass = props.snapshot.networkProxy.bypass.join("\n");
@@ -225,27 +238,6 @@
     }
   }
 
-  function proxyStatusLabel(proxyId: string) {
-    if (testingId === proxyId) return "checking...";
-    if (lastTest?.proxyId !== proxyId) return null;
-    if (lastTest.ok) {
-      return lastTest.latencyMs === null
-        ? "connected"
-        : `connected (ping: ${lastTest.latencyMs} ms)`;
-    }
-    return "failed";
-  }
-
-  function proxyStatusState(proxyId: string) {
-    if (testingId === proxyId) return "checking";
-    if (lastTest?.proxyId !== proxyId) return "unknown";
-    return lastTest.ok ? "connected" : "failed";
-  }
-
-  function proxyStatusTitle(proxyId: string) {
-    return lastTest?.proxyId === proxyId ? lastTest.message : "";
-  }
-
   function saveBypass() {
     void persist({ ...proxy, bypass: normalizeBypass(bypassDraft) });
   }
@@ -300,9 +292,13 @@
             />
             <span>
               <strong>{item.uri}</strong>
-              {#if proxyStatusLabel(item.id)}
-                <small class="pf-network-status" data-state={proxyStatusState(item.id)} title={proxyStatusTitle(item.id)}>
-                  {proxyStatusLabel(item.id)}
+              {#if visibleStatus[item.id].label}
+                <small
+                  class="pf-network-status"
+                  data-state={visibleStatus[item.id].state}
+                  title={visibleStatus[item.id].title}
+                >
+                  {visibleStatus[item.id].label}
                 </small>
               {/if}
               {#if item.username}

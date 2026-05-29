@@ -127,6 +127,26 @@ test("default model load errors stay scoped to the selected provider", async ({ 
   await expect(modelSelect).toHaveValue("codex-default");
 });
 
+test("network proxy test renders connected latency inline", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Network" }).click();
+
+  const pane = page.locator(".pf-settings-pane");
+  const proxyCard = pane.locator(".pf-network-proxy-card").filter({
+    hasText: "socks5://127.0.0.1:7890"
+  });
+  await proxyCard.getByRole("button", { name: "Test" }).click();
+
+  const request = await daemon.waitForRequest("test_proxy");
+  expect(request.params).toMatchObject({ proxyId: "local" });
+  await expect(proxyCard.locator(".pf-network-status")).toHaveText("connected (ping: 848 ms)");
+  await expect(proxyCard.locator(".pf-network-status")).toHaveAttribute("data-state", "connected");
+});
+
 test("default routing only offers authenticated agent providers", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [

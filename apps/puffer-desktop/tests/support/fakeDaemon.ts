@@ -308,6 +308,23 @@ export class FakeDaemon {
     }
   ];
   private readonly protocol: "legacy" | "real";
+  private networkProxy: JsonRecord = {
+    enabled: false,
+    selected: "local",
+    bypass: ["localhost", "127.0.0.1", "::1"],
+    proxies: [
+      {
+        id: "local",
+        scheme: "socks5",
+        host: "127.0.0.1",
+        port: 7890,
+        username: null,
+        hasPassword: false,
+        uri: "socks5://127.0.0.1:7890"
+      }
+    ],
+    lastTest: null
+  };
   private readonly activeTurnIds = new Set<string>();
   private readonly pendingConnectorTurns = new Map<string, {
     sessionId: string;
@@ -641,6 +658,20 @@ export class FakeDaemon {
 
   setProviderModels(providerId: string, models: JsonRecord[]): void {
     this.providerModels[providerId] = models;
+  }
+
+  setNetworkProxy(networkProxy: JsonRecord): void {
+    this.networkProxy = {
+      ...networkProxy,
+      bypass: Array.isArray(networkProxy.bypass) ? [...networkProxy.bypass] : [],
+      proxies: Array.isArray(networkProxy.proxies)
+        ? networkProxy.proxies.map((proxy) => ({ ...(proxy as JsonRecord) }))
+        : [],
+      lastTest:
+        typeof networkProxy.lastTest === "object" && networkProxy.lastTest !== null
+          ? { ...(networkProxy.lastTest as JsonRecord) }
+          : null
+    };
   }
 
   setBrowserTabs(sessionId: string, state: TabSet): void {
@@ -1015,6 +1046,8 @@ export class FakeDaemon {
         };
       case "update_config":
         return this.updateConfig(request.params);
+      case "test_proxy":
+        return this.testProxy(request.params);
       case "list_permissions":
         return this.permissions;
       case "save_permissions":
@@ -1420,6 +1453,22 @@ export class FakeDaemon {
     return this.settingsSnapshot();
   }
 
+  private testProxy(params: JsonRecord): JsonRecord {
+    const proxyId = String(params.proxyId ?? this.networkProxy.selected ?? "local");
+    const result = {
+      proxyId,
+      ok: true,
+      message: "Connected to https://www.gstatic.com/generate_204 with HTTP 204",
+      latencyMs: 848,
+      statusCode: 204
+    };
+    this.networkProxy = {
+      ...this.networkProxy,
+      lastTest: result
+    };
+    return result;
+  }
+
   private loginProvider(params: JsonRecord, kind: "api_key" | "oauth"): JsonRecord {
     const providerId = String(params.providerId ?? "");
     if (!providerId) return this.settingsSnapshot();
@@ -1515,6 +1564,12 @@ export class FakeDaemon {
   }
 
   private settingsSnapshot(): JsonRecord {
+    const networkBypass = Array.isArray(this.networkProxy.bypass)
+      ? this.networkProxy.bypass.map(String)
+      : [];
+    const networkProxies = Array.isArray(this.networkProxy.proxies)
+      ? this.networkProxy.proxies.map((proxy) => ({ ...(proxy as JsonRecord) }))
+      : [];
     return {
       workspaceRoot: this.workspaceRoot,
       workspaceConfigFile: `${this.workspaceRoot}/.puffer/config.json`,
@@ -1568,7 +1623,17 @@ export class FakeDaemon {
           sourceKind: "test",
           sourcePath: null
         }
-      ]
+      ],
+      networkProxy: {
+        ...this.networkProxy,
+        bypass: networkBypass,
+        proxies: networkProxies,
+        lastTest:
+          typeof this.networkProxy.lastTest === "object" && this.networkProxy.lastTest !== null
+            ? { ...(this.networkProxy.lastTest as JsonRecord) }
+            : null
+      },
+      browserProfiles: []
     };
   }
 

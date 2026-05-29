@@ -46,7 +46,7 @@ pub use model_preferences::{
     default_effort_level, effort_level_is_supported, normalized_effort_level,
     provider_preference_family, supported_effort_levels, ModelPreferenceFamily,
 };
-pub use network::{blocking_client_for_url, test_proxy_endpoint, HttpPurpose};
+pub use network::{blocking_client_for_url, test_proxy_endpoint, HttpPurpose, ProxyTestOutcome};
 pub use permissions::browser_action_set_for_action;
 pub use permissions::is_browser_tool_selector;
 pub use permissions::BrowserActionSet;

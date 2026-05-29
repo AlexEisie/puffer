@@ -351,6 +351,7 @@ export type ProxyTestResult = {
   ok: boolean;
   message: string;
   latencyMs: number | null;
+  statusCode: number | null;
 };
 
 export type NetworkProxySettings = {

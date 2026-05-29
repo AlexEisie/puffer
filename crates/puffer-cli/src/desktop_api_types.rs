@@ -286,6 +286,7 @@ pub(crate) struct ProxyTestResultDto {
     pub(crate) ok: bool,
     pub(crate) message: String,
     pub(crate) latency_ms: Option<u128>,
+    pub(crate) status_code: Option<u16>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
