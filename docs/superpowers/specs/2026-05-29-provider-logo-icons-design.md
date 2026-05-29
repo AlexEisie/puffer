@@ -37,29 +37,31 @@ Desktop-native aliases must also be covered because they appear in Settings:
 
 ## Design
 
-Use the smallest reliable logo strategy:
+Use official provider brand marks, sourced from the MIT-licensed
+[lobehub/lobe-icons](https://github.com/lobehub/lobe-icons) collection
+(`packages/static-svg/icons`) and vendored as static assets under
+`apps/puffer-desktop/public/service-icons/`:
 
-1. Use existing bundled brand assets where the repository already has them.
-   `puffer` uses `/brand-logo.svg`; `openai` and `codex` use the existing
-   OpenAI icon; `vercel-ai-gateway` uses the existing Vercel icon.
-2. For every other known provider, add a simple local monogram SVG. These are
-   not meant to impersonate official logos; they are provider-specific visual
-   identifiers that keep the current Settings UI readable without importing
-   third-party assets with unclear reuse terms.
+1. Reuse the existing bundled `puffer` brand asset (`/brand-logo.svg`) for the
+   `puffer` native alias, and keep the existing in-repo `openai.svg` and
+   `vercel.svg` assets.
+2. For every other known provider, vendor the corresponding lobe-icons SVG
+   (`-color.svg` variant when available, otherwise the mono `.svg`). `codex`
+   gets its own dedicated brand mark distinct from `openai`.
 3. Keep `ai.svg` and `llm.svg` only as unknown-provider fallbacks, not as
    visuals for known providers.
 
-The monogram set should cover: `anthropic`, `cerebras`, `groq`, `kimi-coding`,
-`kimi-openai`, `llama-cpp`, `lmstudio`, `minimax-cn`, `minimax`, `ollama`,
-`openrouter`, `vllm`, `worldrouter`, `xai`, `zhipu`, and the desktop-native
-`claude` alias. This is enough to remove generic icons from known provider
-cards without creating a logo licensing project.
+The vendored asset set covers: `anthropic` (Claude mark), `cerebras`, `codex`,
+`groq`, `kimi`, `lmstudio`, `minimax`, `ollama`, `openrouter`, `vllm`,
+`worldrouter`, `xai` (Grok mark), and `zhipu`. The `llama-cpp` provider has no
+official lobe-icons asset and keeps a small local monogram (`L.cpp`).
 
 ## Non-Goals
 
 Do not add provider registry behavior, config behavior, credential behavior, or
-model discovery behavior. Do not download, vendor, or trace third-party brand
-assets in this pass. Do not redesign the provider card layout.
+model discovery behavior. Do not redesign the provider card layout. Do not
+generate or trace new brand marks beyond the lobe-icons set; if a provider lacks
+a lobe-icons asset, keep a neutral local monogram rather than fabricating one.
 
 ## Data Flow
 
@@ -71,10 +73,9 @@ return either a `/service-icons/*.svg` URL or the existing root
 ## UI Rules
 
 Provider cards keep the existing 36 px logo container and subdued card styling.
-New monogram SVGs should use a consistent 24x24 viewBox, currentColor-friendly
-or restrained fills, and short text or geometric marks that remain legible in
-the existing 36 px logo container. Avoid saturated brand-color blocks unless the
-asset already exists in the repository.
+Vendored lobe-icons SVGs use a 24x24 viewBox with `width="1em"`/`height="1em"`
+and either explicit brand colors or `currentColor`, all of which remain legible
+in the existing 36 px logo container.
 
 ## Testing
 

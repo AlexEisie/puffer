@@ -36,7 +36,7 @@ const PROVIDER_ICONS: Record<string, string> = {
   anthropic: "anthropic",
   claude: "anthropic",
   openai: "openai",
-  codex: "openai",
+  codex: "codex",
   puffer: "brand-logo",
   "anthropic-bedrock": "anthropic",
   "anthropic-vertex": "anthropic",
