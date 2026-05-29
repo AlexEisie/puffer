@@ -147,6 +147,38 @@ test("network proxy test renders connected latency inline", async ({ page }) => 
   await expect(proxyCard.locator(".pf-network-status")).toHaveAttribute("data-state", "connected");
 });
 
+test("network proxy editor uses compact controls", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Network" }).click();
+
+  const proxySection = page.locator("section[aria-label='Proxy list']");
+  await expect(
+    proxySection.locator(".pf-network-section-head").getByRole("button", { name: "Add proxy" })
+  ).toBeVisible();
+
+  await proxySection.getByRole("button", { name: "Add proxy" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add proxy" });
+  await expect(dialog.getByLabel("Scheme")).toHaveValue("socks5");
+  await expect(dialog.getByText("socks5h://127.0.0.1:7890")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Save proxy" })).toHaveAttribute(
+    "data-variant",
+    "default"
+  );
+  await expect(dialog.getByLabel("Port")).not.toHaveAttribute("type", "number");
+
+  const endpointGrid = dialog.locator(".pf-network-form-grid").first();
+  await expect(endpointGrid.getByLabel("Host")).toBeVisible();
+  await expect(endpointGrid.getByLabel("Port")).toBeVisible();
+
+  const credentialGrid = dialog.locator(".pf-network-form-grid").nth(1);
+  await expect(credentialGrid.getByLabel("Username")).toBeVisible();
+  await expect(credentialGrid.getByLabel("Password")).toBeVisible();
+});
+
 test("default routing only offers authenticated agent providers", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [

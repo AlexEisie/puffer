@@ -35,6 +35,7 @@
   let lastTest = $state<NetworkProxySettings["lastTest"]>(null);
   let editing = $state<DraftProxyEndpoint | null>(null);
   let draftPassword = $state("");
+  let draftPort = $state("");
 
   let proxy = $derived(props.snapshot?.networkProxy ?? emptyProxy);
   let editingExisting = $derived(proxy.proxies.some((item) => item.id === editing?.id));
@@ -74,13 +75,20 @@
     return `${endpoint.scheme}://${endpoint.host.trim()}:${endpoint.port || 0}`;
   }
 
-  function endpointPreview(endpoint: DraftProxyEndpoint) {
-    if (!endpoint.host.trim() || !validProxyPort(endpoint.port)) return "Enter host and port.";
-    return endpointUri(endpoint);
-  }
-
   function validProxyPort(port: number) {
     return Number.isInteger(port) && port >= 1 && port <= 65535;
+  }
+
+  function portFromDraft(value: string) {
+    const trimmed = value.trim();
+    if (!/^\d+$/.test(trimmed)) return 0;
+    const parsed = Number(trimmed);
+    return Number.isInteger(parsed) ? parsed : 0;
+  }
+
+  function updateDraftPort(value: string) {
+    draftPort = value;
+    editing = { ...editing!, port: portFromDraft(value) };
   }
 
   function proxyValidationLabel(endpoint: DraftProxyEndpoint) {
@@ -155,9 +163,10 @@
   function addProxy() {
     error = null;
     draftPassword = "";
+    draftPort = "7890";
     editing = {
       id: nextProxyId(),
-      scheme: "socks5h",
+      scheme: "socks5",
       host: "127.0.0.1",
       port: 7890,
       username: null,
@@ -169,12 +178,14 @@
   function editProxy(item: SanitizedProxyEndpoint) {
     error = null;
     draftPassword = "";
+    draftPort = String(item.port);
     editing = endpointToDraft(item);
   }
 
   function closeEditor() {
     editing = null;
     draftPassword = "";
+    draftPort = "";
   }
 
   async function saveEditingProxy() {
@@ -183,6 +194,7 @@
       ...editing,
       id: editing.id.trim() || nextProxyId(),
       host: editing.host.trim(),
+      port: portFromDraft(draftPort),
       username: editing.username?.trim() || null,
       password: draftPassword.trim() ? draftPassword : null,
       keepPassword: !draftPassword.trim() && Boolean(editing.keepPassword)
@@ -262,7 +274,7 @@
   </div>
   <input
     type="checkbox"
-    class="sc-switch"
+    class="sc-switch pf-network-switch"
     checked={proxy.enabled}
     disabled={saving}
     onchange={(e) => persist({ ...proxy, enabled: (e.currentTarget as HTMLInputElement).checked })}
@@ -275,6 +287,9 @@
       <h3>Proxy list</h3>
       <p>Saved endpoints available for provider requests.</p>
     </div>
+    <button type="button" class="sc-btn pf-network-add" data-variant="outline" data-size="sm" disabled={saving} onclick={addProxy}>
+      <Icon name="plus" size={12} />Add proxy
+    </button>
   </div>
   <div class="pf-network-list">
     {#if proxy.proxies.length === 0}
@@ -318,9 +333,6 @@
       {/each}
     {/if}
   </div>
-  <button type="button" class="sc-btn pf-network-add" data-variant="outline" data-size="sm" disabled={saving} onclick={addProxy}>
-    <Icon name="plus" size={12} />Add proxy
-  </button>
 </section>
 
 <section class="pf-network-section" aria-label="Bypass">
@@ -383,41 +395,36 @@
                 {/each}
               </select>
             </label>
-            <label>
-              Host
-              <input class="sc-input" value={editing.host} disabled={saving} data-autofocus oninput={(e) => (editing = { ...editing!, host: (e.currentTarget as HTMLInputElement).value })} />
-            </label>
-            <label>
-              Port
-              <input
-                class="sc-input"
-                type="number"
-                min="1"
-                max="65535"
-                step="1"
-                value={editing.port || ""}
-                disabled={saving}
-                oninput={(e) => {
-                  const value = (e.currentTarget as HTMLInputElement).value;
-                  editing = { ...editing!, port: value === "" ? 0 : Number(value) };
-                }}
-              />
-            </label>
-            <label>
-              Username
-              <input class="sc-input" value={editing.username ?? ""} disabled={saving} oninput={(e) => (editing = { ...editing!, username: (e.currentTarget as HTMLInputElement).value || null })} />
-            </label>
-            <label>
-              Password
-              <input class="sc-input" type="password" value={draftPassword} disabled={saving} placeholder={editing.keepPassword ? "Stored password unchanged" : ""} oninput={(e) => (draftPassword = (e.currentTarget as HTMLInputElement).value)} />
-            </label>
+            <div class="pf-network-form-grid">
+              <label>
+                Host
+                <input class="sc-input" value={editing.host} disabled={saving} data-autofocus oninput={(e) => (editing = { ...editing!, host: (e.currentTarget as HTMLInputElement).value })} />
+              </label>
+              <label>
+                Port
+                <input
+                  class="sc-input"
+                  inputmode="numeric"
+                  pattern="[0-9]*"
+                  value={draftPort}
+                  disabled={saving}
+                  oninput={(e) => updateDraftPort((e.currentTarget as HTMLInputElement).value)}
+                />
+              </label>
+            </div>
+            <div class="pf-network-form-grid">
+              <label>
+                Username
+                <input class="sc-input" value={editing.username ?? ""} disabled={saving} oninput={(e) => (editing = { ...editing!, username: (e.currentTarget as HTMLInputElement).value || null })} />
+              </label>
+              <label>
+                Password
+                <input class="sc-input" type="password" value={draftPassword} disabled={saving} placeholder={editing.keepPassword ? "Stored password unchanged" : ""} oninput={(e) => (draftPassword = (e.currentTarget as HTMLInputElement).value)} />
+              </label>
+            </div>
             {#if editingValidation}
               <div class="pf-connector-validation">{editingValidation}</div>
             {/if}
-            <div class="pf-connector-command pf-network-proxy-preview" aria-label="Proxy endpoint preview">
-              <Icon name="link" size={12} />
-              <code>{endpointPreview(editing)}</code>
-            </div>
           </div>
         </div>
         <div class="pf-modal-foot">
@@ -425,7 +432,7 @@
             <button type="button" class="sc-btn" data-variant="outline" data-size="sm" disabled={saving} onclick={closeEditor}>
               Cancel
             </button>
-            <button type="submit" class="sc-btn" data-size="sm" disabled={saving || Boolean(editingValidation)}>
+            <button type="submit" class="sc-btn" data-variant="default" data-size="sm" disabled={saving || Boolean(editingValidation)}>
               {saving ? "Saving..." : "Save proxy"}
             </button>
           </div>
@@ -442,6 +449,7 @@
 
   .pf-network-section-head {
     display: flex;
+    align-items: center;
     justify-content: space-between;
     gap: 16px;
     margin-bottom: 10px;
@@ -462,6 +470,10 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .pf-network-switch {
+    justify-self: end;
   }
 
   .pf-network-proxy-card {
@@ -535,7 +547,8 @@
   }
 
   .pf-network-add {
-    margin-top: 10px;
+    margin-left: auto;
+    flex-shrink: 0;
   }
 
   .pf-network-bypass {
@@ -587,7 +600,14 @@
     font-size: 11.5px;
   }
 
-  .pf-network-proxy-preview code {
+  .pf-network-form-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .pf-network-form-grid label {
     min-width: 0;
   }
 
@@ -599,6 +619,14 @@
     .pf-network-proxy-actions,
     .pf-network-actions {
       justify-content: flex-start;
+    }
+
+    .pf-network-section-head {
+      align-items: flex-start;
+    }
+
+    .pf-network-form-grid {
+      grid-template-columns: minmax(0, 1fr);
     }
 
     .pf-network-proxy-scrim {
