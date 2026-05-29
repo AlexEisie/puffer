@@ -291,6 +291,23 @@ export class FakeDaemon {
     path: "/tmp/puffer/.puffer/permissions.json",
     tools: { bash: "ask" }
   };
+  private localModelStatus: JsonRecord = {
+    id: "minicpm5",
+    modelId: "minicpm5-1b",
+    displayName: "MiniCPM5-1B (local)",
+    supported: true,
+    recommended: true,
+    installed: false,
+    configured: false,
+    running: false,
+    installing: false,
+    reason: "macOS Apple Silicon, model not yet installed",
+    endpoint: "http://127.0.0.1:8088/v1",
+    size: "~589MB",
+    installPath: "/tmp/puffer-home/models/minicpm5-1b",
+    providerPath: "/tmp/puffer-home/resources/providers/minicpm5.yaml",
+    logPath: "/tmp/puffer-home/minicpm5-serve.log"
+  };
   private desktopPins: JsonRecord = {
     pinnedAgentIds: [],
     pinnedWorkspacePaths: []
@@ -1015,6 +1032,10 @@ export class FakeDaemon {
         };
       case "update_config":
         return this.updateConfig(request.params);
+      case "local_model_status":
+        return { ...this.localModelStatus };
+      case "install_local_model":
+        return this.installLocalModel();
       case "list_permissions":
         return this.permissions;
       case "save_permissions":
@@ -1085,6 +1106,42 @@ export class FakeDaemon {
       default:
         throw new Error(`Unhandled fake daemon method: ${request.method}`);
     }
+  }
+
+  private installLocalModel(): JsonRecord {
+    this.localModelStatus = {
+      ...this.localModelStatus,
+      installing: true,
+      reason: "installing"
+    };
+    setTimeout(() => {
+      this.emit("local-model:minicpm5:event", {
+        modelId: "minicpm5-1b",
+        jobId: "fixture-job",
+        phase: "configure",
+        message: "Installing shim and registering the Puffer provider",
+        status: { ...this.localModelStatus }
+      });
+    }, 20);
+    setTimeout(() => {
+      this.localModelStatus = {
+        ...this.localModelStatus,
+        installed: true,
+        configured: true,
+        running: true,
+        installing: false,
+        recommended: false,
+        reason: "ready"
+      };
+      this.emit("local-model:minicpm5:event", {
+        modelId: "minicpm5-1b",
+        jobId: "fixture-job",
+        phase: "done",
+        message: "MiniCPM5 is installed, registered, and running",
+        status: { ...this.localModelStatus }
+      });
+    }, 60);
+    return { jobId: "fixture-job", status: { ...this.localModelStatus } };
   }
 
   private workflowListResponse(): JsonRecord {

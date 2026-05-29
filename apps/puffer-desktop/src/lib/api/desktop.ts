@@ -1852,6 +1852,37 @@ export type ModelDescriptorInfo = {
   defaultThinkingOptionId?: string;
 };
 
+export type LocalModelStatus = {
+  id: string;
+  modelId: string;
+  displayName: string;
+  supported: boolean;
+  recommended: boolean;
+  installed: boolean;
+  configured: boolean;
+  running: boolean;
+  installing: boolean;
+  reason: string;
+  endpoint: string;
+  size: string;
+  installPath: string;
+  providerPath: string;
+  logPath: string;
+};
+
+export type LocalModelInstallJob = {
+  jobId: string;
+  status: LocalModelStatus;
+};
+
+export type LocalModelEvent = {
+  modelId: string;
+  jobId: string;
+  phase: string;
+  message: string;
+  status?: LocalModelStatus | null;
+};
+
 export type PermissionsSnapshot = {
   path: string;
   tools: Record<string, string>;
@@ -1943,6 +1974,16 @@ export type ConfigPatch = {
   theme?: string;
   openaiBaseUrl?: string | null;
 };
+
+export async function localModelStatus(modelId = "minicpm5"): Promise<LocalModelStatus> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<LocalModelStatus>("local_model_status", { modelId });
+}
+
+export async function installLocalModel(modelId = "minicpm5"): Promise<LocalModelInstallJob> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<LocalModelInstallJob>("install_local_model", { modelId });
+}
 
 export async function listMcpServers(): Promise<McpServerInfo[]> {
   const client = await ensureLocalDaemonClient();

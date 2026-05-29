@@ -6,6 +6,7 @@ mod dtos;
 mod events;
 mod files;
 mod fs_watch;
+mod local_model;
 mod lsp;
 mod pty;
 mod remote_client;
