@@ -43,17 +43,13 @@ use puffer_core::{
     PermissionPromptAction, PermissionPromptRequest, ToolCallRequest, ToolInvocation,
     TurnStreamEvent, UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
-use puffer_provider_openai::{
-    exchange_authorization_code as exchange_openai_authorization_code,
-    parse_authorization_input as parse_openai_authorization_input,
-};
+use puffer_provider_openai::parse_authorization_input as parse_openai_authorization_input;
 use puffer_provider_registry::{
     AuthStore, ModelDescriptor, ProviderDescriptor, ProviderRegistry, StoredCredential,
 };
 use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
 use puffer_session_store::{MessageActor, SessionStore, TranscriptEvent};
 use puffer_transport_anthropic::{
-    exchange_authorization_code as exchange_anthropic_authorization_code,
     parse_authorization_input as parse_anthropic_authorization_input, ANTHROPIC_API_BASE_URL,
     ANTHROPIC_MANUAL_REDIRECT_URL,
 };
@@ -435,7 +431,12 @@ impl DaemonState {
             );
         }
         if discover_all {
-            let _ = providers.discover_and_merge_all(&auth_store);
+            if let Ok(client) = proxy_discovery_client(&config) {
+                let _ =
+                    providers.discover_and_merge_all_with_discovery_client(&auth_store, &client);
+            } else {
+                let _ = providers.discover_and_merge_all(&auth_store);
+            }
         }
         let session_store = SessionStore::from_paths(&self.paths)?;
         Ok(RuntimeInputs {
@@ -452,6 +453,29 @@ struct RuntimeInputs {
     providers: ProviderRegistry,
     auth_store: AuthStore,
     session_store: SessionStore,
+}
+
+fn proxy_discovery_client(
+    config: &PufferConfig,
+) -> Result<puffer_provider_registry::ModelDiscoveryClient> {
+    let client = puffer_core::blocking_client_for_url(
+        &config.network.proxy,
+        puffer_core::HttpPurpose::Discovery,
+        "https://api.openai.com/v1/models",
+        Duration::from_secs(8),
+    )?;
+    Ok(puffer_provider_registry::ModelDiscoveryClient::with_client(
+        client,
+    ))
+}
+
+fn proxy_oauth_client(config: &PufferConfig, url: &str) -> Result<reqwest::blocking::Client> {
+    puffer_core::blocking_client_for_url(
+        &config.network.proxy,
+        puffer_core::HttpPurpose::OAuth,
+        url,
+        Duration::from_secs(60),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1402,7 +1426,16 @@ fn handle_login_with_oauth(state: &DaemonState, params: &Value) -> Result<Value>
                     anyhow::bail!("oauth state mismatch for openai");
                 }
             }
-            let credential = exchange_openai_authorization_code(&code, &bundle.verifier, None)?;
+            let oauth_client = proxy_oauth_client(
+                &state.config.lock().unwrap().clone(),
+                puffer_provider_openai::OPENAI_TOKEN_URL,
+            )?;
+            let credential = puffer_provider_openai::exchange_authorization_code_with_client(
+                &oauth_client,
+                &code,
+                &bundle.verifier,
+                None,
+            )?;
             set_stored_credential(
                 &mut inputs.auth_store,
                 provider_id.to_string(),
@@ -1421,7 +1454,12 @@ fn handle_login_with_oauth(state: &DaemonState, params: &Value) -> Result<Value>
             let redirect_uri = inferred_anthropic_redirect_uri(&callback)
                 .or_else(|| bundle.manual_redirect_uri.clone())
                 .unwrap_or_else(|| ANTHROPIC_MANUAL_REDIRECT_URL.to_string());
-            let credential = exchange_anthropic_authorization_code(
+            let oauth_client = proxy_oauth_client(
+                &state.config.lock().unwrap().clone(),
+                ANTHROPIC_API_BASE_URL,
+            )?;
+            let credential = puffer_transport_anthropic::exchange_authorization_code_with_client(
+                &oauth_client,
                 &code,
                 &bundle.verifier,
                 &bundle.state,
@@ -1663,9 +1701,20 @@ fn handle_list_provider_models(state: &DaemonState, params: &Value) -> Result<Va
         .context("missing providerId")?;
     let provider_id = canonical_desktop_provider_id(requested_provider_id);
     let mut inputs = state.build_runtime_inputs_without_discovery()?;
-    inputs
-        .providers
-        .discover_and_merge_provider(&provider_id, &inputs.auth_store)?;
+    let config = state.config.lock().unwrap().clone();
+    if let Ok(client) = proxy_discovery_client(&config) {
+        inputs
+            .providers
+            .discover_and_merge_provider_with_discovery_client(
+                &provider_id,
+                &inputs.auth_store,
+                &client,
+            )?;
+    } else {
+        inputs
+            .providers
+            .discover_and_merge_provider(&provider_id, &inputs.auth_store)?;
+    }
     let entry = inputs
         .providers
         .provider_entries()
@@ -4527,6 +4576,26 @@ mod tests {
             !model_ids.contains(&"gpt-5"),
             "fresh discovery should remove stale static models: {response}"
         );
+    }
+
+    #[test]
+    fn daemon_proxy_clients_accept_configured_proxy() {
+        let config = PufferConfig {
+            network: puffer_config::NetworkConfig {
+                proxy: puffer_config::ProxyConfig {
+                    enabled: false,
+                    selected: None,
+                    bypass: vec![],
+                    proxies: vec![],
+                },
+            },
+            ..PufferConfig::default()
+        };
+
+        let discovery = super::proxy_discovery_client(&config).expect("discovery client");
+        let oauth = super::proxy_oauth_client(&config, puffer_provider_openai::OPENAI_TOKEN_URL)
+            .expect("oauth client");
+        let _ = (discovery, oauth);
     }
 
     #[test]
