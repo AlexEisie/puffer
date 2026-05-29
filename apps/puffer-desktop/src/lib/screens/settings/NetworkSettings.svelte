@@ -9,6 +9,7 @@
   import { saveProxySettings, testProxy } from "../../api/desktop";
   import Icon from "../../design/Icon.svelte";
   import { focusTrap } from "../../focusTrap";
+  import { normalizeProxyBypass, validateProxyBypassEntries } from "./proxyBypass";
   import { proxyStatusLabel, proxyStatusState, proxyStatusTitle } from "./proxyStatus";
 
   type Props = {
@@ -32,6 +33,7 @@
   let testingId = $state<string | null>(null);
   let error = $state<string | null>(null);
   let bypassDraft = $state(defaultBypass.join("\n"));
+  let lastSyncedBypass = $state(defaultBypass.join("\n"));
   let lastTest = $state<NetworkProxySettings["lastTest"]>(null);
   let editing = $state<DraftProxyEndpoint | null>(null);
   let draftPassword = $state("");
@@ -56,8 +58,9 @@
   $effect(() => {
     if (!props.snapshot?.networkProxy) return;
     const nextBypass = props.snapshot.networkProxy.bypass.join("\n");
-    if (nextBypass !== bypassDraft) {
+    if (nextBypass !== lastSyncedBypass) {
       bypassDraft = nextBypass;
+      lastSyncedBypass = nextBypass;
     }
     lastTest = props.snapshot.networkProxy.lastTest;
   });
@@ -112,13 +115,6 @@
         keepPassword: item.hasPassword
       }))
     };
-  }
-
-  function normalizeBypass(value: string) {
-    return value
-      .split(/\r?\n|,/)
-      .map((entry) => entry.trim())
-      .filter(Boolean);
   }
 
   function endpointToDraft(item: SanitizedProxyEndpoint): DraftProxyEndpoint {
@@ -250,8 +246,19 @@
     }
   }
 
+  function updateBypassDraft(value: string) {
+    bypassDraft = value;
+    error = null;
+  }
+
   function saveBypass() {
-    void persist({ ...proxy, bypass: normalizeBypass(bypassDraft) });
+    const nextBypass = normalizeProxyBypass(bypassDraft);
+    const validation = validateProxyBypassEntries(nextBypass);
+    if (validation) {
+      error = validation;
+      return;
+    }
+    void persist({ ...proxy, bypass: nextBypass });
   }
 
   function resetBypassDefaults() {
@@ -342,12 +349,16 @@
       <p>Hosts, IPs, and CIDR ranges that should skip the proxy.</p>
     </div>
   </div>
-  <textarea class="sc-input pf-network-bypass" bind:value={bypassDraft}></textarea>
+  <textarea
+    class="sc-input pf-network-bypass"
+    bind:value={bypassDraft}
+    oninput={(e) => updateBypassDraft((e.currentTarget as HTMLTextAreaElement).value)}
+  ></textarea>
   <div class="pf-network-actions">
     <button type="button" class="sc-btn" data-variant="outline" data-size="sm" disabled={saving} onclick={resetBypassDefaults}>
       Reset defaults
     </button>
-    <button type="button" class="sc-btn" data-size="sm" disabled={saving} onclick={saveBypass}>
+    <button type="button" class="sc-btn" data-variant="default" data-size="sm" disabled={saving} onclick={saveBypass}>
       Save bypass
     </button>
   </div>

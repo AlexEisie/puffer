@@ -179,6 +179,40 @@ test("network proxy editor uses compact controls", async ({ page }) => {
   await expect(credentialGrid.getByLabel("Password")).toBeVisible();
 });
 
+test("network bypass editor preserves input and validates before save", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Network" }).click();
+
+  const bypassSection = page.locator("section[aria-label='Bypass']");
+  const bypassInput = bypassSection.locator(".pf-network-bypass");
+  const saveButton = bypassSection.getByRole("button", { name: "Save bypass" });
+  await expect(saveButton).toHaveAttribute("data-variant", "default");
+
+  await bypassInput.fill("localhost\napi.example.com");
+  await page.waitForTimeout(80);
+  await expect(bypassInput).toHaveValue("localhost\napi.example.com");
+
+  await saveButton.click();
+  const saveRequest = await daemon.waitForRequest("save_proxy_settings");
+  expect(saveRequest.params.bypass).toEqual(["localhost", "api.example.com"]);
+
+  const savedRequestCount = daemon.requests.filter(
+    (request) => request.method === "save_proxy_settings"
+  ).length;
+  await bypassInput.fill("localhost\n*.example.com");
+  await saveButton.click();
+  await page.waitForTimeout(80);
+
+  await expect(page.getByText("Invalid bypass entry: *.example.com")).toBeVisible();
+  expect(daemon.requests.filter((request) => request.method === "save_proxy_settings")).toHaveLength(
+    savedRequestCount
+  );
+});
+
 test("default routing only offers authenticated agent providers", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [

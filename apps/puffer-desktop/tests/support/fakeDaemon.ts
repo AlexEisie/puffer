@@ -1046,6 +1046,8 @@ export class FakeDaemon {
         };
       case "update_config":
         return this.updateConfig(request.params);
+      case "save_proxy_settings":
+        return this.saveProxySettings(request.params);
       case "test_proxy":
         return this.testProxy(request.params);
       case "list_permissions":
@@ -1467,6 +1469,33 @@ export class FakeDaemon {
       lastTest: result
     };
     return result;
+  }
+
+  private saveProxySettings(params: JsonRecord): JsonRecord {
+    this.networkProxy = {
+      enabled: params.enabled === true,
+      selected: typeof params.selected === "string" ? params.selected : null,
+      bypass: Array.isArray(params.bypass) ? params.bypass.map(String) : [],
+      proxies: Array.isArray(params.proxies)
+        ? params.proxies.map((proxy) => {
+            const item = proxy as JsonRecord;
+            const scheme = String(item.scheme ?? "socks5");
+            const host = String(item.host ?? "");
+            const port = Number(item.port ?? 0);
+            return {
+              id: String(item.id ?? ""),
+              scheme,
+              host,
+              port,
+              username: typeof item.username === "string" ? item.username : null,
+              hasPassword: item.keepPassword === true || typeof item.password === "string",
+              uri: `${scheme}://${host}:${port}`
+            };
+          })
+        : [],
+      lastTest: null
+    };
+    return this.settingsSnapshot();
   }
 
   private loginProvider(params: JsonRecord, kind: "api_key" | "oauth"): JsonRecord {
