@@ -200,9 +200,25 @@
     }
   }
 
-  function testSelectedProxy() {
-    if (!proxy.selected) return;
-    void testSavedProxy(proxy.selected);
+  function proxyStatusLabel(proxyId: string) {
+    if (testingId === proxyId) return "checking...";
+    if (lastTest?.proxyId !== proxyId) return null;
+    if (lastTest.ok) {
+      return lastTest.latencyMs === null
+        ? "connected"
+        : `connected (ping: ${lastTest.latencyMs} ms)`;
+    }
+    return "failed";
+  }
+
+  function proxyStatusState(proxyId: string) {
+    if (testingId === proxyId) return "checking";
+    if (lastTest?.proxyId !== proxyId) return "unknown";
+    return lastTest.ok ? "connected" : "failed";
+  }
+
+  function proxyStatusTitle(proxyId: string) {
+    return lastTest?.proxyId === proxyId ? lastTest.message : "";
   }
 
   function saveBypass() {
@@ -259,8 +275,13 @@
             />
             <span>
               <strong>{item.uri}</strong>
+              {#if proxyStatusLabel(item.id)}
+                <small class="pf-network-status" data-state={proxyStatusState(item.id)} title={proxyStatusTitle(item.id)}>
+                  {proxyStatusLabel(item.id)}
+                </small>
+              {/if}
               {#if item.username}
-                <small>{item.username}</small>
+                <small class="pf-network-username">{item.username}</small>
               {/if}
             </span>
           </label>
@@ -297,21 +318,6 @@
       Save bypass
     </button>
   </div>
-</section>
-
-<section class="pf-network-section" aria-label="Connectivity check">
-  <div class="pf-network-section-head">
-    <div>
-      <h3>Connectivity check</h3>
-      <p>Tests the selected proxy against provider network targets.</p>
-    </div>
-  </div>
-  <button type="button" class="sc-btn" data-variant="outline" data-size="sm" disabled={!proxy.selected || testingId !== null} onclick={testSelectedProxy}>
-    <Icon name="test" size={12} />{testingId !== null && testingId === proxy.selected ? "Testing..." : "Test selected proxy"}
-  </button>
-  {#if lastTest}
-    <div class="pf-settings-note pf-network-test-result" data-ok={lastTest.ok}>{lastTest.message}</div>
-  {/if}
 </section>
 
 {#if editing}
@@ -450,9 +456,26 @@
     font-family: var(--font-mono);
   }
 
-  .pf-network-proxy-main small {
+  .pf-network-status,
+  .pf-network-username {
     color: var(--muted-foreground);
     font-size: 11.5px;
+  }
+
+  .pf-network-status {
+    font-family: var(--font-mono);
+  }
+
+  .pf-network-status[data-state="connected"] {
+    color: oklch(0.46 0.14 145);
+  }
+
+  .pf-network-status[data-state="failed"] {
+    color: var(--pf-run-failed);
+  }
+
+  .pf-network-status[data-state="checking"] {
+    color: var(--puffer-accent);
   }
 
   .pf-network-proxy-actions,
@@ -479,17 +502,6 @@
   .pf-network-actions {
     justify-content: flex-end;
     margin-top: 10px;
-  }
-
-  .pf-network-test-result {
-    margin-top: 10px;
-    margin-bottom: 0;
-  }
-
-  .pf-network-test-result[data-ok="true"] {
-    border-color: color-mix(in oklab, oklch(0.7 0.18 145) 35%, var(--border));
-    background: color-mix(in oklab, oklch(0.7 0.18 145) 8%, var(--background));
-    color: oklch(0.42 0.15 145);
   }
 
   .pf-network-modal-scrim {
