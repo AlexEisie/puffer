@@ -1,7 +1,8 @@
 // Multi-agent code review orchestrator backing the `/ultrareview`
 // slash command. Pipeline: planner → 5 parallel lanes → confidence
-// filter + dedup → filter LLM → markdown. Talks to an OpenAI-
-// compatible /v1/chat/completions endpoint.
+// filter + dedup → filter LLM → markdown. Talks to the `openai`
+// provider's /v1/chat/completions endpoint, inheriting puffer's
+// resolved base URL and credentials.
 
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::Client;
@@ -13,13 +14,13 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 
-use puffer_session_store::SessionStore;
+use puffer_provider_registry::{AuthStore, ProviderRegistry, StoredCredential};
 
-use crate::command_helpers::emit_system;
-use crate::state::AppState;
-
-/// Default OpenAI-compatible endpoint when `$OPENAI_BASE_URL` is unset.
-/// Self-hosted LLM proxies / on-prem deployments override via the env var.
+/// Provider whose base URL + credentials the orchestrator borrows from
+/// puffer. `canonical_provider_id` maps imported codex credentials here.
+const ULTRAREVIEW_PROVIDER_ID: &str = "openai";
+/// Defensive fallback; in practice the `openai` provider always carries
+/// a base URL (overridable via puffer config).
 const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 const DEFAULT_MODEL: &str = "gpt-5.5";
 const LANE_TIMEOUT_SECS: u64 = 420;
@@ -104,59 +105,52 @@ fn default_severity() -> String {
     "SHOULD-FIX".to_string()
 }
 
-/// `/ultrareview <pr-url-or-number>` slash-command handler. Fetches the
-/// PR diff via `gh pr diff` and runs `orchestrate`. Result is emitted
-/// as a system message; no LLM turn is consumed.
-pub fn handle_slash_command(
-    state: &mut AppState,
-    session_store: &SessionStore,
+/// Resolves the `openai` provider's base URL and credential from puffer's
+/// registry + auth store. `canonical_provider_id` maps imported codex
+/// credentials onto this provider id.
+pub fn resolve_credentials(
+    providers: &ProviderRegistry,
+    auth_store: &AuthStore,
+) -> (Option<String>, Option<String>) {
+    let base_url = providers
+        .provider(ULTRAREVIEW_PROVIDER_ID)
+        .map(|p| p.base_url.clone());
+    let api_key = match auth_store.get(ULTRAREVIEW_PROVIDER_ID) {
+        Some(StoredCredential::ApiKey { key }) => Some(key.clone()),
+        Some(StoredCredential::OAuth(c)) => Some(c.access_token.clone()),
+        None => None,
+    };
+    (base_url, api_key)
+}
+
+/// Blocking entry for the TUI's background thread: fetch the PR diff via
+/// `gh pr diff`, run the pipeline (reporting phase progress through
+/// `progress`), and return the rendered markdown plus a timing footer.
+pub fn run_review_blocking(
     cwd: &Path,
-    args: &str,
-) -> Result<()> {
-    let trimmed = args.trim();
-    if trimmed.is_empty() {
-        return emit_system(
-            state,
-            session_store,
-            "/ultrareview requires a PR url or number, e.g. `/ultrareview 1234`.".to_string(),
-        );
+    pr_arg: &str,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    progress: &dyn Fn(String),
+) -> Result<String> {
+    progress("fetching diff…".to_string());
+    let diff = fetch_diff_via_gh_in(cwd, pr_arg)?;
+    if diff.trim().is_empty() {
+        bail!("empty diff for {pr_arg}");
     }
-
-    let diff = match fetch_diff_via_gh_in(cwd, trimmed) {
-        Ok(d) if !d.trim().is_empty() => d,
-        Ok(_) => {
-            return emit_system(
-                state,
-                session_store,
-                format!("/ultrareview: empty diff for {trimmed}"),
-            );
-        }
-        Err(e) => {
-            return emit_system(
-                state,
-                session_store,
-                format!("/ultrareview: {e}"),
-            );
-        }
-    };
-
-    let out = match orchestrate(OrchestrateRequest {
-        diff,
-        model: DEFAULT_MODEL.to_string(),
-        base_url: None,
-        api_key: None,
-        agents_dir: None,
-    }) {
-        Ok(r) => r,
-        Err(e) => {
-            return emit_system(
-                state,
-                session_store,
-                format!("/ultrareview orchestrator error: {e}"),
-            );
-        }
-    };
-
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let out = runtime.block_on(orchestrate_async(
+        OrchestrateRequest {
+            diff,
+            model: DEFAULT_MODEL.to_string(),
+            base_url,
+            api_key,
+            agents_dir: None,
+        },
+        progress,
+    ))?;
     let footer = format!(
         "\n_planner: {:.0}s · lanes: {:.0}s · filter: {:.0}s · total: {:.0}s · aggregated: {} → kept: {}_",
         out.timings_s.planner,
@@ -166,17 +160,13 @@ pub fn handle_slash_command(
         out.aggregated_count,
         out.final_count,
     );
-    emit_system(state, session_store, format!("{}\n{}", out.markdown, footer))
+    Ok(format!("{}\n{}", out.markdown, footer))
 }
 
-pub fn orchestrate(req: OrchestrateRequest) -> Result<OrchestrateResult> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(orchestrate_async(req))
-}
-
-pub async fn orchestrate_async(req: OrchestrateRequest) -> Result<OrchestrateResult> {
+pub async fn orchestrate_async(
+    req: OrchestrateRequest,
+    progress: &dyn Fn(String),
+) -> Result<OrchestrateResult> {
     let agents_dir = req.agents_dir.unwrap_or_else(default_agents_dir);
     if !agents_dir.exists() {
         bail!("agents dir does not exist: {:?}", agents_dir);
@@ -184,11 +174,11 @@ pub async fn orchestrate_async(req: OrchestrateRequest) -> Result<OrchestrateRes
 
     let base_url = req.base_url
         .map(|u| u.trim().trim_end_matches('/').to_string())
-        .unwrap_or_else(env_base_url);
-    let api_key = match req.api_key {
-        Some(k) => k,
-        None => load_api_key_from_env_or_codex()?,
-    };
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+    let api_key = req.api_key
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| anyhow!("no API key supplied; configure the `openai` provider in puffer"))?;
     let model = if req.model.is_empty() {
         DEFAULT_MODEL.to_string()
     } else {
@@ -218,6 +208,11 @@ pub async fn orchestrate_async(req: OrchestrateRequest) -> Result<OrchestrateRes
         call_planner(&client, &base_url, &api_key, &model, &planner_prompt, &planner_user).await
     };
     let planner_secs = t_planner.elapsed().as_secs_f64();
+    progress(format!(
+        "planner → {} lane(s): {} · reviewing…",
+        planner_lanes.len(),
+        planner_lanes.join(", ")
+    ));
 
     let t_lanes = Instant::now();
     let diff_clipped = truncate(&req.diff, DIFF_TRUNCATE_LANES).to_string();
@@ -235,6 +230,7 @@ pub async fn orchestrate_async(req: OrchestrateRequest) -> Result<OrchestrateRes
         while let Some(joined) = joinset.join_next().await {
             match joined {
                 Ok((lane_name, lane_run, findings)) => {
+                    progress(format!("✓ {} ({} finding(s))", lane_name, findings.len()));
                     all_findings.extend(findings);
                     lane_runs.insert(lane_name, lane_run);
                 }
@@ -273,6 +269,9 @@ pub async fn orchestrate_async(req: OrchestrateRequest) -> Result<OrchestrateRes
     }
     let aggregated: Vec<Finding> = by_loc.into_values().collect();
     let aggregated_count = aggregated.len();
+    progress(format!(
+        "aggregated {aggregated_count} finding(s) → filtering…"
+    ));
 
     let t_filter = Instant::now();
     let filter_prompt = load_agent_prompt(&agents_dir, FILTER_ID)?;
@@ -339,43 +338,6 @@ pub fn default_agents_dir() -> PathBuf {
         }
     }
     PathBuf::from("resources/agents")
-}
-
-fn env_base_url() -> String {
-    std::env::var("OPENAI_BASE_URL")
-        .ok()
-        .map(|s| s.trim().trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
-}
-
-fn load_api_key_from_env_or_codex() -> Result<String> {
-    if let Ok(k) = std::env::var("OPENAI_API_KEY") {
-        let t = k.trim();
-        if !t.is_empty() {
-            return Ok(t.to_string());
-        }
-    }
-    let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME not set"))?;
-    let path = PathBuf::from(home).join(".codex/auth.json");
-    if !path.exists() {
-        bail!("no OPENAI_API_KEY set and ~/.codex/auth.json missing");
-    }
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)
-        .with_context(|| format!("parse {:?}", path))?;
-    for key in &["OPENAI_API_KEY", "api_key", "token"] {
-        if let Some(Value::String(s)) = v.get(key) {
-            if !s.is_empty() { return Ok(s.clone()); }
-        }
-    }
-    if let Some(tokens) = v.get("tokens").and_then(|x| x.as_object()) {
-        for key in &["access_token", "id_token", "api_key"] {
-            if let Some(Value::String(s)) = tokens.get(*key) {
-                if !s.is_empty() { return Ok(s.clone()); }
-            }
-        }
-    }
-    bail!("could not find an API key in ~/.codex/auth.json")
 }
 
 fn load_agent_prompt(agents_dir: &Path, id: &str) -> Result<String> {

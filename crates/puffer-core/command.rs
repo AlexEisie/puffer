@@ -594,8 +594,14 @@ fn execute_local_command(
         "rewind" => rewind_transcript(state, session_store, args),
         "terminal-setup" => handle_terminal_setup_command(state, session_store),
         "ultrareview" => {
-            let cwd = state.cwd.clone();
-            crate::ultrareview::handle_slash_command(state, session_store, &cwd, args)
+            // Executed in the TUI flow layer, which runs the pipeline on a
+            // background thread and streams progress. Reaching here means it
+            // was dispatched outside the interactive TUI.
+            emit_system(
+                state,
+                session_store,
+                "/ultrareview runs in the interactive TUI.".to_string(),
+            )
         }
         _ => emit_system(
             state,
