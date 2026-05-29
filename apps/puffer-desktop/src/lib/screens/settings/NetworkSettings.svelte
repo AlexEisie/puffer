@@ -10,7 +10,13 @@
   import Icon from "../../design/Icon.svelte";
   import { focusTrap } from "../../focusTrap";
   import { normalizeProxyBypass, validateProxyBypassEntries } from "./proxyBypass";
-  import { removeProxyEndpoint } from "./proxyList";
+  import {
+    normalizeProxySettingsForSave,
+    proxySwitchChecked,
+    proxySwitchDisabled,
+    removeProxyEndpoint,
+    setProxyEnabled
+  } from "./proxyList";
   import { proxyStatusLabel, proxyStatusState, proxyStatusTitle } from "./proxyStatus";
 
   type Props = {
@@ -102,11 +108,12 @@
   }
 
   function toSaveProxySettingsInput(next: NetworkProxySettings) {
+    const normalized = normalizeProxySettingsForSave(next);
     return {
-      enabled: next.enabled,
-      selected: next.selected,
-      bypass: next.bypass,
-      proxies: next.proxies.map((item) => ({
+      enabled: normalized.enabled,
+      selected: normalized.selected,
+      bypass: normalized.bypass,
+      proxies: normalized.proxies.map((item) => ({
         id: item.id,
         scheme: item.scheme,
         host: item.host,
@@ -289,9 +296,9 @@
   <input
     type="checkbox"
     class="sc-switch pf-network-switch"
-    checked={proxy.enabled}
-    disabled={saving}
-    onchange={(e) => persist({ ...proxy, enabled: (e.currentTarget as HTMLInputElement).checked })}
+    checked={proxySwitchChecked(proxy)}
+    disabled={saving || proxySwitchDisabled(proxy)}
+    onchange={(e) => persist(setProxyEnabled(proxy, (e.currentTarget as HTMLInputElement).checked))}
   />
 </div>
 

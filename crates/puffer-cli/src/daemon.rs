@@ -1449,6 +1449,7 @@ fn handle_save_proxy_settings(state: &DaemonState, params: &Value) -> Result<Val
         bypass: input.bypass,
         proxies,
     };
+    config.network.proxy.normalize_selection();
     config.network.proxy.validate()?;
     save_user_config(&state.paths, &config).context("save user config")?;
     reload_daemon_config(state)?;
@@ -4847,6 +4848,95 @@ mod tests {
             .expect("saved proxy");
         assert_eq!(endpoint.scheme, ProxyScheme::Https);
         assert_eq!(endpoint.password.as_deref(), Some("old-secret"));
+    }
+
+    #[test]
+    fn save_proxy_settings_disables_empty_enabled_proxy() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(
+            workspace_root,
+            paths.clone(),
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+
+        let response = handle_save_proxy_settings(
+            &state,
+            &json!({
+                "enabled": true,
+                "selected": null,
+                "bypass": ["localhost"],
+                "proxies": []
+            }),
+        )
+        .expect("save proxy settings");
+
+        let snapshot = &response["networkProxy"];
+        assert_eq!(snapshot["enabled"], false);
+        assert!(snapshot["selected"].is_null());
+        assert_eq!(snapshot["proxies"].as_array().expect("proxies").len(), 0);
+        let saved = load_config(&paths).expect("saved config");
+        assert!(!saved.network.proxy.enabled);
+        assert_eq!(saved.network.proxy.selected, None);
+    }
+
+    #[test]
+    fn save_proxy_settings_selects_first_proxy_when_enabling_without_selection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(
+            workspace_root,
+            paths.clone(),
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+
+        let response = handle_save_proxy_settings(
+            &state,
+            &json!({
+                "enabled": true,
+                "selected": null,
+                "bypass": ["localhost"],
+                "proxies": [{
+                    "id": "local",
+                    "scheme": "socks5",
+                    "host": "127.0.0.1",
+                    "port": 7890,
+                    "username": null,
+                    "password": null,
+                    "keepPassword": false
+                }]
+            }),
+        )
+        .expect("save proxy settings");
+
+        let snapshot = &response["networkProxy"];
+        assert_eq!(snapshot["enabled"], true);
+        assert_eq!(snapshot["selected"], "local");
+        let saved = load_config(&paths).expect("saved config");
+        assert!(saved.network.proxy.enabled);
+        assert_eq!(saved.network.proxy.selected.as_deref(), Some("local"));
     }
 
     #[test]

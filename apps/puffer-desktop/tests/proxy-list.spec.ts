@@ -1,6 +1,12 @@
 import { expect, test } from "@playwright/test";
 import type { NetworkProxySettings, SanitizedProxyEndpoint } from "../src/lib/types";
-import { removeProxyEndpoint } from "../src/lib/screens/settings/proxyList";
+import {
+  normalizeProxySettingsForSave,
+  proxySwitchChecked,
+  proxySwitchDisabled,
+  removeProxyEndpoint,
+  setProxyEnabled
+} from "../src/lib/screens/settings/proxyList";
 
 const localProxy: SanitizedProxyEndpoint = {
   id: "local",
@@ -59,4 +65,36 @@ test("remove final proxy endpoint disables proxy routing", () => {
   expect(next.enabled).toBe(false);
   expect(next.selected).toBeNull();
   expect(next.proxies).toEqual([]);
+  expect(proxySwitchChecked(next)).toBe(false);
+  expect(proxySwitchDisabled(next)).toBe(true);
+});
+
+test("proxy switch is disabled when no proxy endpoints exist", () => {
+  const empty = proxySettings({
+    enabled: true,
+    selected: null,
+    proxies: []
+  });
+
+  expect(proxySwitchChecked(empty)).toBe(false);
+  expect(proxySwitchDisabled(empty)).toBe(true);
+  expect(normalizeProxySettingsForSave(empty)).toMatchObject({
+    enabled: false,
+    selected: null,
+    proxies: []
+  });
+});
+
+test("enabling proxy selects the first endpoint when none is selected", () => {
+  const next = setProxyEnabled(
+    proxySettings({
+      enabled: false,
+      selected: null
+    }),
+    true
+  );
+
+  expect(next.enabled).toBe(true);
+  expect(next.selected).toBe("local");
+  expect(proxySwitchChecked(next)).toBe(true);
 });

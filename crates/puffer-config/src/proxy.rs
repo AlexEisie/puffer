@@ -106,6 +106,28 @@ impl ProxyEndpoint {
 }
 
 impl ProxyConfig {
+    /// Normalizes enabled and selected state against the configured proxy list.
+    pub fn normalize_selection(&mut self) {
+        self.selected = self.selected.as_ref().and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
+
+        if self.proxies.is_empty() {
+            self.enabled = false;
+            self.selected = None;
+            return;
+        }
+
+        let selected_exists = self
+            .selected
+            .as_deref()
+            .is_some_and(|selected| self.proxies.iter().any(|endpoint| endpoint.id == selected));
+        if !selected_exists {
+            self.selected = self.enabled.then(|| self.proxies[0].id.clone());
+        }
+    }
+
     /// Validates selected proxy, endpoint identity, endpoint address, and bypass entries.
     pub fn validate(&self) -> Result<()> {
         let mut ids = std::collections::BTreeSet::new();
@@ -123,12 +145,11 @@ impl ProxyConfig {
                 anyhow::bail!("proxy `{}` port must be between 1 and 65535", endpoint.id);
             }
         }
-        if self.enabled {
-            let selected = self
-                .selected
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| anyhow::anyhow!("enabled proxy requires selected proxy id"))?;
+        if let Some(selected) = self
+            .selected
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
             if !ids.contains(selected) {
                 anyhow::bail!("selected proxy `{selected}` does not exist");
             }
@@ -259,7 +280,7 @@ password = "secret"
     fn proxy_config_validation_rejects_bad_values() {
         let mut config = PufferConfig::default();
         config.network.proxy.enabled = true;
-        assert!(config.network.proxy.validate().is_err());
+        assert!(config.network.proxy.validate().is_ok());
 
         config.network.proxy.selected = Some("missing".to_string());
         config.network.proxy.proxies.push(ProxyEndpoint {
@@ -282,6 +303,19 @@ password = "secret"
             password: None,
         });
         assert!(config.network.proxy.validate().is_err());
+    }
+
+    #[test]
+    fn proxy_config_normalizes_enabled_empty_list_to_disabled() {
+        let mut proxy = PufferConfig::default().network.proxy;
+        proxy.enabled = true;
+        proxy.selected = Some("missing".to_string());
+
+        proxy.normalize_selection();
+
+        assert!(!proxy.enabled);
+        assert_eq!(proxy.selected, None);
+        assert!(proxy.validate().is_ok());
     }
 
     #[test]
