@@ -1052,23 +1052,36 @@
     // Mini floating window hands off its prompt here: focus the main window
     // and run it through the normal create-session-if-needed + submit path.
     let miniUnlisten: UnlistenFn | null = null;
+    let miniDisposed = false;
+    let miniSubmitBusy = false;
     if (detectPlatform() !== "web") {
       void listen<string>("puffer://mini-submit", async (event) => {
         const text = (event.payload ?? "").trim();
         if (!text) return;
+        // Serialize handoffs: two rapid submits before a session exists would
+        // each create one and race on the shared selectedSession.
+        if (miniSubmitBusy) return;
+        miniSubmitBusy = true;
         try {
-          await getCurrentWindow().show();
-          await getCurrentWindow().setFocus();
-        } catch {
-          // best-effort focus; the handoff still runs
+          try {
+            await getCurrentWindow().show();
+            await getCurrentWindow().setFocus();
+          } catch {
+            // best-effort focus; the handoff still runs
+          }
+          await runWorkflowCommand(text);
+        } finally {
+          miniSubmitBusy = false;
         }
-        await runWorkflowCommand(text);
       }).then((un) => {
-        miniUnlisten = un;
+        // If we already unmounted before listen() resolved, unsubscribe now.
+        if (miniDisposed) un();
+        else miniUnlisten = un;
       });
     }
 
     return () => {
+      miniDisposed = true;
       miniUnlisten?.();
       cancelRecapBlurTimer();
       clearDaemonClientListeners();

@@ -37,26 +37,43 @@ pub struct Placement {
 /// Capture the main display to a temp PNG and load it. macOS-only (screencapture);
 /// other platforms fall back to centered placement.
 fn capture_screen() -> Option<image::RgbaImage> {
-    let mut path = std::env::temp_dir();
-    path.push(format!("puffer-mini-shot-{}.png", std::process::id()));
+    // Private, randomly-named temp file: created O_EXCL (no symlink/TOCTOU
+    // window on a predictable path) and auto-removed when `tmp` drops — even if
+    // we early-return or panic. screencapture overwrites the empty file in place.
+    let tmp = tempfile::Builder::new()
+        .prefix("puffer-mini-shot-")
+        .suffix(".png")
+        .tempfile()
+        .ok()?;
     let ok = Command::new("/usr/sbin/screencapture")
-        .args(["-x", "-m", path.to_str()?])
+        .args(["-x", "-m", tmp.path().to_str()?])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
     if !ok {
         return None;
     }
-    let img = image::open(&path).ok().map(|i| i.to_rgba8());
-    let _ = std::fs::remove_file(&path);
-    img
+    image::open(tmp.path()).ok().map(|i| i.to_rgba8())
 }
 
 /// Find the coldest target-sized rectangle in screen pixels.
 fn coldest_placement(img: &image::RgbaImage) -> Placement {
     let (w, h) = img.dimensions();
-    let gw = GRID_W.min(w.max(1));
-    let gh = (((gw as f32) * h as f32 / w as f32).round() as u32).max(1);
+    // A degenerate screenshot (empty / absurd aspect) would make the grid too
+    // small for the 2-cell window + margins and panic the clamps below. Fall
+    // back to a simple centered ~1/10 rect in that case.
+    if w < 8 || h < 8 {
+        let ww = ((w as f32 * 0.24) as u32).max(1);
+        let hh = ((ww as f32 / RATIO) as u32).max(1);
+        return Placement {
+            x: (w.saturating_sub(ww) / 2) as i32,
+            y: (h.saturating_sub(hh) / 2) as i32,
+            w: ww,
+            h: hh,
+        };
+    }
+    let gw = GRID_W.min(w.max(1)).max(4);
+    let gh = ((((gw as f32) * h as f32 / w as f32).round() as u32).max(1)).max(4);
 
     // Downscale, then build the per-cell edge-activity map (|dx|+|dy| of luma).
     let small = image::imageops::resize(img, gw, gh, image::imageops::FilterType::Triangle);
@@ -155,12 +172,21 @@ fn centered_placement(app: &AppHandle) -> Placement {
 }
 
 /// Compute placement: cold-region detection if a screenshot is available,
-/// otherwise a centered fallback.
+/// otherwise a centered fallback. Both detectors work in display-local
+/// coordinates (0,0 = top-left of the primary display); we add the primary
+/// monitor's global origin so the window lands correctly in multi-monitor
+/// layouts where the primary isn't at the global origin.
 fn compute_placement(app: &AppHandle) -> Placement {
-    match capture_screen() {
+    let mut placement = match capture_screen() {
         Some(img) => coldest_placement(&img),
         None => centered_placement(app),
+    };
+    if let Some(monitor) = app.primary_monitor().ok().flatten() {
+        let origin = monitor.position();
+        placement.x += origin.x;
+        placement.y += origin.y;
     }
+    placement
 }
 
 fn frontend_url() -> WebviewUrl {

@@ -388,17 +388,22 @@ pub fn run() {
     let launcher = Arc::new(DaemonLauncher::new());
     websocket::start_backend_ws(backend.clone());
 
-    // Cmd/Ctrl+Shift+Space summons the mini floating window. Avoids Cmd+Space
-    // (Spotlight). Toggling on the same chord hides it.
+    // Cmd+Shift+Space (macOS) / Ctrl+Shift+Space (Windows/Linux) summons the
+    // mini floating window. Avoids Cmd+Space (Spotlight). Same chord hides it.
     use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
-    let mini_shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space);
+    #[cfg(target_os = "macos")]
+    let primary_modifier = Modifiers::SUPER;
+    #[cfg(not(target_os = "macos"))]
+    let primary_modifier = Modifiers::CONTROL;
+    let mini_shortcut = Shortcut::new(Some(primary_modifier | Modifiers::SHIFT), Code::Space);
 
     Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(
+            // Register the shortcut in setup() (below) instead of here so an OS
+            // registration failure (e.g. another app owns the chord) doesn't
+            // abort startup — the handler is harmless until something registers.
             tauri_plugin_global_shortcut::Builder::new()
-                .with_shortcut(mini_shortcut)
-                .expect("register mini-window shortcut")
                 .with_handler(move |app, shortcut, event| {
                     if shortcut == &mini_shortcut && event.state() == ShortcutState::Pressed {
                         mini_window::toggle_mini_window(app);
@@ -406,6 +411,15 @@ pub fn run() {
                 })
                 .build(),
         )
+        .setup(move |app| {
+            use tauri_plugin_global_shortcut::GlobalShortcutExt;
+            if let Err(err) = app.global_shortcut().register(mini_shortcut) {
+                eprintln!(
+                    "mini-window shortcut unavailable (continuing without it): {err}"
+                );
+            }
+            Ok(())
+        })
         .manage(backend)
         .manage(launcher)
         .invoke_handler(tauri::generate_handler![
