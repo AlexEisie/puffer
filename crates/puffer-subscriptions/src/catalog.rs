@@ -111,6 +111,7 @@ pub fn builtin_connector_templates() -> Vec<ConnectorTemplate> {
         slack_bot_template(),
         email_template(),
         gmail_browser_template(),
+        gcal_browser_template(),
     ]
 }
 
@@ -127,6 +128,7 @@ pub fn suggested_connection_slug(connector_slug: &str) -> String {
         "telegram-login" => "telegram-user".to_string(),
         "email" => "email".to_string(),
         "gmail-browser" => "gmail-browser".to_string(),
+        "gcal-browser" => "gcal-browser".to_string(),
         "lark-app" => "lark-app".to_string(),
         "lark-login" => "lark-login".to_string(),
         "discord-bot" => "discord-bot".to_string(),
@@ -324,6 +326,27 @@ fn gmail_browser_template() -> ConnectorTemplate {
     }
 }
 
+fn gcal_browser_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "gcal-browser".to_string(),
+        description: "Google Calendar web connector using the global Puffer browser profile"
+            .to_string(),
+        skill: "gcal-browser".to_string(),
+        binary: "puffer __subscriber gcal-browser".to_string(),
+        command: Vec::new(),
+        requires_auth: true,
+        can_subscribe: true,
+        can_proxy_agent: false,
+        subscriber: Some(ConnectorSubscriberTemplate {
+            manifest_slug: "gcal-browser".to_string(),
+            state_root: Some("gcal-browser-accounts".to_string()),
+            display_name: Some("Google Calendar Browser".to_string()),
+        }),
+        output_schema: message_output_schema(),
+        actions: gcal_browser_actions(),
+    }
+}
+
 fn email_actions() -> BTreeMap<String, ConnectorActionDefinition> {
     let mut actions = send_message_actions();
     for action in email_specific_actions("email") {
@@ -340,6 +363,58 @@ fn gmail_browser_actions() -> BTreeMap<String, ConnectorActionDefinition> {
     let browser_action = request_user_browser_action_definition();
     actions.insert(browser_action.slug.clone(), browser_action);
     actions
+}
+
+fn gcal_browser_actions() -> BTreeMap<String, ConnectorActionDefinition> {
+    let mut actions = BTreeMap::new();
+    for action in [
+        calendar_action_definition(
+            "get_detail",
+            "Read Google Calendar event details from the browser session",
+            "external_calendar_read",
+            "Read external calendar event details",
+            false,
+        ),
+        calendar_action_definition(
+            "accept",
+            "Accept a Google Calendar event invitation",
+            "external_calendar_rsvp",
+            "Accept an external calendar invitation",
+            true,
+        ),
+        calendar_action_definition(
+            "deny",
+            "Decline a Google Calendar event invitation",
+            "external_calendar_rsvp",
+            "Decline an external calendar invitation",
+            true,
+        ),
+    ] {
+        actions.insert(action.slug.clone(), action);
+    }
+    let browser_action = request_user_browser_action_definition();
+    actions.insert(browser_action.slug.clone(), browser_action);
+    actions
+}
+
+fn calendar_action_definition(
+    slug: &str,
+    description: &str,
+    category: &str,
+    summary: &str,
+    external_side_effect: bool,
+) -> ConnectorActionDefinition {
+    ConnectorActionDefinition {
+        slug: slug.to_string(),
+        description: description.to_string(),
+        input_schema: calendar_action_schema(),
+        output_schema: action_output_schema(),
+        permission: ConnectorPermissionDefinition {
+            category: category.to_string(),
+            summary: summary.to_string(),
+            external_side_effect,
+        },
+    }
 }
 
 fn request_user_browser_action_definition() -> ConnectorActionDefinition {

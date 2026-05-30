@@ -434,6 +434,14 @@ export type WorkflowMonitorTaskAction = {
   prompt: string;
 };
 
+export type WorkflowActionUsage = {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_tokens?: number;
+  cache_creation_tokens?: number;
+  spent_tokens?: number;
+};
+
 export type WorkflowMonitorTask = {
   task_id: string;
   subject: string;
@@ -442,7 +450,15 @@ export type WorkflowMonitorTask = {
   monitor_connection?: string | null;
   monitor_connector?: string | null;
   monitor_memory_path?: string | null;
+  monitor_envelope_id?: string | null;
   ignored?: boolean;
+  ignore_reason?: string | null;
+  ignore_analysis_started?: boolean;
+  ignore_analysis_status?: string | null;
+  ignore_analysis_result?: string | null;
+  ignore_analysis_error?: string | null;
+  ignore_analysis_usage?: WorkflowActionUsage | null;
+  ignore_analysis_completed_at_ms?: number | null;
   actions?: WorkflowMonitorTaskAction[];
   possible_ignore_reasons?: string[];
   started_at_ms?: number | null;
@@ -476,8 +492,45 @@ export type WorkflowTask = {
   monitor_connection?: string | null;
   monitor_connector?: string | null;
   monitor_memory_path?: string | null;
+  monitor_envelope_id?: string | null;
+  ignore_reason?: string | null;
+  ignore_analysis_started?: boolean;
+  ignore_analysis_status?: string | null;
+  ignore_analysis_result?: string | null;
+  ignore_analysis_error?: string | null;
+  ignore_analysis_usage?: WorkflowActionUsage | null;
+  ignore_analysis_completed_at_ms?: number | null;
   actions?: WorkflowMonitorTaskAction[];
   possible_ignore_reasons?: string[];
+};
+
+export type WorkflowMonitorHistoryAction = {
+  action: string;
+  status: string;
+  summary: string;
+  started_at_ms: number;
+  ended_at_ms: number;
+  usage?: WorkflowActionUsage | null;
+};
+
+export type WorkflowMonitorHistoryMessage = {
+  idx: number;
+  run_id: string;
+  workflow_slug: string;
+  connection_slug?: string | null;
+  connector_slug?: string | null;
+  envelope_id?: string | null;
+  received_at_ms?: number | null;
+  topic?: string | null;
+  kind?: string | null;
+  dedup_key?: string | null;
+  summary: string;
+  text: string;
+  payload?: Record<string, unknown> | null;
+  action_log: WorkflowMonitorHistoryAction[];
+  status: string;
+  started_at_ms: number;
+  ended_at_ms: number;
 };
 
 export type WorkflowFilterRule = Record<string, unknown>;

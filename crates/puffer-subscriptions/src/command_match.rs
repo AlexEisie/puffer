@@ -48,7 +48,7 @@ pub(crate) fn command_matches_terminal_event(
             .map(|action| payload_str_eq(&envelope.event.payload, "action", action))
             .unwrap_or(true),
         SubscriberCommand::Custom { op, args }
-            if op == "email_act" || op == "gmail_browser_act" =>
+            if op == "email_act" || op == "gmail_browser_act" || op == "gcal_browser_act" =>
         {
             args.get("action")
                 .and_then(Value::as_str)

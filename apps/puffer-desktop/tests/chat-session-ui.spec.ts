@@ -3380,6 +3380,41 @@ test("input user questions render a direct answer field", async ({ page }) => {
   });
 });
 
+test("user questions render markdown images in question text and previews", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const image =
+    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCI+PHJlY3Qgd2lkdGg9IjIwIiBoZWlnaHQ9IjIwIiBmaWxsPSJ3aGl0ZSIvPjxyZWN0IHg9IjQiIHk9IjQiIHdpZHRoPSIxMiIgaGVpZ2h0PSIxMiIgZmlsbD0iYmxhY2siLz48L3N2Zz4=";
+
+  await openSession(page, /^Browser regression\b/);
+  daemon.emit("session:session-browser:event", {
+    type: "user-question-request",
+    turnId: "turn-question-image",
+    requestId: "question-image",
+    questions: [
+      {
+        header: "Approve",
+        question: `Scan this code.\n![Telegram QR](${image})`,
+        options: [
+          {
+            label: "Approved",
+            description: "I approved the login request.",
+            preview: `![Preview QR](${image})\n\ntg://login?token=abc`
+          },
+          { label: "Cancel", description: "Stop setup." }
+        ]
+      }
+    ]
+  });
+
+  const block = page.locator(".pf-question-block").filter({ hasText: "Scan this code." });
+  await expect(block.getByRole("img", { name: "Telegram QR" })).toBeVisible();
+  await expect(block.getByRole("img", { name: "Preview QR" })).toBeVisible();
+  await expect(block.getByText("tg://login?token=abc")).toBeVisible();
+});
+
 test("searchable user question choices filter connector options", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
