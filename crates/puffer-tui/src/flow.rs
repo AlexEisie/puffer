@@ -51,6 +51,10 @@ use flow_shell::{
     execute_shell_shortcut, execute_shell_shortcut_inline, finalize_shell_shortcut_result,
 };
 
+#[path = "flow_ultrareview.rs"]
+mod flow_ultrareview;
+use flow_ultrareview::execute_ultrareview;
+
 const CANCELLED_TURN_MESSAGE: &str = "Interrupted by user.";
 
 fn parsed_slash_command(submitted: &str) -> (&str, &str) {
@@ -70,6 +74,10 @@ fn is_connect_command_input(submitted: &str) -> bool {
 fn is_monitor_command_input(submitted: &str) -> bool {
     let (name, _) = parsed_slash_command(submitted);
     canonical_overlay_command_name(name) == "monitor"
+}
+
+fn is_ultrareview_command_input(submitted: &str) -> bool {
+    parsed_slash_command(submitted).0 == "ultrareview"
 }
 
 fn canonical_overlay_command_name(name: &str) -> &str {
@@ -316,6 +324,21 @@ pub(crate) fn handle_prompt_submit(
             session_store,
             tui,
             submitted,
+        )?;
+        return Ok(());
+    }
+    if is_ultrareview_command_input(&submitted) {
+        ensure_persistent_session_for_prompt_submit(state, session_store, &submitted)?;
+        let (_, pr_arg) = parsed_slash_command(&submitted);
+        let pr_arg = pr_arg.to_string();
+        execute_ultrareview(
+            state,
+            providers,
+            auth_store,
+            session_store,
+            tui,
+            &submitted,
+            &pr_arg,
         )?;
         return Ok(());
     }
@@ -646,7 +669,9 @@ fn persist_pending_submit_progress_on_cancel(
             }
             PendingSubmitEvent::ReflectionCheckpoint(_)
             | PendingSubmitEvent::RetryAttempt { .. }
-            | PendingSubmitEvent::Usage(_) => {}
+            | PendingSubmitEvent::Usage(_)
+            | PendingSubmitEvent::UltrareviewProgress(_)
+            | PendingSubmitEvent::UltrareviewFinished(_) => {}
         }
     }
 
@@ -812,6 +837,25 @@ pub(crate) fn poll_pending_submit(
             PendingSubmitEvent::ShellShortcutFinished(result) => {
                 completed = true;
                 finalize_shell_shortcut_result(state, session_store, result)?;
+                break;
+            }
+            PendingSubmitEvent::UltrareviewProgress(line) => {
+                pending.status_hint = Some(line);
+            }
+            PendingSubmitEvent::UltrareviewFinished(result) => {
+                completed = true;
+                let text = match result {
+                    Ok(markdown) => markdown,
+                    Err(error) => format!("/ultrareview error: {error}"),
+                };
+                state.push_message(MessageRole::System, text.clone());
+                session_store.append_event(
+                    state.session.id,
+                    TranscriptEvent::SystemMessage {
+                        text,
+                        actor: Some(state.system_actor()),
+                    },
+                )?;
                 break;
             }
             PendingSubmitEvent::Finished(result) => {

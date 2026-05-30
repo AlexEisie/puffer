@@ -130,6 +130,10 @@ pub(crate) enum PendingSubmitEvent {
         Sender<UserQuestionPromptResponse>,
     ),
     ShellShortcutFinished(ShellShortcutResult),
+    /// A phase update from a background /ultrareview run (shown as a status hint).
+    UltrareviewProgress(String),
+    /// Final /ultrareview output (rendered markdown) or an error string.
+    UltrareviewFinished(Result<String, String>),
     Finished(PendingSubmitResult),
 }
 
