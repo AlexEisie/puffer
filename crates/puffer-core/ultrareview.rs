@@ -242,7 +242,8 @@ pub async fn orchestrate_async(
                 Err(e) => eprintln!("ultrareview lane join error: {e}"),
             }
             if cancel.is_cancelled() {
-                continue; // stop spawning new lanes; drain those in flight
+                joinset.abort_all(); // drop in-flight lane calls so ESC is responsive
+                break;
             }
             if let Some(lane_name) = lanes_iter.next() {
                 spawn_lane(&mut joinset, &client, &base_url, &api_key, &model,
@@ -572,7 +573,17 @@ fn parse_lane_findings(text: &str, lane_name: &str) -> Result<Vec<Finding>> {
                     return Ok(arr_to_findings(arr.clone(), lane_name));
                 }
             }
-            Vec::new()
+            // An empty object is a legitimate "no findings"; a non-empty object
+            // with no recognized array field is an unexpected envelope — surface
+            // it as a parse error rather than silently reporting zero findings.
+            if map.is_empty() {
+                Vec::new()
+            } else {
+                bail!(
+                    "lane returned an object with no recognized array field (keys: {:?})",
+                    map.keys().collect::<Vec<_>>()
+                );
+            }
         }
         _ => Vec::new(),
     };
