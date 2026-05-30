@@ -126,6 +126,10 @@
     multiSelect: boolean;
   };
 
+  type ConnectorMarkdownPart =
+    | { kind: "text"; text: string }
+    | { kind: "image"; alt: string; src: string };
+
   type ConnectorQuestionRequest = {
     turnId: string;
     requestId: string;
@@ -384,6 +388,37 @@
     return question.question;
   }
 
+  function connectorMarkdownParts(value: string | undefined): ConnectorMarkdownPart[] {
+    if (!value) return [];
+    const parts: ConnectorMarkdownPart[] = [];
+    const imagePattern = /!\[([^\]\n]*)\]\(([^)\s]+)\)/g;
+    let cursor = 0;
+    for (const match of value.matchAll(imagePattern)) {
+      const start = match.index ?? 0;
+      if (start > cursor) {
+        parts.push({ kind: "text", text: value.slice(cursor, start) });
+      }
+      const src = safeConnectorImageSrc(match[2] ?? "");
+      if (src) {
+        parts.push({ kind: "image", alt: match[1] ?? "", src });
+      } else {
+        parts.push({ kind: "text", text: match[0] });
+      }
+      cursor = start + match[0].length;
+    }
+    if (cursor < value.length) {
+      parts.push({ kind: "text", text: value.slice(cursor) });
+    }
+    return parts.length > 0 ? parts : [{ kind: "text", text: value }];
+  }
+
+  function safeConnectorImageSrc(value: string): string | null {
+    const src = value.trim();
+    if (/^data:image\/(?:png|jpe?g|gif|webp|svg\+xml);base64,[a-z0-9+/=]+$/i.test(src)) return src;
+    if (/^https?:\/\//i.test(src)) return src;
+    return null;
+  }
+
   function normalizeConnectorQuestions(rawQuestions: unknown[]): ConnectorQuestion[] {
     return rawQuestions
       .map((raw): ConnectorQuestion | null => {
@@ -489,7 +524,7 @@
   function connectorQuestionSubmitLabel(): string {
     if (connectorCreating) return "Continuing...";
     if (!connectorQuestionRequest) return "Submit answers";
-    if (activeConnectorSetupSlug() === "gmail-browser" && connectorQuestionRequest.questions.some(connectorQuestionIsActionOnly)) {
+    if (activeConnectorSetupUsesBrowser() && connectorQuestionRequest.questions.some(connectorQuestionIsActionOnly)) {
       return "Continue";
     }
     return connectorQuestionRequest.browserSessionId ? "Continue setup" : "Submit answers";
@@ -497,6 +532,10 @@
 
   function activeConnectorSetupSlug(): string {
     return connectorSetupSlug ?? selectedConnector?.connector_slug ?? connectorSlug;
+  }
+
+  function activeConnectorSetupUsesBrowser(): boolean {
+    return ["gmail-browser", "gcal-browser"].includes(activeConnectorSetupSlug());
   }
 
   function connectorQuestionStatusMessage(questions: ConnectorQuestion[]): string {
@@ -512,6 +551,19 @@
         return "Gmail setup found Google accounts in the Puffer profile.";
       }
       return "Gmail setup is waiting for the next browser-profile answer.";
+    }
+    if (activeConnectorSetupSlug() === "gcal-browser") {
+      const prompt = questions
+        .map((question) => `${question.header} ${question.question}`)
+        .join(" ")
+        .toLowerCase();
+      if (prompt.includes("sign in")) {
+        return "Google Calendar setup is waiting for browser sign-in in the Puffer profile.";
+      }
+      if (prompt.includes("accounts")) {
+        return "Google Calendar setup found Google accounts in the Puffer profile.";
+      }
+      return "Google Calendar setup is waiting for the next browser-profile answer.";
     }
     if (activeConnectorSetupSlug() !== "telegram-login") {
       return "Answer the connector setup questions to continue.";
@@ -653,8 +705,6 @@
         connectorQuestionAnswers,
         {}
       );
-      connectorQuestionRequest = null;
-      connectorQuestionAnswers = {};
     } catch (e) {
       connectorCreating = false;
       connectorError = connectorSetupErrorMessage((e as Error).message ?? String(e));
@@ -1279,6 +1329,16 @@
   });
 </script>
 
+{#snippet connectorMarkdown(value: string | undefined, fallbackAlt: string)}
+  {#each connectorMarkdownParts(value) as part}
+    {#if part.kind === "image"}
+      <img class="pf-connector-question-image" src={part.src} alt={part.alt || fallbackAlt} />
+    {:else}
+      <span class="pf-connector-markdown-text">{part.text}</span>
+    {/if}
+  {/each}
+{/snippet}
+
 <div class="pf-settings">
   <div class="pf-settings-nav">
     {#each navItems as n (n.id)}
@@ -1695,7 +1755,15 @@
                 ? "pf-modal-body pf-connector-question-list pf-connector-question-list-browser"
                 : "pf-modal-body pf-connector-question-list"}
               >
-                {#if connectorQuestionRequest.browserSessionId}
+                {#if connectorCreating}
+                  <div class="pf-connector-question-loading" role="status" aria-live="polite">
+                    <span class="pf-connector-loading-spinner" aria-hidden="true"></span>
+                    <div>
+                      <strong>Checking connector auth...</strong>
+                      <span>{connectorSaved || "Waiting for the connector to finish."}</span>
+                    </div>
+                  </div>
+                {:else if connectorQuestionRequest.browserSessionId}
                   <div class="pf-connector-browser-auth">
                     <BrowserPane sessionId={connectorQuestionRequest.browserSessionId} />
                   </div>
@@ -1705,7 +1773,7 @@
                       <fieldset class="pf-connector-question" data-action-only={connectorQuestionIsActionOnly(question)}>
                         <legend>
                           <span>{question.header}</span>
-                          <strong>{question.question}</strong>
+                          <strong>{@render connectorMarkdown(question.question, "Question image")}</strong>
                         </legend>
                         {#if question.type === "input"}
                           <input
@@ -1784,7 +1852,7 @@
                     <fieldset class="pf-connector-question" data-action-only={connectorQuestionIsActionOnly(question)}>
                       <legend>
                         <span>{question.header}</span>
-                        <strong>{question.question}</strong>
+                        <strong>{@render connectorMarkdown(question.question, "Question image")}</strong>
                       </legend>
                       {#if question.type === "input"}
                         <input

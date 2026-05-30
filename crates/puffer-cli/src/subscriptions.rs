@@ -8,6 +8,8 @@
 
 #[path = "email_connector_actions.rs"]
 mod email_connector_actions;
+#[path = "gcal_connector_actions.rs"]
+mod gcal_connector_actions;
 #[path = "lark_connector_actions.rs"]
 mod lark_connector_actions;
 #[path = "slack_connector_actions.rs"]
@@ -36,6 +38,9 @@ use tokio::runtime::Runtime;
 use self::email_connector_actions::{
     email_action_via_subscriber, email_subscriber_for_action, email_subscriber_for_platform,
     is_email_action, is_email_connector,
+};
+use self::gcal_connector_actions::{
+    gcal_action_via_subscriber, gcal_subscriber_for_action, is_gcal_action, is_gcal_connector,
 };
 use self::lark_connector_actions::{
     is_lark_action, is_lark_connector, run_lark_action, LarkConnectionAuthChecker,
@@ -373,6 +378,11 @@ impl puffer_subscriptions::ConnectionAuthChecker for BuiltinConnectionAuthChecke
                 .is_some_and(|config| config.is_configured());
             return Ok(Some(configured));
         }
+        if template.slug == crate::gcal_browser::CONNECTOR_SLUG {
+            let configured = crate::gcal_browser::load_config(&self.paths, connection_slug)?
+                .is_some_and(|config| config.is_configured());
+            return Ok(Some(configured));
+        }
         let slack = SlackConnectionAuthChecker {
             paths: self.paths.clone(),
         }
@@ -476,6 +486,20 @@ impl ConnectorActionExecutor for ManagerConnectorActionExecutor {
         }
         if is_email_connector(connector_slug) && is_email_action(action) {
             let summary = email_action_via_subscriber(
+                &manager,
+                &self.paths,
+                connector_slug,
+                &connection,
+                action,
+                &input,
+            )?;
+            return Ok(format!(
+                "{} [{}]",
+                summary, action_definition.permission.category
+            ));
+        }
+        if is_gcal_connector(connector_slug) && is_gcal_action(action) {
+            let summary = gcal_action_via_subscriber(
                 &manager,
                 &self.paths,
                 connector_slug,
@@ -747,6 +771,11 @@ fn subscriber_for_action(
     }
     if let Some(subscriber_id) =
         email_subscriber_for_action(manager, paths, connector_slug, connection_slug)?
+    {
+        return Ok(Some(subscriber_id));
+    }
+    if let Some(subscriber_id) =
+        gcal_subscriber_for_action(manager, paths, connector_slug, connection_slug)?
     {
         return Ok(Some(subscriber_id));
     }

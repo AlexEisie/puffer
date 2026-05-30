@@ -175,6 +175,29 @@ pub(super) fn email_action_schema() -> Value {
     })
 }
 
+/// Returns the Google Calendar browser action input schema.
+pub(super) fn calendar_action_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "connection_slug": {"type": "string"},
+            "account_slug": {"type": "string"},
+            "connection": {"type": "string"},
+            "account": {"type": "string"},
+            "email": {"type": "string"},
+            "event_id": {"type": "string"},
+            "calendar_event_id": {"type": "string"},
+            "id": {"type": "string"},
+            "title": {"type": "string"},
+            "summary": {"type": "string"},
+            "event_title": {"type": "string"},
+            "url": {"type": "string"},
+            "event_url": {"type": "string"}
+        },
+        "additionalProperties": true
+    })
+}
+
 /// Returns the Telegram peer action input schema.
 pub(super) fn telegram_peer_action_schema() -> Value {
     serde_json::json!({

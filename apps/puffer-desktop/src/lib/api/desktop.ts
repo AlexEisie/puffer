@@ -21,6 +21,7 @@ import type {
   TimelineItem,
   WorkflowDefinition,
   WorkflowBindingCreateRequest,
+  WorkflowMonitorHistoryMessage,
   WorkflowRun,
   WorkflowSnapshot
 } from "../types";
@@ -1246,6 +1247,16 @@ export async function saveMonitorMemory(connectionSlug: string, content: string)
     connection_slug: connectionSlug,
     content
   });
+}
+
+/** Load recent received monitor messages and their agent outcomes. */
+export async function loadMonitorHistory(limit = 200): Promise<WorkflowMonitorHistoryMessage[]> {
+  const client = await ensureLocalDaemonClient();
+  const result = await client.request<{ messages?: WorkflowMonitorHistoryMessage[] }>(
+    "task_monitor_history_list",
+    { limit }
+  );
+  return result.messages ?? [];
 }
 
 /** Delete one connection-triggered workflow binding. */
