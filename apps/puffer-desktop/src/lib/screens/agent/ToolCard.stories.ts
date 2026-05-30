@@ -155,27 +155,6 @@ const webSearchOutput = {
   bytes: 18342
 };
 
-const documentationOutput = {
-  status: "ok",
-  result: {
-    title: "Tool card documentation",
-    path: "docs/desktop/tool-card.md",
-    sections: [
-      "Purpose",
-      "Inputs",
-      "Rendered states",
-      "Accessibility checks"
-    ],
-    excerpt: [
-      "# Tool card",
-      "",
-      "Tool cards summarize a single agent tool invocation, keep arguments scannable, and preserve detailed output behind an expandable row.",
-      "",
-      "Use documentation entries when the agent records implementation notes or component behavior for later review."
-    ].join("\n")
-  }
-};
-
 const httpOutput = {
   status: "ok",
   code: 200,
@@ -489,27 +468,6 @@ export const WebFetch: Story = {
         bytes: 40580,
         result: "Storybook for Svelte uses the @storybook/svelte-vite framework package."
       }, null, 2)
-    })
-  }
-};
-
-export const Documentation: Story = {
-  args: {
-    prompt: toolCardPrompt("Documentation"),
-    item: toolItem({
-      toolName: "Documentation",
-      summary: "Recorded tool card behavior notes.",
-      input: JSON.stringify({
-        path: "docs/desktop/tool-card.md",
-        title: "Tool card documentation",
-        section: "Rendered states"
-      }),
-      inputJson: {
-        path: "docs/desktop/tool-card.md",
-        title: "Tool card documentation",
-        section: "Rendered states"
-      },
-      output: JSON.stringify(documentationOutput, null, 2)
     })
   }
 };

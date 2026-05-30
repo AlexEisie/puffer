@@ -66,7 +66,7 @@ export const Prompt = ({ story }) => {
   );
 };
 
-<Meta title="Agent/ToolCard/Documentation" parameters={{ layout: "padded" }} />
+<Meta title="Agent/ToolCard" parameters={{ layout: "padded" }} />
 
 # ToolCard
 
@@ -105,7 +105,7 @@ argument label from common fields such as `path`, `file_path`, `pattern`,
 | Web | `WebFetch`, `WebSearch` | URL/query title, HTTP metadata, and fetched text. |
 | Browser | `BrowserAction`, browser MCP tools | Recorded browser frames when a session recording exists. |
 | MCP | `mcp__server__tool` | Server/tool title, argument details, sections, and errors. |
-| Generic structured | Workflow, connector, memory, image, task, docs | Status metadata plus structured result text. |
+| Generic structured | Workflow, connector, memory, image, task | Status metadata plus structured result text. |
 
 ## File and terminal cards
 
@@ -186,10 +186,6 @@ argument label from common fields such as `path`, `file_path`, `pattern`,
 <Prompt story={ToolCardStories.Memory} />
 
 <Canvas of={ToolCardStories.Memory} />
-
-<Prompt story={ToolCardStories.Documentation} />
-
-<Canvas of={ToolCardStories.Documentation} />
 
 ## Connector and workflow cards
 
