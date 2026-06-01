@@ -27,6 +27,7 @@ use std::fmt::Write as _;
 mod registry;
 pub use registry::{command_surface, find_command, supported_commands, CommandKind, CommandSpec};
 
+
 /// Dispatches a slash-command against the current application state.
 pub fn dispatch_command(
     state: &mut AppState,
@@ -597,6 +598,14 @@ fn execute_local_command(
         "loop" | "maximize" | "minimize" => {
             // Handled in TUI flow layer which has access to TuiState.
             // If we reach here the command was dispatched outside the TUI.
+            emit_system(
+                state,
+                session_store,
+                format!("/{} requires the interactive TUI.", command.name),
+            )
+        }
+        "pentest" => {
+            // TUI-managed multi-turn command.
             emit_system(
                 state,
                 session_store,

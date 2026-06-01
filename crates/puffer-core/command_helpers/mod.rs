@@ -15,6 +15,7 @@ mod lambda_doctor;
 mod lambda_skill_status;
 mod model;
 mod monitor;
+mod pentest;
 mod plugins;
 pub(crate) mod prompt;
 mod recap;
@@ -63,6 +64,10 @@ pub(crate) use model::{
 };
 pub use monitor::execute_monitor_flow;
 pub(crate) use monitor::handle_monitor_command;
+pub use pentest::{
+    prepare_pentest_command, PentestCommand, PentestStart, DEFAULT_PENTEST_MAX_DISPATCHES_PER_ITER,
+    DEFAULT_PENTEST_MAX_ITERATIONS, PENTEST_USAGE,
+};
 pub use plugins::PluginActionEntry;
 pub(crate) use plugins::{
     handle_plugin_command, reload_plugins_summary, render_plugin_actions, render_plugin_summary,

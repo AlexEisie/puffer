@@ -7,6 +7,8 @@ mod markdown;
 mod markdown_render;
 #[path = "onboarding/mod.rs"]
 mod onboarding;
+mod pentest;
+mod pentest_command;
 mod permission_prompt_flow;
 mod popup;
 mod render;
@@ -232,6 +234,7 @@ pub fn run_app(
         }
         if poll_pending_submit(state, auth_store, auth_path, session_store, &mut tui)? {
             advance_loop_after_turn(state, session_store, &mut tui)?;
+            pentest_command::advance_after_turn(state, session_store, &mut tui)?;
             submit_queued_prompt_if_ready(
                 state,
                 resources,
@@ -525,6 +528,11 @@ fn handle_key(
                 tui.active_loop = None;
                 tui.queued_prompts.clear();
                 tui.status_hint = Some(("Loop stopped.".into(), std::time::Instant::now()));
+            } else if pentest_command::is_active(tui) {
+                cancel_pending_submit(state, session_store, tui)?;
+                pentest_command::clear_active(state, tui);
+                tui.queued_prompts.clear();
+                tui.status_hint = Some(("Pentest stopped.".into(), std::time::Instant::now()));
             } else if tui.has_pending_submit() {
                 cancel_pending_submit(state, session_store, tui)?;
                 tui.status_hint = Some((
@@ -1397,6 +1405,11 @@ fn handle_overlay_key(
                 tui.active_loop = None;
                 tui.queued_prompts.clear();
                 emit_system_message(state, session_store, "Loop stopped.".to_string())?;
+            } else if pentest_command::is_active(tui) {
+                cancel_pending_submit(state, session_store, tui)?;
+                pentest_command::clear_active(state, tui);
+                tui.queued_prompts.clear();
+                emit_system_message(state, session_store, "Pentest stopped.".to_string())?;
             } else if tui.has_pending_submit() {
                 // First Ctrl+C during a running turn → cancel the turn
                 cancel_pending_submit(state, session_store, tui)?;
