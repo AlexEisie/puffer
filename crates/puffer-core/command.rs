@@ -603,6 +603,14 @@ fn execute_local_command(
                 format!("/{} requires the interactive TUI.", command.name),
             )
         }
+        "pentest" => {
+            // TUI-managed multi-turn command.
+            emit_system(
+                state,
+                session_store,
+                format!("/{} requires the interactive TUI.", command.name),
+            )
+        }
         "rewind" => rewind_transcript(state, session_store, args),
         "terminal-setup" => handle_terminal_setup_command(state, session_store),
         "ultrareview" => {

@@ -370,6 +370,32 @@ test("Files tab close controls include paths for duplicate file names", async ({
   await expect(page.getByRole("button", { name: "Close src/main.rs", exact: true })).toHaveCount(1);
 });
 
+test("Files tab restore ignores duplicate and malformed persisted tabs", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  const daemon = new FakeDaemon();
+  daemon.setRawFileTabsState({
+    tabs: [
+      { path: "/tmp/puffer/src/main.rs", pinned: true },
+      { path: "/tmp/puffer/src/main.rs", pinned: false },
+      { path: "/tmp/puffer/src/lib.rs", pinned: true },
+      { path: "", pinned: true },
+      { path: "/tmp/other/outside.rs", pinned: true }
+    ],
+    activePath: "/tmp/puffer/src/main.rs"
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  await expect(page.locator(".file-tabs [role='tab']")).toHaveCount(2);
+  await expect(page.getByRole("button", { name: "Close src/main.rs", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Close src/lib.rs", exact: true })).toHaveCount(1);
+  expect(pageErrors).toEqual([]);
+});
+
 test("Files directory rows expose expand and collapse state", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
@@ -388,6 +414,54 @@ test("Files directory rows expose expand and collapse state", async ({ page }) =
   await srcDir.click();
   await expect(srcDir).toHaveAttribute("aria-expanded", "false");
   await expect(page.locator(".tree-body").getByRole("button", { name: "main.rs" })).toHaveCount(0);
+});
+
+test("Files tree ignores duplicate and malformed directory entries", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  const daemon = new FakeDaemon();
+  daemon.setDirResponse("/tmp/puffer", {
+    entries: [
+      { name: "src", kind: "directory", size: 0, modifiedMs: Date.now() },
+      { name: "src", kind: "directory", size: 0, modifiedMs: Date.now() },
+      { name: "README.md", kind: "file", size: 10, modifiedMs: Date.now() },
+      { name: "bad/name", kind: "file", size: 3, modifiedMs: Date.now() },
+      { name: "ghost", kind: "unknown", size: 0, modifiedMs: Date.now() },
+      { name: "", kind: "file", size: 0, modifiedMs: Date.now() }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  await expect(page.locator(".tree-body").getByRole("button", { name: /^src$/ })).toHaveCount(1);
+  await expect(page.locator(".tree-body").getByRole("button", { name: "README.md" })).toHaveCount(1);
+  await expect(page.locator(".tree-body").getByRole("button", { name: "bad/name" })).toHaveCount(0);
+  await expect(page.locator(".tree-body").getByRole("button", { name: "ghost" })).toHaveCount(0);
+  expect(pageErrors).toEqual([]);
+});
+
+test("Files tree read failure renders inline error without page crash", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+  await daemon.waitForRequest("read_file", (request) => request.params.path === "/tmp/puffer/src/main.rs");
+
+  const srcDir = page.locator(".tree-body").getByRole("button", { name: /^src$/ });
+  await srcDir.click();
+  daemon.failNext("read_file", "permission denied while reading file");
+  await page.locator(".tree-body").getByRole("button", { name: "lib.rs" }).click();
+  await daemon.waitForRequest("read_file", (request) => request.params.path === "/tmp/puffer/src/lib.rs");
+
+  await expect(page.locator(".viewer-msg.err")).toContainText("permission denied while reading file");
+  expect(pageErrors).toEqual([]);
 });
 
 test("Files tab saves text edits through the daemon", async ({ page }) => {
@@ -1559,6 +1633,61 @@ test("Files tab jumps to the line from a chat file link", async ({ page }) => {
   const lineThirtyOffset = Array.from({ length: 29 }, (_, index) => `line ${index + 1}\n`).join("").length;
   await expect.poll(async () => editor.evaluate((node) => (node as HTMLTextAreaElement).selectionStart)).toBe(lineThirtyOffset);
   await expect(editor).toBeFocused();
+});
+
+test("chat messages and generated artifact rows expose local file links", async ({ page }) => {
+  const linkedPath = "/tmp/puffer/src/main.rs";
+  const artifactPath = "/tmp/puffer/generated/output.png";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-message-link-rendering",
+        displayName: "Message link rendering",
+        title: "Message link rendering",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "message-link-rendering-assistant",
+            text:
+              "See [](https://example.com/docs), run_xiaohongshu_pet_feeding_notes.sh, " +
+              `and ${linkedPath}:7 before opening the generated artifact.`
+          },
+          {
+            kind: "tool_call",
+            id: "message-link-rendering-tool",
+            toolId: "image_generation",
+            status: "success",
+            inputText: JSON.stringify({ prompt: "preview image" }),
+            outputText: JSON.stringify({ status: "completed", savedPath: artifactPath })
+          }
+        ]
+      }
+    ]
+  });
+  daemon.seedFile(linkedPath, "fn main() {}\n");
+  daemon.seedFile(artifactPath, "generated image bytes\n");
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Message link rendering\b/ })
+    .click();
+  await expect(page.getByRole("link", { name: "example.com" })).toBeVisible();
+  await expect(page.getByText("run_xiaohongshu_pet_feeding_notes.sh")).toBeVisible();
+
+  await page.getByRole("link", { name: `${linkedPath}:7` }).click();
+  await daemon.waitForRequest("read_file", (request) => request.params.path === linkedPath);
+
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Chat", exact: true }).click();
+  await page.getByRole("button", { name: /Agent activity/ }).click();
+  const action = page.locator(".activity-action").filter({ hasText: "Generate image" });
+  await action.click();
+  const panel = page.locator(".activity-panel").filter({ hasText: "Image generation" });
+  await panel.getByRole("button", { name: artifactPath }).click();
+  await daemon.waitForRequest("read_file", (request) => request.params.path === artifactPath);
 });
 
 test("Files tab ignores late read failures from the previous session", async ({ page }) => {

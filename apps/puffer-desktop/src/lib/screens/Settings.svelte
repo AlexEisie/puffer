@@ -6,6 +6,7 @@
   import LoginView from "../components/LoginView.svelte";
   import LocalModelSetupCard from "../components/LocalModelSetupCard.svelte";
   import NetworkSettings from "./settings/NetworkSettings.svelte";
+  import SecretsSettings from "./settings/SecretsSettings.svelte";
   import BrowserPane from "./agent/BrowserPane.svelte";
   import { focusTrap } from "../focusTrap";
   import {
@@ -43,6 +44,7 @@
   import { canInvokeTauri, currentDaemonClient } from "../api/daemonClient";
   import { subscribeConnectorSetupEvents, type SessionStreamEvent } from "../api/sessionEvents";
   import type {
+    BrowserRenderer,
     DesktopPreferences,
     ExternalCredential,
     RemoteOperation,
@@ -98,12 +100,13 @@
     props.onRefresh();
   }
 
-  type Section = "general" | "providers" | "network" | "connectors" | "permissions" | "skills" | "mcp" | "git" | "appearance" | "shortcuts";
+  type Section = "general" | "providers" | "secrets" | "network" | "connectors" | "permissions" | "skills" | "mcp" | "git" | "appearance" | "shortcuts";
   let section = $state<Section>("general");
 
   const navItems: { id: Section; label: string; icon: IconName }[] = [
     { id: "general",     label: "General",    icon: "settings" },
     { id: "providers",   label: "Providers",  icon: "plug" },
+    { id: "secrets",     label: "Secrets",    icon: "key" },
     { id: "network",     label: "Network",    icon: "globe" },
     { id: "connectors",  label: "Connectors", icon: "server" },
     { id: "permissions", label: "Permissions", icon: "bolt" },
@@ -1181,6 +1184,10 @@
     { k: "all-mono", label: "all mono" }
   ];
   const densities: DensityKey[] = ["compact", "comfortable", "airy"];
+  const browserRenderers: { k: BrowserRenderer; label: string }[] = [
+    { k: "cef", label: "CEF" },
+    { k: "screencast", label: "Screencast" }
+  ];
 
   // Reset daemon-scoped local pane state when the parent refreshes to a
   // different daemon/workspace/config source. Otherwise Settings can show
@@ -1457,6 +1464,23 @@
         </div>
       </div>
 
+      <div class="pf-settings-row">
+        <div class="meta">
+          <div class="label">Browser renderer</div>
+          <div class="desc">Use CEF by default, with screencast available as the compatibility path.</div>
+        </div>
+        <div class="pf-appearance-control">
+          {#each browserRenderers as renderer (renderer.k)}
+            <button
+              type="button"
+              class="pf-choice-pill"
+              data-active={props.preferences.browserRenderer === renderer.k}
+              onclick={() => props.onPreferenceChange("browserRenderer", renderer.k)}
+            >{renderer.label}</button>
+          {/each}
+        </div>
+      </div>
+
       <div class="pf-settings-row" style="border-bottom: 0;">
         <div class="meta">
           <div class="label">Reset preferences</div>
@@ -1567,6 +1591,13 @@
         onLoginOauth={props.onLoginOauth ?? (() => {})}
         onLoginApiKey={props.onApiKeyLogin ?? (() => {})}
         onImportExternal={props.onImportExternal ?? (() => {})}
+        onRefresh={props.onRefresh}
+      />
+
+    {:else if section === "secrets"}
+      <SecretsSettings
+        snapshot={props.snapshot}
+        daemonReachable={daemonReachable}
         onRefresh={props.onRefresh}
       />
 
@@ -1770,7 +1801,10 @@
                   </div>
                 {:else if connectorQuestionRequest.browserSessionId}
                   <div class="pf-connector-browser-auth">
-                    <BrowserPane sessionId={connectorQuestionRequest.browserSessionId} />
+                    <BrowserPane
+                      sessionId={connectorQuestionRequest.browserSessionId}
+                      browserRenderer={props.preferences.browserRenderer}
+                    />
                   </div>
                   <div class="pf-connector-question-column">
                     {#each connectorQuestionRequest.questions as question, questionIndex (connectorQuestionKey(question))}

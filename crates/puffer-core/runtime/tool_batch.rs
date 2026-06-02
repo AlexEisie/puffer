@@ -83,6 +83,9 @@ pub(super) fn execute_tool_batch(
     // touch `inputs.state` (no `&mut AppState` across spawn boundaries).
     // `Arc<dyn ToolRunner>` is `Send + Sync` and clones cheaply.
     let runner = inputs.state.tool_runner.clone();
+    let agent_state = std::sync::Arc::new(inputs.state.clone());
+    let agent_providers = std::sync::Arc::new(inputs.providers.clone());
+    let agent_auth_template = inputs.auth_store.clone();
 
     let mut results: Vec<Option<(String, bool, bool, Value)>> = vec![None; tool_calls.len()];
 
@@ -123,10 +126,26 @@ pub(super) fn execute_tool_batch(
                 }
             };
             let args: Value = serde_json::from_str(&tc.input).unwrap_or(Value::Null);
+            let args = match super::secrets::expand_secret_placeholders(inputs.state, &args) {
+                Ok(args) => args,
+                Err(error) => {
+                    results[i] = Some((
+                        format!("Tool execution failed: {error}"),
+                        false,
+                        false,
+                        Value::Null,
+                    ));
+                    continue;
+                }
+            };
             let resources = inputs.resources;
             let registry = inputs.registry;
             let provider_context_ref = &provider_context;
             let runner_clone = runner.clone();
+            let tool_id_for_thread = tc.tool_id.clone();
+            let agent_state_local = agent_state.clone();
+            let agent_providers_local = agent_providers.clone();
+            let agent_auth_local = agent_auth_template.clone();
             // Observability-only clones are gated on a live handle so
             // the disabled path does no per-tool string allocations
             // (review v4 BLOCK #1).
@@ -162,35 +181,55 @@ pub(super) fn execute_tool_batch(
                         }
                         None => puffer_observability::SpanGuard::Disabled,
                     };
-                    let result = match claude_tools::execute_parallel_tool(
-                        &definition,
-                        cwd,
-                        &filesystem_policy.workspace_roots,
-                        &filesystem_policy,
-                        &session_id,
-                        args,
-                        resources,
-                        registry,
-                        provider_context_ref,
-                        &runner_clone,
-                    ) {
-                        Ok(exec) => {
-                            let terminate = extract_terminate(&exec.output.metadata);
-                            let output = if exec.output.stderr.is_empty() {
-                                exec.output.stdout
-                            } else if exec.output.stdout.is_empty() {
-                                exec.output.stderr
-                            } else {
-                                format!("{}\n{}", exec.output.stdout, exec.output.stderr)
-                            };
-                            (output, exec.success, terminate, exec.output.metadata)
+                    let result = if tool_id_for_thread == "Agent" {
+                        let mut local_auth = agent_auth_local;
+                        match super::agents::execute_agent_tool(
+                            agent_state_local.as_ref(),
+                            resources,
+                            agent_providers_local.as_ref(),
+                            &mut local_auth,
+                            cwd,
+                            args,
+                        ) {
+                            Ok(output) => (output, true, false, Value::Null),
+                            Err(error) => (
+                                format!("Tool execution failed: {error}"),
+                                false,
+                                false,
+                                Value::Null,
+                            ),
                         }
-                        Err(error) => (
-                            format!("Tool execution failed: {error}"),
-                            false,
-                            false,
-                            Value::Null,
-                        ),
+                    } else {
+                        match claude_tools::execute_parallel_tool(
+                            &definition,
+                            cwd,
+                            &filesystem_policy.workspace_roots,
+                            &filesystem_policy,
+                            &session_id,
+                            args,
+                            resources,
+                            registry,
+                            provider_context_ref,
+                            &runner_clone,
+                        ) {
+                            Ok(exec) => {
+                                let terminate = extract_terminate(&exec.output.metadata);
+                                let output = if exec.output.stderr.is_empty() {
+                                    exec.output.stdout
+                                } else if exec.output.stdout.is_empty() {
+                                    exec.output.stderr
+                                } else {
+                                    format!("{}\n{}", exec.output.stdout, exec.output.stderr)
+                                };
+                                (output, exec.success, terminate, exec.output.metadata)
+                            }
+                            Err(error) => (
+                                format!("Tool execution failed: {error}"),
+                                false,
+                                false,
+                                Value::Null,
+                            ),
+                        }
                     };
                     if let Some((_, _, tool_id, _, _)) = span_meta.as_ref() {
                         tool_span.set_content(
@@ -316,6 +355,8 @@ pub(super) fn execute_tool_batch(
                 Value::Null,
             )
         });
+        let raw_output = super::secrets::redact_known_secrets(inputs.state, &raw_output);
+        let metadata = super::secrets::redact_json_value(inputs.state, &metadata);
         let output_text =
             process_tool_result(&raw_output, MAX_TOOL_RESULT_CHARS, &inputs.state.session.id);
         invocations.push(ToolInvocation {
@@ -379,8 +420,12 @@ fn execute_tool_batch_serial(
         ) {
             Ok(exec) => exec,
             Err(error) => {
-                let output_text = process_tool_result(
+                let raw_error = super::secrets::redact_known_secrets(
+                    inputs.state,
                     &format!("Tool execution failed: {error}"),
+                );
+                let output_text = process_tool_result(
+                    &raw_error,
                     MAX_TOOL_RESULT_CHARS,
                     &inputs.state.session.id,
                 );
@@ -416,8 +461,10 @@ fn execute_tool_batch_serial(
         } else {
             format!("{}\n{}", execution.output.stdout, execution.output.stderr)
         };
+        let raw_output = super::secrets::redact_known_secrets(inputs.state, &raw_output);
         let output_text =
             process_tool_result(&raw_output, MAX_TOOL_RESULT_CHARS, &inputs.state.session.id);
+        let metadata = super::secrets::redact_json_value(inputs.state, &execution.output.metadata);
         if inputs.observability.is_some() {
             tool_span.set_content(
                 puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
@@ -438,7 +485,7 @@ fn execute_tool_batch_serial(
             input: call.input.clone(),
             output: output_text,
             success: execution.success,
-            metadata: execution.output.metadata,
+            metadata,
             terminate,
         });
     }

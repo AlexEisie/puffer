@@ -513,6 +513,10 @@ fn test_proxy_connectivity(
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no proxy connectivity test URLs configured")))
 }
 
+fn desktop_latency_ms(value: u128) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
 fn parse_proxy_scheme(value: &str) -> Result<ProxyScheme> {
     match value.trim().to_ascii_lowercase().as_str() {
         "http" => Ok(ProxyScheme::Http),
@@ -957,6 +961,11 @@ async fn dispatch_request(
             respond!(detached!(|s, p| handle_list_provider_models(&s, &p)))
         }
         "save_proxy_settings" => respond!(detached!(|s, p| handle_save_proxy_settings(&s, &p))),
+        "save_secret" => respond!(detached!(|s, p| handle_save_secret(&s, &p))),
+        "delete_secret" => respond!(detached!(|s, p| handle_delete_secret(&s, &p))),
+        "import_chrome_secrets" => {
+            respond!(detached!(|s| handle_import_chrome_secrets(&s)))
+        }
         "test_proxy" => respond!(detached!(|s, p| handle_test_proxy(&s, &p))),
         "create_openai_realtime_client_secret" => {
             respond!(detached!(|s, p| {
@@ -994,6 +1003,9 @@ async fn dispatch_request(
         "browser_open" => respond!(detached!(
             |s, p| crate::daemon_browser::handle_browser_open(&s, &p)
         )),
+        "browser_backend_status" => respond!(detached!(|s, p| {
+            crate::daemon_browser::handle_browser_backend_status(&s, &p)
+        })),
         "browser_navigate" => respond!(detached!(|s, p| {
             crate::daemon_browser::handle_browser_navigate(&s, &p)
         })),
@@ -1515,6 +1527,25 @@ fn handle_load_settings_snapshot(state: &DaemonState) -> Result<Value> {
     Ok(serde_json::to_value(snapshot)?)
 }
 
+fn handle_save_secret(state: &DaemonState, params: &Value) -> Result<Value> {
+    crate::daemon_secrets::save_secret(state.config_paths(), params)?;
+    handle_load_settings_snapshot(state)
+}
+
+fn handle_delete_secret(state: &DaemonState, params: &Value) -> Result<Value> {
+    let _ = crate::daemon_secrets::delete_secret(state.config_paths(), params)?;
+    handle_load_settings_snapshot(state)
+}
+
+fn handle_import_chrome_secrets(state: &DaemonState) -> Result<Value> {
+    let report = crate::daemon_secrets::import_chrome_secrets(state.config_paths())?;
+    let settings = handle_load_settings_snapshot(state)?;
+    Ok(json!({
+        "settings": settings,
+        "report": report,
+    }))
+}
+
 fn handle_save_proxy_settings(state: &DaemonState, params: &Value) -> Result<Value> {
     let input: SaveProxySettingsParams =
         serde_json::from_value(params.clone()).context("invalid proxy settings")?;
@@ -1579,7 +1610,7 @@ fn handle_test_proxy(state: &DaemonState, params: &Value) -> Result<Value> {
                 "Connected to {target_url} with HTTP {}",
                 outcome.status_code
             ),
-            latency_ms: Some(outcome.latency_ms),
+            latency_ms: Some(desktop_latency_ms(outcome.latency_ms)),
             status_code: Some(outcome.status_code),
         },
         Err(error) => ProxyTestResultDto {
@@ -4717,7 +4748,7 @@ mod tests {
     use super::{
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
         browser_permission_payload_json, connector_setup_connect_args, connector_setup_id,
-        handle_create_openai_realtime_client_secret, handle_create_session,
+        desktop_latency_ms, handle_create_openai_realtime_client_secret, handle_create_session,
         handle_import_external_credential, handle_list_lambda_skill_libraries,
         handle_list_permissions, handle_list_provider_models, handle_local_model_status,
         handle_login_with_api_key, handle_logout_provider, handle_remove_lambda_skill_library,
@@ -7422,6 +7453,13 @@ input_schema:
         );
         assert_eq!(payload["resolvedRootSessionId"], "root-1");
         assert_eq!(payload["sessionTargeting"], "explicit_session");
+    }
+
+    #[test]
+    fn desktop_latency_ms_saturates_to_frontend_safe_integer() {
+        assert_eq!(desktop_latency_ms(42), 42);
+        assert_eq!(desktop_latency_ms(u128::from(u64::MAX)), u64::MAX);
+        assert_eq!(desktop_latency_ms(u128::from(u64::MAX) + 1), u64::MAX);
     }
 
     fn provider(id: &str, models: &[&str]) -> ProviderDescriptor {

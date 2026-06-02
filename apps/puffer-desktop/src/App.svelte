@@ -239,6 +239,7 @@
     launchInspectorOpen: true,
     defaultInspectorTab: "latest-diff",
     defaultInspectorWidth: 50,
+    browserRenderer: "cef",
     remoteEnabled: false,
     remoteTarget: "",
     remoteCwd: ""
@@ -834,6 +835,10 @@
           typeof parsed.defaultInspectorWidth === "number"
             ? parsed.defaultInspectorWidth
             : defaultDesktopPreferences.defaultInspectorWidth,
+        browserRenderer:
+          parsed.browserRenderer === "screencast"
+            ? "screencast"
+            : defaultDesktopPreferences.browserRenderer,
         remoteEnabled: parsed.remoteEnabled === true,
         remoteTarget: typeof parsed.remoteTarget === "string" ? parsed.remoteTarget : "",
         remoteCwd: typeof parsed.remoteCwd === "string" ? parsed.remoteCwd : ""
@@ -1778,6 +1783,7 @@
     const cached = transientConversationStates[sessionId] ?? emptyTransientConversationState();
     let liveItems = cached.liveStreamItems;
     for (const req of ev.requests) {
+      if (isAskUserQuestionToolName(req.toolId)) continue;
       const id = liveToolId(ev.turnId, req.callId);
       if (liveItems.some((item) => item.id === id)) continue;
       liveItems = appendCachedLiveItem(
@@ -1814,6 +1820,7 @@
     const cached = transientConversationStates[sessionId] ?? emptyTransientConversationState();
     let liveItems = cached.liveStreamItems;
     for (const inv of ev.invocations) {
+      if (isAskUserQuestionToolName(inv.toolId)) continue;
       const id = liveToolId(ev.turnId, inv.callId);
       const payload: TimelineItem = {
         id,
@@ -3046,7 +3053,15 @@
   function transientToolSignature(item: TimelineItem): string | null {
     if (item.kind !== "tool") return null;
     const input = normalizedToolInput(item);
-    return input ? `${item.toolName}:${input}` : null;
+    return input ? `${normalizedToolName(item.toolName)}:${input}` : null;
+  }
+
+  function normalizedToolName(value: string | null | undefined): string {
+    return (value ?? "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+  }
+
+  function isAskUserQuestionToolName(value: string | null | undefined): boolean {
+    return normalizedToolName(value) === "askuserquestion";
   }
 
   function normalizedGateKey(value: string | null | undefined): string {
@@ -3135,16 +3150,17 @@
           transientGateSignature(item) === gateSignature
       );
     }
+    const toolSignature = transientToolSignature(pending);
+    if (toolSignature) {
+      return items.some(
+        (item) =>
+          !wasPersistedBeforeSubmit(pending.id, item.id) &&
+          transientToolSignature(item) === toolSignature &&
+          transientTimestampsMatch(item, pending)
+      );
+    }
     const body = timelineItemBody(pending).trim();
     if (!body) {
-      const toolSignature = transientToolSignature(pending);
-      if (toolSignature) {
-        return items.some(
-          (item) =>
-            !wasPersistedBeforeSubmit(pending.id, item.id) &&
-            transientToolSignature(item) === toolSignature
-        );
-      }
       return items.some(
         (item) =>
           !wasPersistedBeforeSubmit(pending.id, item.id) &&
@@ -3445,6 +3461,7 @@
         // scoped to the turn and call id, so backend call id reuse in a later
         // turn does not replace a previous live card while transcript reloads.
         for (const req of ev.requests) {
+          if (isAskUserQuestionToolName(req.toolId)) continue;
           const id = liveToolId(ev.turnId, req.callId);
           if (liveStreamItems.some((x) => x.id === id)) continue;
           appendLive({
@@ -3467,6 +3484,7 @@
         turnThinking = false;
         turnStatusHint = null;
         for (const inv of ev.invocations) {
+          if (isAskUserQuestionToolName(inv.toolId)) continue;
           const id = liveToolId(ev.turnId, inv.callId);
           const existingIdx = liveStreamItems.findIndex((x) => x.id === id);
           const payload: TimelineItem = {
@@ -3790,6 +3808,7 @@
                 turnStatusHint={turnStatusHint}
                 settingsSnapshot={settingsSnapshot}
                 backendConnected={connectionState === "open"}
+                browserRenderer={desktopPreferences.browserRenderer}
                 userDisplayName={tweaks.userName}
                 onBack={onCloseAgent}
                 onSubmitMessage={submitMessage}

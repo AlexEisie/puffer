@@ -296,6 +296,13 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             CommandKind::Local,
         ),
         cmd(
+            "pentest",
+            &[],
+            "Run an authorized web penetration test",
+            Some("<url> [iter] [disp] [task-spec=<file>]"),
+            CommandKind::Local,
+        ),
+        cmd(
             "permissions",
             &["allowed-tools"],
             "Manage allow & deny tool permission rules",

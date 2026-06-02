@@ -1,10 +1,11 @@
 use crate::approval_overlay::ApprovalOverlay;
 use crate::btw_overlay::BtwOverlay;
+use crate::pentest_command;
 use anyhow::Result;
 use puffer_config::{save_user_config, ConfigPaths};
 use puffer_core::{
     command_surface, dispatch_command, execute_user_turn,
-    execute_user_turn_streaming_with_permissions_and_cancel, reload_runtime_resources,
+    execute_user_turn_streaming_with_prompt_tools_and_cancel, reload_runtime_resources,
     render_config_summary, render_context_panel, render_copy_actions, render_doctor_report,
     render_hooks_actions, render_ide_actions, render_mcp_actions, render_permissions_panel,
     render_plugin_actions, render_sandbox_actions, render_session_panel, render_skills_panel,
@@ -304,6 +305,15 @@ pub(crate) fn handle_prompt_submit(
     if submitted.is_empty() {
         return Ok(());
     }
+    if pentest_command::try_handle_pentest_command(
+        state,
+        resources,
+        session_store,
+        tui,
+        &submitted,
+    )? {
+        return Ok(());
+    }
     if tui.has_pending_submit() && should_defer_while_turn_is_running(&submitted) {
         tui.enqueue_prompt(submitted);
         return Ok(());
@@ -311,7 +321,15 @@ pub(crate) fn handle_prompt_submit(
     if is_loop_command_input(&submitted) {
         ensure_persistent_session_for_prompt_submit(state, session_store, &submitted)?;
     }
+    let had_pentest_before_loop_command = pentest_command::is_active(tui);
+    let queued_before_loop_command = tui.queued_prompts.len();
     if try_handle_loop_command(state, session_store, tui, &submitted)? {
+        if had_pentest_before_loop_command && tui.active_loop.is_some() {
+            pentest_command::clear_active(state, tui);
+            for _ in 0..queued_before_loop_command {
+                let _ = tui.queued_prompts.pop_front();
+            }
+        }
         return Ok(());
     }
     if is_connect_command_input(&submitted) {
@@ -377,9 +395,13 @@ pub(crate) fn handle_prompt_submit(
             submitted,
             no_alt_screen,
         )?;
-        // Clear active loop if transcript was wiped (/compact, /clear).
-        if had_transcript && state.transcript.is_empty() && tui.active_loop.is_some() {
+        // Clear active pentest if transcript was wiped (/compact, /clear).
+        if had_transcript
+            && state.transcript.is_empty()
+            && (tui.active_loop.is_some() || pentest_command::is_active(tui))
+        {
             tui.active_loop = None;
+            pentest_command::clear_active(state, tui);
             tui.queued_prompts.clear();
         }
         return Ok(());
@@ -397,20 +419,23 @@ pub(crate) fn handle_prompt_submit(
     }
 
     ensure_persistent_session_for_prompt_submit(state, session_store, &submitted)?;
-    state.push_message(MessageRole::User, submitted.clone());
+    let visible_submitted = visible_user_message_for_submission(&submitted);
+    state.push_message(MessageRole::User, visible_submitted.clone());
     session_store.append_event(
         state.session.id,
         TranscriptEvent::UserMessage {
-            text: submitted.clone(),
+            text: visible_submitted.clone(),
             actor: Some(state.user_actor()),
         },
     )?;
     let transcript_start_len = state.transcript.len();
 
     let mut worker_state = state.clone();
+    set_provider_submission_text(&mut worker_state, transcript_start_len - 1, &submitted);
     let worker_resources = resources.clone();
     let worker_providers = providers.clone();
     let worker_prompt = submitted.clone();
+    let worker_prompt_tool_scope = pentest_command::prompt_tool_scope(tui).map(str::to_string);
     let worker_session_store = session_store.clone();
     let mut worker_auth_store = auth_store.clone();
     let (sender, receiver) = mpsc::channel();
@@ -438,12 +463,13 @@ pub(crate) fn handle_prompt_submit(
                 .unwrap_or_else(|_| empty_user_question_response())
         };
         let outcome = with_user_question_prompt_handler(on_user_question, || {
-            execute_user_turn_streaming_with_permissions_and_cancel(
+            execute_user_turn_streaming_with_prompt_tools_and_cancel(
                 &mut worker_state,
                 &worker_resources,
                 &worker_providers,
                 &mut worker_auth_store,
                 &worker_prompt,
+                worker_prompt_tool_scope.as_deref(),
                 None,
                 &worker_cancel,
                 |event| match event {
@@ -529,7 +555,7 @@ pub(crate) fn handle_prompt_submit(
         }));
     });
     tui.pending_submit = Some(PendingSubmit {
-        prompt: submitted,
+        prompt: visible_submitted,
         receiver,
         transcript_persisted_len: transcript_start_len,
         pending_tool_calls: Vec::new(),
@@ -930,7 +956,11 @@ pub(crate) fn poll_pending_submit(
             }
             PendingSubmitEvent::Usage(report) => {
                 state.update_cache_stats(report.input_tokens, report.cache_read_tokens);
-                pending.status_hint = None; // clear retry hint on success
+                // Worker holds a clone of state; mirror back what the provider wrote.
+                if report.input_tokens > 0 {
+                    state.last_input_tokens = Some(report.input_tokens as u32);
+                }
+                pending.status_hint = None;
             }
             PendingSubmitEvent::PermissionRequest(request, response_tx) => {
                 tui.pending_permission_request = Some(PendingPermissionRequest { response_tx });
@@ -1190,17 +1220,22 @@ pub(crate) fn handle_submit(
         return Ok(());
     }
 
-    state.push_message(MessageRole::User, submitted.clone());
+    let visible_submitted = visible_user_message_for_submission(&submitted);
+    state.push_message(MessageRole::User, visible_submitted.clone());
     session_store.append_event(
         state.session.id,
         TranscriptEvent::UserMessage {
-            text: submitted.clone(),
+            text: visible_submitted.clone(),
             actor: Some(state.user_actor()),
         },
     )?;
 
     let previous_auth_store = auth_store.clone();
-    match execute_user_turn(state, resources, providers, auth_store, &submitted) {
+    let submitted_index = state.transcript.len() - 1;
+    set_provider_submission_text(state, submitted_index, &submitted);
+    let execution = execute_user_turn(state, resources, providers, auth_store, &submitted);
+    set_visible_submission_text(state, submitted_index, &visible_submitted);
+    match execution {
         Ok(turn) => {
             append_tool_messages(state, session_store, &turn.tool_invocations)?;
             finalize_assistant_text(state, session_store, &turn.assistant_text)?;
@@ -1786,6 +1821,50 @@ fn command_requires_terminal_restore(submitted: &str) -> bool {
         || trimmed == "/mcp edit"
         || trimmed.starts_with("/mcp open ")
         || trimmed.starts_with("/mcp edit ")
+}
+
+fn visible_user_message_for_submission(submitted: &str) -> String {
+    monitor_action_submission_label(submitted).unwrap_or_else(|| submitted.to_string())
+}
+
+fn set_provider_submission_text(state: &mut AppState, index: usize, submitted: &str) {
+    set_user_submission_text(state, index, submitted);
+}
+
+fn set_visible_submission_text(state: &mut AppState, index: usize, visible_submitted: &str) {
+    set_user_submission_text(state, index, visible_submitted);
+}
+
+fn set_user_submission_text(state: &mut AppState, index: usize, text: &str) {
+    if let Some(message) = state.transcript.get_mut(index) {
+        if message.role == MessageRole::User {
+            message.text = text.to_string();
+        }
+    }
+}
+
+fn monitor_action_submission_label(submitted: &str) -> Option<String> {
+    if !submitted.contains("\n\nTask description:\n")
+        || !submitted.contains("\n\nSelected action: ")
+    {
+        return None;
+    }
+    let first_line = submitted.lines().next()?.trim();
+    let rest = first_line.strip_prefix("Act on monitored task ")?;
+    let task_id = rest.split_once(':')?.0.trim();
+    if task_id.is_empty() {
+        return None;
+    }
+    let action_name = submitted
+        .split_once("\n\nSelected action: ")?
+        .1
+        .lines()
+        .next()?
+        .trim();
+    if action_name.is_empty() {
+        return None;
+    }
+    Some(format!("Act on monitored task {task_id}: {action_name}"))
 }
 
 fn run_with_terminal_restored<T>(

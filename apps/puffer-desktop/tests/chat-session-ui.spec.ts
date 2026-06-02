@@ -1250,6 +1250,71 @@ test("transcript reload replaces pending live tool card when invocation event is
   await expect(page.locator(".pf-tool").filter({ hasText: "running" })).toHaveCount(0);
 });
 
+test("transcript reload dedupes completed live tools by stable input signature", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-completed-tool-dedupe",
+        displayName: "Completed tool dedupe",
+        title: "Completed tool dedupe",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Completed tool dedupe/);
+  daemon.emit("session:session-completed-tool-dedupe:event", {
+    type: "turn-start",
+    turnId: "turn-completed-tool-dedupe"
+  });
+  daemon.emit("session:session-completed-tool-dedupe:event", {
+    type: "tool-invocations",
+    turnId: "turn-completed-tool-dedupe",
+    invocations: [
+      {
+        callId: "call-web-search",
+        toolId: "web_search",
+        input: "{\"query\":\"puffer timeline\"}",
+        output: "live-only search output",
+        success: true
+      }
+    ]
+  });
+  await expect(page.locator(".pf-tool").filter({ hasText: "web_search" })).toHaveCount(1);
+
+  daemon.setSessionTimeline("session-completed-tool-dedupe", [
+    {
+      kind: "tool_call",
+      id: "persisted-web-search",
+      toolId: "WebSearch",
+      status: "success",
+      inputText: "{\"query\":\"puffer timeline\"}",
+      inputJson: { query: "puffer timeline" },
+      outputText: "persisted search output",
+      createdAtMs: baseTime + 1
+    }
+  ]);
+  daemon.emit("session:session-completed-tool-dedupe:event", {
+    type: "turn-complete",
+    turnId: "turn-completed-tool-dedupe",
+    assistantText: ""
+  });
+
+  await expect(page.locator(".pf-tool").filter({ hasText: /web_search|WebSearch/ })).toHaveCount(1);
+  await expect(page.getByText("live-only search output")).toHaveCount(0);
+});
+
 test("stop turn is disabled until the daemon returns a turn id", async ({ page }) => {
   const prompt = "Wait for a real turn id before cancel";
   const daemon = new FakeDaemon({
@@ -3265,6 +3330,50 @@ test("new turn can reuse a permission request id after earlier approval", async 
 
   await expect(page.getByText("Second turn reuses the backend request id.")).toBeVisible();
   await expect(page.getByText("Approval needed")).toBeVisible();
+});
+
+test("ask user question live tool events render only the question prompt", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  daemon.emit("session:session-browser:event", {
+    type: "turn-start",
+    turnId: "turn-question-tool"
+  });
+  daemon.emit("session:session-browser:event", {
+    type: "tool-calls-requested",
+    turnId: "turn-question-tool",
+    requests: [
+      {
+        callId: "ask-question-call",
+        toolId: "AskUserQuestion",
+        input: JSON.stringify({
+          questions: [
+            {
+              question: "Which branch should I use?",
+              options: [{ label: "main" }, { label: "feature" }]
+            }
+          ]
+        })
+      }
+    ]
+  });
+  daemon.emit("session:session-browser:event", {
+    type: "user-question-request",
+    turnId: "turn-question-tool",
+    requestId: "question-tool-1",
+    questions: [
+      {
+        question: "Which branch should I use?",
+        options: [{ label: "main" }, { label: "feature" }]
+      }
+    ]
+  });
+
+  await expect(page.getByText("Which branch should I use?")).toBeVisible();
+  await expect(page.locator(".pf-tool").filter({ hasText: "AskUserQuestion" })).toHaveCount(0);
 });
 
 test("failed question responses keep the question prompt retryable", async ({ page }) => {

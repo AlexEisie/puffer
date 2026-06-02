@@ -1,4 +1,5 @@
 export type InspectorTab = "latest-diff" | "history" | "tool-details";
+export type BrowserRenderer = "cef" | "screencast";
 export type AppView = "workspace" | "settings" | "login";
 
 export type TimelineKind =
@@ -256,6 +257,7 @@ export type DesktopPreferences = {
   launchInspectorOpen: boolean;
   defaultInspectorTab: InspectorTab;
   defaultInspectorWidth: number;
+  browserRenderer: BrowserRenderer;
   remoteEnabled: boolean;
   remoteTarget: string;
   remoteCwd: string;
@@ -371,6 +373,44 @@ export type SaveProxySettingsInput = {
   proxies: DraftProxyEndpoint[];
 };
 
+export type SecretSummary = {
+  id: string;
+  label: string;
+  description: string | null;
+  username: string | null;
+  origin: string | null;
+  source: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+export type SecretsSettings = {
+  storeFile: string;
+  keySource: string;
+  chromeImportSupported: boolean;
+  items: SecretSummary[];
+};
+
+export type SaveSecretInput = {
+  id?: string | null;
+  label: string;
+  value: string;
+  description?: string | null;
+  username?: string | null;
+  origin?: string | null;
+};
+
+export type ChromeImportReport = {
+  imported: number;
+  skipped: number;
+  errors: string[];
+};
+
+export type ChromeSecretsImportResult = {
+  settings: SettingsSnapshot;
+  report: ChromeImportReport;
+};
+
 export type OpenAIRealtimeClientSecretOptions = {
   providerId?: string;
   model?: string;
@@ -399,6 +439,7 @@ export type SettingsSnapshot = {
   auth: AuthProviderStatus[];
   providers: ProviderSummary[];
   networkProxy: NetworkProxySettings;
+  secrets: SecretsSettings;
 };
 
 export type WorkflowTrigger =

@@ -106,6 +106,9 @@ pub(super) fn execute_tool_call(
     {
         return Ok(denied);
     }
+    if let Some(denied) = enforce_pentest_scope(state, tool_id, &input) {
+        return Ok(denied);
+    }
     let skip_verified_approval =
         lambda_skill_skips_concrete_approval(state, registry, tool_id, &input);
     let input = prepare_browser_permission_input(state, cwd, &definition, input)?;
@@ -194,6 +197,11 @@ pub(super) fn execute_tool_call(
     };
     let hook_input = input.clone();
     run_tool_start_hooks(resources, cwd, tool_id, &hook_input);
+    let execution_input = if definition.handler == "runtime:agent" {
+        input.clone()
+    } else {
+        super::secrets::expand_secret_placeholders(state, &input)?
+    };
     let lambda_skill_target_snapshot = if tool_id == "Skill"
         && state
             .pending_lambda_host_call
@@ -207,26 +215,42 @@ pub(super) fn execute_tool_call(
     } else {
         None
     };
-    let mut result = if definition.handler == "runtime:agent" {
-        let output =
-            execute_agent_tool(state, resources, providers, auth_store, cwd, input.clone())?;
-        successful_runtime_tool(tool_id, output)
-    } else if let Some(result) =
-        execute_legacy_builtin_alias(&definition, cwd, &filesystem_policy, &input)?
-    {
-        result
-    } else {
-        claude_tools::execute_tool(
+    let execution_result: Result<ToolExecutionResult> = if definition.handler == "runtime:agent" {
+        let output = execute_agent_tool(
             state,
             resources,
-            registry,
-            &definition,
+            providers,
+            auth_store,
             cwd,
-            &filesystem_policy,
-            input.clone(),
-            provider_context,
-        )?
+            execution_input,
+        );
+        output.map(|output| successful_runtime_tool(tool_id, output))
+    } else {
+        match execute_legacy_builtin_alias(&definition, cwd, &filesystem_policy, &execution_input) {
+            Ok(Some(result)) => Ok(result),
+            Ok(None) => claude_tools::execute_tool(
+                state,
+                resources,
+                registry,
+                &definition,
+                cwd,
+                &filesystem_policy,
+                execution_input,
+                provider_context,
+            ),
+            Err(error) => Err(error),
+        }
     };
+    let mut result = match execution_result {
+        Ok(result) => result,
+        Err(error) => {
+            return Err(anyhow!(super::secrets::redact_known_secrets(
+                state,
+                &error.to_string()
+            )));
+        }
+    };
+    super::secrets::redact_tool_result(state, &mut result);
     if result.success {
         let post_skill_gate = lambda_skill_target_snapshot.as_ref().map(|_| {
             (
@@ -313,7 +337,7 @@ fn successful_runtime_tool_with_metadata(
 pub(super) fn is_parallel_safe_tool(tool_id: &str) -> bool {
     matches!(
         tool_id,
-        "Glob" | "Grep" | "WebFetch" | "WebSearch" | "ToolSearch"
+        "Glob" | "Grep" | "WebFetch" | "WebSearch" | "ToolSearch" | "Skill" | "Bash" | "Agent"
     )
 }
 
@@ -909,4 +933,97 @@ pub(super) fn blocked_runtime_tool(
             metadata: Value::Null,
         },
     }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn in_scope_matches_origin() {
+        assert!(url_in_scope(
+            "http://target.local:32918/path?q=1",
+            "http://target.local:32918"
+        ));
+        assert!(url_in_scope(
+            "https://target.local:443/",
+            "https://target.local:443"
+        ));
+    }
+
+    #[test]
+    fn out_of_scope_origins_rejected() {
+        let scope = "http://target.local:32918";
+        assert!(!url_in_scope("http://127.0.0.1:32918/", scope));
+        assert!(!url_in_scope(
+            "http://169.254.169.254/latest/meta-data/",
+            scope
+        ));
+        assert!(
+            !url_in_scope("http://target.local:80/", scope),
+            "wrong port"
+        );
+        assert!(
+            !url_in_scope("https://target.local:32918/", scope),
+            "wrong scheme"
+        );
+        assert!(!url_in_scope("http://attacker.example/", scope));
+    }
+
+    #[test]
+    fn dangerous_schemes_always_rejected() {
+        let scope = "http://target.local:32918";
+        assert!(!url_in_scope("file:///etc/passwd", scope));
+        assert!(!url_in_scope("javascript:alert(1)", scope));
+        assert!(!url_in_scope("data:text/html,<script>", scope));
+    }
+}
+
+/// Tools whose inputs carry outbound URLs that must respect pentest scope.
+const PENTEST_SCOPED_TOOLS: &[&str] = &["WebFetch", "Browser"];
+
+/// Denies a tool call when an in-scope origin is set and the call's URL points
+/// outside it (loopback, link-local, file://, foreign hosts). Bash + nested Agent
+/// dispatches are out of scope here — they go through their own filters.
+pub(super) fn enforce_pentest_scope(
+    state: &AppState,
+    tool_id: &str,
+    input: &Value,
+) -> Option<ToolExecutionResult> {
+    let scope = state.pentest_in_scope_origin.as_deref()?;
+    let canonical = canonical_tool_name(tool_id);
+    if !PENTEST_SCOPED_TOOLS.contains(&canonical.as_str()) {
+        return None;
+    }
+    let url = input.get("url").and_then(Value::as_str)?;
+    if url_in_scope(url, scope) {
+        return None;
+    }
+    Some(blocked_runtime_tool(
+        tool_id,
+        ToolPermissionBehavior::Deny,
+        Some(format!(
+            "pentest scope: `{url}` is outside `{scope}` — set $PUFFER_PENTEST_TASK_SPEC to widen scope"
+        )),
+    ))
+}
+
+/// Compares a URL's `scheme://host:port` against an expected origin literal.
+fn url_in_scope(url: &str, scope_origin: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let scheme = parsed.scheme();
+    if scheme == "file" || scheme == "javascript" || scheme == "data" {
+        return false;
+    }
+    let host = match parsed.host_str() {
+        Some(h) => h.to_ascii_lowercase(),
+        None => return false,
+    };
+    let port = parsed
+        .port_or_known_default()
+        .map(|p| format!(":{p}"))
+        .unwrap_or_default();
+    format!("{scheme}://{host}{port}") == scope_origin
 }
