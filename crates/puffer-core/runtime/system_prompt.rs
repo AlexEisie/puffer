@@ -105,6 +105,13 @@ pub(super) fn render_runtime_system_prompt(
     )
     .unwrap_or_else(|| render_fallback_prompt(&variables));
     let mut prompt = normalize_prompt_whitespace(&rendered);
+    // Identity first (who the agent is), then project memory (how it operates).
+    // soul.md is universal across providers; AGENTS.md/CLAUDE.md follow the
+    // provider convention in load_memory_prompt.
+    if let Some(soul) = load_soul_prompt(&state.cwd) {
+        prompt.push_str("\n\n");
+        prompt.push_str(&soul);
+    }
     if let Some(memory) = load_memory_prompt(&state.cwd, provider_id) {
         prompt.push_str("\n\n");
         prompt.push_str(&memory);
@@ -113,6 +120,8 @@ pub(super) fn render_runtime_system_prompt(
 }
 
 const MEMORY_INSTRUCTION_PROMPT: &str = "Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.";
+
+const SOUL_INSTRUCTION_PROMPT: &str = "The following describes your identity: who you are, your values, your voice, and your boundaries. Embody it consistently across the session. A direct user instruction takes precedence - this is context, not a hard rule.";
 
 enum MemorySource {
     Project,
@@ -373,7 +382,10 @@ fn load_memory_prompt(cwd: &Path, provider_id: Option<&str>) -> Option<String> {
     load_memory_prompt_for_filename(cwd, "CLAUDE.md")
 }
 
-fn load_memory_prompt_for_filename(cwd: &Path, filename: &str) -> Option<String> {
+/// Reads a context filename from the project dir plus the user-global dirs
+/// (~/.claude, ~/.puffer), returning one "Contents of <path> (<description>):"
+/// block per non-empty file found, nearest (project) first.
+fn load_context_blocks(cwd: &Path, filename: &str) -> Vec<String> {
     let mut sources: Vec<(PathBuf, MemorySource)> = Vec::new();
     sources.push((cwd.join(filename), MemorySource::Project));
     if let Some(home) = env::var_os("HOME") {
@@ -401,13 +413,33 @@ fn load_memory_prompt_for_filename(cwd: &Path, filename: &str) -> Option<String>
             trimmed
         ));
     }
+    blocks
+}
 
+fn load_memory_prompt_for_filename(cwd: &Path, filename: &str) -> Option<String> {
+    let blocks = load_context_blocks(cwd, filename);
     if blocks.is_empty() {
         None
     } else {
         Some(format!(
             "{}\n\n{}",
             MEMORY_INSTRUCTION_PROMPT,
+            blocks.join("\n\n")
+        ))
+    }
+}
+
+/// Loads the agent identity file (soul.md) from the project + user-global dirs.
+/// Universal across providers: identity is not a provider-specific convention
+/// the way AGENTS.md (Codex) vs CLAUDE.md (Anthropic) operating docs are.
+fn load_soul_prompt(cwd: &Path) -> Option<String> {
+    let blocks = load_context_blocks(cwd, "soul.md");
+    if blocks.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "{}\n\n{}",
+            SOUL_INSTRUCTION_PROMPT,
             blocks.join("\n\n")
         ))
     }
@@ -460,7 +492,7 @@ fn os_version() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_memory_prompt, render_runtime_system_prompt};
+    use super::{load_memory_prompt, load_soul_prompt, render_runtime_system_prompt};
     use crate::runtime::tests::state;
     use puffer_resources::{
         LoadedItem, LoadedResources, PromptTemplate, SkillSpec, SkillVerificationSpec, SourceInfo,
@@ -756,5 +788,37 @@ mod tests {
         if let Some(text) = &none {
             assert!(!text.contains(tmp.path().to_str().unwrap()));
         }
+    }
+
+    #[test]
+    fn load_soul_prompt_loads_identity_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Absent: nothing.
+        assert!(load_soul_prompt(tmp.path()).is_none());
+        // Present: wrapped in the identity instruction with a Contents block.
+        std::fs::write(tmp.path().join("soul.md"), "I am Puffer.").unwrap();
+        let soul = load_soul_prompt(tmp.path()).unwrap();
+        assert!(soul.contains("your identity"), "missing identity instruction");
+        assert!(soul.contains("soul.md"));
+        assert!(soul.contains("I am Puffer."));
+    }
+
+    #[test]
+    fn render_runtime_system_prompt_injects_soul_before_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("soul.md"), "SOUL_IDENTITY_MARKER").unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "MEMORY_RULES_MARKER").unwrap();
+        let mut state = state();
+        state.cwd = tmp.path().to_path_buf();
+        state.current_provider = Some("openai".to_string());
+        let resources = LoadedResources::default();
+        let enabled_tools = BTreeSet::new();
+
+        // openai loads AGENTS.md as memory; soul.md loads regardless.
+        let prompt =
+            render_runtime_system_prompt(&state, &resources, "gpt-5", &enabled_tools).unwrap();
+        let soul_at = prompt.find("SOUL_IDENTITY_MARKER").expect("soul not injected");
+        let mem_at = prompt.find("MEMORY_RULES_MARKER").expect("memory not injected");
+        assert!(soul_at < mem_at, "identity must precede project memory");
     }
 }
