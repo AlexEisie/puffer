@@ -73,7 +73,11 @@
     onRefresh: () => void;
     onLogout: (providerId: string) => void;
     onLoginOauth?: (providerId: string) => void;
-    onApiKeyLogin?: (providerId: string, apiKey: string) => void;
+    onApiKeyLogin?: (
+      providerId: string,
+      apiKey: string,
+      options?: { baseUrl?: string | null }
+    ) => void;
     onImportExternal?: (providerId: string, source: "claude" | "codex") => void;
     busyProviderId?: string | null;
     authError?: string | null;
@@ -1593,6 +1597,7 @@
           busyImportKey={props.busyImportKey ?? null}
           onLoginOauth={props.onLoginOauth ?? (() => {})}
           onLoginApiKey={props.onApiKeyLogin ?? (() => {})}
+          onLogout={props.onLogout}
           onImportExternal={props.onImportExternal ?? (() => {})}
           onRefresh={props.onRefresh}
         />
