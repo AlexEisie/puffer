@@ -154,6 +154,12 @@ where
     unreachable!("retry loop always returns or errors")
 }
 
+/// Returns true when an OpenAI streaming failure is safe to retry by
+/// restarting the whole sampling request.
+pub(super) fn is_retryable_openai_stream_error(error: &Error) -> bool {
+    is_retryable_openai_transport_error(error)
+}
+
 fn openai_transport_max_attempts() -> usize {
     std::env::var("PUFFER_OPENAI_HTTP_MAX_ATTEMPTS")
         .ok()
@@ -164,6 +170,26 @@ fn openai_transport_max_attempts() -> usize {
 
 fn openai_transport_retry_delay() -> Duration {
     let delay_ms = std::env::var("PUFFER_OPENAI_HTTP_RETRY_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(1_000)
+        .min(10_000);
+    Duration::from_millis(delay_ms)
+}
+
+/// Maximum attempts for full OpenAI stream restarts after a dropped SSE body.
+pub(super) fn openai_stream_max_attempts() -> usize {
+    std::env::var("PUFFER_OPENAI_STREAM_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(3)
+        .clamp(1, 10)
+}
+
+/// Delay between full OpenAI stream restart attempts.
+pub(super) fn openai_stream_retry_delay() -> Duration {
+    let delay_ms = std::env::var("PUFFER_OPENAI_STREAM_RETRY_DELAY_MS")
+        .or_else(|_| std::env::var("PUFFER_OPENAI_HTTP_RETRY_DELAY_MS"))
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(1_000)
