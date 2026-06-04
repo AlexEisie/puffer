@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { fileOpenIntent, type ChatOpenIntent } from "../chatOpenIntent";
+
   type InlineSegment = {
     kind: "text" | "code";
     text: string;
@@ -23,7 +25,7 @@
     | { kind: "rule" };
 
   export let body = "";
-  export let onOpenFile: ((path: string, line?: number | null) => void) | undefined = undefined;
+  export let onOpenChatIntent: ((intent: ChatOpenIntent) => void) | undefined = undefined;
 
   const urlPattern = /^(https?:\/\/[^\s<]+|file:\/\/[^\s<]+|\/[^\s<]+)$/;
   const bareLocalPathPattern = /(file:\/\/[^\s<>()]+|\/[^\s<>()]+)/g;
@@ -52,7 +54,7 @@
     const target = fileTarget(href);
     if (!target) return;
     event.preventDefault();
-    onOpenFile?.(target.path, target.line);
+    onOpenChatIntent?.(fileOpenIntent(target.path, target.line));
   }
 
   function appendText(

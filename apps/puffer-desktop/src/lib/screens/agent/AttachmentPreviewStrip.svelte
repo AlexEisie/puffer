@@ -7,6 +7,7 @@
 
 <script lang="ts">
   import Icon from "../../design/Icon.svelte";
+  import { attachmentOpenIntent, type ChatOpenIntent } from "../../chatOpenIntent";
 
   type Props = {
     attachments: AttachmentPreviewItem[];
@@ -14,6 +15,7 @@
     removable?: boolean;
     testId?: string;
     onRemove?: (id: string) => void;
+    onOpenChatIntent?: (intent: ChatOpenIntent) => void;
   };
 
   let {
@@ -21,8 +23,15 @@
     variant = "composer",
     removable = false,
     testId = undefined,
-    onRemove
+    onRemove,
+    onOpenChatIntent
   }: Props = $props();
+
+  function attachmentOpenLabel(attachment: AttachmentPreviewItem): string {
+    return attachment.kind === "image"
+      ? `Open image attachment ${attachment.name}`
+      : `Open attachment details for ${attachment.name}`;
+  }
 </script>
 
 {#if attachments.length > 0}
@@ -32,34 +41,60 @@
     data-testid={testId}
   >
     {#each attachments as attachment (attachment.id)}
-      <div class="pf-attachment-preview">
-        {#if attachment.previewUrl && attachment.kind === "image"}
-          <div class="pf-attachment-thumb">
-            <img src={attachment.previewUrl} alt={attachment.name} draggable="false" />
-          </div>
-        {:else}
-          <div class="pf-attachment-file-card" data-kind={attachment.kind}>
-            <span class="pf-attachment-file-icon">
-              <Icon name="file" size={18} />
-            </span>
-            <span class="pf-attachment-file-copy">
-              <span class="pf-attachment-file-name">{attachment.name}</span>
-              <span class="pf-attachment-file-ext">{attachment.extension}</span>
-            </span>
-          </div>
-        {/if}
-        {#if removable}
-          <button
-            type="button"
-            class="pf-attachment-remove"
-            aria-label={`Remove attachment ${attachment.name}`}
-            title="Remove attachment"
-            onclick={() => onRemove?.(attachment.id)}
-          >
-            <Icon name="x" size={13} />
-          </button>
-        {/if}
-      </div>
+      {#if variant === "message"}
+        <button
+          type="button"
+          class="pf-attachment-preview pf-attachment-preview-action"
+          aria-label={attachmentOpenLabel(attachment)}
+          title={attachment.name}
+          onclick={() => onOpenChatIntent?.(attachmentOpenIntent(attachment))}
+        >
+          {#if attachment.previewUrl && attachment.kind === "image"}
+            <div class="pf-attachment-thumb">
+              <img src={attachment.previewUrl} alt={attachment.name} draggable="false" />
+            </div>
+          {:else}
+            <div class="pf-attachment-file-card" data-kind={attachment.kind}>
+              <span class="pf-attachment-file-icon">
+                <Icon name="file" size={18} />
+              </span>
+              <span class="pf-attachment-file-copy">
+                <span class="pf-attachment-file-name">{attachment.name}</span>
+                <span class="pf-attachment-file-ext">{attachment.extension}</span>
+              </span>
+            </div>
+          {/if}
+        </button>
+      {:else}
+        <div class="pf-attachment-preview">
+          {#if attachment.previewUrl && attachment.kind === "image"}
+            <div class="pf-attachment-thumb">
+              <img src={attachment.previewUrl} alt={attachment.name} draggable="false" />
+            </div>
+          {:else}
+            <div class="pf-attachment-file-card" data-kind={attachment.kind}>
+              <span class="pf-attachment-file-icon">
+                <Icon name="file" size={18} />
+              </span>
+              <span class="pf-attachment-file-copy">
+                <span class="pf-attachment-file-name">{attachment.name}</span>
+                <span class="pf-attachment-file-ext">{attachment.extension}</span>
+              </span>
+            </div>
+          {/if}
+          {#if removable}
+            <button
+              type="button"
+              class="pf-attachment-remove"
+              aria-label={`Remove attachment ${attachment.name}`}
+              title="Remove attachment"
+              onclick={() => onRemove?.(attachment.id)}
+            >
+              <Icon name="x" size={13} />
+            </button>
+          {/if}
+        </div>
+      {/if}
     {/each}
   </div>
 {/if}
@@ -78,6 +113,22 @@
   .pf-attachment-preview {
     position: relative;
     flex: 0 0 auto;
+  }
+  .pf-attachment-preview-action {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+  }
+  .pf-attachment-preview-action:hover .pf-attachment-thumb,
+  .pf-attachment-preview-action:hover .pf-attachment-file-card {
+    border-color: color-mix(in oklab, var(--primary) 58%, var(--border));
+  }
+  .pf-attachment-preview-action:focus-visible {
+    outline: 2px solid color-mix(in oklab, var(--primary) 70%, white);
+    outline-offset: 2px;
+    border-radius: 8px;
   }
   .pf-attachment-thumb {
     width: 64px;

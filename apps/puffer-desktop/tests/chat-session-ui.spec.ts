@@ -210,6 +210,196 @@ test("composer add content menu attaches image and file drafts", async ({ page }
   await expect(page.getByText("[File: report.pdf]")).toHaveCount(0);
 });
 
+test("message attachments open image preview and file details", async ({ page }) => {
+  const imageBuffer = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==",
+    "base64"
+  );
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-attachment-open",
+        displayName: "Attachment open targets",
+        title: "Attachment open targets",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "attachment-open-seed",
+            text: "Attach a screenshot and notes.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Attachment open targets/);
+  await page.getByRole("button", { name: "Add content" }).click();
+  await page.locator('[data-testid="composer-file-input"]').setInputFiles([
+    {
+      name: "sample.png",
+      mimeType: "image/png",
+      buffer: imageBuffer
+    },
+    {
+      name: "notes.md",
+      mimeType: "text/markdown",
+      buffer: Buffer.from("# Notes\n\nReview this.", "utf8")
+    }
+  ]);
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-attachment-open" &&
+      request.params.message === "[Image: sample.png]\n[File: notes.md]"
+  );
+
+  await page.getByRole("button", { name: "Open image attachment sample.png" }).click();
+  const previewDialog = page.getByRole("dialog", { name: "sample.png" });
+  await expect(previewDialog).toBeVisible();
+  await expect(previewDialog.getByAltText("sample.png")).toBeVisible();
+  await expect(previewDialog).toContainText("PNG");
+  await page.keyboard.press("Escape");
+  await expect(page.locator('[data-testid="attachment-overlay"]')).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Open attachment details for notes.md" }).click();
+  const detailsDialog = page.getByRole("dialog", { name: "notes.md" });
+  await expect(detailsDialog).toBeVisible();
+  await expect(detailsDialog).toContainText("Preview unavailable for this attachment.");
+  await expect(detailsDialog).toContainText("text/markdown");
+  await expect(page.getByRole("button", { name: "Files" })).toHaveAttribute("aria-pressed", "false");
+});
+
+test("restored pending attachment without preview opens unavailable detail", async ({ page }) => {
+  const sessionId = "session-restored-attachment";
+  await page.addInitScript(
+    ({ key, expiresAtMs }) => {
+      window.localStorage.setItem(
+        key,
+        JSON.stringify({
+          expiresAtMs,
+          item: {
+            id: "pending-stale-image",
+            kind: "user",
+            createdAtMs: Date.now(),
+            title: "User",
+            summary: "stale.png",
+            body: "[Image: stale.png]",
+            meta: ["1 attachment"],
+            attachments: [
+              {
+                id: "stale-image",
+                name: "stale.png",
+                mimeType: "image/png",
+                size: 68,
+                extension: "PNG",
+                kind: "image"
+              }
+            ]
+          }
+        })
+      );
+    },
+    {
+      key: `puffer-desktop:pending-submitted:${sessionId}`,
+      expiresAtMs: Date.now() + 10 * 60_000
+    }
+  );
+
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId,
+        displayName: "Restored attachment",
+        title: "Restored attachment",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        timeline: []
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Restored attachment/);
+  await expect(page.getByText("stale.png")).toBeVisible();
+  await expect(page.getByText("[Image: stale.png]")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Open image attachment stale.png" }).click();
+  const dialog = page.getByRole("dialog", { name: "stale.png" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Preview unavailable for this attachment.");
+});
+
+test("chat file targets route message paths and tool paths through Files", async ({ page }) => {
+  const messagePath = "/tmp/puffer/src/main.rs";
+  const toolPath = "/tmp/puffer/src/tool.rs";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-file-open-targets",
+        displayName: "File open targets",
+        title: "File open targets",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 2,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "file-open-message",
+            text: `Review ${messagePath}:2 before changing the helper.`,
+            createdAtMs: baseTime - 30_000
+          },
+          {
+            kind: "tool_call",
+            id: "file-open-tool",
+            toolId: "read_file",
+            status: "success",
+            summary: `Read ${toolPath}`,
+            inputJson: { path: toolPath },
+            outputText: JSON.stringify({ content: "pub fn helper() {}\n" }),
+            createdAtMs: baseTime - 20_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.seedFile(messagePath, "fn main() {\n    let target = 42;\n}\n");
+  daemon.seedFile(toolPath, "pub fn helper() {}\n");
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /File open targets/);
+  await page.getByRole("link", { name: `${messagePath}:2` }).click();
+  await expect(page.getByRole("button", { name: "Files" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".viewer")).toContainText(messagePath);
+  await expect(page.locator(".viewer")).toContainText("let target = 42");
+
+  await page.getByRole("button", { name: "Chat" }).click();
+  await page.getByRole("button", { name: /Agent activity/ }).click();
+  await page.getByRole("button", { name: /Read tool\.rs/ }).click();
+  await page.getByRole("button", { name: toolPath, exact: true }).click();
+  await expect(page.getByRole("button", { name: "Files" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".viewer")).toContainText(toolPath);
+  await expect(page.locator(".viewer")).toContainText("pub fn helper() {}");
+});
+
 test("chat surface drop attaches image and file drafts", async ({ page }) => {
   const imageBuffer = Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==",

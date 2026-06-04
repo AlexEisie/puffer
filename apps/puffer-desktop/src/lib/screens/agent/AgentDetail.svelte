@@ -2,14 +2,17 @@
   import { onMount, tick } from "svelte";
   import Icon, { type IconName } from "../../design/Icon.svelte";
   import AgentDetailContent from "./AgentDetailContent.svelte";
+  import AttachmentOverlay from "./AttachmentOverlay.svelte";
   import {
     AGENT_STATE_LABELS,
     agentPufferState,
     type AgentStatus
   } from "../../data/mockProjects";
   import { sessionDisplayName, sessionDisplayTitle } from "../../sessionDisplay";
+  import type { ChatOpenIntent } from "../../chatOpenIntent";
   import type {
     BrowserRenderer,
+    MessageAttachment,
     PermissionTimelineItem,
     SessionDetail,
     SessionListItem,
@@ -87,6 +90,7 @@
   let sideWidth = $state(420);
   let sideDragStart: { pointerId: number; startX: number; startWidth: number } | null = null;
   let fileToOpen = $state<FileOpenTarget | null>(null);
+  let openAttachment = $state<MessageAttachment | null>(null);
   let fileOpenRequestId = 0;
   let fileToOpenSessionId: string | null = null;
   let rootEl = $state<HTMLElement | undefined>(undefined);
@@ -136,6 +140,7 @@
     if (nextSessionId === fileToOpenSessionId) return;
     fileToOpenSessionId = nextSessionId;
     fileToOpen = null;
+    openAttachment = null;
   });
 
   $effect(() => {
@@ -263,9 +268,13 @@
     return value === "diff";
   }
 
-  function openLinkedFile(path: string, line: number | null = null) {
-    fileToOpen = { path, line, requestId: ++fileOpenRequestId };
-    tab = "files";
+  function openChatIntent(intent: ChatOpenIntent) {
+    if (intent.kind === "file") {
+      fileToOpen = { path: intent.path, line: intent.line, requestId: ++fileOpenRequestId };
+      tab = "files";
+      return;
+    }
+    openAttachment = intent.attachment;
   }
 
   function tabLabel(value: Tab): string {
@@ -619,7 +628,7 @@
         {onResolveUserQuestion}
         {onCancelTurn}
         {onDraftChange}
-        onOpenFileLink={openLinkedFile}
+        onOpenChatIntent={openChatIntent}
         {fileToOpen}
       />
     </div>
@@ -672,12 +681,14 @@
           {onResolveUserQuestion}
           {onCancelTurn}
           {onDraftChange}
-          onOpenFileLink={openLinkedFile}
+          onOpenChatIntent={openChatIntent}
           {fileToOpen}
         />
       </div>
     {/if}
   </div>
+
+  <AttachmentOverlay attachment={openAttachment} onClose={() => (openAttachment = null)} />
 
   {#if searchOpen}
     <div class="pf-agent-find" role="search" aria-label="Find in agent view">

@@ -5,6 +5,7 @@
   import BrowserPane from "./BrowserPane.svelte";
   import FilesPane from "./FilesPane.svelte";
   import TerminalPane from "./TerminalPane.svelte";
+  import type { ChatOpenIntent } from "../../chatOpenIntent";
   import type {
     BrowserRenderer,
     PermissionTimelineItem,
@@ -53,7 +54,7 @@
       annotations?: Record<string, Record<string, string>>
     ) => void;
     onCancelTurn?: () => void;
-    onOpenFileLink?: (path: string, line?: number | null) => void;
+    onOpenChatIntent?: (intent: ChatOpenIntent) => void;
     onDraftChange?: (hasDraft: boolean) => void;
     fileToOpen?: FileOpenTarget | null;
   };
@@ -84,7 +85,7 @@
     onResolvePermission,
     onResolveUserQuestion,
     onCancelTurn,
-    onOpenFileLink,
+    onOpenChatIntent,
     onDraftChange,
     fileToOpen = null
   }: Props = $props();
@@ -170,7 +171,7 @@
       onResolvePermission={onResolvePermission}
       onResolveUserQuestion={onResolveUserQuestion}
       onCancelTurn={onCancelTurn}
-      onOpenFileLink={onOpenFileLink}
+      {onOpenChatIntent}
       onDraftChange={onDraftChange}
     />
   {:else if tab === "diff"}

@@ -23,6 +23,7 @@
     type ComposerAttachmentDraft
   } from "./attachments";
   import { formatAgentTurnAttachmentLine } from "../../agentTurnAttachments";
+  import type { ChatOpenIntent } from "../../chatOpenIntent";
   import type {
     PermissionTimelineItem,
     SessionListItem,
@@ -92,7 +93,7 @@
       annotations?: Record<string, Record<string, string>>
     ) => void;
     onCancelTurn?: () => void;
-    onOpenFileLink?: (path: string, line?: number | null) => void;
+    onOpenChatIntent?: (intent: ChatOpenIntent) => void;
     onDraftChange?: (hasDraft: boolean) => void;
   };
 
@@ -117,7 +118,7 @@
     onResolvePermission,
     onResolveUserQuestion,
     onCancelTurn,
-    onOpenFileLink,
+    onOpenChatIntent,
     onDraftChange
   }: Props = $props();
 
@@ -2018,11 +2019,15 @@
                   <span class="time">{formatTime((row.item as MessageTimelineItem & { createdAtMs?: number }).createdAtMs)}</span>
                 </div>
                 {#if row.item.attachments?.length}
-                  <AttachmentPreviewStrip attachments={row.item.attachments} variant="message" />
+                  <AttachmentPreviewStrip
+                    attachments={row.item.attachments}
+                    variant="message"
+                    {onOpenChatIntent}
+                  />
                 {/if}
                 {#if visibleBody.trim()}
                   <div class="pf-msg-text">
-                    <MessageBody body={visibleBody} onOpenFile={onOpenFileLink} />
+                    <MessageBody body={visibleBody} {onOpenChatIntent} />
                   </div>
                 {/if}
               </div>
@@ -2070,11 +2075,11 @@
                     <span class="name">{row.item.title || "Error"}</span>
                   </div>
                   <div class="pf-msg-text">
-                    <MessageBody body={row.item.body} onOpenFile={onOpenFileLink} />
+                    <MessageBody body={row.item.body} {onOpenChatIntent} />
                   </div>
                 {:else}
                   <div class="pf-msg-text">
-                    <MessageBody body={row.item.body} onOpenFile={onOpenFileLink} />
+                    <MessageBody body={row.item.body} {onOpenChatIntent} />
                   </div>
                 {/if}
               </div>
@@ -2134,7 +2139,7 @@
                                     class="activity-message pf-msg-text"
                                     style:order={activityActionOrder(childIdx)}
                                   >
-                                    <MessageBody body={(child as MessageTimelineItem).body} onOpenFile={onOpenFileLink} />
+                                    <MessageBody body={(child as MessageTimelineItem).body} {onOpenChatIntent} />
                                   </div>
                                 {:else}
                                   <button
@@ -2174,7 +2179,7 @@
                                       item={selected.child as ToolTimelineItem}
                                       sessionId={session?.id ?? null}
                                       defaultCollapsed={false}
-                                      onOpenFile={onOpenFileLink}
+                                      {onOpenChatIntent}
                                     />
                                   {:else if selected.child.kind === "diff"}
                                     <DiffCard item={selected.child as DiffTimelineItem} defaultCollapsed={false} />
@@ -2193,7 +2198,7 @@
                                     </div>
                                   {:else}
                                     <div class="activity-message pf-msg-text">
-                                      <MessageBody body={(selected.child as MessageTimelineItem).body} onOpenFile={onOpenFileLink} />
+                                      <MessageBody body={(selected.child as MessageTimelineItem).body} {onOpenChatIntent} />
                                     </div>
                                   {/if}
                                 </div>
@@ -2207,7 +2212,7 @@
                             <ToolCard
                               item={child as ToolTimelineItem}
                               sessionId={session?.id ?? null}
-                              onOpenFile={onOpenFileLink}
+                              {onOpenChatIntent}
                             />
                           {:else if child.kind === "diff"}
                             <DiffCard item={child as DiffTimelineItem} />
@@ -2226,7 +2231,7 @@
                             </div>
                           {:else}
                             <div class="activity-message pf-msg-text">
-                              <MessageBody body={(child as MessageTimelineItem).body} onOpenFile={onOpenFileLink} />
+                              <MessageBody body={(child as MessageTimelineItem).body} {onOpenChatIntent} />
                             </div>
                           {/if}
                         {/each}
@@ -2242,7 +2247,7 @@
                 {/if}
                 {#if row.item}
                   <div class="pf-msg-text">
-                    <MessageBody body={row.item.body} onOpenFile={onOpenFileLink} />
+                    <MessageBody body={row.item.body} {onOpenChatIntent} />
                   </div>
                 {/if}
               </div>

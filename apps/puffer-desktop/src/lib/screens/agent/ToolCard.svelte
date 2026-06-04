@@ -4,19 +4,20 @@
   import { browserRecording, type BrowserRecordedFrame } from "../../api/desktop";
   import Icon, { type IconName } from "../../design/Icon.svelte";
   import HighlightedLine from "../../components/HighlightedLine.svelte";
+  import { fileOpenIntent, type ChatOpenIntent } from "../../chatOpenIntent";
   import type { ToolTimelineItem } from "../../types";
 
   type Props = {
     item: ToolTimelineItem;
     sessionId?: string | null;
     defaultCollapsed?: boolean;
-    onOpenFile?: (path: string, line?: number | null) => void;
+    onOpenChatIntent?: (intent: ChatOpenIntent) => void;
   };
   let {
     item,
     sessionId = null,
     defaultCollapsed = true,
-    onOpenFile
+    onOpenChatIntent
   }: Props = $props();
   type RenderRow = { kind: "ctx" | "add" | "del" | "omit"; line: number | null; text: string };
   type FileRender = { mode: "read" | "diff"; path: string; rows: RenderRow[] };
@@ -122,7 +123,7 @@
   function openFilePath(path: string) {
     const target = fileTarget(path);
     if (!target) return;
-    onOpenFile?.(target.path, target.line);
+    onOpenChatIntent?.(fileOpenIntent(target.path, target.line));
   }
 
   function browserArgLine(input: Record<string, unknown> | null): string | null {
@@ -1124,7 +1125,14 @@
       {:else if toolRender?.mode === "read" || toolRender?.mode === "diff"}
         <div class="pf-file-render" data-mode={toolRender.mode}>
           {#if toolRender.path}
-            <div class="pf-file-path" title={toolRender.path}>{toolRender.path}</div>
+            <button
+              type="button"
+              class="pf-file-path pf-file-path-button"
+              title={toolRender.path}
+              onclick={() => openFilePath(toolRender.path)}
+            >
+              {toolRender.path}
+            </button>
           {/if}
           <div class="pf-file-lines">
             {#each toolRender.rows as row, i (i)}
@@ -1315,6 +1323,16 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .pf-file-path-button {
+    width: 100%;
+    border: 0;
+    text-align: left;
+    cursor: pointer;
+  }
+  .pf-file-path-button:hover {
+    color: var(--foreground);
+    text-decoration: underline;
   }
   .pf-file-lines {
     padding: 6px 0;
