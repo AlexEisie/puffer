@@ -21,6 +21,7 @@ test("composer add content menu attaches image and file drafts", async ({ page }
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==",
     "base64"
   );
+  const pdfBuffer = Buffer.from("%PDF-1.7\n", "utf8");
   const daemon = new FakeDaemon({
     sessions: [
       {
@@ -72,6 +73,15 @@ test("composer add content menu attaches image and file drafts", async ({ page }
 
   await page.getByRole("button", { name: "Remove attachment notes.md" }).click();
   await expect(page.getByText("notes.md")).toHaveCount(0);
+
+  await page.locator('[data-testid="composer-file-input"]').setInputFiles([
+    {
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      buffer: pdfBuffer
+    }
+  ]);
+  await expect(page.getByText("report.pdf")).toBeVisible();
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
 
   await page.getByRole("button", { name: "Send" }).click();
@@ -79,9 +89,9 @@ test("composer add content menu attaches image and file drafts", async ({ page }
     "run_agent_turn",
     (candidate) =>
       candidate.params.sessionId === "session-attachments" &&
-      candidate.params.message === "[Image: sample.png]" &&
+      candidate.params.message === "[Image: sample.png]\n[File: report.pdf]" &&
       Array.isArray(candidate.params.attachments) &&
-      candidate.params.attachments.length === 1
+      candidate.params.attachments.length === 2
   );
   expect(request.params.attachments).toEqual([
     expect.objectContaining({
@@ -90,10 +100,52 @@ test("composer add content menu attaches image and file drafts", async ({ page }
       kind: "image",
       extension: "PNG",
       size: imageBuffer.length
+    }),
+    expect.objectContaining({
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      kind: "file",
+      extension: "PDF",
+      size: pdfBuffer.length
     })
   ]);
-  await expect(page.getByText("[Image: sample.png]")).toBeVisible();
+  await expect(page.getByAltText("sample.png")).toBeVisible();
+  await expect(page.getByText("report.pdf")).toBeVisible();
+  await expect(page.getByText("[Image: sample.png]")).toHaveCount(0);
+  await expect(page.getByText("[File: report.pdf]")).toHaveCount(0);
   await expect(page.locator('[data-testid="composer-attachment-preview-strip"]')).toHaveCount(0);
+
+  daemon.setSessionTimeline("session-attachments", [
+    {
+      kind: "assistant_message",
+      id: "attachment-seed",
+      text: "Attach files here.",
+      createdAtMs: baseTime - 30_000
+    },
+    {
+      kind: "user_message",
+      id: "attachment-persisted-user",
+      text: request.params.message,
+      createdAtMs: Date.now()
+    },
+    {
+      kind: "assistant_message",
+      id: "attachment-persisted-assistant",
+      text: "Done.",
+      createdAtMs: Date.now() + 1
+    }
+  ]);
+  daemon.emit("session:session-attachments:event", {
+    type: "turn-complete",
+    turnId: "turn-session-attachments",
+    assistantText: "Done."
+  });
+
+  await expect(page.getByText("Done.")).toBeVisible();
+  await expect(page.getByAltText("sample.png")).toBeVisible();
+  await expect(page.getByText("report.pdf")).toBeVisible();
+  await expect(page.getByText("[Image: sample.png]")).toHaveCount(0);
+  await expect(page.getByText("[File: report.pdf]")).toHaveCount(0);
 });
 
 test("turn completion reload does not leak live chat into a newly selected session", async ({

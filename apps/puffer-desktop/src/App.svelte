@@ -54,7 +54,7 @@
     loadDefaultWorkspace,
     loadDesktopPins,
     setDesktopPin,
-    type AgentTurnOptions
+    type AgentTurnSubmitOptions
   } from "./lib/api/desktop";
   import {
     subscribeSessionEvents,
@@ -69,6 +69,8 @@
   import { sessionDisplayName, sessionDisplayTitle } from "./lib/sessionDisplay";
   import {
     formatAgentTurnMessage,
+    revokeTimelineAttachmentPreviews,
+    stripAttachmentPreviewUrls,
     summarizeAgentTurnAttachments
   } from "./lib/agentTurnAttachments";
   import { providerIdCanRunAgent, providerIdInSet, providerIsAvailableForAgent } from "./lib/providerIds";
@@ -1668,7 +1670,10 @@
     try {
       window.localStorage.setItem(
         pendingSubmittedMessageKey(sessionId),
-        JSON.stringify({ item, expiresAtMs: Date.now() + PENDING_SUBMITTED_MESSAGE_TTL_MS })
+        JSON.stringify({
+          item: stripAttachmentPreviewUrls(item),
+          expiresAtMs: Date.now() + PENDING_SUBMITTED_MESSAGE_TTL_MS
+        })
       );
     } catch {
       /* Best-effort recovery for reloads during turn start. */
@@ -2375,6 +2380,7 @@
     if (cancelingTurnId === null || activityStatusIsActive(activityStatus)) return;
     clearTurnRuntimeState(sessionId, currentTurnId);
     liveStreamItems = [];
+    revokeTimelineAttachmentPreviews(submittedMessages);
     submittedMessages = [];
     submittedMessageBaselineIds = {};
   }
@@ -2840,7 +2846,7 @@
     );
   }
 
-  async function submitMessage(message: string, options: AgentTurnOptions = {}) {
+  async function submitMessage(message: string, options: AgentTurnSubmitOptions = {}) {
     if (!selectedSession) {
       statusMessage = "Select a session to send a message.";
       return false;
@@ -2885,7 +2891,9 @@
         .map((item) => item.id)
         .filter((id) => id.length > 0)
     };
-    const attachments = options.attachments ?? [];
+    const { displayAttachments, ...turnOptions } = options;
+    const attachments = turnOptions.attachments ?? [];
+    const messageAttachments = displayAttachments ?? attachments;
     const turnMessage = formatAgentTurnMessage(message, attachments);
     const attachmentMeta =
       attachments.length > 0
@@ -2898,6 +2906,7 @@
       title: "User",
       summary: message || summarizeAgentTurnAttachments(attachments),
       body: turnMessage,
+      ...(messageAttachments.length > 0 ? { attachments: messageAttachments } : {}),
       meta: attachmentMeta
     };
     submittedMessages = [...submittedMessages, submittedMessage];
@@ -2907,7 +2916,7 @@
     turnStatusHint = "Thinking";
     setLiveSidebarAgentState(submitSessionId, "thinking", null, sessionAtSubmit);
     try {
-      const turnId = await runAgentTurn(submitSessionId, turnMessage, options);
+      const turnId = await runAgentTurn(submitSessionId, turnMessage, turnOptions);
       const settledBeforeRpcReturned = isTurnSettled(submitSessionId, turnId);
       if (!settledBeforeRpcReturned) {
         setLiveSidebarAgentState(submitSessionId, "thinking", turnId, sessionAtSubmit);
@@ -3154,6 +3163,44 @@
     return `${item.kind}:${body}`;
   }
 
+  function timelineItemAttachmentsMatch(persisted: TimelineItem, pending: TimelineItem): boolean {
+    const persistedAttachments = persisted.attachments ?? [];
+    const pendingAttachments = pending.attachments ?? [];
+    if (pendingAttachments.length === 0) return true;
+    if (persistedAttachments.length !== pendingAttachments.length) return false;
+    return pendingAttachments.every((attachment, index) => {
+      const persistedAttachment = persistedAttachments[index];
+      return Boolean(persistedAttachment) &&
+        persistedAttachment.id === attachment.id &&
+        persistedAttachment.name === attachment.name &&
+        persistedAttachment.kind === attachment.kind &&
+        persistedAttachment.size === attachment.size;
+    });
+  }
+
+  function needsTransientAttachmentPresentation(
+    persisted: TimelineItem,
+    pending: TimelineItem
+  ): boolean {
+    return (pending.attachments?.length ?? 0) > 0 &&
+      transientItemsMatch(persisted, pending) &&
+      !timelineItemAttachmentsMatch(persisted, pending);
+  }
+
+  function withTransientAttachmentPresentation(
+    persisted: TimelineItem,
+    pending: TimelineItem
+  ): TimelineItem {
+    return {
+      ...persisted,
+      id: pending.id,
+      summary: pending.summary || persisted.summary,
+      body: timelineItemBody(pending) || persisted.body,
+      attachments: pending.attachments,
+      meta: Array.from(new Set([...persisted.meta, ...pending.meta]))
+    };
+  }
+
   function stableJsonText(value: unknown): string {
     if (Array.isArray(value)) {
       return `[${value.map(stableJsonText).join(",")}]`;
@@ -3342,12 +3389,20 @@
         pendingUnmatched = [...pendingUnmatched, item];
         continue;
       }
+      let presentationIndex = matchIndex;
       if (pendingUnmatched.length > 0) {
         merged.splice(matchIndex, 0, ...pendingUnmatched);
+        presentationIndex = matchIndex + pendingUnmatched.length;
         searchStart = matchIndex + pendingUnmatched.length + 1;
         pendingUnmatched = [];
       } else {
         searchStart = matchIndex + 1;
+      }
+      if (needsTransientAttachmentPresentation(merged[presentationIndex], item)) {
+        merged[presentationIndex] = withTransientAttachmentPresentation(
+          merged[presentationIndex],
+          item
+        );
       }
     }
     if (pendingUnmatched.length > 0) merged.push(...pendingUnmatched);
@@ -3380,8 +3435,13 @@
     items: TimelineItem[],
     pending: TimelineItem[]
   ): TimelineItem[] {
-    const missing = stillMissingFromPersisted(items, pending);
+    const missing = pending.filter((item) => {
+      const match = items.find((candidate) => transientItemsMatch(candidate, item));
+      if (!match) return true;
+      return needsTransientAttachmentPresentation(match, item);
+    });
     const missingIds = new Set(missing.map((item) => item.id));
+    revokeTimelineAttachmentPreviews(pending.filter((item) => !missingIds.has(item.id)));
     let nextBaselineIds = submittedMessageBaselineIds;
     for (const item of pending) {
       if (missingIds.has(item.id)) continue;

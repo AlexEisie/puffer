@@ -16,7 +16,7 @@
     UserQuestionTimelineItem
   } from "../../types";
   import type { AgentState } from "../../shell/tweaks";
-  import type { AgentTurnOptions } from "../../api/desktop";
+  import type { AgentTurnSubmitOptions } from "../../api/desktop";
 
   type Tab = "chat" | "diff" | "terminal" | "files" | "browser";
   type DiffSubTab = "agent" | "git" | "divergence";
@@ -45,7 +45,7 @@
     backendConnected?: boolean;
     browserRenderer?: BrowserRenderer;
     userDisplayName?: string;
-    onSubmitMessage: (message: string, options?: AgentTurnOptions) => SubmitMessageResult;
+    onSubmitMessage: (message: string, options?: AgentTurnSubmitOptions) => SubmitMessageResult;
     onResolvePermission: (permissionId: string, choice: string) => void;
     onResolveUserQuestion: (
       questionId: string,

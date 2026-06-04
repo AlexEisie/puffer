@@ -1,4 +1,4 @@
-import type { AgentTurnAttachment, AgentTurnAttachmentKind } from "../../types";
+import type { AgentTurnAttachment, AgentTurnAttachmentKind, MessageAttachment } from "../../types";
 
 export const MAX_ATTACHMENTS = 10;
 export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
@@ -102,6 +102,13 @@ export function attachmentPayloadFromDraft(
     size: attachment.size,
     extension: attachment.extension,
     kind: attachment.kind
+  };
+}
+
+export function messageAttachmentFromDraft(attachment: ComposerAttachmentDraft): MessageAttachment {
+  return {
+    ...attachmentPayloadFromDraft(attachment),
+    previewUrl: attachment.previewUrl ?? null
   };
 }
 

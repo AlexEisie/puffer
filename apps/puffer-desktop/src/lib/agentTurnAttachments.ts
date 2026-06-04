@@ -1,4 +1,4 @@
-import type { AgentTurnAttachment } from "./types";
+import type { AgentTurnAttachment, MessageAttachment, TimelineItem } from "./types";
 
 function promptSafeAttachmentName(name: string): string {
   return name.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim() || "attachment";
@@ -22,4 +22,24 @@ export function formatAgentTurnMessage(
 
 export function summarizeAgentTurnAttachments(attachments: AgentTurnAttachment[]): string {
   return attachments.map((attachment) => promptSafeAttachmentName(attachment.name)).join(", ");
+}
+
+export function stripAttachmentPreviewUrls(item: TimelineItem): TimelineItem {
+  if (!item.attachments?.length) return item;
+  return {
+    ...item,
+    attachments: item.attachments.map(({ previewUrl: _previewUrl, ...attachment }) => attachment)
+  };
+}
+
+export function revokeMessageAttachmentPreviews(attachments: MessageAttachment[] = []): void {
+  for (const attachment of attachments) {
+    if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+  }
+}
+
+export function revokeTimelineAttachmentPreviews(items: TimelineItem[] = []): void {
+  for (const item of items) {
+    revokeMessageAttachmentPreviews(item.attachments);
+  }
 }

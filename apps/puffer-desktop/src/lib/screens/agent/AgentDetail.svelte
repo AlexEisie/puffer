@@ -18,7 +18,7 @@
     UserQuestionTimelineItem
   } from "../../types";
   import type { AgentState } from "../../shell/tweaks";
-  import type { AgentTurnOptions } from "../../api/desktop";
+  import type { AgentTurnSubmitOptions } from "../../api/desktop";
   type SubmitMessageResult = boolean | void | Promise<boolean | void>;
 
   type Props = {
@@ -41,7 +41,7 @@
     browserRenderer?: BrowserRenderer;
     userDisplayName?: string;
     onBack: () => void;
-    onSubmitMessage: (message: string, options?: AgentTurnOptions) => SubmitMessageResult;
+    onSubmitMessage: (message: string, options?: AgentTurnSubmitOptions) => SubmitMessageResult;
     onResolvePermission: (permissionId: string, choice: string) => void;
     onResolveUserQuestion: (
       questionId: string,

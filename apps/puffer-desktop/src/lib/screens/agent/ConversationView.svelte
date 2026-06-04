@@ -10,16 +10,19 @@
   import Approval from "./Approval.svelte";
   import QuestionPrompt from "./QuestionPrompt.svelte";
   import ModelPicker from "./ModelPicker.svelte";
+  import AttachmentPreviewStrip from "./AttachmentPreviewStrip.svelte";
   import {
     FILE_INPUT_ACCEPT,
     addAttachmentFiles,
     attachmentPayloadFromDraft,
     dataTransferHasFiles,
     filesFromDataTransfer,
+    messageAttachmentFromDraft,
     revokeAttachmentPreview,
     revokeAttachmentPreviews,
     type ComposerAttachmentDraft
   } from "./attachments";
+  import { formatAgentTurnAttachmentLine } from "../../agentTurnAttachments";
   import type {
     PermissionTimelineItem,
     SessionListItem,
@@ -35,6 +38,7 @@
     listProviderModels,
     type AgentPermissionMode,
     type AgentTurnOptions,
+    type AgentTurnSubmitOptions,
     type ModelDescriptorInfo
   } from "../../api/desktop";
   import {
@@ -78,7 +82,7 @@
     turnStatusHint?: string | null;
     settingsSnapshot?: SettingsSnapshot | null;
     backendConnected?: boolean;
-    onSubmitMessage: (message: string, options?: AgentTurnOptions) => SubmitMessageResult;
+    onSubmitMessage: (message: string, options?: AgentTurnSubmitOptions) => SubmitMessageResult;
     onResolvePermission: (permissionId: string, choice: string) => void;
     onResolveUserQuestion: (
       questionId: string,
@@ -934,6 +938,17 @@
     addFilesToComposer(filesFromDataTransfer(event.dataTransfer));
   }
 
+  function visibleMessageBody(item: MessageTimelineItem): string {
+    const attachments = item.attachments ?? [];
+    if (attachments.length === 0) return item.body;
+    const attachmentSummary = attachments.map(formatAgentTurnAttachmentLine).join("\n");
+    const body = item.body.trimEnd();
+    if (body === attachmentSummary) return "";
+    const suffix = `\n\n${attachmentSummary}`;
+    if (body.endsWith(suffix)) return body.slice(0, -suffix.length).trimEnd();
+    return item.body;
+  }
+
   $effect(() => {
     // Keep unsent composer text isolated per session while switching threads.
     const nextSessionId = session?.id ?? null;
@@ -1159,6 +1174,7 @@
     const previousDraft = draft;
     const previousAttachments = attachmentDrafts;
     const submittedAttachments = previousAttachments.map(attachmentPayloadFromDraft);
+    const displayAttachments = previousAttachments.map(messageAttachmentFromDraft);
     setSubmitInFlight(targetSessionId, true);
     draft = "";
     setDraftForSession(targetSessionId, "");
@@ -1166,7 +1182,9 @@
     try {
       const options = {
         ...composerOptions(),
-        ...(submittedAttachments.length > 0 ? { attachments: submittedAttachments } : {})
+        ...(submittedAttachments.length > 0
+          ? { attachments: submittedAttachments, displayAttachments }
+          : {})
       };
       const accepted = await onSubmitMessage(v, options);
       if (accepted === false) {
@@ -1179,7 +1197,6 @@
         }
         return;
       }
-      revokeAttachmentPreviews(previousAttachments);
       await tick();
       if ((session?.id ?? null) === targetSessionId) {
         threadEl?.scrollTo({ top: threadEl.scrollHeight, behavior: "smooth" });
@@ -1915,6 +1932,7 @@
       {:else}
         {#each distributedRows as row, idx (row.key)}
           {#if row.kind === "user"}
+            {@const visibleBody = visibleMessageBody(row.item)}
             <div class="pf-msg" data-role="user">
               <div class="pf-msg-avatar">{userInitial}</div>
               <div class="pf-msg-body">
@@ -1923,9 +1941,14 @@
                   <span class="you-badge">You</span>
                   <span class="time">{formatTime((row.item as MessageTimelineItem & { createdAtMs?: number }).createdAtMs)}</span>
                 </div>
-                <div class="pf-msg-text">
-                  <MessageBody body={row.item.body} onOpenFile={onOpenFileLink} />
-                </div>
+                {#if row.item.attachments?.length}
+                  <AttachmentPreviewStrip attachments={row.item.attachments} variant="message" />
+                {/if}
+                {#if visibleBody.trim()}
+                  <div class="pf-msg-text">
+                    <MessageBody body={visibleBody} onOpenFile={onOpenFileLink} />
+                  </div>
+                {/if}
               </div>
             </div>
           {:else if row.kind === "system"}
@@ -2186,36 +2209,12 @@
         <div class="pf-attachment-drop-overlay">Drop files to attach</div>
       {/if}
       {#if attachmentDrafts.length > 0}
-        <div class="pf-attachment-preview-strip" data-testid="composer-attachment-preview-strip">
-          {#each attachmentDrafts as attachment (attachment.id)}
-            <div class="pf-attachment-preview">
-              {#if attachment.previewUrl}
-                <div class="pf-attachment-thumb">
-                  <img src={attachment.previewUrl} alt={attachment.name} draggable="false" />
-                </div>
-              {:else}
-                <div class="pf-attachment-file-card">
-                  <span class="pf-attachment-file-icon">
-                    <Icon name="file" size={18} />
-                  </span>
-                  <span class="pf-attachment-file-copy">
-                    <span class="pf-attachment-file-name">{attachment.name}</span>
-                    <span class="pf-attachment-file-ext">{attachment.extension}</span>
-                  </span>
-                </div>
-              {/if}
-              <button
-                type="button"
-                class="pf-attachment-remove"
-                aria-label={`Remove attachment ${attachment.name}`}
-                title="Remove attachment"
-                onclick={() => removeAttachment(attachment.id)}
-              >
-                <Icon name="x" size={13} />
-              </button>
-            </div>
-          {/each}
-        </div>
+        <AttachmentPreviewStrip
+          attachments={attachmentDrafts}
+          removable={true}
+          onRemove={removeAttachment}
+          testId="composer-attachment-preview-strip"
+        />
       {/if}
       {#if attachmentError}
         <p class="pf-attachment-error" role="alert">{attachmentError}</p>
@@ -2373,98 +2372,6 @@
     font-size: 13px;
     font-weight: 650;
     pointer-events: none;
-  }
-  .pf-attachment-preview-strip {
-    display: flex;
-    gap: 8px;
-    max-width: 100%;
-    overflow-x: auto;
-    padding: 2px 24px 8px 2px;
-  }
-  .pf-attachment-preview {
-    position: relative;
-    flex: 0 0 auto;
-  }
-  .pf-attachment-thumb {
-    width: 64px;
-    height: 64px;
-    overflow: hidden;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--muted);
-  }
-  .pf-attachment-thumb img {
-    width: 100%;
-    height: 100%;
-    display: block;
-    object-fit: cover;
-  }
-  .pf-attachment-file-card {
-    width: 224px;
-    height: 64px;
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    padding: 8px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: color-mix(in oklab, var(--muted) 34%, var(--background));
-    color: var(--foreground);
-  }
-  .pf-attachment-file-icon {
-    width: 34px;
-    height: 34px;
-    flex: 0 0 auto;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 7px;
-    background: var(--background);
-    color: var(--muted-foreground);
-    border: 1px solid color-mix(in oklab, var(--border) 80%, transparent);
-  }
-  .pf-attachment-file-copy {
-    min-width: 0;
-    display: grid;
-    gap: 2px;
-  }
-  .pf-attachment-file-name,
-  .pf-attachment-file-ext {
-    display: block;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .pf-attachment-file-name {
-    font-size: 12.5px;
-    line-height: 16px;
-    font-weight: 650;
-  }
-  .pf-attachment-file-ext {
-    color: var(--muted-foreground);
-    font-size: 11px;
-    line-height: 14px;
-    font-weight: 600;
-  }
-  .pf-attachment-remove {
-    position: absolute;
-    top: -6px;
-    right: -6px;
-    width: 22px;
-    height: 22px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: var(--background);
-    color: var(--muted-foreground);
-    box-shadow: var(--shadow-sm);
-    cursor: pointer;
-  }
-  .pf-attachment-remove:hover {
-    color: var(--foreground);
-    background: var(--accent);
   }
   .pf-attachment-error {
     margin: -2px 4px 4px;

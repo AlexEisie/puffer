@@ -26,6 +26,7 @@ import type {
   SessionListItem,
   SettingsSnapshot,
   MessageActor,
+  MessageAttachment,
   OpenAIRealtimeClientSecret,
   OpenAIRealtimeClientSecretOptions,
   TimelineItem,
@@ -1387,6 +1388,9 @@ export type AgentTurnOptions = {
   permissionMode?: AgentPermissionMode;
   mode?: AgentTurnMode;
   attachments?: AgentTurnAttachment[];
+};
+export type AgentTurnSubmitOptions = AgentTurnOptions & {
+  displayAttachments?: MessageAttachment[];
 };
 export type StaleTurnRecoveryResult =
   | { recovery: "retry_started"; turnId: string }

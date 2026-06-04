@@ -43,6 +43,10 @@ export type AgentTurnAttachment = {
   kind: AgentTurnAttachmentKind;
 };
 
+export type MessageAttachment = AgentTurnAttachment & {
+  previewUrl?: string | null;
+};
+
 export type FolderGroup = {
   id: string;
   label: string;
@@ -154,6 +158,7 @@ type TimelineBase = {
   summary: string;
   body: string;
   meta: string[];
+  attachments?: MessageAttachment[];
   status?: string | null;
   actor?: MessageActor | null;
 };
