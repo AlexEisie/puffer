@@ -169,6 +169,7 @@ fn autodream_gated_counter_runs_after_session_gate() {
             other.id,
             puffer_session_store::TranscriptEvent::UserMessage {
                 text: "hello".to_string(),
+                attachments: Vec::new(),
                 actor: None,
             },
         )
@@ -213,6 +214,7 @@ fn recent_session_selector_excludes_current_and_other_cwd() {
             same.id,
             puffer_session_store::TranscriptEvent::UserMessage {
                 text: "same cwd".to_string(),
+                attachments: Vec::new(),
                 actor: None,
             },
         )
@@ -222,6 +224,7 @@ fn recent_session_selector_excludes_current_and_other_cwd() {
             other.id,
             puffer_session_store::TranscriptEvent::UserMessage {
                 text: "other cwd".to_string(),
+                attachments: Vec::new(),
                 actor: None,
             },
         )

@@ -435,6 +435,7 @@ impl BackendState {
                 StoredEvent::User { text, .. } => items.push(TimelineItemDto::UserMessage {
                     id,
                     text: text.clone(),
+                    attachments: Vec::new(),
                     actor: None,
                 }),
                 StoredEvent::Assistant { text, .. } => {
@@ -2141,6 +2142,26 @@ mod tests {
 
         assert_eq!(routing.provider, "claude");
         assert_eq!(routing.model.as_deref(), Some("claude-sonnet-4-5"));
+    }
+
+    #[test]
+    fn legacy_timeline_user_messages_return_empty_attachments() {
+        let backend = BackendState::new();
+        let record = test_session_record(
+            "codex",
+            Some("gpt-5.4"),
+            vec![StoredEvent::User {
+                at_ms: 1,
+                text: "hello".to_string(),
+            }],
+        );
+
+        let items = backend.timeline_items(&record, None);
+
+        let TimelineItemDto::UserMessage { attachments, .. } = &items[0] else {
+            panic!("expected user message");
+        };
+        assert!(attachments.is_empty());
     }
 
     #[test]

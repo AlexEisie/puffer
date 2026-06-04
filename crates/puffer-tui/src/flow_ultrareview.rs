@@ -33,6 +33,7 @@ pub(crate) fn execute_ultrareview(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: submitted.to_string(),
+            attachments: Vec::new(),
             actor: Some(state.user_actor()),
         },
     )?;

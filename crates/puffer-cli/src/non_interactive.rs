@@ -181,6 +181,7 @@ fn append_user_message(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: message.to_string(),
+            attachments: Vec::new(),
             actor: Some(state.user_actor()),
         },
     )?;
@@ -202,6 +203,7 @@ fn run_user_turn(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: prompt.to_string(),
+            attachments: Vec::new(),
             actor: Some(state.user_actor()),
         },
     )?;

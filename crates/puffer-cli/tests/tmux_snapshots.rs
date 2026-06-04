@@ -156,6 +156,7 @@ fn capture_tmux_turn(size: TerminalSize) -> String {
             session.id,
             TranscriptEvent::UserMessage {
                 text: "Review the current worktree and call out any risks.".to_string(),
+                attachments: Vec::new(),
                 actor: None,
             },
         )

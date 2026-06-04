@@ -53,7 +53,9 @@ use puffer_provider_registry::{
     AuthStore, ModelDescriptor, ProviderDescriptor, ProviderRegistry, StoredCredential,
 };
 use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
-use puffer_session_store::{MessageActor, SessionMetadata, SessionStore, TranscriptEvent};
+use puffer_session_store::{
+    MessageActor, SessionMetadata, SessionStore, StoredAttachment, TranscriptEvent,
+};
 use puffer_transport_anthropic::{
     parse_authorization_input as parse_anthropic_authorization_input, ANTHROPIC_API_BASE_URL,
     ANTHROPIC_MANUAL_REDIRECT_URL,
@@ -345,6 +347,7 @@ struct TurnHandle {
     session_uuid: Option<Uuid>,
     channel: String,
     message: String,
+    attachments: Vec<StoredAttachment>,
     cancel: CancelToken,
     cancel_reported: Arc<AtomicBool>,
     user_prompt_persisted: Arc<AtomicBool>,
@@ -3218,6 +3221,7 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
                 &handle.channel,
                 turn_id,
                 &handle.message,
+                &handle.attachments,
                 &handle.cancel_reported,
                 &handle.user_prompt_persisted,
                 &handle.progress,
@@ -3246,6 +3250,7 @@ fn report_cancelled_turn(
     channel: &str,
     turn_id: &str,
     message: &str,
+    attachments: &[StoredAttachment],
     cancel_reported: &AtomicBool,
     user_prompt_persisted: &AtomicBool,
     progress: &Arc<Mutex<TurnProgress>>,
@@ -3259,6 +3264,7 @@ fn report_cancelled_turn(
             session_uuid,
             TranscriptEvent::UserMessage {
                 text: message.to_string(),
+                attachments: attachments.to_vec(),
                 actor: None,
             },
         )?;
@@ -3395,6 +3401,25 @@ fn parse_agent_turn_mode(params: &Value) -> Result<AgentTurnMode> {
     }
 }
 
+fn parse_attachment_ids(params: &Value) -> Result<Vec<String>> {
+    let Some(value) = params
+        .get("attachmentIds")
+        .or_else(|| params.get("attachment_ids"))
+    else {
+        return Ok(Vec::new());
+    };
+    value
+        .as_array()
+        .context("attachmentIds must be an array")?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_string)
+                .context("attachmentIds must contain strings")
+        })
+        .collect()
+}
+
 fn unix_timestamp_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3433,7 +3458,11 @@ async fn recover_stale_turn(state: Arc<DaemonState>, params: Value) -> Result<Va
     let session_store = SessionStore::from_paths(&state.paths)?;
     let record = session_store.load_session(session_uuid)?;
     match stale_turn_recovery_decision(&record, unix_timestamp_ms(), retry_after_ms) {
-        StaleTurnRecoveryDecision::Retry { message, marker } => {
+        StaleTurnRecoveryDecision::Retry {
+            message,
+            attachment_ids,
+            marker,
+        } => {
             session_store.append_event(
                 session_uuid,
                 TranscriptEvent::SystemMessage {
@@ -3453,6 +3482,9 @@ async fn recover_stale_turn(state: Arc<DaemonState>, params: Value) -> Result<Va
             if let Some(object) = retry_params.as_object_mut() {
                 object.insert("sessionId".to_string(), json!(session_id.clone()));
                 object.insert("message".to_string(), json!(message));
+                if !attachment_ids.is_empty() {
+                    object.insert("attachmentIds".to_string(), json!(attachment_ids));
+                }
             } else {
                 anyhow::bail!("recover_stale_turn params must be an object");
             }
@@ -3507,6 +3539,9 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         .to_string();
     let turn_options = TurnRequestOptions::from_params(&params);
     let turn_mode = parse_agent_turn_mode(&params)?;
+    let attachment_ids = parse_attachment_ids(&params)?;
+    let turn_id = Uuid::new_v4().to_string();
+    let channel = format!("session:{session_id}:event");
 
     // Parse cheap, non-tokio-touching things synchronously so we can fail
     // fast with a clean error. Anything that builds a runtime (i.e. the
@@ -3514,9 +3549,30 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     // we're inside an async task, and dropping that inner runtime from an
     // async context panics. All such setup moved into the worker thread.
     let session_uuid = Uuid::parse_str(&session_id).context("invalid sessionId")?;
+    let staged_attachments = if attachment_ids.is_empty() {
+        Vec::new()
+    } else {
+        match SessionStore::from_paths(&state.paths)?
+            .load_staged_attachments(session_uuid, &attachment_ids)
+            .context("attachment staging")
+        {
+            Ok(attachments) => attachments,
+            Err(error) => {
+                publish_turn_error_event(
+                    &state,
+                    &channel,
+                    &session_id,
+                    &turn_id,
+                    format!("{error:#}"),
+                    None,
+                    Some("attachment-staging"),
+                );
+                state.turns.lock().unwrap().remove(&turn_id);
+                return Ok(json!({ "turnId": turn_id }));
+            }
+        }
+    };
 
-    let turn_id = Uuid::new_v4().to_string();
-    let channel = format!("session:{session_id}:event");
     let pending: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<PermissionPromptAction>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let pending_questions: Arc<
@@ -3542,6 +3598,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 session_uuid: Some(session_uuid),
                 channel: channel.clone(),
                 message: message.clone(),
+                attachments: staged_attachments.clone(),
                 cancel: cancel.clone(),
                 cancel_reported: cancel_reported.clone(),
                 user_prompt_persisted: user_prompt_persisted.clone(),
@@ -3572,6 +3629,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let session_id_for_thread = session_id.clone();
     let turn_options_for_thread = turn_options.clone();
     let turn_mode_for_thread = turn_mode;
+    let staged_attachments_for_thread = staged_attachments.clone();
     std::thread::spawn(move || {
         setup_state.publish_event(ServerEnvelope::Event {
             event: channel_thread.clone(),
@@ -3728,6 +3786,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 &channel_thread,
                 &turn_id_thread,
                 &message_for_thread,
+                &staged_attachments_for_thread,
                 &cancel_reported_thread,
                 &user_prompt_persisted_thread,
                 &progress_thread,
@@ -3784,6 +3843,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 session_uuid,
                 TranscriptEvent::UserMessage {
                     text: message_for_thread.clone(),
+                    attachments: staged_attachments_for_thread.clone(),
                     actor: Some(app_state.user_actor()),
                 },
             );
@@ -4184,6 +4244,7 @@ async fn start_slash_command_turn(state: Arc<DaemonState>, params: Value) -> Res
                 session_uuid: Some(session_uuid),
                 channel: channel.clone(),
                 message: message.clone(),
+                attachments: Vec::new(),
                 cancel: cancel.clone(),
                 cancel_reported: cancel_reported.clone(),
                 user_prompt_persisted: user_prompt_persisted.clone(),
@@ -4383,6 +4444,7 @@ async fn start_connector_setup_turn(state: Arc<DaemonState>, params: Value) -> R
                 session_uuid: None,
                 channel: channel.clone(),
                 message: message.clone(),
+                attachments: Vec::new(),
                 cancel: cancel.clone(),
                 cancel_reported: cancel_reported.clone(),
                 user_prompt_persisted,
@@ -5550,6 +5612,7 @@ mod tests {
             "session:test:event",
             "turn-1",
             "question",
+            &[],
             &cancel_reported,
             &user_prompt_persisted,
             &progress,

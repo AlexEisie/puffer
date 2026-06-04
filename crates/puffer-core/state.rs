@@ -1169,6 +1169,7 @@ mod tests {
             events: vec![
                 TranscriptEvent::UserMessage {
                     text: "u1".to_string(),
+                    attachments: Vec::new(),
                     actor: None,
                 },
                 TranscriptEvent::AssistantMessage {
@@ -1204,6 +1205,7 @@ mod tests {
             events: vec![
                 TranscriptEvent::UserMessage {
                     text: "before".to_string(),
+                    attachments: Vec::new(),
                     actor: None,
                 },
                 TranscriptEvent::CommandInvoked {

@@ -30,6 +30,7 @@ fn failed_pending_turn_discards_streamed_assistant_draft() {
             state.session.id,
             TranscriptEvent::UserMessage {
                 text: "fail after partial".to_string(),
+                attachments: Vec::new(),
                 actor: Some(state.user_actor()),
             },
         )
@@ -121,6 +122,7 @@ fn successful_tool_turn_persists_pre_tool_assistant_draft() {
             state.session.id,
             TranscriptEvent::UserMessage {
                 text: "inspect the file".to_string(),
+                attachments: Vec::new(),
                 actor: Some(state.user_actor()),
             },
         )

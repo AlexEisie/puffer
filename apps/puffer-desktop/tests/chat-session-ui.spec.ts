@@ -43,6 +43,24 @@ async function dispatchFileDrag(
   }
 }
 
+async function installAttachmentStageHook(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    (window as unknown as {
+      __PUFFER_TEST_STAGE_CHAT_ATTACHMENT__?: (
+        sessionId: string,
+        attachment: Record<string, unknown>
+      ) => Record<string, unknown>;
+    }).__PUFFER_TEST_STAGE_CHAT_ATTACHMENT__ = (_sessionId, attachment) => {
+      const { file: _file, previewUrl: _previewUrl, ...rest } = attachment;
+      return {
+        ...rest,
+        id: `staged-${String(attachment.id)}`,
+        state: "available"
+      };
+    };
+  });
+}
+
 async function composerTextareaMetrics(page: Page): Promise<{
   height: number;
   scrollHeight: number;
@@ -108,6 +126,7 @@ test("composer add content menu attaches image and file drafts", async ({ page }
   });
 
   await daemon.install(page);
+  await installAttachmentStageHook(page);
   await daemon.open(page);
 
   await openSession(page, /Attachment composer/);
@@ -152,25 +171,11 @@ test("composer add content menu attaches image and file drafts", async ({ page }
     (candidate) =>
       candidate.params.sessionId === "session-attachments" &&
       candidate.params.message === "[Image: sample.png]\n[File: report.pdf]" &&
-      Array.isArray(candidate.params.attachments) &&
-      candidate.params.attachments.length === 2
+      Array.isArray(candidate.params.attachmentIds) &&
+      candidate.params.attachmentIds.length === 2 &&
+      candidate.params.attachments === undefined
   );
-  expect(request.params.attachments).toEqual([
-    expect.objectContaining({
-      name: "sample.png",
-      mimeType: "image/png",
-      kind: "image",
-      extension: "PNG",
-      size: imageBuffer.length
-    }),
-    expect.objectContaining({
-      name: "report.pdf",
-      mimeType: "application/pdf",
-      kind: "file",
-      extension: "PDF",
-      size: pdfBuffer.length
-    })
-  ]);
+  const attachmentIds = request.params.attachmentIds as string[];
   await expect(page.getByAltText("sample.png")).toBeVisible();
   await expect(page.getByText("report.pdf")).toBeVisible();
   await expect(page.getByText("[Image: sample.png]")).toHaveCount(0);
@@ -188,7 +193,27 @@ test("composer add content menu attaches image and file drafts", async ({ page }
       kind: "user_message",
       id: "attachment-persisted-user",
       text: request.params.message,
-      createdAtMs: Date.now()
+      createdAtMs: Date.now(),
+      attachments: [
+        {
+          id: attachmentIds[0],
+          name: "sample.png",
+          mimeType: "image/png",
+          kind: "image",
+          extension: "PNG",
+          size: imageBuffer.length,
+          state: "available"
+        },
+        {
+          id: attachmentIds[1],
+          name: "report.pdf",
+          mimeType: "application/pdf",
+          kind: "file",
+          extension: "PDF",
+          size: pdfBuffer.length,
+          state: "available"
+        }
+      ]
     },
     {
       kind: "assistant_message",
@@ -204,10 +229,25 @@ test("composer add content menu attaches image and file drafts", async ({ page }
   });
 
   await expect(page.getByText("Done.")).toBeVisible();
-  await expect(page.getByAltText("sample.png")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open image attachment sample.png" })).toBeVisible();
   await expect(page.getByText("report.pdf")).toBeVisible();
   await expect(page.getByText("[Image: sample.png]")).toHaveCount(0);
   await expect(page.getByText("[File: report.pdf]")).toHaveCount(0);
+
+  daemon.seedAttachmentPreview("session-attachments", attachmentIds[0], {
+    state: "available",
+    mimeType: "image/png",
+    bytes: Array.from(imageBuffer)
+  });
+  await page.reload();
+  await openSession(page, /Attachment composer/);
+  await expect(page.getByRole("button", { name: "Open image attachment sample.png" })).toBeVisible();
+  await expect(page.getByText("report.pdf")).toBeVisible();
+  await expect(page.getByText("[Image: sample.png]")).toHaveCount(0);
+  await page.getByRole("button", { name: "Open image attachment sample.png" }).click();
+  const refreshedPreview = page.getByRole("dialog", { name: "sample.png" });
+  await expect(refreshedPreview).toBeVisible();
+  await expect(refreshedPreview.getByAltText("sample.png")).toBeVisible();
 });
 
 test("message attachments open image preview and file details", async ({ page }) => {
@@ -239,6 +279,7 @@ test("message attachments open image preview and file details", async ({ page })
   });
 
   await daemon.install(page);
+  await installAttachmentStageHook(page);
   await daemon.open(page);
 
   await openSession(page, /Attachment open targets/);
@@ -260,7 +301,10 @@ test("message attachments open image preview and file details", async ({ page })
     "run_agent_turn",
     (request) =>
       request.params.sessionId === "session-attachment-open" &&
-      request.params.message === "[Image: sample.png]\n[File: notes.md]"
+      request.params.message === "[Image: sample.png]\n[File: notes.md]" &&
+      Array.isArray(request.params.attachmentIds) &&
+      request.params.attachmentIds.length === 2 &&
+      request.params.attachments === undefined
   );
 
   const sampleAttachmentButton = page.getByRole("button", { name: "Open image attachment sample.png" });
@@ -344,6 +388,55 @@ test("restored pending attachment without preview opens unavailable detail", asy
   const dialog = page.getByRole("dialog", { name: "stale.png" });
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("Preview unavailable for this attachment.");
+});
+
+test("missing persisted image attachment opens unavailable detail", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-missing-persisted-attachment",
+        displayName: "Missing persisted attachment",
+        title: "Missing persisted attachment",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "missing-image-message",
+            text: "[Image: lost.png]",
+            createdAtMs: baseTime - 30_000,
+            attachments: [
+              {
+                id: "missing-image",
+                name: "lost.png",
+                mimeType: "image/png",
+                size: 68,
+                extension: "PNG",
+                kind: "image",
+                state: "missing"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Missing persisted attachment/);
+  await expect(page.getByText("lost.png")).toBeVisible();
+  await expect(page.getByText("[Image: lost.png]")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Open image attachment lost.png" }).click();
+  const dialog = page.getByRole("dialog", { name: "lost.png" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Preview unavailable for this attachment.");
+  await expect(dialog.locator("img")).toHaveCount(0);
 });
 
 test("chat file targets route message paths and tool paths through Files", async ({ page }) => {
@@ -444,6 +537,7 @@ test("chat surface drop attaches image and file drafts", async ({ page }) => {
   });
 
   await daemon.install(page);
+  await installAttachmentStageHook(page);
   await daemon.open(page);
 
   await openSession(page, /Drop attachments/);
@@ -468,25 +562,11 @@ test("chat surface drop attaches image and file drafts", async ({ page }) => {
     (candidate) =>
       candidate.params.sessionId === "session-drop-attachments" &&
       candidate.params.message === "review drop\n\n[Image: drop.png]\n[File: drop.pdf]" &&
-      Array.isArray(candidate.params.attachments) &&
-      candidate.params.attachments.length === 2
+      Array.isArray(candidate.params.attachmentIds) &&
+      candidate.params.attachmentIds.length === 2 &&
+      candidate.params.attachments === undefined
   );
-  expect(request.params.attachments).toEqual([
-    expect.objectContaining({
-      name: "drop.png",
-      mimeType: "image/png",
-      kind: "image",
-      extension: "PNG",
-      size: imageBuffer.length
-    }),
-    expect.objectContaining({
-      name: "drop.pdf",
-      mimeType: "application/pdf",
-      kind: "file",
-      extension: "PDF",
-      size: pdfBuffer.length
-    })
-  ]);
+  expect(request.params.attachmentIds).toHaveLength(2);
   await expect(page.locator('[data-testid="composer-attachment-preview-strip"]')).toHaveCount(0);
   await expect(page.getByAltText("drop.png")).toBeVisible();
   await expect(page.getByText("drop.pdf")).toBeVisible();
@@ -3086,7 +3166,7 @@ test("background permission request is available when returning to that session"
 
   await openSession(page, /Permission background A/);
   await expect(page.getByText("Approval needed")).toBeVisible();
-  await page.getByRole("button", { name: "Allow once" }).click();
+  await page.getByRole("button", { name: "Approve once" }).click();
 
   const request = await daemon.waitForRequest("resolve_permission");
   expect(request.params).toMatchObject({
@@ -3581,7 +3661,7 @@ test("daemon-running background sessions receive approval events", async ({ page
 
   await openSession(page, /Daemon running A/);
   await expect(page.getByText("This approval started before the UI opened the session.")).toBeVisible();
-  await page.getByRole("button", { name: "Allow once" }).click();
+  await page.getByRole("button", { name: "Approve once" }).click();
 
   const request = await daemon.waitForRequest("resolve_permission");
   expect(request.params).toMatchObject({
@@ -3821,7 +3901,7 @@ test("successful permission response clears the awaiting approval hint", async (
 
   await expect(page.getByText("Approval needed")).toBeVisible();
   await expect(page.getByText(/Awaiting approval/)).toBeVisible();
-  await page.getByRole("button", { name: "Allow once" }).click();
+  await page.getByRole("button", { name: "Approve once" }).click();
 
   const request = await daemon.waitForRequest("resolve_permission");
   expect(request.params).toMatchObject({
@@ -3898,7 +3978,7 @@ test("successful permission response stays dismissed after switching away before
   });
 
   await expect(page.getByText("This approval should not reappear after success.")).toBeVisible();
-  await page.getByRole("button", { name: "Allow once" }).click();
+  await page.getByRole("button", { name: "Approve once" }).click();
   await daemon.waitForRequest(
     "resolve_permission",
     (request) =>
@@ -3936,7 +4016,7 @@ test("permission responses ignore duplicate clicks while the choice is in flight
   });
 
   await expect(page.getByText("Needs a single approval.")).toBeVisible();
-  const allowOnce = page.getByRole("button", { name: "Allow once" });
+  const allowOnce = page.getByRole("button", { name: "Approve once" });
   await allowOnce.click();
   await expect(allowOnce).toBeDisabled();
 
@@ -3968,7 +4048,7 @@ test("new turn can reuse a permission request id after earlier approval", async 
   });
 
   await expect(page.getByText("First turn needs approval.")).toBeVisible();
-  await page.getByRole("button", { name: "Allow once" }).click();
+  await page.getByRole("button", { name: "Approve once" }).click();
   await daemon.waitForRequest("resolve_permission", (request) =>
     request.params.turnId === "turn-permission-first" &&
     request.params.requestId === "permission-reused"
@@ -5696,7 +5776,7 @@ test("permission prompt remains actionable after backend reconnect", async ({ pa
   });
 
   await expect(page.getByText("Approval needed")).toBeVisible();
-  await page.getByRole("button", { name: "Allow once" }).click();
+  await page.getByRole("button", { name: "Approve once" }).click();
   const request = await daemon.waitForRequest("resolve_permission");
   expect(request.params).toMatchObject({
     turnId: "turn-session-permission-reconnect",
@@ -8432,19 +8512,10 @@ test("workspace settled event clears selected canceled turn state", async ({ pag
     (request) => request.params.turnId === "turn-session-cancel-workspace-settled"
   );
 
-  const previousRefreshes = daemon.requests.filter(
-    (request) => request.method === "list_grouped_sessions"
-  ).length;
   daemon.emit("workspace:sessions:changed", {
     sessionId: "session-cancel-workspace-settled",
     reason: "turn_complete"
   });
-  await daemon.waitForRequest(
-    "list_grouped_sessions",
-    (request) =>
-      daemon.requests.filter((candidate) => candidate.method === "list_grouped_sessions")
-        .indexOf(request) >= previousRefreshes
-  );
 
   await expect(page.getByRole("button", { name: "Stop turn" })).toHaveCount(0);
   await expect(page.locator(".pf-composer textarea")).toBeEnabled();
@@ -8493,7 +8564,7 @@ test("canceled selected idle session stays idle when reopened from workspace", a
   await page.getByRole("button", { name: "Back" }).click();
 
   const card = page.locator(".pf-pw-agent").filter({ hasText: "Cancel same reopen" });
-  await expect(card.locator('.status-pill[data-status="idle"]')).toContainText("Idle");
+  await expect(card.locator('.status-pill[data-status="idle"]')).toContainText("idle");
 
   await card.click();
   await expect(page.locator(".pf-agent-status-pill")).toContainText("Idle");

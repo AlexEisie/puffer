@@ -23,6 +23,7 @@ pub(crate) fn execute_shell_shortcut(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: rendered_command,
+            attachments: Vec::new(),
             actor: Some(state.user_actor()),
         },
     )?;
@@ -105,6 +106,7 @@ pub(crate) fn execute_shell_shortcut_inline(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: rendered_command,
+            attachments: Vec::new(),
             actor: Some(state.user_actor()),
         },
     )?;

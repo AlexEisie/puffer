@@ -14,7 +14,6 @@
   import {
     FILE_INPUT_ACCEPT,
     addAttachmentFiles,
-    attachmentPayloadFromDraft,
     dataTransferHasFiles,
     filesFromDataTransfer,
     messageAttachmentFromDraft,
@@ -1230,7 +1229,6 @@
     if (submitInFlightGuards.has(targetSessionId)) return;
     const previousDraft = draft;
     const previousAttachments = attachmentDrafts;
-    const submittedAttachments = previousAttachments.map(attachmentPayloadFromDraft);
     const displayAttachments = previousAttachments.map(messageAttachmentFromDraft);
     setSubmitInFlight(targetSessionId, true);
     draft = "";
@@ -1240,9 +1238,7 @@
     try {
       const options = {
         ...composerOptions(),
-        ...(submittedAttachments.length > 0
-          ? { attachments: submittedAttachments, displayAttachments }
-          : {})
+        ...(displayAttachments.length > 0 ? { displayAttachments } : {})
       };
       const accepted = await onSubmitMessage(v, options);
       if (accepted === false) {
@@ -2238,7 +2234,7 @@
                       {/if}
                     {/if}
                     {#each row.approvals as p (p.id)}
-                      <Approval item={p} disabled={!turnCancelable || isPermissionResolving(p)} onResolve={onResolvePermission} />
+                      <Approval item={p} disabled={isPermissionResolving(p)} onResolve={onResolvePermission} />
                     {/each}
                     {#each row.questions as q (q.id)}
                       <QuestionPrompt item={q} disabled={isQuestionResolving(q)} onResolve={onResolveUserQuestion} />

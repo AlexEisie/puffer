@@ -108,6 +108,7 @@ export function attachmentPayloadFromDraft(
 export function messageAttachmentFromDraft(attachment: ComposerAttachmentDraft): MessageAttachment {
   return {
     ...attachmentPayloadFromDraft(attachment),
+    file: attachment.file,
     previewUrl: attachment.previewUrl ?? null
   };
 }

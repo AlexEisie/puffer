@@ -282,6 +282,7 @@ pub(crate) fn execute_skill_command(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: rendered.clone(),
+            attachments: Vec::new(),
             actor: Some(state.user_actor()),
         },
     )?;

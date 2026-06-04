@@ -47,6 +47,7 @@
     runRemoteBash,
     writeRemoteFile,
     runAgentTurn,
+    stageChatAttachment,
     resolvePermission as resolveTurnPermission,
     resolveUserQuestion as resolveTurnUserQuestion,
     cancelTurn,
@@ -86,6 +87,7 @@
     ExternalCredential,
     FolderGroup,
     AskUserQuestionItem,
+    MessageAttachment,
     MessageTimelineItem,
     PermissionTimelineItem,
     RemoteConnection,
@@ -2883,6 +2885,27 @@
       return false;
     }
     setSubmitMessageInFlight(submitSessionId, true);
+    const { displayAttachments = [], attachmentIds: _attachmentIds, ...turnOptionsBase } = options;
+    if (displayAttachments.length > 0 && remoteConnection.enabled) {
+      const detail = "Attachments are only supported for local desktop sessions.";
+      statusMessage = detail;
+      appendAgentError("Attachment upload unavailable", detail, "attachment-remote");
+      setSubmitMessageInFlight(submitSessionId, false);
+      return false;
+    }
+    let stagedAttachments: MessageAttachment[];
+    try {
+      stagedAttachments = [];
+      for (const attachment of displayAttachments) {
+        stagedAttachments.push(await stageChatAttachment(submitSessionId, attachment));
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      statusMessage = `Attachment upload failed: ${detail}`;
+      appendAgentError("Attachment upload failed", detail, "attachment-stage");
+      setSubmitMessageInFlight(submitSessionId, false);
+      return false;
+    }
     const now = Date.now();
     const localUserId = `local-user-${now}`;
     submittedMessageBaselineIds = {
@@ -2891,20 +2914,27 @@
         .map((item) => item.id)
         .filter((id) => id.length > 0)
     };
-    const { displayAttachments, ...turnOptions } = options;
-    const attachments = turnOptions.attachments ?? [];
-    const messageAttachments = displayAttachments ?? attachments;
-    const turnMessage = formatAgentTurnMessage(message, attachments);
+    const messageAttachments = stagedAttachments.map((attachment, index) => ({
+      ...attachment,
+      previewUrl: displayAttachments[index]?.previewUrl ?? null
+    }));
+    const turnMessage = formatAgentTurnMessage(message, stagedAttachments);
+    const turnOptions = {
+      ...turnOptionsBase,
+      ...(stagedAttachments.length > 0
+        ? { attachmentIds: stagedAttachments.map((attachment) => attachment.id) }
+        : {})
+    };
     const attachmentMeta =
-      attachments.length > 0
-        ? [`${attachments.length} attachment${attachments.length === 1 ? "" : "s"}`]
+      stagedAttachments.length > 0
+        ? [`${stagedAttachments.length} attachment${stagedAttachments.length === 1 ? "" : "s"}`]
         : [];
     const submittedMessage: TimelineItem = {
       id: localUserId,
       kind: "user",
       createdAtMs: now,
       title: "User",
-      summary: message || summarizeAgentTurnAttachments(attachments),
+      summary: message || summarizeAgentTurnAttachments(stagedAttachments),
       body: turnMessage,
       ...(messageAttachments.length > 0 ? { attachments: messageAttachments } : {}),
       meta: attachmentMeta

@@ -21,7 +21,7 @@
     UserQuestionTimelineItem
   } from "../../types";
   import type { AgentState } from "../../shell/tweaks";
-  import type { AgentTurnSubmitOptions } from "../../api/desktop";
+  import { readChatAttachmentPreview, type AgentTurnSubmitOptions } from "../../api/desktop";
   type SubmitMessageResult = boolean | void | Promise<boolean | void>;
 
   type Props = {
@@ -91,6 +91,7 @@
   let sideDragStart: { pointerId: number; startX: number; startWidth: number } | null = null;
   let fileToOpen = $state<FileOpenTarget | null>(null);
   let openAttachment = $state<MessageAttachment | null>(null);
+  let previewReadObjectUrl = $state<string | null>(null);
   let fileOpenRequestId = 0;
   let fileToOpenSessionId: string | null = null;
   let rootEl = $state<HTMLElement | undefined>(undefined);
@@ -140,7 +141,7 @@
     if (nextSessionId === fileToOpenSessionId) return;
     fileToOpenSessionId = nextSessionId;
     fileToOpen = null;
-    openAttachment = null;
+    closeAttachmentOverlay();
   });
 
   $effect(() => {
@@ -268,13 +269,48 @@
     return value === "diff";
   }
 
+  function closeAttachmentOverlay() {
+    if (previewReadObjectUrl) URL.revokeObjectURL(previewReadObjectUrl);
+    previewReadObjectUrl = null;
+    openAttachment = null;
+  }
+
+  async function openAttachmentIntent(attachment: MessageAttachment) {
+    if (previewReadObjectUrl) URL.revokeObjectURL(previewReadObjectUrl);
+    previewReadObjectUrl = null;
+    if (attachment.kind !== "image" || attachment.previewUrl) {
+      openAttachment = attachment;
+      return;
+    }
+
+    const sessionId = session?.id ?? null;
+    if (!sessionId) {
+      openAttachment = attachment;
+      return;
+    }
+
+    const preview = await readChatAttachmentPreview(sessionId, attachment.id).catch(() => ({
+      state: "missing" as const
+    }));
+    if ((session?.id ?? null) !== sessionId) return;
+    if (preview.state !== "available") {
+      openAttachment = attachment;
+      return;
+    }
+
+    const bytes = new Uint8Array(preview.bytes);
+    const previewUrl = URL.createObjectURL(new Blob([bytes], { type: preview.mimeType }));
+    previewReadObjectUrl = previewUrl;
+    openAttachment = { ...attachment, previewUrl };
+  }
+
   function openChatIntent(intent: ChatOpenIntent) {
     if (intent.kind === "file") {
       fileToOpen = { path: intent.path, line: intent.line, requestId: ++fileOpenRequestId };
       tab = "files";
       return;
     }
-    openAttachment = intent.attachment;
+    void openAttachmentIntent(intent.attachment);
   }
 
   function tabLabel(value: Tab): string {
@@ -688,7 +724,7 @@
     {/if}
   </div>
 
-  <AttachmentOverlay attachment={openAttachment} onClose={() => (openAttachment = null)} />
+  <AttachmentOverlay attachment={openAttachment} onClose={closeAttachmentOverlay} />
 
   {#if searchOpen}
     <div class="pf-agent-find" role="search" aria-label="Find in agent view">

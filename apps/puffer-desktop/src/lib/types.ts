@@ -33,6 +33,11 @@ export type MessageActor = {
 };
 
 export type AgentTurnAttachmentKind = "image" | "file";
+export type AttachmentState = "available" | "missing";
+export type AttachmentPreviewResult =
+  | { state: "available"; mimeType: string; bytes: number[] }
+  | { state: "missing" }
+  | { state: "unsupported" };
 
 export type AgentTurnAttachment = {
   id: string;
@@ -44,6 +49,8 @@ export type AgentTurnAttachment = {
 };
 
 export type MessageAttachment = AgentTurnAttachment & {
+  state?: AttachmentState;
+  file?: File;
   previewUrl?: string | null;
 };
 

@@ -11,6 +11,22 @@ This design intentionally does not preserve compatibility with the old
 placeholder-only transcript shape. Placeholder text such as `[Image: 1.jpg]`
 must not be parsed to synthesize cards.
 
+## Design Review Update
+
+This spec was reviewed against the current desktop attachment implementation.
+The existing HTML5 file picker/drop path, submitted-message cards, open intents,
+and unavailable attachment overlay should stay in place. The missing piece is
+durable storage and timeline reconstruction, not a new attachment UX.
+
+The implementation should therefore be deliberately narrow:
+
+- replace production turn submission metadata with staged attachment IDs;
+- keep browser object URLs transient and frontend-only;
+- avoid parsing fallback prompt lines into UI cards;
+- avoid download/open-with/rich-preview/dedupe/chunking/GC subsystems;
+- preserve old transcript compatibility by defaulting missing
+  `UserMessage.attachments` to an empty list.
+
 ## Current Failure
 
 The composer creates local attachment cards from transient frontend state. The
@@ -94,6 +110,7 @@ The session transcript event shape becomes:
 ```rust
 UserMessage {
     text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     attachments: Vec<StoredAttachment>,
     actor: Option<MessageActor>,
 }
@@ -120,13 +137,16 @@ Each session owns its attachments:
 This sidecar layout preserves the existing session metadata and transcript file
 layout. It adds no session-directory migration.
 
-The staging command writes to a temporary file, writes metadata, then atomically
-renames into place. This prevents partially staged attachments from appearing
-as available.
+The staging command writes `original.tmp`, renames it to `original`, writes
+`metadata.json.tmp`, then renames it to `metadata.json`. A staged attachment is
+loadable only after metadata exists, and it is available only while `original`
+exists.
 
 Deletion policy stays simple:
 
 - Deleting a session deletes its attachment directory.
+- The session delete sweep must remove the `<session-id>.attachments/`
+  directory with `remove_dir_all`, not only matching files.
 - No background garbage collector is added in this phase.
 - No cross-session deduplication is added in this phase.
 
@@ -156,7 +176,7 @@ read_chat_attachment_preview({
 `stage_chat_attachment` is a Tauri command, not a daemon WebSocket JSON-RPC
 method. The browser `File` bytes cross only the desktop shell IPC boundary and
 are written into the session-store attachment sidecar. The daemon WebSocket and
-`run_agent_turn` receive only small JSON refs.
+`run_agent_turn` receive only staged IDs and small timeline DTOs.
 
 Vite/Playwright tests may install a dev-only frontend staging hook that returns
 fixture `AttachmentRef` values without writing files. Production builds must
@@ -182,6 +202,16 @@ The daemon validates each ID belongs to the session, loads the corresponding
 provider execution starts. A crash after turn start still reloads the user's
 message and cards.
 
+Validation is required even though IDs are generated locally. `attachmentIds`
+must be UUID strings, must not be interpreted as paths, and the loaded metadata
+`id` must equal the requested ID. Storage paths are computed from
+`sessionId + attachmentId`, not from untrusted input or exposed DTO data.
+
+If staged attachment loading fails, the turn fails before provider execution and
+before any user message is appended. The cancellation fallback path that writes
+an unpersisted user prompt must carry the same loaded attachments; otherwise an
+early cancellation can lose cards even though a normal turn preserves them.
+
 `load_session_detail` returns user timeline items with `attachments`.
 `normalizeTimelineItem` maps those refs into `TimelineItem.attachments`.
 
@@ -202,7 +232,9 @@ Image card preview:
   UI renders metadata only.
 
 The timeline `state` is advisory. The preview API re-checks storage on click so
-the UI handles files deleted after the transcript was loaded.
+the UI handles files deleted after the transcript was loaded. Production
+preview reads use the Tauri command path; fake daemon preview responses are
+allowed only for dev/browser Playwright coverage.
 
 The frontend creates an object URL only for the currently open preview overlay
 and revokes it when the overlay closes. Timeline items never store preview URLs.
@@ -216,7 +248,8 @@ Composer drafts keep their current local preview behavior before submit.
 After submit:
 
 - draft files are staged first;
-- the optimistic user row uses returned refs;
+- the optimistic user row uses returned refs merged with the existing draft
+  `previewUrl` for immediate image preview;
 - pending localStorage no longer needs to be the durable source of attachment
   presentation;
 - refreshed timelines render cards from backend attachments;
@@ -237,7 +270,7 @@ The storage code should live behind a small session-store attachment module
 with these responsibilities:
 
 - allocate attachment IDs;
-- validate file count and size limits;
+- validate per-file size and staged ID format;
 - write staged files atomically;
 - persist and load metadata;
 - compute availability state;
@@ -255,6 +288,7 @@ Security constraints:
   lines.
 - Enforce attachment limits in the backend even if the frontend already
   checked them.
+- Reject non-UUID staged IDs and metadata/ID mismatches.
 - Treat MIME type from the browser as a hint; infer or validate when possible.
 - Scope preview reads by `sessionId` and `attachmentId`.
 
