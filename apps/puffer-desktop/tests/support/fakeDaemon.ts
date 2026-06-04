@@ -26,6 +26,11 @@ type ResponseFailureDelay = ResponseDelay & {
   error: string;
 };
 
+export type AttachmentPreviewFixture =
+  | { state: "available"; mimeType: string; bytes: number[] }
+  | { state: "missing" }
+  | { state: "unsupported" };
+
 type FakeFileValue =
   | string
   | {
@@ -274,6 +279,7 @@ export class FakeDaemon {
   private readonly sessions = new Map<string, JsonRecord>();
   private readonly projectTags = new Map<string, string[]>();
   private readonly timelines = new Map<string, JsonRecord[]>();
+  private readonly attachmentPreviews = new Map<string, AttachmentPreviewFixture>();
   private readonly details = new Map<string, SessionDetailOverrides>();
   private groupedSessionFilter: ((metadata: JsonRecord) => boolean) | null = null;
   private readonly files = new Map<string, FakeFileValue>();
@@ -983,6 +989,14 @@ export class FakeDaemon {
     }
   }
 
+  seedAttachmentPreview(
+    sessionId: string,
+    attachmentId: string,
+    preview: AttachmentPreviewFixture
+  ): void {
+    this.attachmentPreviews.set(this.attachmentPreviewKey(sessionId, attachmentId), preview);
+  }
+
   updateSessionMetadata(sessionId: string, updates: JsonRecord): void {
     const metadata = this.sessions.get(sessionId);
     if (!metadata) return;
@@ -1118,6 +1132,8 @@ export class FakeDaemon {
         return this.runAgentTurn(request.params);
       case "dispatch_slash_command":
         return this.runAgentTurn(request.params);
+      case "read_chat_attachment_preview":
+        return this.readChatAttachmentPreview(request.params);
       case "start_connector_setup":
         return this.startConnectorSetup(request.params);
       case "cancel_turn": {
@@ -1532,6 +1548,18 @@ export class FakeDaemon {
       }, 0);
     }
     return { turnId };
+  }
+
+  private readChatAttachmentPreview(params: JsonRecord): AttachmentPreviewFixture {
+    const sessionId = String(params.sessionId ?? session.sessionId);
+    const attachmentId = String(params.attachmentId ?? "");
+    return this.attachmentPreviews.get(this.attachmentPreviewKey(sessionId, attachmentId)) ?? {
+      state: "missing"
+    };
+  }
+
+  private attachmentPreviewKey(sessionId: string, attachmentId: string): string {
+    return `${sessionId}:${attachmentId}`;
   }
 
   private startConnectorSetup(params: JsonRecord): JsonRecord {

@@ -10,6 +10,20 @@
   import Approval from "./Approval.svelte";
   import QuestionPrompt from "./QuestionPrompt.svelte";
   import ModelPicker from "./ModelPicker.svelte";
+  import AttachmentPreviewStrip from "./AttachmentPreviewStrip.svelte";
+  import MessageAttachmentPreviewStrip from "./MessageAttachmentPreviewStrip.svelte";
+  import {
+    FILE_INPUT_ACCEPT,
+    addAttachmentFiles,
+    dataTransferHasFiles,
+    filesFromDataTransfer,
+    messageAttachmentFromDraft,
+    revokeAttachmentPreview,
+    revokeAttachmentPreviews,
+    type ComposerAttachmentDraft
+  } from "./attachments";
+  import { formatAgentTurnAttachmentLine } from "../../agentTurnAttachments";
+  import type { ChatOpenIntent } from "../../chatOpenIntent";
   import type {
     PermissionTimelineItem,
     SessionListItem,
@@ -25,6 +39,7 @@
     listProviderModels,
     type AgentPermissionMode,
     type AgentTurnOptions,
+    type AgentTurnSubmitOptions,
     type ModelDescriptorInfo
   } from "../../api/desktop";
   import {
@@ -37,6 +52,8 @@
 
   const ENGINEER_NAME = "Engineer";
   const RECAP_DISPLAY_PREFIX = "\u203B recap: ";
+  const COMPOSER_MAX_HEIGHT_PX = 200;
+  const THREAD_BOTTOM_THRESHOLD_PX = 100;
   type SubmitMessageResult = boolean | void | Promise<boolean | void>;
   type ComposerRoutingPreference = {
     providerId: string | null;
@@ -68,7 +85,7 @@
     turnStatusHint?: string | null;
     settingsSnapshot?: SettingsSnapshot | null;
     backendConnected?: boolean;
-    onSubmitMessage: (message: string, options?: AgentTurnOptions) => SubmitMessageResult;
+    onSubmitMessage: (message: string, options?: AgentTurnSubmitOptions) => SubmitMessageResult;
     onResolvePermission: (permissionId: string, choice: string) => void;
     onResolveUserQuestion: (
       questionId: string,
@@ -76,7 +93,7 @@
       annotations?: Record<string, Record<string, string>>
     ) => void;
     onCancelTurn?: () => void;
-    onOpenFileLink?: (path: string, line?: number | null) => void;
+    onOpenChatIntent?: (intent: ChatOpenIntent) => void;
     onDraftChange?: (hasDraft: boolean) => void;
   };
 
@@ -101,7 +118,7 @@
     onResolvePermission,
     onResolveUserQuestion,
     onCancelTurn,
-    onOpenFileLink,
+    onOpenChatIntent,
     onDraftChange
   }: Props = $props();
 
@@ -122,7 +139,18 @@
 
   let draft = $state("");
   let draftBySessionId = $state<Record<string, string>>({});
+  let attachmentDrafts = $state<ComposerAttachmentDraft[]>([]);
+  let attachmentDraftsBySessionId = $state<Record<string, ComposerAttachmentDraft[]>>({});
+  let attachmentError = $state<string | null>(null);
+  let attachmentMenuOpen = $state(false);
+  let attachmentDropActive = $state(false);
+  let attachmentDragDepth = 0;
+  let attachmentIdSequence = 0;
+  let fileInputEl: HTMLInputElement | undefined;
+  let composerTextareaEl: HTMLTextAreaElement | undefined;
+  let attachmentMenuEl: HTMLDivElement | undefined;
   let threadEl: HTMLDivElement | undefined;
+  let showScrollToBottom = $state(false);
   let lastSessionId: string | null = null;
   let nowMs = $state(Date.now());
   let expandedActivityIds = $state<string[]>([]);
@@ -235,12 +263,15 @@
   let composerDisabled = $derived(
     !session ||
       !backendConnected ||
+      submitInFlight ||
       agentBusy ||
       (!selectedProviderAuthenticated && !providerSwitchCanRecover)
   );
+  let canAcceptAttachmentDrop = $derived(!composerDisabled);
   let modelPickerDisabled = $derived(
     turnRunning || (!selectedProviderAuthenticated && !providerSwitchCanRecover)
   );
+  let hasComposerPayload = $derived(Boolean(draft.trim() || attachmentDrafts.length > 0));
   let composerBlockedReason = $derived(
     agentBusy
       ? agentState === "awaiting"
@@ -258,7 +289,7 @@
   );
   let canSubmitPrompt = $derived(
     Boolean(
-      draft.trim() &&
+      hasComposerPayload &&
         session &&
         backendConnected &&
         !turnRunning &&
@@ -813,28 +844,235 @@
     }
   }
 
+  function isThreadNearBottom(thread: HTMLDivElement | undefined = threadEl): boolean {
+    if (!thread) return false;
+    const bottomGap = thread.scrollHeight - thread.scrollTop - thread.clientHeight;
+    const hasMeaningfulOverflow =
+      thread.scrollHeight - thread.clientHeight > THREAD_BOTTOM_THRESHOLD_PX;
+    return !hasMeaningfulOverflow || bottomGap < THREAD_BOTTOM_THRESHOLD_PX;
+  }
+
+  function scrollThreadToBottom(behavior: ScrollBehavior = "auto") {
+    if (!threadEl) return;
+    threadEl.scrollTo({ top: threadEl.scrollHeight, behavior });
+  }
+
+  function refreshThreadScrollButtonState(thread: HTMLDivElement | undefined = threadEl) {
+    if (!thread) {
+      if (showScrollToBottom) showScrollToBottom = false;
+      return;
+    }
+    const shouldShow = !isThreadNearBottom(thread);
+    if (showScrollToBottom !== shouldShow) showScrollToBottom = shouldShow;
+  }
+
+  function scheduleThreadScrollButtonStateRefresh() {
+    void tick().then(() => refreshThreadScrollButtonState());
+  }
+
+  function handleThreadScroll(event: Event) {
+    refreshThreadScrollButtonState(event.currentTarget as HTMLDivElement);
+  }
+
+  function handleScrollToBottomClick() {
+    showScrollToBottom = false;
+    scrollThreadToBottom("smooth");
+  }
+
+  function resizeComposerTextarea(
+    textarea: HTMLTextAreaElement | undefined = composerTextareaEl
+  ): boolean {
+    if (!textarea) return false;
+    const previousHeight = textarea.getBoundingClientRect().height;
+    const previousOverflowY = textarea.style.overflowY;
+    textarea.style.height = "auto";
+    const scrollHeight = textarea.scrollHeight;
+    const nextHeight = Math.min(scrollHeight, COMPOSER_MAX_HEIGHT_PX);
+    const nextOverflowY = scrollHeight > COMPOSER_MAX_HEIGHT_PX ? "auto" : "hidden";
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = nextOverflowY;
+    return Math.abs(previousHeight - nextHeight) > 0.5 || previousOverflowY !== nextOverflowY;
+  }
+
+  function scheduleComposerResize({ anchorThread = true }: { anchorThread?: boolean } = {}) {
+    const shouldAnchorThread = anchorThread && isThreadNearBottom();
+    void tick().then(() => {
+      const resized = resizeComposerTextarea();
+      if (resized && shouldAnchorThread) scrollThreadToBottom();
+      refreshThreadScrollButtonState();
+    });
+  }
+
   function updateDraft(value: string) {
     draft = value;
     setDraftForSession(session?.id, value);
+    scheduleComposerResize();
+  }
+
+  function nextAttachmentId(): string {
+    attachmentIdSequence += 1;
+    return `attachment-${Date.now().toString(36)}-${attachmentIdSequence.toString(36)}`;
+  }
+
+  function rememberAttachmentDrafts(
+    sessionId: string | null | undefined,
+    attachments: ComposerAttachmentDraft[]
+  ) {
+    if (!sessionId) return;
+    if (attachments.length > 0) {
+      attachmentDraftsBySessionId = { ...attachmentDraftsBySessionId, [sessionId]: attachments };
+      return;
+    }
+    const { [sessionId]: _removed, ...rest } = attachmentDraftsBySessionId;
+    attachmentDraftsBySessionId = rest;
+  }
+
+  function setAttachmentDrafts(
+    attachments: ComposerAttachmentDraft[],
+    error: string | null = attachmentError
+  ) {
+    attachmentDrafts = attachments;
+    attachmentError = error;
+    rememberAttachmentDrafts(session?.id, attachments);
+  }
+
+  function addFilesToComposer(files: FileList | File[] | null) {
+    if (composerDisabled) return;
+    attachmentMenuOpen = false;
+    const result = addAttachmentFiles({
+      current: attachmentDrafts,
+      files,
+      nextId: nextAttachmentId
+    });
+    setAttachmentDrafts(result.attachments, result.error);
+    if (fileInputEl) fileInputEl.value = "";
+  }
+
+  function removeAttachment(id: string) {
+    const attachment = attachmentDrafts.find((item) => item.id === id);
+    if (attachment) revokeAttachmentPreview(attachment);
+    setAttachmentDrafts(
+      attachmentDrafts.filter((item) => item.id !== id),
+      null
+    );
+  }
+
+  function clearCurrentAttachments() {
+    setAttachmentDrafts([], null);
+    if (fileInputEl) fileInputEl.value = "";
+  }
+
+  function clearAllAttachmentDrafts() {
+    revokeAttachmentPreviews(attachmentDrafts);
+    for (const attachments of Object.values(attachmentDraftsBySessionId)) {
+      if (attachments !== attachmentDrafts) revokeAttachmentPreviews(attachments);
+    }
+    attachmentDrafts = [];
+    attachmentDraftsBySessionId = {};
+    attachmentError = null;
+  }
+
+  function resetAttachmentDropState() {
+    attachmentDragDepth = 0;
+    attachmentDropActive = false;
+  }
+
+  function openAttachmentPicker() {
+    if (composerDisabled) return;
+    attachmentMenuOpen = false;
+    fileInputEl?.click();
+  }
+
+  function toggleAttachmentMenu(event: MouseEvent) {
+    event.stopPropagation();
+    if (composerDisabled) return;
+    attachmentMenuOpen = !attachmentMenuOpen;
+  }
+
+  function handleAttachmentDragEnter(event: DragEvent) {
+    if (!canAcceptAttachmentDrop || !dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    attachmentDragDepth += 1;
+    attachmentDropActive = true;
+  }
+
+  function handleAttachmentDragOver(event: DragEvent) {
+    if (!canAcceptAttachmentDrop || !dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer!.dropEffect = "copy";
+    attachmentDropActive = true;
+  }
+
+  function handleAttachmentDragLeave(event: DragEvent) {
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
+    attachmentDragDepth = Math.max(0, attachmentDragDepth - 1);
+    if (attachmentDragDepth === 0) attachmentDropActive = false;
+  }
+
+  function handleAttachmentDrop(event: DragEvent) {
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    const files = filesFromDataTransfer(event.dataTransfer);
+    resetAttachmentDropState();
+    if (!canAcceptAttachmentDrop || files.length === 0) return;
+    addFilesToComposer(files);
+  }
+
+  function visibleMessageBody(item: MessageTimelineItem): string {
+    const attachments = item.attachments ?? [];
+    if (attachments.length === 0) return item.body;
+    const attachmentSummary = attachments.map(formatAgentTurnAttachmentLine).join("\n");
+    const body = item.body.trimEnd();
+    if (body === attachmentSummary) return "";
+    const suffix = `\n\n${attachmentSummary}`;
+    if (body.endsWith(suffix)) return body.slice(0, -suffix.length).trimEnd();
+    return item.body;
   }
 
   $effect(() => {
     // Keep unsent composer text isolated per session while switching threads.
     const nextSessionId = session?.id ?? null;
     if (nextSessionId !== lastSessionId) {
+      showScrollToBottom = false;
       draft = nextSessionId ? draftBySessionId[nextSessionId] ?? readDraftForSession(nextSessionId) : "";
+      attachmentDrafts = nextSessionId ? attachmentDraftsBySessionId[nextSessionId] ?? [] : [];
+      attachmentError = null;
+      attachmentMenuOpen = false;
+      resetAttachmentDropState();
       expandedActivityIds = [];
       selectedActivityChildren = {};
       lastSessionId = nextSessionId;
-      void tick().then(() => threadEl?.scrollTo({ top: 0, behavior: "auto" }));
+      scheduleComposerResize({ anchorThread: false });
+      void tick().then(() => {
+        threadEl?.scrollTo({ top: 0, behavior: "auto" });
+        refreshThreadScrollButtonState();
+      });
     }
   });
 
   $effect(() => {
-    onDraftChange?.(draft.trim().length > 0);
+    onDraftChange?.(hasComposerPayload);
+  });
+
+  $effect(() => {
+    if (!composerDisabled) return;
+    attachmentMenuOpen = false;
+    resetAttachmentDropState();
+  });
+
+  $effect(() => {
+    if (!attachmentMenuOpen || typeof window === "undefined") return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && attachmentMenuEl?.contains(target)) return;
+      attachmentMenuOpen = false;
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
   });
 
   onDestroy(() => {
+    clearAllAttachmentDrafts();
     onDraftChange?.(false);
   });
 
@@ -1014,19 +1252,33 @@
 
   async function submit() {
     const v = draft.trim();
-    if (!v || !canSubmitPrompt) return;
+    if (!canSubmitPrompt) return;
     const targetSessionId = session?.id;
     if (!targetSessionId) return;
     if (submitInFlightGuards.has(targetSessionId)) return;
     const previousDraft = draft;
+    const previousAttachments = attachmentDrafts;
+    const displayAttachments = previousAttachments.map(messageAttachmentFromDraft);
     setSubmitInFlight(targetSessionId, true);
     draft = "";
     setDraftForSession(targetSessionId, "");
+    clearCurrentAttachments();
+    scheduleComposerResize();
     try {
-      const accepted = await onSubmitMessage(v, composerOptions());
+      const options = {
+        ...composerOptions(),
+        ...(displayAttachments.length > 0 ? { displayAttachments } : {})
+      };
+      const accepted = await onSubmitMessage(v, options);
       if (accepted === false) {
         setDraftForSession(targetSessionId, previousDraft);
         if ((session?.id ?? null) === targetSessionId && !draft.trim()) draft = previousDraft;
+        rememberAttachmentDrafts(targetSessionId, previousAttachments);
+        if ((session?.id ?? null) === targetSessionId) {
+          attachmentDrafts = previousAttachments;
+          attachmentError = null;
+          scheduleComposerResize();
+        }
         return;
       }
       await tick();
@@ -1036,6 +1288,12 @@
     } catch {
       setDraftForSession(targetSessionId, previousDraft);
       if ((session?.id ?? null) === targetSessionId && !draft.trim()) draft = previousDraft;
+      rememberAttachmentDrafts(targetSessionId, previousAttachments);
+      if ((session?.id ?? null) === targetSessionId) {
+        attachmentDrafts = previousAttachments;
+        attachmentError = null;
+        scheduleComposerResize();
+      }
     } finally {
       setSubmitInFlight(targetSessionId, false);
     }
@@ -1129,6 +1387,16 @@
     }
     if (agentState === "awaiting") return `${engineerName} paused - waiting for your response`;
     return null;
+  });
+
+  $effect(() => {
+    void session?.id;
+    void loading;
+    void timeline;
+    void pendingPermissions;
+    void pendingQuestions;
+    void typingLabel;
+    scheduleThreadScrollButtonStateRefresh();
   });
 
   function shouldCollapseActivity(row: Extract<RowKind, { kind: "agent" }>, idx: number): boolean {
@@ -1749,267 +2017,332 @@
   }
 </script>
 
-<div class="pf-chat">
-  <div class="pf-chat-thread" bind:this={threadEl}>
-    <div class="pf-chat-thread-inner">
-      {#if loading && rows.length === 0}
-        <div class="state">Loading conversation…</div>
-      {:else if rows.length === 0 && !typingLabel}
-        <div class="state">No messages in this session yet. Send a prompt to get started.</div>
-      {:else}
-        {#each distributedRows as row, idx (row.key)}
-          {#if row.kind === "user"}
-            <div class="pf-msg" data-role="user">
-              <div class="pf-msg-avatar">{userInitial}</div>
-              <div class="pf-msg-body">
-                <div class="pf-msg-meta">
-                  <span class="name">{displayUserName}</span>
-                  <span class="you-badge">You</span>
-                  <span class="time">{formatTime((row.item as MessageTimelineItem & { createdAtMs?: number }).createdAtMs)}</span>
-                </div>
-                <div class="pf-msg-text">
-                  <MessageBody body={row.item.body} onOpenFile={onOpenFileLink} />
-                </div>
-              </div>
-            </div>
-          {:else if row.kind === "system"}
-            {@const isError = row.item.status === "error" || row.item.meta.includes("error")}
-            {@const recap = recapContent(row.item)}
-            <div class="pf-msg" data-role="system" data-error={isError} data-recap={Boolean(recap)}>
-              {#if !recap}
-                <div class="pf-msg-avatar">{isError ? "err" : "sys"}</div>
-              {/if}
-              <div class="pf-msg-body">
-                {#if recap}
-                  <div class="recap-card" data-expanded={recapExpanded(row.key)}>
-                    {#if recap.details.length > 0}
-                      <button
-                        type="button"
-                        class="recap-summary"
-                        onclick={() => toggleRecap(row.key)}
-                        aria-expanded={recapExpanded(row.key)}
-                        aria-label={recapExpanded(row.key) ? "Collapse recap details" : "Expand recap details"}
-                      >
-                        <span class="recap-icon" aria-hidden="true"><Icon name="sparkles" size={13} /></span>
-                        <span class="recap-sentence">{recap.summary}</span>
-                        <span class="recap-chevron" aria-hidden="true">
-                          <Icon name={recapExpanded(row.key) ? "chevD" : "chevR"} size={11} />
-                        </span>
-                      </button>
-                    {:else}
-                      <div class="recap-summary">
-                        <span class="recap-icon" aria-hidden="true"><Icon name="sparkles" size={13} /></span>
-                        <span class="recap-sentence">{recap.summary}</span>
-                      </div>
-                    {/if}
-                    {#if recap.details.length > 0 && recapExpanded(row.key)}
-                      <div class="recap-details">
-                        {#each recap.details as paragraph, paragraphIdx (`${row.key}-recap-${paragraphIdx}`)}
-                          <p>{paragraph}</p>
-                        {/each}
-                      </div>
-                    {/if}
-                  </div>
-                {:else if isError}
+<div
+  class={`pf-chat${attachmentDropActive ? " drop-active" : ""}`}
+  data-testid="agent-chat-drop-surface"
+  role="region"
+  aria-label="Chat conversation and attachment drop surface"
+  ondragenter={handleAttachmentDragEnter}
+  ondragover={handleAttachmentDragOver}
+  ondragleave={handleAttachmentDragLeave}
+  ondrop={handleAttachmentDrop}
+>
+  {#if attachmentDropActive}
+    <div class="pf-attachment-drop-overlay">
+      <div class="pf-attachment-drop-copy">
+        <p>Drop files to attach</p>
+        <span>Up to 10 files, 20 MiB each</span>
+      </div>
+    </div>
+  {/if}
+  <div class="pf-chat-thread-frame">
+    <div class="pf-chat-thread" bind:this={threadEl} onscroll={handleThreadScroll}>
+      <div class="pf-chat-thread-inner">
+        {#if loading && rows.length === 0}
+          <div class="state">Loading conversation…</div>
+        {:else if rows.length === 0 && !typingLabel}
+          <div class="state">No messages in this session yet. Send a prompt to get started.</div>
+        {:else}
+          {#each distributedRows as row, idx (row.key)}
+            {#if row.kind === "user"}
+              {@const visibleBody = visibleMessageBody(row.item)}
+              <div class="pf-msg" data-role="user">
+                <div class="pf-msg-avatar">{userInitial}</div>
+                <div class="pf-msg-body">
                   <div class="pf-msg-meta">
-                    <span class="name">{row.item.title || "Error"}</span>
+                    <span class="name">{displayUserName}</span>
+                    <span class="you-badge">You</span>
+                    <span class="time">{formatTime((row.item as MessageTimelineItem & { createdAtMs?: number }).createdAtMs)}</span>
                   </div>
-                  <div class="pf-msg-text">
-                    <MessageBody body={row.item.body} onOpenFile={onOpenFileLink} />
-                  </div>
-                {:else}
-                  <div class="pf-msg-text">
-                    <MessageBody body={row.item.body} onOpenFile={onOpenFileLink} />
-                  </div>
-                {/if}
+                  {#if row.item.attachments?.length}
+                    <MessageAttachmentPreviewStrip
+                      sessionId={session?.id ?? null}
+                      attachments={row.item.attachments}
+                      {onOpenChatIntent}
+                    />
+                  {/if}
+                  {#if visibleBody.trim()}
+                    <div class="pf-msg-text">
+                      <MessageBody body={visibleBody} {onOpenChatIntent} />
+                    </div>
+                  {/if}
+                </div>
               </div>
-            </div>
-          {:else}
-            <div class="pf-msg" data-role="agent">
+            {:else if row.kind === "system"}
+              {@const isError = row.item.status === "error" || row.item.meta.includes("error")}
+              {@const recap = recapContent(row.item)}
+              <div class="pf-msg" data-role="system" data-error={isError} data-recap={Boolean(recap)}>
+                {#if !recap}
+                  <div class="pf-msg-avatar">{isError ? "err" : "sys"}</div>
+                {/if}
+                <div class="pf-msg-body">
+                  {#if recap}
+                    <div class="recap-card" data-expanded={recapExpanded(row.key)}>
+                      {#if recap.details.length > 0}
+                        <button
+                          type="button"
+                          class="recap-summary"
+                          onclick={() => toggleRecap(row.key)}
+                          aria-expanded={recapExpanded(row.key)}
+                          aria-label={recapExpanded(row.key) ? "Collapse recap details" : "Expand recap details"}
+                        >
+                          <span class="recap-icon" aria-hidden="true"><Icon name="sparkles" size={13} /></span>
+                          <span class="recap-sentence">{recap.summary}</span>
+                          <span class="recap-chevron" aria-hidden="true">
+                            <Icon name={recapExpanded(row.key) ? "chevD" : "chevR"} size={11} />
+                          </span>
+                        </button>
+                      {:else}
+                        <div class="recap-summary">
+                          <span class="recap-icon" aria-hidden="true"><Icon name="sparkles" size={13} /></span>
+                          <span class="recap-sentence">{recap.summary}</span>
+                        </div>
+                      {/if}
+                      {#if recap.details.length > 0 && recapExpanded(row.key)}
+                        <div class="recap-details">
+                          {#each recap.details as paragraph, paragraphIdx (`${row.key}-recap-${paragraphIdx}`)}
+                            <p>{paragraph}</p>
+                          {/each}
+                        </div>
+                      {/if}
+                    </div>
+                  {:else if isError}
+                    <div class="pf-msg-meta">
+                      <span class="name">{row.item.title || "Error"}</span>
+                    </div>
+                    <div class="pf-msg-text">
+                      <MessageBody body={row.item.body} {onOpenChatIntent} />
+                    </div>
+                  {:else}
+                    <div class="pf-msg-text">
+                      <MessageBody body={row.item.body} {onOpenChatIntent} />
+                    </div>
+                  {/if}
+                </div>
+              </div>
+            {:else}
+              <div class="pf-msg" data-role="agent">
+                <div class="pf-msg-avatar"><BrandLogo size={26} /></div>
+                <div class="pf-msg-body">
+                  <div class="pf-msg-meta">
+                    <span class="name">{engineerName}</span>
+                  </div>
+                  {#if row.children.length || row.approvals.length || row.questions.length}
+                    <div class="agent-tools">
+                      {#if row.children.length}
+                        {#if shouldCollapseActivity(row, idx)}
+                          {@const activityId = activityGroupId(row, idx)}
+                          {@const summary = activitySummary(row.children)}
+                          <div class="activity-group" data-expanded={activityExpanded(activityId)}>
+                            <button
+                              type="button"
+                              class="activity-head"
+                              onclick={() => toggleActivity(activityId)}
+                              aria-expanded={activityExpanded(activityId)}
+                            >
+                              <span class="activity-chevron">
+                                <Icon name={activityExpanded(activityId) ? "chevD" : "chevR"} size={11} />
+                              </span>
+                              <span class="activity-icons" aria-hidden="true">
+                                {#each summary.icons as icon, iconIdx (`${icon}-${iconIdx}`)}
+                                  <span class="activity-icon">
+                                    <Icon name={icon} size={13} />
+                                  </span>
+                                {/each}
+                              </span>
+                              <span class="activity-copy">
+                                <strong>Agent activity</strong>
+                                <em>{summary.text}</em>
+                              </span>
+                              {#if summary.failed > 0}
+                                <span class="activity-failed">{summary.failed} failed</span>
+                              {/if}
+                              <span class="activity-count">{row.children.length}</span>
+                            </button>
+                            {#if activityExpanded(activityId)}
+                              {@const selected = selectedActivityChild(row.children, activityId)}
+                              <div class="activity-details">
+                                {#each row.children as child, childIdx (child.id)}
+                                  {#if isThinkingActivity(child)}
+                                    <div
+                                      class="activity-thought"
+                                      style:order={activityActionOrder(childIdx)}
+                                    >
+                                      <span>Thought for {thoughtDurationLabel(child, row.children, childIdx, row.item)}</span>
+                                    </div>
+                                  {:else if child.kind === "assistant" || child.kind === "command"}
+                                    <div
+                                      class="activity-message pf-msg-text"
+                                      style:order={activityActionOrder(childIdx)}
+                                    >
+                                      <MessageBody body={(child as MessageTimelineItem).body} {onOpenChatIntent} />
+                                    </div>
+                                  {:else}
+                                    <button
+                                      type="button"
+                                      class="activity-action"
+                                      class:selected={activityActionSelected(activityId, child)}
+                                      style:order={activityActionOrder(childIdx)}
+                                      onclick={() => handleActivityActionClick(activityId, child)}
+                                      aria-expanded={activityChildSelected(activityId, child.id)}
+                                    >
+                                      <span class="activity-action-icon">
+                                        <Icon name={activityIcon(childActivityCategory(child))} size={13} />
+                                      </span>
+                                      <span class="activity-action-name">{activityActionName(child)}</span>
+                                      <span class="activity-action-arg" title={activityActionArg(child)}>
+                                        {activityActionArg(child)}
+                                      </span>
+                                      <span class="activity-action-status" data-state={activityStatus(child)}>
+                                        <span class="dot"></span>{activityStatus(child)}
+                                      </span>
+                                      <span class="activity-action-chevron" aria-hidden="true">
+                                        <Icon
+                                          name={activityChildSelected(activityId, child.id) ? "chevD" : "chevR"}
+                                          size={11}
+                                        />
+                                      </span>
+                                    </button>
+                                  {/if}
+                                {/each}
+                                {#if selected}
+                                  <div
+                                    class="activity-panel"
+                                    style:order={activityPanelOrder(selected.idx)}
+                                  >
+                                    {#if selected.child.kind === "tool"}
+                                      <ToolCard
+                                        item={selected.child as ToolTimelineItem}
+                                        sessionId={session?.id ?? null}
+                                        defaultCollapsed={false}
+                                        {onOpenChatIntent}
+                                      />
+                                    {:else if selected.child.kind === "diff"}
+                                      <DiffCard item={selected.child as DiffTimelineItem} defaultCollapsed={false} />
+                                    {:else if isGateActivity(selected.child)}
+                                      <div class="gate-detail-panel pf-msg-text">
+                                        {#each gateDetailRows(selected.child) as row (row.label)}
+                                          <div class="gate-detail-row">
+                                            <span class="gate-detail-label">{row.label}</span>
+                                            {#if row.code}
+                                              <code class="gate-detail-value">{row.value}</code>
+                                            {:else}
+                                              <span class="gate-detail-value">{row.value}</span>
+                                            {/if}
+                                          </div>
+                                        {/each}
+                                      </div>
+                                    {:else}
+                                      <div class="activity-message pf-msg-text">
+                                        <MessageBody body={(selected.child as MessageTimelineItem).body} {onOpenChatIntent} />
+                                      </div>
+                                    {/if}
+                                  </div>
+                                {/if}
+                              </div>
+                            {/if}
+                          </div>
+                        {:else}
+                          {#each row.children as child (child.id)}
+                            {#if child.kind === "tool"}
+                              <ToolCard
+                                item={child as ToolTimelineItem}
+                                sessionId={session?.id ?? null}
+                                {onOpenChatIntent}
+                              />
+                            {:else if child.kind === "diff"}
+                              <DiffCard item={child as DiffTimelineItem} />
+                            {:else if isGateActivity(child)}
+                              <div class="gate-detail-panel pf-msg-text">
+                                {#each gateDetailRows(child) as row (row.label)}
+                                  <div class="gate-detail-row">
+                                    <span class="gate-detail-label">{row.label}</span>
+                                    {#if row.code}
+                                      <code class="gate-detail-value">{row.value}</code>
+                                    {:else}
+                                      <span class="gate-detail-value">{row.value}</span>
+                                    {/if}
+                                  </div>
+                                {/each}
+                              </div>
+                            {:else}
+                              <div class="activity-message pf-msg-text">
+                                <MessageBody body={(child as MessageTimelineItem).body} {onOpenChatIntent} />
+                              </div>
+                            {/if}
+                          {/each}
+                        {/if}
+                      {/if}
+                      {#each row.approvals as p (p.id)}
+                        <Approval item={p} disabled={isPermissionResolving(p)} onResolve={onResolvePermission} />
+                      {/each}
+                      {#each row.questions as q (q.id)}
+                        <QuestionPrompt item={q} disabled={isQuestionResolving(q)} onResolve={onResolveUserQuestion} />
+                      {/each}
+                    </div>
+                  {/if}
+                  {#if row.item}
+                    <div class="pf-msg-text">
+                      <MessageBody body={row.item.body} {onOpenChatIntent} />
+                    </div>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+          {/each}
+
+          {#if typingLabel}
+            <div class="pf-msg" data-role="agent" style="opacity: 0.85;">
               <div class="pf-msg-avatar"><BrandLogo size={26} /></div>
               <div class="pf-msg-body">
-                <div class="pf-msg-meta">
-                  <span class="name">{engineerName}</span>
-                </div>
-                {#if row.children.length || row.approvals.length || row.questions.length}
-                  <div class="agent-tools">
-                    {#if row.children.length}
-                      {#if shouldCollapseActivity(row, idx)}
-                        {@const activityId = activityGroupId(row, idx)}
-                        {@const summary = activitySummary(row.children)}
-                        <div class="activity-group" data-expanded={activityExpanded(activityId)}>
-                          <button
-                            type="button"
-                            class="activity-head"
-                            onclick={() => toggleActivity(activityId)}
-                            aria-expanded={activityExpanded(activityId)}
-                          >
-                            <span class="activity-chevron">
-                              <Icon name={activityExpanded(activityId) ? "chevD" : "chevR"} size={11} />
-                            </span>
-                            <span class="activity-icons" aria-hidden="true">
-                              {#each summary.icons as icon, iconIdx (`${icon}-${iconIdx}`)}
-                                <span class="activity-icon">
-                                  <Icon name={icon} size={13} />
-                                </span>
-                              {/each}
-                            </span>
-                            <span class="activity-copy">
-                              <strong>Agent activity</strong>
-                              <em>{summary.text}</em>
-                            </span>
-                            {#if summary.failed > 0}
-                              <span class="activity-failed">{summary.failed} failed</span>
-                            {/if}
-                            <span class="activity-count">{row.children.length}</span>
-                          </button>
-                          {#if activityExpanded(activityId)}
-                            {@const selected = selectedActivityChild(row.children, activityId)}
-                            <div class="activity-details">
-                              {#each row.children as child, childIdx (child.id)}
-                                {#if isThinkingActivity(child)}
-                                  <div
-                                    class="activity-thought"
-                                    style:order={activityActionOrder(childIdx)}
-                                  >
-                                    <span>Thought for {thoughtDurationLabel(child, row.children, childIdx, row.item)}</span>
-                                  </div>
-                                {:else if child.kind === "assistant" || child.kind === "command"}
-                                  <div
-                                    class="activity-message pf-msg-text"
-                                    style:order={activityActionOrder(childIdx)}
-                                  >
-                                    <MessageBody body={(child as MessageTimelineItem).body} onOpenFile={onOpenFileLink} />
-                                  </div>
-                                {:else}
-                                  <button
-                                    type="button"
-                                    class="activity-action"
-                                    class:selected={activityActionSelected(activityId, child)}
-                                    style:order={activityActionOrder(childIdx)}
-                                    onclick={() => handleActivityActionClick(activityId, child)}
-                                    aria-expanded={activityChildSelected(activityId, child.id)}
-                                  >
-                                    <span class="activity-action-icon">
-                                      <Icon name={activityIcon(childActivityCategory(child))} size={13} />
-                                    </span>
-                                    <span class="activity-action-name">{activityActionName(child)}</span>
-                                    <span class="activity-action-arg" title={activityActionArg(child)}>
-                                      {activityActionArg(child)}
-                                    </span>
-                                    <span class="activity-action-status" data-state={activityStatus(child)}>
-                                      <span class="dot"></span>{activityStatus(child)}
-                                    </span>
-                                    <span class="activity-action-chevron" aria-hidden="true">
-                                      <Icon
-                                        name={activityChildSelected(activityId, child.id) ? "chevD" : "chevR"}
-                                        size={11}
-                                      />
-                                    </span>
-                                  </button>
-                                {/if}
-                              {/each}
-                              {#if selected}
-                                <div
-                                  class="activity-panel"
-                                  style:order={activityPanelOrder(selected.idx)}
-                                >
-                                  {#if selected.child.kind === "tool"}
-                                    <ToolCard
-                                      item={selected.child as ToolTimelineItem}
-                                      sessionId={session?.id ?? null}
-                                      defaultCollapsed={false}
-                                      onOpenFile={onOpenFileLink}
-                                    />
-                                  {:else if selected.child.kind === "diff"}
-                                    <DiffCard item={selected.child as DiffTimelineItem} defaultCollapsed={false} />
-                                  {:else if isGateActivity(selected.child)}
-                                    <div class="gate-detail-panel pf-msg-text">
-                                      {#each gateDetailRows(selected.child) as row (row.label)}
-                                        <div class="gate-detail-row">
-                                          <span class="gate-detail-label">{row.label}</span>
-                                          {#if row.code}
-                                            <code class="gate-detail-value">{row.value}</code>
-                                          {:else}
-                                            <span class="gate-detail-value">{row.value}</span>
-                                          {/if}
-                                        </div>
-                                      {/each}
-                                    </div>
-                                  {:else}
-                                    <div class="activity-message pf-msg-text">
-                                      <MessageBody body={(selected.child as MessageTimelineItem).body} onOpenFile={onOpenFileLink} />
-                                    </div>
-                                  {/if}
-                                </div>
-                              {/if}
-                            </div>
-                          {/if}
-                        </div>
-                      {:else}
-                        {#each row.children as child (child.id)}
-                          {#if child.kind === "tool"}
-                            <ToolCard
-                              item={child as ToolTimelineItem}
-                              sessionId={session?.id ?? null}
-                              onOpenFile={onOpenFileLink}
-                            />
-                          {:else if child.kind === "diff"}
-                            <DiffCard item={child as DiffTimelineItem} />
-                          {:else if isGateActivity(child)}
-                            <div class="gate-detail-panel pf-msg-text">
-                              {#each gateDetailRows(child) as row (row.label)}
-                                <div class="gate-detail-row">
-                                  <span class="gate-detail-label">{row.label}</span>
-                                  {#if row.code}
-                                    <code class="gate-detail-value">{row.value}</code>
-                                  {:else}
-                                    <span class="gate-detail-value">{row.value}</span>
-                                  {/if}
-                                </div>
-                              {/each}
-                            </div>
-                          {:else}
-                            <div class="activity-message pf-msg-text">
-                              <MessageBody body={(child as MessageTimelineItem).body} onOpenFile={onOpenFileLink} />
-                            </div>
-                          {/if}
-                        {/each}
-                      {/if}
-                    {/if}
-                    {#each row.approvals as p (p.id)}
-                      <Approval item={p} disabled={!turnCancelable || isPermissionResolving(p)} onResolve={onResolvePermission} />
-                    {/each}
-                    {#each row.questions as q (q.id)}
-                      <QuestionPrompt item={q} disabled={isQuestionResolving(q)} onResolve={onResolveUserQuestion} />
-                    {/each}
-                  </div>
-                {/if}
-                {#if row.item}
-                  <div class="pf-msg-text">
-                    <MessageBody body={row.item.body} onOpenFile={onOpenFileLink} />
-                  </div>
-                {/if}
+                <div class="typing">{typingLabel}</div>
               </div>
             </div>
           {/if}
-        {/each}
-
-        {#if typingLabel}
-          <div class="pf-msg" data-role="agent" style="opacity: 0.85;">
-            <div class="pf-msg-avatar"><BrandLogo size={26} /></div>
-            <div class="pf-msg-body">
-              <div class="typing">{typingLabel}</div>
-            </div>
-          </div>
         {/if}
-      {/if}
+      </div>
     </div>
+    {#if showScrollToBottom}
+      <button
+        type="button"
+        class="pf-scroll-bottom-btn"
+        aria-label="Scroll to bottom"
+        onclick={handleScrollToBottomClick}
+      >
+        <Icon name="chevD" size={18} />
+      </button>
+    {/if}
   </div>
 
   <div class="pf-composer-wrap">
-    <div class="pf-composer">
+    <div
+      class="pf-composer"
+      role="group"
+      aria-label="Message composer"
+    >
+      <input
+        bind:this={fileInputEl}
+        class="pf-attachment-input"
+        type="file"
+        multiple
+        accept={FILE_INPUT_ACCEPT}
+        tabindex="-1"
+        data-testid="composer-file-input"
+        onchange={(event) => addFilesToComposer(event.currentTarget.files)}
+      />
+      {#if attachmentDrafts.length > 0}
+        <AttachmentPreviewStrip
+          attachments={attachmentDrafts}
+          removable={true}
+          onRemove={removeAttachment}
+          testId="composer-attachment-preview-strip"
+        />
+      {/if}
+      {#if attachmentError}
+        <p class="pf-attachment-error" role="alert">{attachmentError}</p>
+      {/if}
       <textarea
+        bind:this={composerTextareaEl}
         value={draft}
         placeholder={session ? `Reply to ${engineerName}…` : "Select a session to continue"}
         oninput={(event) => updateDraft(event.currentTarget.value)}
@@ -2017,6 +2350,33 @@
         disabled={composerDisabled}
       ></textarea>
       <div class="pf-composer-foot">
+        <div class="pf-attachment-menu" bind:this={attachmentMenuEl}>
+          <button
+            type="button"
+            class="pf-add-content-btn"
+            disabled={composerDisabled}
+            aria-label="Add content"
+            aria-haspopup="menu"
+            aria-expanded={attachmentMenuOpen}
+            title="Add content"
+            onclick={toggleAttachmentMenu}
+          >
+            <Icon name="plus" size={15} />
+          </button>
+          {#if attachmentMenuOpen}
+            <div class="pf-attachment-dropdown" role="menu" aria-label="Add content">
+              <button
+                type="button"
+                class="pf-attachment-dropdown-item"
+                role="menuitem"
+                onclick={openAttachmentPicker}
+              >
+                <Icon name="paperclip" size={15} />
+                <span>Add images and files</span>
+              </button>
+            </div>
+          {/if}
+        </div>
         <ModelPicker
           snapshot={settingsSnapshot}
           currentProvider={selectedProviderId}
@@ -2087,10 +2447,16 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+    position: relative;
     background: var(--background);
   }
-  .pf-chat-thread {
+  .pf-chat-thread-frame {
+    position: relative;
     flex: 1;
+    min-height: 0;
+  }
+  .pf-chat-thread {
+    height: 100%;
     overflow-y: auto;
     padding: 24px 0 24px;
   }
@@ -2102,6 +2468,33 @@
     flex-direction: column;
     gap: var(--puffer-row-gap, 14px);
   }
+  .pf-scroll-bottom-btn {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 14px;
+    z-index: 5;
+    width: 34px;
+    height: 34px;
+    margin-inline: auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--background) 94%, var(--muted));
+    color: var(--foreground);
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.16);
+    cursor: pointer;
+  }
+  .pf-scroll-bottom-btn:hover {
+    background: color-mix(in oklab, var(--accent) 58%, var(--background));
+  }
+  .pf-scroll-bottom-btn:focus-visible {
+    outline: 2px solid var(--puffer-accent);
+    outline-offset: 2px;
+  }
   .pf-composer-wrap {
     border-top: 0;
     background: transparent;
@@ -2112,6 +2505,60 @@
   .pf-composer {
     max-width: 820px;
     margin: 0 auto;
+    position: relative;
+  }
+  .pf-chat.drop-active .pf-composer {
+    border-color: var(--puffer-accent);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--puffer-accent) 18%, transparent);
+  }
+  .pf-chat .pf-composer textarea {
+    overflow-y: hidden;
+  }
+  .pf-attachment-input {
+    display: none;
+  }
+  .pf-attachment-drop-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: color-mix(in oklab, var(--background) 82%, transparent);
+    color: var(--foreground);
+    backdrop-filter: blur(2px);
+    pointer-events: none;
+  }
+  .pf-attachment-drop-copy {
+    min-width: min(340px, 100%);
+    padding: 18px 22px;
+    border: 1px dashed color-mix(in oklab, var(--puffer-accent) 62%, var(--border));
+    border-radius: 10px;
+    background: color-mix(in oklab, var(--background) 88%, var(--puffer-accent));
+    box-shadow: var(--shadow-lg);
+    text-align: center;
+  }
+  .pf-attachment-drop-copy p {
+    margin: 0;
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 700;
+  }
+  .pf-attachment-drop-copy span {
+    display: block;
+    margin-top: 3px;
+    color: var(--muted-foreground);
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 600;
+  }
+  .pf-attachment-error {
+    margin: -2px 4px 4px;
+    color: var(--destructive);
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 600;
   }
   .pf-composer-foot :global(.picker) {
     min-width: 0;
@@ -2122,6 +2569,7 @@
     background: var(--background);
   }
   .pf-toggle-chip,
+  .pf-add-content-btn,
   .pf-select-chip {
     height: 28px;
     display: inline-flex;
@@ -2135,6 +2583,60 @@
     font-size: 11.5px;
     line-height: 1;
     white-space: nowrap;
+  }
+  .pf-attachment-menu {
+    position: relative;
+    flex: 0 0 auto;
+  }
+  .pf-add-content-btn {
+    width: 28px;
+    justify-content: center;
+    padding: 0;
+    cursor: pointer;
+  }
+  .pf-add-content-btn:hover {
+    color: var(--foreground);
+    background: var(--accent);
+  }
+  .pf-add-content-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+  .pf-attachment-dropdown {
+    position: absolute;
+    left: 0;
+    bottom: calc(100% + 8px);
+    z-index: 20;
+    min-width: 220px;
+    padding: 6px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--background);
+    box-shadow: var(--shadow-lg);
+  }
+  .pf-attachment-dropdown-item {
+    width: 100%;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 9px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--foreground);
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+  }
+  .pf-attachment-dropdown-item:hover {
+    background: var(--accent);
+  }
+  .pf-attachment-dropdown-item :global(svg) {
+    flex: 0 0 auto;
+    color: var(--muted-foreground);
   }
   .pf-toggle-chip {
     cursor: pointer;
@@ -2538,6 +3040,9 @@
 
   @media (max-width: 720px) {
     .pf-chat-thread-inner { padding: 0 16px; }
+    .pf-scroll-bottom-btn {
+      bottom: 10px;
+    }
     .pf-composer-wrap {
       padding: 0;
       margin-bottom: 10px;

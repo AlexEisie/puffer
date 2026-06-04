@@ -225,6 +225,8 @@ impl SessionStore {
         // `<uuid>.<trace>.jsonl`. Sweep every file in the sessions root
         // whose name starts with `<uuid>.`.
         let needle = format!("{session_id}.");
+        let attachment_dir = self.root.join(format!("{session_id}.attachments"));
+        let _ = fs::remove_dir_all(&attachment_dir);
         if let Ok(entries) = fs::read_dir(&self.root) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
@@ -558,6 +560,7 @@ mod tests {
                 source.id,
                 TranscriptEvent::UserMessage {
                     text: "hello".to_string(),
+                    attachments: Vec::new(),
                     actor: None,
                 },
             )
@@ -600,6 +603,7 @@ mod tests {
                 third.id,
                 TranscriptEvent::UserMessage {
                     text: "hello".to_string(),
+                    attachments: Vec::new(),
                     actor: None,
                 },
             )
@@ -867,6 +871,7 @@ mod tests {
                 session.id,
                 TranscriptEvent::UserMessage {
                     text: "before".to_string(),
+                    attachments: Vec::new(),
                     actor: None,
                 },
             )
@@ -927,6 +932,7 @@ mod tests {
                 session.id,
                 TranscriptEvent::UserMessage {
                     text: "hello".into(),
+                    attachments: Vec::new(),
                     actor: None,
                 },
             )

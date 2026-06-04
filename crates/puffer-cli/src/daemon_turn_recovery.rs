@@ -14,8 +14,14 @@ const PROMPT_HASH_LABEL: &str = "prompt_sha256:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StaleTurnRecoveryDecision {
-    Retry { message: String, marker: String },
-    AlreadyRetried { marker: String },
+    Retry {
+        message: String,
+        attachment_ids: Vec<String>,
+        marker: String,
+    },
+    AlreadyRetried {
+        marker: String,
+    },
     NotRecoverable,
 }
 
@@ -44,10 +50,10 @@ pub(crate) fn stale_turn_recovery_decision(
     }
 
     let events = activity_events_after_rewrites(&record.events);
-    let Some(message) = latest_unanswered_user_message(&events) else {
+    let Some(user_turn) = latest_unanswered_user_turn(&events) else {
         return StaleTurnRecoveryDecision::NotRecoverable;
     };
-    let message = message.trim();
+    let message = user_turn.message.trim();
     if message.is_empty() {
         return StaleTurnRecoveryDecision::NotRecoverable;
     }
@@ -61,8 +67,14 @@ pub(crate) fn stale_turn_recovery_decision(
 
     StaleTurnRecoveryDecision::Retry {
         message: message.to_string(),
+        attachment_ids: user_turn.attachment_ids,
         marker: retry_marker(&hash),
     }
+}
+
+struct LatestUserTurn<'a> {
+    message: &'a str,
+    attachment_ids: Vec<String>,
 }
 
 fn activity_events_after_rewrites(events: &[TranscriptEvent]) -> Vec<TranscriptEvent> {
@@ -92,10 +104,20 @@ fn apply_activity_rewrite(events: &mut Vec<TranscriptEvent>, rewrite: &Transcrip
     }
 }
 
-fn latest_unanswered_user_message(events: &[TranscriptEvent]) -> Option<&str> {
+fn latest_unanswered_user_turn(events: &[TranscriptEvent]) -> Option<LatestUserTurn<'_>> {
     for event in events.iter().rev() {
         match event {
-            TranscriptEvent::UserMessage { text, .. } => return Some(text),
+            TranscriptEvent::UserMessage {
+                text, attachments, ..
+            } => {
+                return Some(LatestUserTurn {
+                    message: text,
+                    attachment_ids: attachments
+                        .iter()
+                        .map(|attachment| attachment.id.clone())
+                        .collect(),
+                });
+            }
             TranscriptEvent::SessionRenamed { .. }
             | TranscriptEvent::TranscriptRewritten { .. }
             | TranscriptEvent::StateSnapshot { .. } => {}
@@ -136,7 +158,9 @@ mod tests {
     use super::{
         stale_turn_recovery_decision, StaleTurnRecoveryDecision, DEFAULT_STALE_TURN_RETRY_AFTER_MS,
     };
-    use puffer_session_store::{SessionMetadata, SessionRecord, TranscriptEvent};
+    use puffer_session_store::{
+        SessionMetadata, SessionRecord, StoredAttachment, StoredAttachmentKind, TranscriptEvent,
+    };
     use std::path::PathBuf;
     use uuid::Uuid;
 
@@ -164,6 +188,7 @@ mod tests {
             1_000,
             vec![TranscriptEvent::UserMessage {
                 text: "pull".to_string(),
+                attachments: Vec::new(),
                 actor: None,
             }],
         );
@@ -171,11 +196,52 @@ mod tests {
         let decision =
             stale_turn_recovery_decision(&record, 1_000 + DEFAULT_STALE_TURN_RETRY_AFTER_MS, 1);
 
-        let StaleTurnRecoveryDecision::Retry { message, marker } = decision else {
+        let StaleTurnRecoveryDecision::Retry {
+            message,
+            attachment_ids,
+            marker,
+        } = decision
+        else {
             panic!("expected retry decision");
         };
         assert_eq!(message, "pull");
+        assert!(attachment_ids.is_empty());
         assert!(marker.contains("prompt_sha256:"));
+    }
+
+    #[test]
+    fn retries_old_unanswered_user_message_with_attachment_ids() {
+        let attachment = StoredAttachment {
+            id: Uuid::new_v4().to_string(),
+            name: "pixel.png".to_string(),
+            mime_type: "image/png".to_string(),
+            size: 3,
+            extension: "PNG".to_string(),
+            kind: StoredAttachmentKind::Image,
+            storage_key: "attachment/original".to_string(),
+        };
+        let record = record(
+            1_000,
+            vec![TranscriptEvent::UserMessage {
+                text: "[Image: pixel.png]".to_string(),
+                attachments: vec![attachment.clone()],
+                actor: None,
+            }],
+        );
+
+        let decision =
+            stale_turn_recovery_decision(&record, 1_000 + DEFAULT_STALE_TURN_RETRY_AFTER_MS, 1);
+
+        let StaleTurnRecoveryDecision::Retry {
+            message,
+            attachment_ids,
+            ..
+        } = decision
+        else {
+            panic!("expected retry decision");
+        };
+        assert_eq!(message, "[Image: pixel.png]");
+        assert_eq!(attachment_ids, vec![attachment.id]);
     }
 
     #[test]
@@ -184,6 +250,7 @@ mod tests {
             1_000,
             vec![TranscriptEvent::UserMessage {
                 text: "pull".to_string(),
+                attachments: Vec::new(),
                 actor: None,
             }],
         );
@@ -203,6 +270,7 @@ mod tests {
             1_000,
             vec![TranscriptEvent::UserMessage {
                 text: "pull".to_string(),
+                attachments: Vec::new(),
                 actor: None,
             }],
         );
@@ -216,6 +284,7 @@ mod tests {
             vec![
                 TranscriptEvent::UserMessage {
                     text: "pull".to_string(),
+                    attachments: Vec::new(),
                     actor: None,
                 },
                 TranscriptEvent::SystemMessage {
@@ -224,6 +293,7 @@ mod tests {
                 },
                 TranscriptEvent::UserMessage {
                     text: "pull".to_string(),
+                    attachments: Vec::new(),
                     actor: None,
                 },
             ],
@@ -244,6 +314,7 @@ mod tests {
             vec![
                 TranscriptEvent::UserMessage {
                     text: "hello".to_string(),
+                    attachments: Vec::new(),
                     actor: None,
                 },
                 TranscriptEvent::AssistantMessage {

@@ -32,6 +32,28 @@ export type MessageActor = {
   parentSessionId?: string | null;
 };
 
+export type AgentTurnAttachmentKind = "image" | "file";
+export type AttachmentState = "available" | "missing";
+export type AttachmentPreviewResult =
+  | { state: "available"; mimeType: string; bytes: number[] }
+  | { state: "missing" }
+  | { state: "unsupported" };
+
+export type AgentTurnAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  extension: string;
+  kind: AgentTurnAttachmentKind;
+};
+
+export type MessageAttachment = AgentTurnAttachment & {
+  state?: AttachmentState;
+  file?: File;
+  previewUrl?: string | null;
+};
+
 export type FolderGroup = {
   id: string;
   label: string;
@@ -143,6 +165,7 @@ type TimelineBase = {
   summary: string;
   body: string;
   meta: string[];
+  attachments?: MessageAttachment[];
   status?: string | null;
   actor?: MessageActor | null;
 };

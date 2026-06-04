@@ -425,6 +425,7 @@ pub(crate) fn handle_prompt_submit(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: visible_submitted.clone(),
+            attachments: Vec::new(),
             actor: Some(state.user_actor()),
         },
     )?;
@@ -1259,6 +1260,7 @@ pub(crate) fn handle_submit(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: visible_submitted.clone(),
+            attachments: Vec::new(),
             actor: Some(state.user_actor()),
         },
     )?;

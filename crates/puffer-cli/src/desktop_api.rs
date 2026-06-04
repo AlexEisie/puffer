@@ -21,7 +21,7 @@ use crate::desktop_activity::session_activity_status;
 use crate::desktop_api_types::{
     AgentDiffDto, AgentDiffEntryDto, AgentDiffFileDto, AuthProviderStatusDto,
     BrowserCaptchaSettingsDto, BrowserCaptchaSolverDto, BrowserExtensionDto, BrowserSettingsDto,
-    DiffSummaryDto, DivergenceReportDto, ExternalCredentialDto, FolderGroupDto,
+    ChatAttachmentDto, DiffSummaryDto, DivergenceReportDto, ExternalCredentialDto, FolderGroupDto,
     NetworkProxySettingsDto, ProviderSummaryDto, RepoActionResultDto, RepoPullRequestDto,
     RepoStatusDto, ResourceCountsDto, SanitizedProxyEndpointDto, SecretSummaryDto,
     SecretsSettingsDto, SessionDetailDto, SessionGroupsPageDto, SessionListItemDto,
@@ -325,7 +325,7 @@ pub(crate) fn load_session_detail(
             .map(|value| value.to_string()),
         provider_id: None,
         model_id: None,
-        timeline: timeline_items(&record),
+        timeline: timeline_items(session_store, &record),
         latest_diff,
         diff_history,
         repo_status,
@@ -1131,16 +1131,21 @@ fn extract_paths_from_patch(patch: &str, _cwd: &Path) -> BTreeSet<String> {
     out
 }
 
-fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
+fn timeline_items(session_store: &SessionStore, record: &SessionRecord) -> Vec<TimelineItemDto> {
     let mut items = Vec::new();
     let mut pending_assistant = None;
     for (index, event) in record.events.iter().enumerate() {
         match event {
-            TranscriptEvent::UserMessage { text, actor } => {
+            TranscriptEvent::UserMessage {
+                text,
+                attachments,
+                actor,
+            } => {
                 flush_pending_assistant(&mut items, &mut pending_assistant);
                 items.push(TimelineItemDto::UserMessage {
                     id: format!("timeline-{index}"),
                     text: text.clone(),
+                    attachments: attachment_dtos(session_store, record.metadata.id, attachments),
                     actor: actor.clone(),
                 });
             }
@@ -1234,6 +1239,17 @@ fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
     }
     flush_pending_assistant(&mut items, &mut pending_assistant);
     items
+}
+
+fn attachment_dtos(
+    session_store: &SessionStore,
+    session_id: Uuid,
+    attachments: &[puffer_session_store::StoredAttachment],
+) -> Vec<ChatAttachmentDto> {
+    attachments
+        .iter()
+        .map(|attachment| ChatAttachmentDto::from_stored(session_store, session_id, attachment))
+        .collect()
 }
 
 fn apply_timeline_rewrite(
@@ -1820,9 +1836,10 @@ fn command_exists(command: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{timeline_items, TimelineItemDto};
+    use super::{load_session_detail, timeline_items, TimelineItemDto};
+    use puffer_config::ConfigPaths;
     use puffer_session_store::{
-        SessionMetadata, SessionRecord, TranscriptEvent, TranscriptRewrite,
+        SessionMetadata, SessionRecord, SessionStore, TranscriptEvent, TranscriptRewrite,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -1846,6 +1863,13 @@ mod tests {
         }
     }
 
+    fn test_store() -> (tempfile::TempDir, SessionStore) {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        let store = SessionStore::from_paths(&paths).unwrap();
+        (temp, store)
+    }
+
     fn item_kind(item: &TimelineItemDto) -> &'static str {
         match item {
             TimelineItemDto::UserMessage { .. } => "user",
@@ -1859,25 +1883,75 @@ mod tests {
     }
 
     #[test]
+    fn timeline_user_message_includes_attachment_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        let store = SessionStore::from_paths(&paths).unwrap();
+        let session = store.create_session(temp.path().to_path_buf()).unwrap();
+        let attachment = store
+            .stage_attachment(
+                session.id,
+                puffer_session_store::StageAttachmentInput {
+                    name: "pixel.png".to_string(),
+                    mime_type: "image/png".to_string(),
+                    extension: "PNG".to_string(),
+                    kind: puffer_session_store::StoredAttachmentKind::Image,
+                    bytes: vec![1, 2, 3],
+                },
+            )
+            .unwrap();
+        store
+            .append_event(
+                session.id,
+                TranscriptEvent::UserMessage {
+                    text: "[Image: pixel.png]".to_string(),
+                    attachments: vec![attachment],
+                    actor: None,
+                },
+            )
+            .unwrap();
+
+        let detail = load_session_detail(&store, &session.id.to_string()).unwrap();
+        let user = detail
+            .timeline
+            .iter()
+            .find(|item| matches!(item, TimelineItemDto::UserMessage { .. }))
+            .unwrap();
+
+        match user {
+            TimelineItemDto::UserMessage { attachments, .. } => {
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(attachments[0].name, "pixel.png");
+                assert_eq!(attachments[0].state, "available");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
     fn timeline_surfaces_lambda_gate_metadata_as_system_event() {
-        let items = timeline_items(&record(vec![TranscriptEvent::ToolInvocation {
-            call_id: "call-1".to_string(),
-            tool_id: "LambdaHostCall".to_string(),
-            input: "{}".to_string(),
-            output: "admitted".to_string(),
-            success: true,
-            metadata: Some(json!({
-                "lambda_skill": {
-                    "event": "host_call_admitted",
-                    "host_tool": "gh_pr_view",
-                    "host_args": {"number": 42},
-                    "concrete_tool": "Bash",
-                    "concrete_input": {"command": "gh pr view 42"}
-                }
-            })),
-            actor: None,
-            subject: None,
-        }]));
+        let (_temp, store) = test_store();
+        let items = timeline_items(
+            &store,
+            &record(vec![TranscriptEvent::ToolInvocation {
+                call_id: "call-1".to_string(),
+                tool_id: "LambdaHostCall".to_string(),
+                input: "{}".to_string(),
+                output: "admitted".to_string(),
+                success: true,
+                metadata: Some(json!({
+                    "lambda_skill": {
+                        "event": "host_call_admitted",
+                        "host_tool": "gh_pr_view",
+                        "host_args": {"number": 42},
+                        "concrete_tool": "Bash",
+                        "concrete_input": {"command": "gh pr view 42"}
+                    }
+                })),
+                actor: None,
+                subject: None,
+            }]),
+        );
 
         assert_eq!(items.len(), 2);
         assert!(matches!(items[0], TimelineItemDto::ToolCall { .. }));
@@ -1899,26 +1973,31 @@ mod tests {
 
     #[test]
     fn timeline_places_persisted_tool_invocations_before_assistant_text() {
-        let items = timeline_items(&record(vec![
-            TranscriptEvent::UserMessage {
-                text: "inspect this".to_string(),
-                actor: None,
-            },
-            TranscriptEvent::AssistantMessage {
-                text: "Here is what I found.".to_string(),
-                actor: None,
-            },
-            TranscriptEvent::ToolInvocation {
-                call_id: "call-1".to_string(),
-                tool_id: "Read".to_string(),
-                input: r#"{"path":"Cargo.toml"}"#.to_string(),
-                output: "contents".to_string(),
-                success: true,
-                metadata: None,
-                actor: None,
-                subject: None,
-            },
-        ]));
+        let (_temp, store) = test_store();
+        let items = timeline_items(
+            &store,
+            &record(vec![
+                TranscriptEvent::UserMessage {
+                    text: "inspect this".to_string(),
+                    attachments: Vec::new(),
+                    actor: None,
+                },
+                TranscriptEvent::AssistantMessage {
+                    text: "Here is what I found.".to_string(),
+                    actor: None,
+                },
+                TranscriptEvent::ToolInvocation {
+                    call_id: "call-1".to_string(),
+                    tool_id: "Read".to_string(),
+                    input: r#"{"path":"Cargo.toml"}"#.to_string(),
+                    output: "contents".to_string(),
+                    success: true,
+                    metadata: None,
+                    actor: None,
+                    subject: None,
+                },
+            ]),
+        );
 
         let kinds = items.iter().map(item_kind).collect::<Vec<_>>();
         assert_eq!(kinds, vec!["user", "tool", "assistant"]);
@@ -1926,26 +2005,31 @@ mod tests {
 
     #[test]
     fn timeline_keeps_new_tool_before_assistant_order() {
-        let items = timeline_items(&record(vec![
-            TranscriptEvent::UserMessage {
-                text: "inspect this".to_string(),
-                actor: None,
-            },
-            TranscriptEvent::ToolInvocation {
-                call_id: "call-1".to_string(),
-                tool_id: "Read".to_string(),
-                input: r#"{"path":"Cargo.toml"}"#.to_string(),
-                output: "contents".to_string(),
-                success: true,
-                metadata: None,
-                actor: None,
-                subject: None,
-            },
-            TranscriptEvent::AssistantMessage {
-                text: "Here is what I found.".to_string(),
-                actor: None,
-            },
-        ]));
+        let (_temp, store) = test_store();
+        let items = timeline_items(
+            &store,
+            &record(vec![
+                TranscriptEvent::UserMessage {
+                    text: "inspect this".to_string(),
+                    attachments: Vec::new(),
+                    actor: None,
+                },
+                TranscriptEvent::ToolInvocation {
+                    call_id: "call-1".to_string(),
+                    tool_id: "Read".to_string(),
+                    input: r#"{"path":"Cargo.toml"}"#.to_string(),
+                    output: "contents".to_string(),
+                    success: true,
+                    metadata: None,
+                    actor: None,
+                    subject: None,
+                },
+                TranscriptEvent::AssistantMessage {
+                    text: "Here is what I found.".to_string(),
+                    actor: None,
+                },
+            ]),
+        );
 
         let kinds = items.iter().map(item_kind).collect::<Vec<_>>();
         assert_eq!(kinds, vec!["user", "tool", "assistant"]);
@@ -1953,23 +2037,28 @@ mod tests {
 
     #[test]
     fn timeline_clear_discards_prior_messages() {
-        let items = timeline_items(&record(vec![
-            TranscriptEvent::UserMessage {
-                text: "old prompt".to_string(),
-                actor: None,
-            },
-            TranscriptEvent::AssistantMessage {
-                text: "old answer".to_string(),
-                actor: None,
-            },
-            TranscriptEvent::TranscriptRewritten {
-                rewrite: TranscriptRewrite::Clear,
-            },
-            TranscriptEvent::SystemMessage {
-                text: "Transcript cleared.".to_string(),
-                actor: None,
-            },
-        ]));
+        let (_temp, store) = test_store();
+        let items = timeline_items(
+            &store,
+            &record(vec![
+                TranscriptEvent::UserMessage {
+                    text: "old prompt".to_string(),
+                    attachments: Vec::new(),
+                    actor: None,
+                },
+                TranscriptEvent::AssistantMessage {
+                    text: "old answer".to_string(),
+                    actor: None,
+                },
+                TranscriptEvent::TranscriptRewritten {
+                    rewrite: TranscriptRewrite::Clear,
+                },
+                TranscriptEvent::SystemMessage {
+                    text: "Transcript cleared.".to_string(),
+                    actor: None,
+                },
+            ]),
+        );
 
         let kinds = items.iter().map(item_kind).collect::<Vec<_>>();
         assert_eq!(kinds, vec!["system"]);
@@ -1981,23 +2070,28 @@ mod tests {
 
     #[test]
     fn timeline_pop_discards_latest_visible_message() {
-        let items = timeline_items(&record(vec![
-            TranscriptEvent::UserMessage {
-                text: "keep prompt".to_string(),
-                actor: None,
-            },
-            TranscriptEvent::AssistantMessage {
-                text: "remove answer".to_string(),
-                actor: None,
-            },
-            TranscriptEvent::TranscriptRewritten {
-                rewrite: TranscriptRewrite::PopLast { count: 1 },
-            },
-            TranscriptEvent::SystemMessage {
-                text: "Removed the latest rendered transcript item.".to_string(),
-                actor: None,
-            },
-        ]));
+        let (_temp, store) = test_store();
+        let items = timeline_items(
+            &store,
+            &record(vec![
+                TranscriptEvent::UserMessage {
+                    text: "keep prompt".to_string(),
+                    attachments: Vec::new(),
+                    actor: None,
+                },
+                TranscriptEvent::AssistantMessage {
+                    text: "remove answer".to_string(),
+                    actor: None,
+                },
+                TranscriptEvent::TranscriptRewritten {
+                    rewrite: TranscriptRewrite::PopLast { count: 1 },
+                },
+                TranscriptEvent::SystemMessage {
+                    text: "Removed the latest rendered transcript item.".to_string(),
+                    actor: None,
+                },
+            ]),
+        );
 
         let kinds = items.iter().map(item_kind).collect::<Vec<_>>();
         assert_eq!(kinds, vec!["user", "system"]);

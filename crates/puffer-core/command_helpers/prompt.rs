@@ -242,6 +242,7 @@ fn record_specialized_prompt_request(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: rendered.to_string(),
+            attachments: Vec::new(),
             actor: Some(state.user_actor()),
         },
     )?;
@@ -267,6 +268,7 @@ pub(crate) fn finalize_compact_prompt_command(
         state.session.id,
         puffer_session_store::TranscriptEvent::UserMessage {
             text: boundary,
+            attachments: Vec::new(),
             actor: Some(state.user_actor()),
         },
     )?;

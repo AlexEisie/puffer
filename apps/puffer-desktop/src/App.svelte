@@ -47,6 +47,7 @@
     runRemoteBash,
     writeRemoteFile,
     runAgentTurn,
+    stageChatAttachment,
     resolvePermission as resolveTurnPermission,
     resolveUserQuestion as resolveTurnUserQuestion,
     cancelTurn,
@@ -54,7 +55,7 @@
     loadDefaultWorkspace,
     loadDesktopPins,
     setDesktopPin,
-    type AgentTurnOptions
+    type AgentTurnSubmitOptions
   } from "./lib/api/desktop";
   import {
     subscribeSessionEvents,
@@ -67,6 +68,12 @@
     type ConnectionState
   } from "./lib/api/daemonClient";
   import { sessionDisplayName, sessionDisplayTitle } from "./lib/sessionDisplay";
+  import {
+    formatAgentTurnMessage,
+    revokeTimelineAttachmentPreviews,
+    stripAttachmentPreviewUrls,
+    summarizeAgentTurnAttachments
+  } from "./lib/agentTurnAttachments";
   import { providerIdCanRunAgent, providerIdInSet, providerIsAvailableForAgent } from "./lib/providerIds";
   import { providerCatalogForSetup } from "./lib/providerFallbacks";
   import type { UnlistenFn } from "@tauri-apps/api/event";
@@ -80,6 +87,7 @@
     ExternalCredential,
     FolderGroup,
     AskUserQuestionItem,
+    MessageAttachment,
     MessageTimelineItem,
     PermissionTimelineItem,
     RemoteConnection,
@@ -1664,7 +1672,10 @@
     try {
       window.localStorage.setItem(
         pendingSubmittedMessageKey(sessionId),
-        JSON.stringify({ item, expiresAtMs: Date.now() + PENDING_SUBMITTED_MESSAGE_TTL_MS })
+        JSON.stringify({
+          item: stripAttachmentPreviewUrls(item),
+          expiresAtMs: Date.now() + PENDING_SUBMITTED_MESSAGE_TTL_MS
+        })
       );
     } catch {
       /* Best-effort recovery for reloads during turn start. */
@@ -2371,6 +2382,7 @@
     if (cancelingTurnId === null || activityStatusIsActive(activityStatus)) return;
     clearTurnRuntimeState(sessionId, currentTurnId);
     liveStreamItems = [];
+    revokeTimelineAttachmentPreviews(submittedMessages);
     submittedMessages = [];
     submittedMessageBaselineIds = {};
   }
@@ -2836,7 +2848,7 @@
     );
   }
 
-  async function submitMessage(message: string, options: AgentTurnOptions = {}) {
+  async function submitMessage(message: string, options: AgentTurnSubmitOptions = {}) {
     if (!selectedSession) {
       statusMessage = "Select a session to send a message.";
       return false;
@@ -2873,6 +2885,27 @@
       return false;
     }
     setSubmitMessageInFlight(submitSessionId, true);
+    const { displayAttachments = [], attachmentIds: _attachmentIds, ...turnOptionsBase } = options;
+    if (displayAttachments.length > 0 && remoteConnection.enabled) {
+      const detail = "Attachments are only supported for local desktop sessions.";
+      statusMessage = detail;
+      appendAgentError("Attachment upload unavailable", detail, "attachment-remote");
+      setSubmitMessageInFlight(submitSessionId, false);
+      return false;
+    }
+    let stagedAttachments: MessageAttachment[];
+    try {
+      stagedAttachments = [];
+      for (const attachment of displayAttachments) {
+        stagedAttachments.push(await stageChatAttachment(submitSessionId, attachment));
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      statusMessage = `Attachment upload failed: ${detail}`;
+      appendAgentError("Attachment upload failed", detail, "attachment-stage");
+      setSubmitMessageInFlight(submitSessionId, false);
+      return false;
+    }
     const now = Date.now();
     const localUserId = `local-user-${now}`;
     submittedMessageBaselineIds = {
@@ -2881,14 +2914,30 @@
         .map((item) => item.id)
         .filter((id) => id.length > 0)
     };
+    const messageAttachments = stagedAttachments.map((attachment, index) => ({
+      ...attachment,
+      previewUrl: displayAttachments[index]?.previewUrl ?? null
+    }));
+    const turnMessage = formatAgentTurnMessage(message, stagedAttachments);
+    const turnOptions = {
+      ...turnOptionsBase,
+      ...(stagedAttachments.length > 0
+        ? { attachmentIds: stagedAttachments.map((attachment) => attachment.id) }
+        : {})
+    };
+    const attachmentMeta =
+      stagedAttachments.length > 0
+        ? [`${stagedAttachments.length} attachment${stagedAttachments.length === 1 ? "" : "s"}`]
+        : [];
     const submittedMessage: TimelineItem = {
       id: localUserId,
       kind: "user",
       createdAtMs: now,
       title: "User",
-      summary: message,
-      body: message,
-      meta: []
+      summary: message || summarizeAgentTurnAttachments(stagedAttachments),
+      body: turnMessage,
+      ...(messageAttachments.length > 0 ? { attachments: messageAttachments } : {}),
+      meta: attachmentMeta
     };
     submittedMessages = [...submittedMessages, submittedMessage];
     persistPendingSubmittedMessage(submitSessionId, submittedMessage);
@@ -2897,7 +2946,7 @@
     turnStatusHint = "Thinking";
     setLiveSidebarAgentState(submitSessionId, "thinking", null, sessionAtSubmit);
     try {
-      const turnId = await runAgentTurn(submitSessionId, message, options);
+      const turnId = await runAgentTurn(submitSessionId, turnMessage, turnOptions);
       const settledBeforeRpcReturned = isTurnSettled(submitSessionId, turnId);
       if (!settledBeforeRpcReturned) {
         setLiveSidebarAgentState(submitSessionId, "thinking", turnId, sessionAtSubmit);
@@ -3144,6 +3193,44 @@
     return `${item.kind}:${body}`;
   }
 
+  function timelineItemAttachmentsMatch(persisted: TimelineItem, pending: TimelineItem): boolean {
+    const persistedAttachments = persisted.attachments ?? [];
+    const pendingAttachments = pending.attachments ?? [];
+    if (pendingAttachments.length === 0) return true;
+    if (persistedAttachments.length !== pendingAttachments.length) return false;
+    return pendingAttachments.every((attachment, index) => {
+      const persistedAttachment = persistedAttachments[index];
+      return Boolean(persistedAttachment) &&
+        persistedAttachment.id === attachment.id &&
+        persistedAttachment.name === attachment.name &&
+        persistedAttachment.kind === attachment.kind &&
+        persistedAttachment.size === attachment.size;
+    });
+  }
+
+  function needsTransientAttachmentPresentation(
+    persisted: TimelineItem,
+    pending: TimelineItem
+  ): boolean {
+    return (pending.attachments?.length ?? 0) > 0 &&
+      transientItemsMatch(persisted, pending) &&
+      !timelineItemAttachmentsMatch(persisted, pending);
+  }
+
+  function withTransientAttachmentPresentation(
+    persisted: TimelineItem,
+    pending: TimelineItem
+  ): TimelineItem {
+    return {
+      ...persisted,
+      id: pending.id,
+      summary: pending.summary || persisted.summary,
+      body: timelineItemBody(pending) || persisted.body,
+      attachments: pending.attachments,
+      meta: Array.from(new Set([...persisted.meta, ...pending.meta]))
+    };
+  }
+
   function stableJsonText(value: unknown): string {
     if (Array.isArray(value)) {
       return `[${value.map(stableJsonText).join(",")}]`;
@@ -3332,12 +3419,20 @@
         pendingUnmatched = [...pendingUnmatched, item];
         continue;
       }
+      let presentationIndex = matchIndex;
       if (pendingUnmatched.length > 0) {
         merged.splice(matchIndex, 0, ...pendingUnmatched);
+        presentationIndex = matchIndex + pendingUnmatched.length;
         searchStart = matchIndex + pendingUnmatched.length + 1;
         pendingUnmatched = [];
       } else {
         searchStart = matchIndex + 1;
+      }
+      if (needsTransientAttachmentPresentation(merged[presentationIndex], item)) {
+        merged[presentationIndex] = withTransientAttachmentPresentation(
+          merged[presentationIndex],
+          item
+        );
       }
     }
     if (pendingUnmatched.length > 0) merged.push(...pendingUnmatched);
@@ -3370,8 +3465,13 @@
     items: TimelineItem[],
     pending: TimelineItem[]
   ): TimelineItem[] {
-    const missing = stillMissingFromPersisted(items, pending);
+    const missing = pending.filter((item) => {
+      const match = items.find((candidate) => transientItemsMatch(candidate, item));
+      if (!match) return true;
+      return needsTransientAttachmentPresentation(match, item);
+    });
     const missingIds = new Set(missing.map((item) => item.id));
+    revokeTimelineAttachmentPreviews(pending.filter((item) => !missingIds.has(item.id)));
     let nextBaselineIds = submittedMessageBaselineIds;
     for (const item of pending) {
       if (missingIds.has(item.id)) continue;

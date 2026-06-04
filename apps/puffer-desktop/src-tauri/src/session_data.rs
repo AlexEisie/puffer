@@ -1,6 +1,6 @@
 use crate::dtos::{
-    AgentDiffDto, AgentDiffEntryDto, AgentDiffFileDto, DiffSummaryDto, DivergenceReportDto,
-    FolderGroupDto, SessionDetailDto, SessionListItemDto, TimelineItemDto,
+    AgentDiffDto, AgentDiffEntryDto, AgentDiffFileDto, ChatAttachmentDto, DiffSummaryDto,
+    DivergenceReportDto, FolderGroupDto, SessionDetailDto, SessionListItemDto, TimelineItemDto,
 };
 use crate::repo_actions;
 use anyhow::{Context, Result};
@@ -122,7 +122,7 @@ pub(crate) fn load_session_detail(session_id: &str) -> Result<SessionDetailDto> 
             .metadata
             .parent_session_id
             .map(|value| value.to_string()),
-        timeline: timeline_items(&record),
+        timeline: timeline_items(&store, &record),
         latest_diff,
         diff_history,
         repo_status,
@@ -446,16 +446,21 @@ fn extract_paths_from_patch(patch: &str) -> BTreeSet<String> {
     out
 }
 
-fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
+fn timeline_items(store: &SessionStore, record: &SessionRecord) -> Vec<TimelineItemDto> {
     let mut items = Vec::new();
     let mut pending_assistant = None;
     for (index, event) in record.events.iter().enumerate() {
         match event {
-            TranscriptEvent::UserMessage { text, actor } => {
+            TranscriptEvent::UserMessage {
+                text,
+                attachments,
+                actor,
+            } => {
                 flush_pending_assistant(&mut items, &mut pending_assistant);
                 items.push(TimelineItemDto::UserMessage {
                     id: format!("timeline-{index}"),
                     text: text.clone(),
+                    attachments: attachment_dtos(store, record.metadata.id, attachments),
                     actor: actor.clone(),
                 });
             }
@@ -504,6 +509,7 @@ fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
                 input,
                 output,
                 success,
+                metadata: _,
                 actor,
                 subject,
             } => {
@@ -533,6 +539,17 @@ fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
     }
     flush_pending_assistant(&mut items, &mut pending_assistant);
     items
+}
+
+fn attachment_dtos(
+    store: &SessionStore,
+    session_id: Uuid,
+    attachments: &[puffer_session_store::StoredAttachment],
+) -> Vec<ChatAttachmentDto> {
+    attachments
+        .iter()
+        .map(|attachment| ChatAttachmentDto::from_stored(store, session_id, attachment))
+        .collect()
 }
 
 fn flush_pending_assistant(

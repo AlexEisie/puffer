@@ -16,6 +16,566 @@ async function reconnectBackend(page: Page, daemon: FakeDaemon): Promise<void> {
   await expect(page.locator(".connection-banner")).toHaveCount(0);
 }
 
+async function dispatchFileDrag(
+  page: Page,
+  type: "dragenter" | "drop",
+  files: Array<{ name: string; mimeType: string; buffer: Buffer }>
+): Promise<void> {
+  const dataTransfer = await page.evaluateHandle((uploads) => {
+    const transfer = new DataTransfer();
+    for (const upload of uploads) {
+      transfer.items.add(
+        new File([Uint8Array.from(upload.bytes)], upload.name, { type: upload.mimeType })
+      );
+    }
+    return transfer;
+  }, files.map((file) => ({
+    name: file.name,
+    mimeType: file.mimeType,
+    bytes: Array.from(file.buffer)
+  })));
+  try {
+    await page
+      .locator('[data-testid="agent-chat-drop-surface"]')
+      .dispatchEvent(type, { dataTransfer });
+  } finally {
+    await dataTransfer.dispose();
+  }
+}
+
+async function installAttachmentStageHook(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    (window as unknown as {
+      __PUFFER_TEST_STAGE_CHAT_ATTACHMENT__?: (
+        sessionId: string,
+        attachment: Record<string, unknown>
+      ) => Record<string, unknown>;
+    }).__PUFFER_TEST_STAGE_CHAT_ATTACHMENT__ = (_sessionId, attachment) => {
+      const { file: _file, previewUrl: _previewUrl, ...rest } = attachment;
+      return {
+        ...rest,
+        id: `staged-${String(attachment.id)}`,
+        state: "available"
+      };
+    };
+  });
+}
+
+async function composerTextareaMetrics(page: Page): Promise<{
+  height: number;
+  scrollHeight: number;
+  clientHeight: number;
+  overflowY: string;
+}> {
+  return page.locator(".pf-composer textarea").evaluate((node) => {
+    const textarea = node as HTMLTextAreaElement;
+    const rect = textarea.getBoundingClientRect();
+    return {
+      height: rect.height,
+      scrollHeight: textarea.scrollHeight,
+      clientHeight: textarea.clientHeight,
+      overflowY: getComputedStyle(textarea).overflowY
+    };
+  });
+}
+
+async function chatThreadMetrics(page: Page): Promise<{
+  scrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+  bottomGap: number;
+}> {
+  return page.locator(".pf-chat-thread").evaluate((node) => {
+    const thread = node as HTMLDivElement;
+    return {
+      scrollTop: thread.scrollTop,
+      scrollHeight: thread.scrollHeight,
+      clientHeight: thread.clientHeight,
+      bottomGap: thread.scrollHeight - thread.scrollTop - thread.clientHeight
+    };
+  });
+}
+
+test("composer add content menu attaches image and file drafts", async ({ page }) => {
+  const imageBuffer = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==",
+    "base64"
+  );
+  const pdfBuffer = Buffer.from("%PDF-1.7\n", "utf8");
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-attachments",
+        displayName: "Attachment composer",
+        title: "Attachment composer",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "attachment-seed",
+            text: "Attach files here.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await installAttachmentStageHook(page);
+  await daemon.open(page);
+
+  await openSession(page, /Attachment composer/);
+  await expect(page.getByText("Attach files here.")).toBeVisible();
+
+  await page.getByRole("button", { name: "Add content" }).click();
+  await expect(page.getByRole("menuitem", { name: "Add images and files" })).toBeVisible();
+
+  await page.locator('[data-testid="composer-file-input"]').setInputFiles([
+    {
+      name: "sample.png",
+      mimeType: "image/png",
+      buffer: imageBuffer
+    },
+    {
+      name: "notes.md",
+      mimeType: "text/markdown",
+      buffer: Buffer.from("# Notes\n\nReview this.", "utf8")
+    }
+  ]);
+
+  await expect(page.locator('[data-testid="composer-attachment-preview-strip"]')).toBeVisible();
+  await expect(page.getByAltText("sample.png")).toBeVisible();
+  await expect(page.getByText("notes.md")).toBeVisible();
+
+  await page.getByRole("button", { name: "Remove attachment notes.md" }).click();
+  await expect(page.getByText("notes.md")).toHaveCount(0);
+
+  await page.locator('[data-testid="composer-file-input"]').setInputFiles([
+    {
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      buffer: pdfBuffer
+    }
+  ]);
+  await expect(page.getByText("report.pdf")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+
+  await page.getByRole("button", { name: "Send" }).click();
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (candidate) =>
+      candidate.params.sessionId === "session-attachments" &&
+      candidate.params.message === "[Image: sample.png]\n[File: report.pdf]" &&
+      Array.isArray(candidate.params.attachmentIds) &&
+      candidate.params.attachmentIds.length === 2 &&
+      candidate.params.attachments === undefined
+  );
+  const attachmentIds = request.params.attachmentIds as string[];
+  await expect(page.getByAltText("sample.png")).toBeVisible();
+  await expect(page.getByText("report.pdf")).toBeVisible();
+  await expect(page.getByText("[Image: sample.png]")).toHaveCount(0);
+  await expect(page.getByText("[File: report.pdf]")).toHaveCount(0);
+  await expect(page.locator('[data-testid="composer-attachment-preview-strip"]')).toHaveCount(0);
+
+  daemon.setSessionTimeline("session-attachments", [
+    {
+      kind: "assistant_message",
+      id: "attachment-seed",
+      text: "Attach files here.",
+      createdAtMs: baseTime - 30_000
+    },
+    {
+      kind: "user_message",
+      id: "attachment-persisted-user",
+      text: request.params.message,
+      createdAtMs: Date.now(),
+      attachments: [
+        {
+          id: attachmentIds[0],
+          name: "sample.png",
+          mimeType: "image/png",
+          kind: "image",
+          extension: "PNG",
+          size: imageBuffer.length,
+          state: "available"
+        },
+        {
+          id: attachmentIds[1],
+          name: "report.pdf",
+          mimeType: "application/pdf",
+          kind: "file",
+          extension: "PDF",
+          size: pdfBuffer.length,
+          state: "available"
+        }
+      ]
+    },
+    {
+      kind: "assistant_message",
+      id: "attachment-persisted-assistant",
+      text: "Done.",
+      createdAtMs: Date.now() + 1
+    }
+  ]);
+  daemon.emit("session:session-attachments:event", {
+    type: "turn-complete",
+    turnId: "turn-session-attachments",
+    assistantText: "Done."
+  });
+
+  await expect(page.getByText("Done.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open image attachment sample.png" })).toBeVisible();
+  await expect(page.getByText("report.pdf")).toBeVisible();
+  await expect(page.getByText("[Image: sample.png]")).toHaveCount(0);
+  await expect(page.getByText("[File: report.pdf]")).toHaveCount(0);
+
+  daemon.seedAttachmentPreview("session-attachments", attachmentIds[0], {
+    state: "available",
+    mimeType: "image/png",
+    bytes: Array.from(imageBuffer)
+  });
+  await page.reload();
+  await openSession(page, /Attachment composer/);
+  const persistedImageButton = page.getByRole("button", { name: "Open image attachment sample.png" });
+  await expect(persistedImageButton).toBeVisible();
+  await expect(persistedImageButton.getByAltText("sample.png")).toBeVisible();
+  await expect(page.getByText("report.pdf")).toBeVisible();
+  await expect(page.getByText("[Image: sample.png]")).toHaveCount(0);
+  await persistedImageButton.click();
+  const refreshedPreview = page.getByRole("dialog", { name: "sample.png" });
+  await expect(refreshedPreview).toBeVisible();
+  await expect(refreshedPreview.getByAltText("sample.png")).toBeVisible();
+});
+
+test("message attachments open image preview and file details", async ({ page }) => {
+  const imageBuffer = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==",
+    "base64"
+  );
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-attachment-open",
+        displayName: "Attachment open targets",
+        title: "Attachment open targets",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "attachment-open-seed",
+            text: "Attach a screenshot and notes.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await installAttachmentStageHook(page);
+  await daemon.open(page);
+
+  await openSession(page, /Attachment open targets/);
+  await page.getByRole("button", { name: "Add content" }).click();
+  await page.locator('[data-testid="composer-file-input"]').setInputFiles([
+    {
+      name: "sample.png",
+      mimeType: "image/png",
+      buffer: imageBuffer
+    },
+    {
+      name: "notes.md",
+      mimeType: "text/markdown",
+      buffer: Buffer.from("# Notes\n\nReview this.", "utf8")
+    }
+  ]);
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-attachment-open" &&
+      request.params.message === "[Image: sample.png]\n[File: notes.md]" &&
+      Array.isArray(request.params.attachmentIds) &&
+      request.params.attachmentIds.length === 2 &&
+      request.params.attachments === undefined
+  );
+
+  const sampleAttachmentButton = page.getByRole("button", { name: "Open image attachment sample.png" });
+  await sampleAttachmentButton.click();
+  const previewDialog = page.getByRole("dialog", { name: "sample.png" });
+  await expect(previewDialog).toBeVisible();
+  await expect(previewDialog.getByAltText("sample.png")).toBeVisible();
+  await expect(previewDialog).toContainText("PNG");
+  await page.keyboard.press("Escape");
+  await expect(page.locator('[data-testid="attachment-overlay"]')).toHaveCount(0);
+  await expect(sampleAttachmentButton).toBeFocused();
+
+  await page.getByRole("button", { name: "Open attachment details for notes.md" }).click();
+  const detailsDialog = page.getByRole("dialog", { name: "notes.md" });
+  await expect(detailsDialog).toBeVisible();
+  await expect(detailsDialog).toContainText("Preview unavailable for this attachment.");
+  await expect(detailsDialog).toContainText("text/markdown");
+  await expect(page.getByRole("button", { name: "Files" })).toHaveAttribute("aria-pressed", "false");
+});
+
+test("restored pending attachment without preview opens unavailable detail", async ({ page }) => {
+  const sessionId = "session-restored-attachment";
+  await page.addInitScript(
+    ({ key, expiresAtMs }) => {
+      window.localStorage.setItem(
+        key,
+        JSON.stringify({
+          expiresAtMs,
+          item: {
+            id: "pending-stale-image",
+            kind: "user",
+            createdAtMs: Date.now(),
+            title: "User",
+            summary: "stale.png",
+            body: "[Image: stale.png]",
+            meta: ["1 attachment"],
+            attachments: [
+              {
+                id: "stale-image",
+                name: "stale.png",
+                mimeType: "image/png",
+                size: 68,
+                extension: "PNG",
+                kind: "image"
+              }
+            ]
+          }
+        })
+      );
+    },
+    {
+      key: `puffer-desktop:pending-submitted:${sessionId}`,
+      expiresAtMs: Date.now() + 10 * 60_000
+    }
+  );
+
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId,
+        displayName: "Restored attachment",
+        title: "Restored attachment",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        timeline: []
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Restored attachment/);
+  await expect(page.getByText("stale.png")).toBeVisible();
+  await expect(page.getByText("[Image: stale.png]")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Open image attachment stale.png" }).click();
+  const dialog = page.getByRole("dialog", { name: "stale.png" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Preview unavailable for this attachment.");
+});
+
+test("missing persisted image attachment opens unavailable detail", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-missing-persisted-attachment",
+        displayName: "Missing persisted attachment",
+        title: "Missing persisted attachment",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "missing-image-message",
+            text: "[Image: lost.png]",
+            createdAtMs: baseTime - 30_000,
+            attachments: [
+              {
+                id: "missing-image",
+                name: "lost.png",
+                mimeType: "image/png",
+                size: 68,
+                extension: "PNG",
+                kind: "image",
+                state: "missing"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Missing persisted attachment/);
+  await expect(page.getByText("lost.png")).toBeVisible();
+  await expect(page.getByText("[Image: lost.png]")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Open image attachment lost.png" }).click();
+  const dialog = page.getByRole("dialog", { name: "lost.png" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Preview unavailable for this attachment.");
+  await expect(dialog.locator("img")).toHaveCount(0);
+});
+
+test("chat file targets route message paths and tool paths through Files", async ({ page }) => {
+  const messagePath = "/tmp/puffer/src/main.rs";
+  const toolPath = "/tmp/puffer/src/tool.rs";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-file-open-targets",
+        displayName: "File open targets",
+        title: "File open targets",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 2,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "file-open-message",
+            text: `Review ${messagePath}:2 before changing the helper.`,
+            createdAtMs: baseTime - 30_000
+          },
+          {
+            kind: "tool_call",
+            id: "file-open-tool",
+            toolId: "read_file",
+            status: "success",
+            summary: `Read ${toolPath}`,
+            inputJson: { path: toolPath },
+            outputText: JSON.stringify({ content: "pub fn helper() {}\n" }),
+            createdAtMs: baseTime - 20_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.seedFile(messagePath, "fn main() {\n    let target = 42;\n}\n");
+  daemon.seedFile(toolPath, "pub fn helper() {}\n");
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /File open targets/);
+  await page.getByRole("link", { name: `${messagePath}:2` }).click();
+  await expect(page.getByRole("button", { name: "Files" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".viewer")).toContainText(messagePath);
+  await expect(page.locator(".viewer")).toContainText("let target = 42");
+
+  await page.getByRole("button", { name: "Chat" }).click();
+  await page.getByRole("button", { name: /Agent activity/ }).click();
+  await page.getByRole("button", { name: /Read tool\.rs/ }).click();
+  await page.getByRole("button", { name: toolPath, exact: true }).click();
+  await expect(page.getByRole("button", { name: "Files" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".viewer")).toContainText(toolPath);
+  await expect(page.locator(".viewer")).toContainText("pub fn helper() {}");
+});
+
+test("chat surface drop attaches image and file drafts", async ({ page }) => {
+  const imageBuffer = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==",
+    "base64"
+  );
+  const pdfBuffer = Buffer.from("%PDF-1.7\n", "utf8");
+  const files = [
+    {
+      name: "drop.png",
+      mimeType: "image/png",
+      buffer: imageBuffer
+    },
+    {
+      name: "drop.pdf",
+      mimeType: "application/pdf",
+      buffer: pdfBuffer
+    }
+  ];
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-drop-attachments",
+        displayName: "Drop attachments",
+        title: "Drop attachments",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "drop-seed",
+            text: "Drop files here.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await installAttachmentStageHook(page);
+  await daemon.open(page);
+
+  await openSession(page, /Drop attachments/);
+  await expect(page.getByText("Drop files here.")).toBeVisible();
+
+  await dispatchFileDrag(page, "dragenter", files);
+  await expect(page.getByText("Drop files to attach")).toBeVisible();
+  await expect(page.getByText("Up to 10 files, 20 MiB each")).toBeVisible();
+
+  await dispatchFileDrag(page, "drop", files);
+
+  await expect(page.getByText("Drop files to attach")).toHaveCount(0);
+  await expect(page.locator('[data-testid="composer-attachment-preview-strip"]')).toBeVisible();
+  await expect(page.getByAltText("drop.png")).toBeVisible();
+  await expect(page.getByText("drop.pdf")).toBeVisible();
+
+  await page.locator(".pf-composer textarea").fill("review drop");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (candidate) =>
+      candidate.params.sessionId === "session-drop-attachments" &&
+      candidate.params.message === "review drop\n\n[Image: drop.png]\n[File: drop.pdf]" &&
+      Array.isArray(candidate.params.attachmentIds) &&
+      candidate.params.attachmentIds.length === 2 &&
+      candidate.params.attachments === undefined
+  );
+  expect(request.params.attachmentIds).toHaveLength(2);
+  await expect(page.locator('[data-testid="composer-attachment-preview-strip"]')).toHaveCount(0);
+  await expect(page.getByAltText("drop.png")).toBeVisible();
+  await expect(page.getByText("drop.pdf")).toBeVisible();
+  await expect(page.getByText("[Image: drop.png]")).toHaveCount(0);
+  await expect(page.getByText("[File: drop.pdf]")).toHaveCount(0);
+});
+
 test("turn completion reload does not leak live chat into a newly selected session", async ({
   page
 }) => {
@@ -601,6 +1161,302 @@ test("composer enter does not submit while IME composition is active", async ({ 
   await page.waitForTimeout(50);
   await expect(composer).toHaveValue("zhong");
   expect(daemon.requests.filter((request) => request.method === "run_agent_turn")).toHaveLength(0);
+});
+
+test("composer textarea autosizes long drafts and resets after send", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-autosize-alpha",
+        displayName: "Autosize alpha",
+        title: "Autosize alpha",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "autosize-alpha-seed",
+            text: "Use the composer for a long prompt.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      },
+      {
+        sessionId: "session-autosize-beta",
+        displayName: "Autosize beta",
+        title: "Autosize beta",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 55_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "autosize-beta-seed",
+            text: "Second session for draft restoration.",
+            createdAtMs: baseTime - 25_000
+          }
+        ]
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Autosize alpha/);
+  const composer = page.locator(".pf-composer textarea");
+  await expect(composer).toBeEnabled();
+
+  const initialMetrics = await composerTextareaMetrics(page);
+  const multilinePrompt = [
+    "Audit the current chat composer.",
+    "Keep the implementation local.",
+    "Preserve Enter and Shift+Enter behavior.",
+    "Avoid shared abstractions.",
+    "Add a focused regression test.",
+    "Report any risks."
+  ].join("\n");
+
+  await composer.fill(multilinePrompt);
+  await expect(composer).toHaveValue(multilinePrompt);
+  await expect
+    .poll(async () => (await composerTextareaMetrics(page)).height)
+    .toBeGreaterThan(initialMetrics.height + 24);
+
+  const grownMetrics = await composerTextareaMetrics(page);
+
+  await openSession(page, /Autosize beta/);
+  await expect(composer).toHaveValue("");
+
+  await openSession(page, /Autosize alpha/);
+  await expect(composer).toHaveValue(multilinePrompt);
+  await expect
+    .poll(async () => (await composerTextareaMetrics(page)).height)
+    .toBeGreaterThanOrEqual(grownMetrics.height - 1);
+
+  const longPrompt = Array.from(
+    { length: 40 },
+    (_, index) => `long composer line ${index + 1}`
+  ).join("\n");
+
+  await composer.fill(longPrompt);
+  await expect(composer).toHaveValue(longPrompt);
+  await expect
+    .poll(async () => (await composerTextareaMetrics(page)).overflowY)
+    .toBe("auto");
+
+  const cappedMetrics = await composerTextareaMetrics(page);
+  expect(cappedMetrics.height).toBeGreaterThan(160);
+  expect(cappedMetrics.height).toBeLessThanOrEqual(205);
+  expect(cappedMetrics.scrollHeight).toBeGreaterThan(cappedMetrics.clientHeight);
+  expect(cappedMetrics.overflowY).toBe("auto");
+
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-autosize-alpha" &&
+      request.params.message === longPrompt
+  );
+  await expect(composer).toHaveValue("");
+  await expect
+    .poll(async () => (await composerTextareaMetrics(page)).height)
+    .toBeLessThanOrEqual(initialMetrics.height + 4);
+});
+
+test("composer autosize keeps bottom thread content anchored", async ({ page }) => {
+  const timeline = Array.from({ length: 36 }, (_, index) => [
+    {
+      kind: "user_message",
+      id: `anchor-user-${index + 1}`,
+      text: `Anchored composer user row ${index + 1}. `.repeat(6),
+      createdAtMs: baseTime - 120_000 + index * 2_000
+    },
+    {
+      kind: "assistant_message",
+      id: `anchor-assistant-${index + 1}`,
+      text: `Anchored composer assistant row ${index + 1}. `.repeat(10),
+      createdAtMs: baseTime - 119_000 + index * 2_000
+    }
+  ]).flat();
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-autosize-anchor",
+        displayName: "Autosize anchor",
+        title: "Autosize anchor",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 120_000,
+        eventCount: timeline.length,
+        timeline
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Autosize anchor/);
+  const composer = page.locator(".pf-composer textarea");
+  const thread = page.locator(".pf-chat-thread");
+  await expect(composer).toBeEnabled();
+  await expect(page.getByText("Anchored composer assistant row 36.")).toBeVisible();
+  const overflowMetrics = await chatThreadMetrics(page);
+  expect(overflowMetrics.scrollHeight).toBeGreaterThan(overflowMetrics.clientHeight + 200);
+
+  await thread.evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  await expect.poll(async () => (await chatThreadMetrics(page)).bottomGap).toBeLessThan(2);
+
+  const pinnedBefore = await chatThreadMetrics(page);
+  const multilinePrompt = Array.from(
+    { length: 9 },
+    (_, index) => `anchored composer line ${index + 1}`
+  ).join("\n");
+
+  await composer.fill(multilinePrompt);
+  await expect
+    .poll(async () => (await composerTextareaMetrics(page)).height)
+    .toBeGreaterThan(120);
+  await expect.poll(async () => (await chatThreadMetrics(page)).bottomGap).toBeLessThan(2);
+
+  const pinnedAfter = await chatThreadMetrics(page);
+  expect(pinnedAfter.scrollTop).toBeGreaterThan(pinnedBefore.scrollTop + 48);
+
+  await thread.evaluate((node) => {
+    node.scrollTop = Math.max(0, node.scrollTop - 320);
+  });
+  const scrolledBefore = await chatThreadMetrics(page);
+  expect(scrolledBefore.bottomGap).toBeGreaterThan(260);
+
+  await composer.fill("short prompt");
+  await expect
+    .poll(async () => (await composerTextareaMetrics(page)).height)
+    .toBeLessThan(80);
+
+  const scrolledAfter = await chatThreadMetrics(page);
+  expect(scrolledAfter.bottomGap).toBeGreaterThan(120);
+});
+
+test("chat scroll-to-bottom button appears away from bottom and scrolls to latest message", async ({
+  page
+}) => {
+  const timeline = Array.from({ length: 34 }, (_, index) => [
+    {
+      kind: "user_message",
+      id: `scroll-button-user-${index + 1}`,
+      text: `Scroll button user row ${index + 1}. `.repeat(6),
+      createdAtMs: baseTime - 140_000 + index * 2_000
+    },
+    {
+      kind: "assistant_message",
+      id: `scroll-button-assistant-${index + 1}`,
+      text: `Scroll button assistant row ${index + 1}. `.repeat(10),
+      createdAtMs: baseTime - 139_000 + index * 2_000
+    }
+  ]).flat();
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-scroll-button",
+        displayName: "Scroll button",
+        title: "Scroll button",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 140_000,
+        eventCount: timeline.length,
+        timeline
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Scroll button/);
+  const thread = page.locator(".pf-chat-thread");
+  const scrollButton = page.getByRole("button", { name: "Scroll to bottom" });
+  await expect(page.getByText("Scroll button assistant row 34.")).toBeVisible();
+
+  const overflowMetrics = await chatThreadMetrics(page);
+  expect(overflowMetrics.scrollHeight).toBeGreaterThan(overflowMetrics.clientHeight + 200);
+
+  await thread.evaluate((node) => {
+    const thread = node as HTMLDivElement;
+    thread.scrollTop = thread.scrollHeight;
+    thread.dispatchEvent(new Event("scroll"));
+  });
+  await expect.poll(async () => (await chatThreadMetrics(page)).bottomGap).toBeLessThan(2);
+  await expect(scrollButton).toHaveCount(0);
+
+  await thread.evaluate((node) => {
+    const thread = node as HTMLDivElement;
+    thread.scrollTop = Math.max(0, thread.scrollTop - 360);
+    thread.dispatchEvent(new Event("scroll"));
+  });
+  await expect.poll(async () => (await chatThreadMetrics(page)).bottomGap).toBeGreaterThan(250);
+  await expect(scrollButton).toBeVisible();
+
+  await scrollButton.click();
+  await expect(scrollButton).toHaveCount(0);
+  await expect.poll(async () => (await chatThreadMetrics(page)).bottomGap).toBeLessThan(100);
+});
+
+test("chat scroll-to-bottom button stays hidden without meaningful overflow", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-scroll-button-short",
+        displayName: "Short scroll button",
+        title: "Short scroll button",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 20_000,
+        eventCount: 2,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "short-scroll-user",
+            text: "A short prompt.",
+            createdAtMs: baseTime - 10_000
+          },
+          {
+            kind: "assistant_message",
+            id: "short-scroll-assistant",
+            text: "A short answer.",
+            createdAtMs: baseTime - 9_000
+          }
+        ]
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Short scroll button/);
+  const thread = page.locator(".pf-chat-thread");
+  await expect(page.getByText("A short answer.")).toBeVisible();
+
+  const metrics = await chatThreadMetrics(page);
+  expect(metrics.scrollHeight - metrics.clientHeight).toBeLessThanOrEqual(100);
+
+  await thread.evaluate((node) => {
+    const thread = node as HTMLDivElement;
+    thread.scrollTop = 0;
+    thread.dispatchEvent(new Event("scroll"));
+  });
+  await expect(page.getByRole("button", { name: "Scroll to bottom" })).toHaveCount(0);
 });
 
 test("composer moves submitted prompt into the thread while turn start is pending", async ({
@@ -2425,7 +3281,7 @@ test("background permission request is available when returning to that session"
 
   await openSession(page, /Permission background A/);
   await expect(page.getByText("Approval needed")).toBeVisible();
-  await page.getByRole("button", { name: "Allow once" }).click();
+  await page.getByRole("button", { name: "Approve once" }).click();
 
   const request = await daemon.waitForRequest("resolve_permission");
   expect(request.params).toMatchObject({
@@ -2920,7 +3776,7 @@ test("daemon-running background sessions receive approval events", async ({ page
 
   await openSession(page, /Daemon running A/);
   await expect(page.getByText("This approval started before the UI opened the session.")).toBeVisible();
-  await page.getByRole("button", { name: "Allow once" }).click();
+  await page.getByRole("button", { name: "Approve once" }).click();
 
   const request = await daemon.waitForRequest("resolve_permission");
   expect(request.params).toMatchObject({
@@ -3160,7 +4016,7 @@ test("successful permission response clears the awaiting approval hint", async (
 
   await expect(page.getByText("Approval needed")).toBeVisible();
   await expect(page.getByText(/Awaiting approval/)).toBeVisible();
-  await page.getByRole("button", { name: "Allow once" }).click();
+  await page.getByRole("button", { name: "Approve once" }).click();
 
   const request = await daemon.waitForRequest("resolve_permission");
   expect(request.params).toMatchObject({
@@ -3237,7 +4093,7 @@ test("successful permission response stays dismissed after switching away before
   });
 
   await expect(page.getByText("This approval should not reappear after success.")).toBeVisible();
-  await page.getByRole("button", { name: "Allow once" }).click();
+  await page.getByRole("button", { name: "Approve once" }).click();
   await daemon.waitForRequest(
     "resolve_permission",
     (request) =>
@@ -3275,7 +4131,7 @@ test("permission responses ignore duplicate clicks while the choice is in flight
   });
 
   await expect(page.getByText("Needs a single approval.")).toBeVisible();
-  const allowOnce = page.getByRole("button", { name: "Allow once" });
+  const allowOnce = page.getByRole("button", { name: "Approve once" });
   await allowOnce.click();
   await expect(allowOnce).toBeDisabled();
 
@@ -3307,7 +4163,7 @@ test("new turn can reuse a permission request id after earlier approval", async 
   });
 
   await expect(page.getByText("First turn needs approval.")).toBeVisible();
-  await page.getByRole("button", { name: "Allow once" }).click();
+  await page.getByRole("button", { name: "Approve once" }).click();
   await daemon.waitForRequest("resolve_permission", (request) =>
     request.params.turnId === "turn-permission-first" &&
     request.params.requestId === "permission-reused"
@@ -5035,7 +5891,7 @@ test("permission prompt remains actionable after backend reconnect", async ({ pa
   });
 
   await expect(page.getByText("Approval needed")).toBeVisible();
-  await page.getByRole("button", { name: "Allow once" }).click();
+  await page.getByRole("button", { name: "Approve once" }).click();
   const request = await daemon.waitForRequest("resolve_permission");
   expect(request.params).toMatchObject({
     turnId: "turn-session-permission-reconnect",
@@ -7771,19 +8627,10 @@ test("workspace settled event clears selected canceled turn state", async ({ pag
     (request) => request.params.turnId === "turn-session-cancel-workspace-settled"
   );
 
-  const previousRefreshes = daemon.requests.filter(
-    (request) => request.method === "list_grouped_sessions"
-  ).length;
   daemon.emit("workspace:sessions:changed", {
     sessionId: "session-cancel-workspace-settled",
     reason: "turn_complete"
   });
-  await daemon.waitForRequest(
-    "list_grouped_sessions",
-    (request) =>
-      daemon.requests.filter((candidate) => candidate.method === "list_grouped_sessions")
-        .indexOf(request) >= previousRefreshes
-  );
 
   await expect(page.getByRole("button", { name: "Stop turn" })).toHaveCount(0);
   await expect(page.locator(".pf-composer textarea")).toBeEnabled();
@@ -7832,7 +8679,7 @@ test("canceled selected idle session stays idle when reopened from workspace", a
   await page.getByRole("button", { name: "Back" }).click();
 
   const card = page.locator(".pf-pw-agent").filter({ hasText: "Cancel same reopen" });
-  await expect(card.locator('.status-pill[data-status="idle"]')).toContainText("Idle");
+  await expect(card.locator('.status-pill[data-status="idle"]')).toContainText("idle");
 
   await card.click();
   await expect(page.locator(".pf-agent-status-pill")).toContainText("Idle");

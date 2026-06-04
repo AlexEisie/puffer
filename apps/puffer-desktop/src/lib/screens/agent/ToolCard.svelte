@@ -4,19 +4,20 @@
   import { browserRecording, type BrowserRecordedFrame } from "../../api/desktop";
   import Icon, { type IconName } from "../../design/Icon.svelte";
   import HighlightedLine from "../../components/HighlightedLine.svelte";
+  import { chatFileTarget, fileOpenIntent, type ChatOpenIntent } from "../../chatOpenIntent";
   import type { ToolTimelineItem } from "../../types";
 
   type Props = {
     item: ToolTimelineItem;
     sessionId?: string | null;
     defaultCollapsed?: boolean;
-    onOpenFile?: (path: string, line?: number | null) => void;
+    onOpenChatIntent?: (intent: ChatOpenIntent) => void;
   };
   let {
     item,
     sessionId = null,
     defaultCollapsed = true,
-    onOpenFile
+    onOpenChatIntent
   }: Props = $props();
   type RenderRow = { kind: "ctx" | "add" | "del" | "omit"; line: number | null; text: string };
   type FileRender = { mode: "read" | "diff"; path: string; rows: RenderRow[] };
@@ -99,30 +100,10 @@
     return shortValue(valueText(value), max);
   }
 
-  function fileTarget(href: string): { path: string; line: number | null } | null {
-    let value = href.trim();
-    if (value.startsWith("file://")) {
-      try {
-        value = decodeURIComponent(new URL(value).pathname);
-      } catch {
-        value = value.slice("file://".length);
-      }
-    }
-    if (!value.startsWith("/")) return null;
-    const match = value.match(/^(.*?):(\d+)(?::\d+)?$/);
-    if (match) {
-      return {
-        path: match[1],
-        line: Number(match[2])
-      };
-    }
-    return { path: value, line: null };
-  }
-
   function openFilePath(path: string) {
-    const target = fileTarget(path);
+    const target = chatFileTarget(path);
     if (!target) return;
-    onOpenFile?.(target.path, target.line);
+    onOpenChatIntent?.(fileOpenIntent(target.path, target.line));
   }
 
   function browserArgLine(input: Record<string, unknown> | null): string | null {
@@ -1124,7 +1105,14 @@
       {:else if toolRender?.mode === "read" || toolRender?.mode === "diff"}
         <div class="pf-file-render" data-mode={toolRender.mode}>
           {#if toolRender.path}
-            <div class="pf-file-path" title={toolRender.path}>{toolRender.path}</div>
+            <button
+              type="button"
+              class="pf-file-path pf-file-path-button"
+              title={toolRender.path}
+              onclick={() => openFilePath(toolRender.path)}
+            >
+              {toolRender.path}
+            </button>
           {/if}
           <div class="pf-file-lines">
             {#each toolRender.rows as row, i (i)}
@@ -1163,7 +1151,7 @@
           {#if toolRender.rows.length}
             <div class="pf-result-list">
               {#each toolRender.rows as row, i (i)}
-                {@const target = fileTarget(row)}
+                {@const target = chatFileTarget(row)}
                 {#if target}
                   <button
                     type="button"
@@ -1210,7 +1198,7 @@
               {#if section.rows.length}
                 <div class="pf-result-list">
                   {#each section.rows as row, i (i)}
-                    {@const target = fileTarget(row)}
+                    {@const target = chatFileTarget(row)}
                     {#if target}
                       <button
                         type="button"
@@ -1315,6 +1303,18 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .pf-file-path-button {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .pf-file-path-button:hover {
+    color: var(--foreground);
+    text-decoration: underline;
   }
   .pf-file-lines {
     padding: 6px 0;

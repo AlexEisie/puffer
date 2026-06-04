@@ -1,6 +1,9 @@
-use puffer_session_store::MessageActor;
+use puffer_session_store::{
+    AttachmentState, MessageActor, SessionStore, StoredAttachment, StoredAttachmentKind,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,6 +99,44 @@ pub(crate) struct RepoStatusDto {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ChatAttachmentDto {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) mime_type: String,
+    pub(crate) size: u64,
+    pub(crate) extension: String,
+    pub(crate) kind: String,
+    pub(crate) state: String,
+}
+
+impl ChatAttachmentDto {
+    /// Builds a desktop attachment DTO from stored metadata and file availability.
+    pub(crate) fn from_stored(
+        session_store: &SessionStore,
+        session_id: Uuid,
+        attachment: &StoredAttachment,
+    ) -> Self {
+        let state = match session_store.attachment_state(session_id, attachment) {
+            AttachmentState::Available => "available",
+            AttachmentState::Missing => "missing",
+        };
+        Self {
+            id: attachment.id.clone(),
+            name: attachment.name.clone(),
+            mime_type: attachment.mime_type.clone(),
+            size: attachment.size,
+            extension: attachment.extension.clone(),
+            kind: match attachment.kind {
+                StoredAttachmentKind::Image => "image".to_string(),
+                StoredAttachmentKind::File => "file".to_string(),
+            },
+            state: state.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct RepoActionResultDto {
     pub(crate) ok: bool,
     pub(crate) action: String,
@@ -110,6 +151,7 @@ pub(crate) enum TimelineItemDto {
     UserMessage {
         id: String,
         text: String,
+        attachments: Vec<ChatAttachmentDto>,
         #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
     },
