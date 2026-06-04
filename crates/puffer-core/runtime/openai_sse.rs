@@ -3,6 +3,7 @@ use anyhow::{bail, Context, Result};
 use puffer_provider_openai::OpenAIResponseToolCall;
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::io::{BufRead, BufReader};
@@ -25,6 +26,121 @@ pub(super) struct OpenAISseResult {
     pub(super) reasoning_items: Vec<Value>,
     /// Raw response Value, kept for backward-compat callers that still need it.
     pub(super) raw_response: Value,
+}
+
+/// Structured failure emitted by the OpenAI Responses streaming API.
+#[derive(Debug, Clone)]
+pub(crate) struct OpenAISseApiError {
+    status: String,
+    code: Option<String>,
+    message: Option<String>,
+    reason: Option<String>,
+}
+
+impl OpenAISseApiError {
+    fn from_event(event: &Value) -> Self {
+        Self {
+            status: event
+                .pointer("/response/status")
+                .and_then(Value::as_str)
+                .unwrap_or("failed")
+                .to_string(),
+            code: event
+                .pointer("/response/error/code")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            message: event
+                .pointer("/response/error/message")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            reason: event
+                .pointer("/response/incomplete_details/reason")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }
+    }
+
+    fn from_incomplete_event(event: &Value) -> Self {
+        Self::from_incomplete_response(event.get("response"))
+    }
+
+    fn from_incomplete_response(response: Option<&Value>) -> Self {
+        let reason = response
+            .and_then(|value| value.pointer("/incomplete_details/reason"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        Self {
+            status: "incomplete".to_string(),
+            code: None,
+            message: None,
+            reason,
+        }
+    }
+
+    fn is_retryable(&self) -> bool {
+        matches!(
+            self.code.as_deref(),
+            Some("rate_limit_exceeded" | "server_error" | "overloaded")
+        )
+    }
+}
+
+impl fmt::Display for OpenAISseApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.status == "incomplete" {
+            return write!(
+                f,
+                "Incomplete response returned, reason: {}",
+                self.reason.as_deref().unwrap_or("unknown")
+            );
+        }
+        match (
+            self.code.as_deref(),
+            self.message.as_deref(),
+            self.reason.as_deref(),
+        ) {
+            (_, Some(message), _) if !message.is_empty() => match self.code.as_deref() {
+                Some(code) if !code.is_empty() => {
+                    write!(f, "{}: {code}: {message}", self.status)
+                }
+                _ => write!(f, "{}: {message}", self.status),
+            },
+            (_, _, Some(reason)) if !reason.is_empty() => write!(f, "{}: {reason}", self.status),
+            _ => write!(f, "OpenAI stream failed with status {}", self.status),
+        }
+    }
+}
+
+impl std::error::Error for OpenAISseApiError {}
+
+/// Returns true when the error chain contains an OpenAI SSE API failure.
+pub(crate) fn is_openai_sse_api_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<OpenAISseApiError>().is_some())
+}
+
+/// Returns true when the error chain contains a retryable OpenAI SSE failure.
+pub(crate) fn is_retryable_openai_sse_api_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<OpenAISseApiError>()
+            .is_some_and(OpenAISseApiError::is_retryable)
+    })
+}
+
+/// Returns true when the error chain contains an incomplete Responses failure.
+pub(crate) fn is_openai_response_incomplete_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<OpenAISseApiError>())
+        .any(|value| value.status == "incomplete")
+}
+
+/// Builds a typed API error when a non-streaming Responses payload is incomplete.
+pub(crate) fn openai_response_incomplete_error(response: &Value) -> Option<anyhow::Error> {
+    (response.get("status").and_then(Value::as_str) == Some("incomplete"))
+        .then(|| OpenAISseApiError::from_incomplete_response(Some(response)).into())
 }
 
 /// Returns true when an OpenAI response payload is encoded as SSE.
@@ -69,7 +185,6 @@ where
     let mut reader = reader;
     let mut line = String::new();
     let mut data_lines = Vec::new();
-    let mut last_event_name: Option<String> = None;
     let mut trace = openai_sse_trace_file();
 
     loop {
@@ -78,13 +193,6 @@ where
         trace_openai_sse_line(&mut trace, read, &line);
         if read == 0 {
             flush_sse_event(&data_lines, &mut state, on_event)?;
-            if !state.terminal && is_terminal_event_name(last_event_name.as_deref()) {
-                state.terminal = true;
-                trace_openai_sse_message(
-                    &mut trace,
-                    "EOF after terminal event header without data — treating as terminal",
-                );
-            }
             if !state.terminal {
                 trace_openai_sse_message(&mut trace, "EOF before terminal event");
                 bail!("stream closed before response.completed");
@@ -104,19 +212,10 @@ where
         }
         if let Some(data) = trimmed.strip_prefix("data:") {
             data_lines.push(data.trim_start().to_string());
-        } else if let Some(name) = trimmed.strip_prefix("event:") {
-            last_event_name = Some(name.trim().to_string());
         }
     }
 
     Ok(state)
-}
-
-fn is_terminal_event_name(name: Option<&str>) -> bool {
-    matches!(
-        name,
-        Some("response.completed" | "response.done" | "response.incomplete" | "response.cancelled")
-    )
 }
 
 /// Parses an OpenAI SSE stream and returns typed result with tool calls,
@@ -243,7 +342,13 @@ where
                                 input: input_payload,
                                 output: output_payload,
                                 success,
-                                metadata: Value::Null,
+                                metadata: json!({
+                                    "puffer": {
+                                        "provider": "openai",
+                                        "provider_stream_invocation": true,
+                                        "response_item_type": "web_search_call",
+                                    },
+                                }),
                                 terminate: false,
                             },
                         ]));
@@ -303,13 +408,16 @@ where
                 on_event(TurnStreamEvent::TextDelta(delta.to_string()));
             }
         }
-        "response.completed" | "response.done" | "response.incomplete" | "response.cancelled" => {
+        "response.completed" => {
             state.update_response(event.get("response"));
             state.terminal = true;
             return Ok(true);
         }
+        "response.incomplete" => {
+            return Err(OpenAISseApiError::from_incomplete_event(event).into());
+        }
         "response.failed" => {
-            bail!("{}", format_openai_sse_error(&event));
+            return Err(OpenAISseApiError::from_event(event).into());
         }
         _ => {}
     }
@@ -332,10 +440,9 @@ fn upsert_output_item(output: &mut Vec<Value>, item: Value) {
 /// Accumulator state for OpenAI streaming events (SSE or WebSocket).
 ///
 /// Collects response metadata, output items, assistant text deltas, and
-/// typed tool calls as they arrive. Once a terminal event is received
-/// (`response.completed`, `response.done`, `response.incomplete`, or
-/// `response.cancelled`), the accumulated state is converted into an
-/// [`OpenAISseResult`] via [`into_typed_result`](Self::into_typed_result).
+/// typed tool calls as they arrive. Once a `response.completed` event is
+/// received, the accumulated state is converted into an [`OpenAISseResult`] via
+/// [`into_typed_result`](Self::into_typed_result).
 #[derive(Default)]
 pub(super) struct OpenAISseState {
     response: Option<Value>,
@@ -457,33 +564,13 @@ fn extract_text_from_output_items(items: &[Value]) -> String {
     parts.join("")
 }
 
-fn format_openai_sse_error(event: &Value) -> String {
-    let status = event
-        .pointer("/response/status")
-        .and_then(Value::as_str)
-        .unwrap_or("failed");
-    let code = event
-        .pointer("/response/error/code")
-        .and_then(Value::as_str);
-    let message = event
-        .pointer("/response/error/message")
-        .and_then(Value::as_str);
-    let reason = event
-        .pointer("/response/incomplete_details/reason")
-        .and_then(Value::as_str);
-    match (code, message, reason) {
-        (_, Some(message), _) if !message.is_empty() => match code {
-            Some(code) if !code.is_empty() => format!("{status}: {code}: {message}"),
-            _ => format!("{status}: {message}"),
-        },
-        (_, _, Some(reason)) if !reason.is_empty() => format!("{status}: {reason}"),
-        _ => format!("OpenAI stream failed with status {status}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{parse_openai_sse_response, parse_openai_sse_response_streaming};
+    use super::{
+        is_openai_response_incomplete_error, is_openai_sse_api_error,
+        is_retryable_openai_sse_api_error, openai_response_incomplete_error,
+        parse_openai_sse_response, parse_openai_sse_response_streaming,
+    };
     use crate::runtime::TurnStreamEvent;
     use serde_json::json;
     use std::io::BufReader;
@@ -523,12 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_openai_sse_response_treats_eof_after_terminal_event_header_as_terminal() {
-        // Real-world proxy bug: the upstream sends `event: response.completed\n`
-        // and then closes the connection before the matching `data:` line lands.
-        // Without recovery, every tool-call turn through such a proxy bails with
-        // "stream closed before response.completed" and the request is retried,
-        // even though the user already saw the assistant text streamed.
+    fn parse_openai_sse_response_requires_completed_event_data() {
         let stream = concat!(
             "event: response.created\n",
             "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\"}}\n\n",
@@ -537,17 +619,29 @@ mod tests {
             "event: response.completed\n",
         );
 
-        let parsed = parse_openai_sse_response(stream).unwrap();
-        assert_eq!(parsed["id"], json!("resp_123"));
-        assert_eq!(parsed["output"][0]["type"], json!("message"));
+        let error = parse_openai_sse_response(stream).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("stream closed before response.completed"));
+    }
+
+    #[test]
+    fn parse_openai_sse_response_does_not_treat_non_completed_terminal_events_as_completed() {
+        for event in ["response.cancelled", "response.done"] {
+            let stream = format!(
+                "event: {event}\n\
+                 data: {{\"type\":\"{event}\",\"response\":{{\"id\":\"resp_123\",\"status\":\"cancelled\"}}}}\n\n"
+            );
+
+            let error = parse_openai_sse_response(&stream).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("stream closed before response.completed"));
+        }
     }
 
     #[test]
     fn parse_openai_sse_response_does_not_recover_from_eof_after_failed_event_header() {
-        // We only recover non-failure terminal events on header-only EOF, since a
-        // failed response without its data line lacks the error message we need
-        // to surface to the user. Falling back to "stream closed" preserves the
-        // retry path for genuine failures.
         let stream = concat!(
             "event: response.created\n",
             "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\"}}\n\n",
@@ -573,28 +667,92 @@ mod tests {
         assert!(error
             .to_string()
             .contains("failed: rate_limit_exceeded: too many requests"));
+        assert!(is_openai_sse_api_error(&error));
+        assert!(is_retryable_openai_sse_api_error(&error));
     }
 
     #[test]
-    fn parse_openai_sse_response_accepts_incomplete_terminal_event() {
+    fn parse_openai_sse_response_classifies_server_errors_as_retryable() {
+        let stream = concat!(
+            "event: response.failed\n",
+            "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"An error occurred while processing your request.\"}}}\n\n"
+        );
+
+        let error = parse_openai_sse_response(stream).unwrap_err();
+        assert!(error.to_string().contains("failed: server_error"));
+        assert!(is_retryable_openai_sse_api_error(&error));
+    }
+
+    #[test]
+    fn parse_openai_sse_response_surfaces_incomplete_events() {
         let stream = concat!(
             "event: response.output_text.delta\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
             "event: response.incomplete\n",
-            "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_123\",\"status\":\"incomplete\"}}\n\n"
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_123\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"content_filter\"}}}\n\n"
         );
         let mut deltas = Vec::new();
 
-        let parsed = parse_openai_sse_response_streaming(stream, &mut |event| {
+        let error = parse_openai_sse_response_streaming(stream, &mut |event| {
             if let super::TurnStreamEvent::TextDelta(delta) = event {
                 deltas.push(delta);
             }
         })
-        .unwrap();
+        .unwrap_err();
 
         assert_eq!(deltas, vec!["partial".to_string()]);
-        assert_eq!(parsed["id"], json!("resp_123"));
-        assert_eq!(parsed["status"], json!("incomplete"));
+        assert_eq!(
+            error.to_string(),
+            "Incomplete response returned, reason: content_filter"
+        );
+        assert!(is_openai_sse_api_error(&error));
+        assert!(!is_retryable_openai_sse_api_error(&error));
+    }
+
+    #[test]
+    fn parse_openai_sse_response_uses_unknown_incomplete_reason() {
+        let stream = concat!(
+            "event: response.incomplete\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_123\",\"status\":\"incomplete\"}}\n\n"
+        );
+
+        let error = parse_openai_sse_response(stream).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Incomplete response returned, reason: unknown"
+        );
+        assert!(is_openai_sse_api_error(&error));
+        assert!(!is_retryable_openai_sse_api_error(&error));
+    }
+
+    #[test]
+    fn openai_response_incomplete_error_handles_json_payloads() {
+        let error = openai_response_incomplete_error(&json!({
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"}
+        }))
+        .unwrap();
+        assert_eq!(
+            error.to_string(),
+            "Incomplete response returned, reason: max_output_tokens"
+        );
+        assert!(is_openai_sse_api_error(&error) && is_openai_response_incomplete_error(&error));
+    }
+
+    #[test]
+    fn parse_openai_sse_response_does_not_recover_from_eof_after_incomplete_event_header() {
+        let stream = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+            "event: response.incomplete\n"
+        );
+
+        let error = parse_openai_sse_response(stream).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("stream closed before response.completed"));
     }
 
     #[test]
@@ -658,6 +816,7 @@ mod tests {
         assert_eq!(invocation.tool_id, "web_search");
         assert_eq!(invocation.call_id, "ws_1");
         assert!(invocation.success);
+        assert!(invocation.is_provider_stream_invocation());
         assert!(
             invocation.input.contains("rust async tokio"),
             "input carries the search query: {}",
@@ -773,23 +932,33 @@ mod tests {
     }
 
     #[test]
-    fn process_openai_event_handles_response_cancelled() {
-        let stream = concat!(
-            "event: response.output_text.delta\n",
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
-            "event: response.cancelled\n",
-            "data: {\"type\":\"response.cancelled\",\"response\":{\"id\":\"resp_cancel\",\"status\":\"cancelled\"}}\n\n"
-        );
-        let mut deltas = Vec::new();
-        let result =
-            super::parse_openai_sse_reader_typed(BufReader::new(stream.as_bytes()), &mut |evt| {
-                if let TurnStreamEvent::TextDelta(d) = evt {
-                    deltas.push(d);
-                }
-            })
-            .unwrap();
-        assert_eq!(deltas, vec!["partial"]);
-        assert_eq!(result.response_id.as_deref(), Some("resp_cancel"));
+    fn process_openai_event_does_not_complete_on_non_completed_terminal_events() {
+        for event in ["response.cancelled", "response.done"] {
+            let stream = format!(
+                "event: response.output_text.delta\n\
+                 data: {{\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}}\n\n\
+                 event: {event}\n\
+                 data: {{\"type\":\"{event}\",\"response\":{{\"id\":\"resp_cancel\",\"status\":\"cancelled\"}}}}\n\n"
+            );
+            let mut deltas = Vec::new();
+            let result = super::parse_openai_sse_reader_typed(
+                BufReader::new(stream.as_bytes()),
+                &mut |evt| {
+                    if let TurnStreamEvent::TextDelta(d) = evt {
+                        deltas.push(d);
+                    }
+                },
+            );
+            let error = match result {
+                Ok(_) => panic!("non-completed terminal event must not complete"),
+                Err(error) => error,
+            };
+
+            assert_eq!(deltas, vec!["partial"]);
+            assert!(error
+                .to_string()
+                .contains("stream closed before response.completed"));
+        }
     }
 
     #[test]

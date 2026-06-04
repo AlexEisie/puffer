@@ -1,4 +1,6 @@
 references/
+# But skill reference docs are real content, not build artifacts.
+!resources/skills/**/references/
 target/
 .release/
 release/

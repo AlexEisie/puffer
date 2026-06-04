@@ -17,6 +17,7 @@ import type {
   RepoActionResult,
   RepoStatus,
   ChromeSecretsImportResult,
+  SaveBrowserSettingsInput,
   SaveSecretInput,
   SaveProxySettingsInput,
   SessionDetail,
@@ -251,6 +252,7 @@ type BackendAuthProviderStatus = AuthProviderStatus;
 type BackendProviderSummary = ProviderSummary;
 type BackendNetworkProxySettings = SettingsSnapshot["networkProxy"];
 type BackendSecretsSettings = SettingsSnapshot["secrets"];
+type BackendBrowserSettings = SettingsSnapshot["browser"];
 
 type BackendSettingsSnapshot = {
   workspaceRoot: string;
@@ -263,6 +265,7 @@ type BackendSettingsSnapshot = {
   sessions: BackendSettingsSessionSummary;
   auth: BackendAuthProviderStatus[];
   providers: BackendProviderSummary[];
+  browser: BackendBrowserSettings;
   networkProxy: BackendNetworkProxySettings;
   secrets: BackendSecretsSettings;
 };
@@ -840,6 +843,13 @@ export async function saveProxySettings(
   return client.request<BackendSettingsSnapshot>("save_proxy_settings", input);
 }
 
+export async function saveBrowserSettings(
+  input: SaveBrowserSettingsInput
+): Promise<SettingsSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<BackendSettingsSnapshot>("save_browser_settings", input);
+}
+
 export async function saveSecret(input: SaveSecretInput): Promise<SettingsSnapshot> {
   if (canReachDaemon()) {
     const client = await ensureLocalDaemonClient();
@@ -1376,6 +1386,10 @@ export type AgentTurnOptions = {
   permissionMode?: AgentPermissionMode;
   mode?: AgentTurnMode;
 };
+export type StaleTurnRecoveryResult =
+  | { recovery: "retry_started"; turnId: string }
+  | { recovery: "already_retried" }
+  | { recovery: "not_recoverable"; reason?: string | null; turnId?: string | null };
 
 /** Starts a new agent turn on `sessionId` with `message`. Returns the turn id
  *  so the caller can correlate streamed events and reply to permission
@@ -1399,6 +1413,21 @@ export async function runAgentTurn(
     // Fallback: the in-process Tauri command (same behavior, just no daemon).
     return invoke<string>("run_agent_turn", { sessionId, message, ...options });
   }
+}
+
+/** Retries one stale unanswered turn after the daemon validates that no live
+ *  turn exists and persists a one-shot recovery marker. */
+export async function recoverStaleAgentTurn(
+  sessionId: string,
+  retryAfterMs: number,
+  options: AgentTurnOptions = {}
+): Promise<StaleTurnRecoveryResult> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<StaleTurnRecoveryResult>("recover_stale_turn", {
+    sessionId,
+    retryAfterMs,
+    ...options
+  });
 }
 
 /** Runs a slash command (e.g. `/connect <slug> <conn>`) through the
@@ -1977,6 +2006,11 @@ export async function browserCefNativeHistory(
 /** Close a native CEF browser. */
 export async function browserCefNativeClose(sessionId: string): Promise<void> {
   await invoke("browser_cef_native_close", { sessionId });
+}
+
+/** Hide a native CEF browser without closing its renderer process. */
+export async function browserCefNativeHide(sessionId: string): Promise<void> {
+  await invoke("browser_cef_native_hide", { sessionId });
 }
 
 /** Open or reuse the Chrome-backed browser session for a Puffer session. */
