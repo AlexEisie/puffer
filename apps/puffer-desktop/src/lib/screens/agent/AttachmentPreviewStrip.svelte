@@ -109,6 +109,7 @@
     border: 0;
     background: transparent;
     color: inherit;
+    text-align: left;
     cursor: pointer;
   }
   .pf-attachment-preview-action:hover .pf-attachment-thumb,
@@ -162,6 +163,7 @@
     min-width: 0;
     display: grid;
     gap: 2px;
+    text-align: left;
   }
   .pf-attachment-file-name,
   .pf-attachment-file-ext {
