@@ -80,7 +80,7 @@
               title="Remove attachment"
               onclick={() => onRemove?.(attachment.id)}
             >
-              <Icon name="x" size={13} />
+              <Icon name="x" size={16} />
             </button>
           {/if}
         </div>
@@ -185,8 +185,8 @@
   }
   .pf-attachment-remove {
     position: absolute;
-    top: -6px;
-    right: -6px;
+    top: -2px;
+    right: -2px;
     width: 22px;
     height: 22px;
     display: inline-flex;
