@@ -52,6 +52,7 @@
   const ENGINEER_NAME = "Engineer";
   const RECAP_DISPLAY_PREFIX = "\u203B recap: ";
   const COMPOSER_MAX_HEIGHT_PX = 200;
+  const THREAD_BOTTOM_THRESHOLD_PX = 100;
   type SubmitMessageResult = boolean | void | Promise<boolean | void>;
   type ComposerRoutingPreference = {
     providerId: string | null;
@@ -841,19 +842,40 @@
     }
   }
 
+  function isThreadNearBottom(thread: HTMLDivElement | undefined = threadEl): boolean {
+    if (!thread) return false;
+    const bottomGap = thread.scrollHeight - thread.scrollTop - thread.clientHeight;
+    const hasMeaningfulOverflow =
+      thread.scrollHeight - thread.clientHeight > THREAD_BOTTOM_THRESHOLD_PX;
+    return !hasMeaningfulOverflow || bottomGap < THREAD_BOTTOM_THRESHOLD_PX;
+  }
+
+  function scrollThreadToBottom(behavior: ScrollBehavior = "auto") {
+    if (!threadEl) return;
+    threadEl.scrollTo({ top: threadEl.scrollHeight, behavior });
+  }
+
   function resizeComposerTextarea(
     textarea: HTMLTextAreaElement | undefined = composerTextareaEl
-  ) {
-    if (!textarea) return;
+  ): boolean {
+    if (!textarea) return false;
+    const previousHeight = textarea.getBoundingClientRect().height;
+    const previousOverflowY = textarea.style.overflowY;
     textarea.style.height = "auto";
     const scrollHeight = textarea.scrollHeight;
     const nextHeight = Math.min(scrollHeight, COMPOSER_MAX_HEIGHT_PX);
+    const nextOverflowY = scrollHeight > COMPOSER_MAX_HEIGHT_PX ? "auto" : "hidden";
     textarea.style.height = `${nextHeight}px`;
-    textarea.style.overflowY = scrollHeight > COMPOSER_MAX_HEIGHT_PX ? "auto" : "hidden";
+    textarea.style.overflowY = nextOverflowY;
+    return Math.abs(previousHeight - nextHeight) > 0.5 || previousOverflowY !== nextOverflowY;
   }
 
-  function scheduleComposerResize() {
-    void tick().then(() => resizeComposerTextarea());
+  function scheduleComposerResize({ anchorThread = true }: { anchorThread?: boolean } = {}) {
+    const shouldAnchorThread = anchorThread && isThreadNearBottom();
+    void tick().then(() => {
+      const resized = resizeComposerTextarea();
+      if (resized && shouldAnchorThread) scrollThreadToBottom();
+    });
   }
 
   function updateDraft(value: string) {
@@ -994,7 +1016,7 @@
       expandedActivityIds = [];
       selectedActivityChildren = {};
       lastSessionId = nextSessionId;
-      scheduleComposerResize();
+      scheduleComposerResize({ anchorThread: false });
       void tick().then(() => threadEl?.scrollTo({ top: 0, behavior: "auto" }));
     }
   });
@@ -1229,8 +1251,8 @@
         if ((session?.id ?? null) === targetSessionId) {
           attachmentDrafts = previousAttachments;
           attachmentError = null;
+          scheduleComposerResize();
         }
-        scheduleComposerResize();
         return;
       }
       await tick();
@@ -1244,8 +1266,8 @@
       if ((session?.id ?? null) === targetSessionId) {
         attachmentDrafts = previousAttachments;
         attachmentError = null;
+        scheduleComposerResize();
       }
-      scheduleComposerResize();
     } finally {
       setSubmitInFlight(targetSessionId, false);
     }

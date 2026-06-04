@@ -61,6 +61,23 @@ async function composerTextareaMetrics(page: Page): Promise<{
   });
 }
 
+async function chatThreadMetrics(page: Page): Promise<{
+  scrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+  bottomGap: number;
+}> {
+  return page.locator(".pf-chat-thread").evaluate((node) => {
+    const thread = node as HTMLDivElement;
+    return {
+      scrollTop: thread.scrollTop,
+      scrollHeight: thread.scrollHeight,
+      clientHeight: thread.clientHeight,
+      bottomGap: thread.scrollHeight - thread.scrollTop - thread.clientHeight
+    };
+  });
+}
+
 test("composer add content menu attaches image and file drafts", async ({ page }) => {
   const imageBuffer = Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==",
@@ -976,6 +993,83 @@ test("composer textarea autosizes long drafts and resets after send", async ({ p
   await expect
     .poll(async () => (await composerTextareaMetrics(page)).height)
     .toBeLessThanOrEqual(initialMetrics.height + 4);
+});
+
+test("composer autosize keeps bottom thread content anchored", async ({ page }) => {
+  const timeline = Array.from({ length: 36 }, (_, index) => [
+    {
+      kind: "user_message",
+      id: `anchor-user-${index + 1}`,
+      text: `Anchored composer user row ${index + 1}. `.repeat(6),
+      createdAtMs: baseTime - 120_000 + index * 2_000
+    },
+    {
+      kind: "assistant_message",
+      id: `anchor-assistant-${index + 1}`,
+      text: `Anchored composer assistant row ${index + 1}. `.repeat(10),
+      createdAtMs: baseTime - 119_000 + index * 2_000
+    }
+  ]).flat();
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-autosize-anchor",
+        displayName: "Autosize anchor",
+        title: "Autosize anchor",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 120_000,
+        eventCount: timeline.length,
+        timeline
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Autosize anchor/);
+  const composer = page.locator(".pf-composer textarea");
+  const thread = page.locator(".pf-chat-thread");
+  await expect(composer).toBeEnabled();
+  await expect(page.getByText("Anchored composer assistant row 36.")).toBeVisible();
+  const overflowMetrics = await chatThreadMetrics(page);
+  expect(overflowMetrics.scrollHeight).toBeGreaterThan(overflowMetrics.clientHeight + 200);
+
+  await thread.evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  await expect.poll(async () => (await chatThreadMetrics(page)).bottomGap).toBeLessThan(2);
+
+  const pinnedBefore = await chatThreadMetrics(page);
+  const multilinePrompt = Array.from(
+    { length: 9 },
+    (_, index) => `anchored composer line ${index + 1}`
+  ).join("\n");
+
+  await composer.fill(multilinePrompt);
+  await expect
+    .poll(async () => (await composerTextareaMetrics(page)).height)
+    .toBeGreaterThan(120);
+  await expect.poll(async () => (await chatThreadMetrics(page)).bottomGap).toBeLessThan(2);
+
+  const pinnedAfter = await chatThreadMetrics(page);
+  expect(pinnedAfter.scrollTop).toBeGreaterThan(pinnedBefore.scrollTop + 48);
+
+  await thread.evaluate((node) => {
+    node.scrollTop = Math.max(0, node.scrollTop - 320);
+  });
+  const scrolledBefore = await chatThreadMetrics(page);
+  expect(scrolledBefore.bottomGap).toBeGreaterThan(260);
+
+  await composer.fill("short prompt");
+  await expect
+    .poll(async () => (await composerTextareaMetrics(page)).height)
+    .toBeLessThan(80);
+
+  const scrolledAfter = await chatThreadMetrics(page);
+  expect(scrolledAfter.bottomGap).toBeGreaterThan(120);
 });
 
 test("composer moves submitted prompt into the thread while turn start is pending", async ({
