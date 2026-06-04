@@ -16,6 +16,33 @@ async function reconnectBackend(page: Page, daemon: FakeDaemon): Promise<void> {
   await expect(page.locator(".connection-banner")).toHaveCount(0);
 }
 
+async function dispatchFileDrag(
+  page: Page,
+  type: "dragenter" | "drop",
+  files: Array<{ name: string; mimeType: string; buffer: Buffer }>
+): Promise<void> {
+  const dataTransfer = await page.evaluateHandle((uploads) => {
+    const transfer = new DataTransfer();
+    for (const upload of uploads) {
+      transfer.items.add(
+        new File([Uint8Array.from(upload.bytes)], upload.name, { type: upload.mimeType })
+      );
+    }
+    return transfer;
+  }, files.map((file) => ({
+    name: file.name,
+    mimeType: file.mimeType,
+    bytes: Array.from(file.buffer)
+  })));
+  try {
+    await page
+      .locator('[data-testid="agent-chat-drop-surface"]')
+      .dispatchEvent(type, { dataTransfer });
+  } finally {
+    await dataTransfer.dispose();
+  }
+}
+
 test("composer add content menu attaches image and file drafts", async ({ page }) => {
   const imageBuffer = Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==",
@@ -146,6 +173,98 @@ test("composer add content menu attaches image and file drafts", async ({ page }
   await expect(page.getByText("report.pdf")).toBeVisible();
   await expect(page.getByText("[Image: sample.png]")).toHaveCount(0);
   await expect(page.getByText("[File: report.pdf]")).toHaveCount(0);
+});
+
+test("chat surface drop attaches image and file drafts", async ({ page }) => {
+  const imageBuffer = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==",
+    "base64"
+  );
+  const pdfBuffer = Buffer.from("%PDF-1.7\n", "utf8");
+  const files = [
+    {
+      name: "drop.png",
+      mimeType: "image/png",
+      buffer: imageBuffer
+    },
+    {
+      name: "drop.pdf",
+      mimeType: "application/pdf",
+      buffer: pdfBuffer
+    }
+  ];
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-drop-attachments",
+        displayName: "Drop attachments",
+        title: "Drop attachments",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "drop-seed",
+            text: "Drop files here.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Drop attachments/);
+  await expect(page.getByText("Drop files here.")).toBeVisible();
+
+  await dispatchFileDrag(page, "dragenter", files);
+  await expect(page.getByText("Drop files to attach")).toBeVisible();
+  await expect(page.getByText("Up to 10 files, 20 MiB each")).toBeVisible();
+
+  await dispatchFileDrag(page, "drop", files);
+
+  await expect(page.getByText("Drop files to attach")).toHaveCount(0);
+  await expect(page.locator('[data-testid="composer-attachment-preview-strip"]')).toBeVisible();
+  await expect(page.getByAltText("drop.png")).toBeVisible();
+  await expect(page.getByText("drop.pdf")).toBeVisible();
+
+  await page.locator(".pf-composer textarea").fill("review drop");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (candidate) =>
+      candidate.params.sessionId === "session-drop-attachments" &&
+      candidate.params.message === "review drop\n\n[Image: drop.png]\n[File: drop.pdf]" &&
+      Array.isArray(candidate.params.attachments) &&
+      candidate.params.attachments.length === 2
+  );
+  expect(request.params.attachments).toEqual([
+    expect.objectContaining({
+      name: "drop.png",
+      mimeType: "image/png",
+      kind: "image",
+      extension: "PNG",
+      size: imageBuffer.length
+    }),
+    expect.objectContaining({
+      name: "drop.pdf",
+      mimeType: "application/pdf",
+      kind: "file",
+      extension: "PDF",
+      size: pdfBuffer.length
+    })
+  ]);
+  await expect(page.locator('[data-testid="composer-attachment-preview-strip"]')).toHaveCount(0);
+  await expect(page.getByAltText("drop.png")).toBeVisible();
+  await expect(page.getByText("drop.pdf")).toBeVisible();
+  await expect(page.getByText("[Image: drop.png]")).toHaveCount(0);
+  await expect(page.getByText("[File: drop.pdf]")).toHaveCount(0);
 });
 
 test("turn completion reload does not leak live chat into a newly selected session", async ({

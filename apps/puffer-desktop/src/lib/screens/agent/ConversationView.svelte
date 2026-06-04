@@ -141,6 +141,7 @@
   let attachmentError = $state<string | null>(null);
   let attachmentMenuOpen = $state(false);
   let attachmentDropActive = $state(false);
+  let attachmentDragDepth = 0;
   let attachmentIdSequence = 0;
   let fileInputEl: HTMLInputElement | undefined;
   let attachmentMenuEl: HTMLDivElement | undefined;
@@ -261,6 +262,7 @@
       agentBusy ||
       (!selectedProviderAuthenticated && !providerSwitchCanRecover)
   );
+  let canAcceptAttachmentDrop = $derived(!composerDisabled);
   let modelPickerDisabled = $derived(
     turnRunning || (!selectedProviderAuthenticated && !providerSwitchCanRecover)
   );
@@ -905,6 +907,11 @@
     attachmentError = null;
   }
 
+  function resetAttachmentDropState() {
+    attachmentDragDepth = 0;
+    attachmentDropActive = false;
+  }
+
   function openAttachmentPicker() {
     if (composerDisabled) return;
     attachmentMenuOpen = false;
@@ -917,25 +924,33 @@
     attachmentMenuOpen = !attachmentMenuOpen;
   }
 
+  function handleAttachmentDragEnter(event: DragEvent) {
+    if (!canAcceptAttachmentDrop || !dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    attachmentDragDepth += 1;
+    attachmentDropActive = true;
+  }
+
   function handleAttachmentDragOver(event: DragEvent) {
-    if (composerDisabled || !dataTransferHasFiles(event.dataTransfer)) return;
+    if (!canAcceptAttachmentDrop || !dataTransferHasFiles(event.dataTransfer)) return;
     event.preventDefault();
     event.dataTransfer!.dropEffect = "copy";
     attachmentDropActive = true;
   }
 
   function handleAttachmentDragLeave(event: DragEvent) {
-    const current = event.currentTarget;
-    const next = event.relatedTarget;
-    if (current instanceof HTMLElement && next instanceof Node && current.contains(next)) return;
-    attachmentDropActive = false;
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
+    attachmentDragDepth = Math.max(0, attachmentDragDepth - 1);
+    if (attachmentDragDepth === 0) attachmentDropActive = false;
   }
 
   function handleAttachmentDrop(event: DragEvent) {
-    if (composerDisabled || !dataTransferHasFiles(event.dataTransfer)) return;
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
     event.preventDefault();
-    attachmentDropActive = false;
-    addFilesToComposer(filesFromDataTransfer(event.dataTransfer));
+    const files = filesFromDataTransfer(event.dataTransfer);
+    resetAttachmentDropState();
+    if (!canAcceptAttachmentDrop || files.length === 0) return;
+    addFilesToComposer(files);
   }
 
   function visibleMessageBody(item: MessageTimelineItem): string {
@@ -957,7 +972,7 @@
       attachmentDrafts = nextSessionId ? attachmentDraftsBySessionId[nextSessionId] ?? [] : [];
       attachmentError = null;
       attachmentMenuOpen = false;
-      attachmentDropActive = false;
+      resetAttachmentDropState();
       expandedActivityIds = [];
       selectedActivityChildren = {};
       lastSessionId = nextSessionId;
@@ -972,7 +987,7 @@
   $effect(() => {
     if (!composerDisabled) return;
     attachmentMenuOpen = false;
-    attachmentDropActive = false;
+    resetAttachmentDropState();
   });
 
   $effect(() => {
@@ -1922,7 +1937,24 @@
   }
 </script>
 
-<div class="pf-chat">
+<div
+  class={`pf-chat${attachmentDropActive ? " drop-active" : ""}`}
+  data-testid="agent-chat-drop-surface"
+  role="region"
+  aria-label="Chat conversation and attachment drop surface"
+  ondragenter={handleAttachmentDragEnter}
+  ondragover={handleAttachmentDragOver}
+  ondragleave={handleAttachmentDragLeave}
+  ondrop={handleAttachmentDrop}
+>
+  {#if attachmentDropActive}
+    <div class="pf-attachment-drop-overlay">
+      <div class="pf-attachment-drop-copy">
+        <p>Drop files to attach</p>
+        <span>Up to 10 files, 20 MiB each</span>
+      </div>
+    </div>
+  {/if}
   <div class="pf-chat-thread" bind:this={threadEl}>
     <div class="pf-chat-thread-inner">
       {#if loading && rows.length === 0}
@@ -2188,12 +2220,9 @@
 
   <div class="pf-composer-wrap">
     <div
-      class={`pf-composer${attachmentDropActive ? " drop-active" : ""}`}
+      class="pf-composer"
       role="group"
       aria-label="Message composer"
-      ondragover={handleAttachmentDragOver}
-      ondragleave={handleAttachmentDragLeave}
-      ondrop={handleAttachmentDrop}
     >
       <input
         bind:this={fileInputEl}
@@ -2205,9 +2234,6 @@
         data-testid="composer-file-input"
         onchange={(event) => addFilesToComposer(event.currentTarget.files)}
       />
-      {#if attachmentDropActive}
-        <div class="pf-attachment-drop-overlay">Drop files to attach</div>
-      {/if}
       {#if attachmentDrafts.length > 0}
         <AttachmentPreviewStrip
           attachments={attachmentDrafts}
@@ -2324,6 +2350,7 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+    position: relative;
     background: var(--background);
   }
   .pf-chat-thread {
@@ -2351,7 +2378,7 @@
     margin: 0 auto;
     position: relative;
   }
-  .pf-composer.drop-active {
+  .pf-chat.drop-active .pf-composer {
     border-color: var(--puffer-accent);
     box-shadow: 0 0 0 3px color-mix(in oklab, var(--puffer-accent) 18%, transparent);
   }
@@ -2360,18 +2387,39 @@
   }
   .pf-attachment-drop-overlay {
     position: absolute;
-    inset: 8px;
-    z-index: 5;
+    inset: 0;
+    z-index: 30;
     display: flex;
     align-items: center;
     justify-content: center;
+    padding: 24px;
+    background: color-mix(in oklab, var(--background) 82%, transparent);
+    color: var(--foreground);
+    backdrop-filter: blur(2px);
+    pointer-events: none;
+  }
+  .pf-attachment-drop-copy {
+    min-width: min(340px, 100%);
+    padding: 18px 22px;
     border: 1px dashed color-mix(in oklab, var(--puffer-accent) 62%, var(--border));
     border-radius: 10px;
-    background: color-mix(in oklab, var(--background) 84%, var(--puffer-accent));
-    color: var(--foreground);
-    font-size: 13px;
-    font-weight: 650;
-    pointer-events: none;
+    background: color-mix(in oklab, var(--background) 88%, var(--puffer-accent));
+    box-shadow: var(--shadow-lg);
+    text-align: center;
+  }
+  .pf-attachment-drop-copy p {
+    margin: 0;
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 700;
+  }
+  .pf-attachment-drop-copy span {
+    display: block;
+    margin-top: 3px;
+    color: var(--muted-foreground);
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 600;
   }
   .pf-attachment-error {
     margin: -2px 4px 4px;
