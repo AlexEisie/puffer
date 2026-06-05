@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { onMount, tick, untrack } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { listMediaCapabilities, updateConfig } from "../../api/desktop";
   import Icon from "../../design/Icon.svelte";
+  import { focusTrap } from "../../focusTrap";
   import type {
     ImageMediaSettings,
     MediaCapabilityInfo,
@@ -23,9 +24,20 @@
   const initialVideo = untrack(() => settings.video);
 
   const title = $derived(mediaSettingsTitle(kind));
-  const saveLabel = $derived(`Save ${title.toLowerCase()}`);
+  const saveLabel = $derived(kind === "image" ? "Save" : `Save ${title.toLowerCase()}`);
   const closeLabel = $derived(`Close ${title.toLowerCase()}`);
   const saved = $derived(mediaSettingsForKind(kind, settings));
+  const COMMON_IMAGE_SIZES = [
+    "256x256",
+    "512x512",
+    "768x768",
+    "1024x1024",
+    "1024x1536",
+    "1536x1024",
+    "1024x1792",
+    "1792x1024",
+    "2048x2048"
+  ];
 
   let capabilities = $state<MediaCapabilityInfo[]>([]);
   let loading = $state(true);
@@ -38,9 +50,6 @@
   let outputFormat = $state(initialImage.outputFormat);
   let aspectRatio = $state(initialVideo.aspectRatio);
   let durationSeconds = $state(initialVideo.durationSeconds);
-  let dialogEl: HTMLDivElement | undefined;
-  let closeButtonEl: HTMLButtonElement | undefined;
-  let previouslyFocusedEl: HTMLElement | null = null;
   let appliedSettingsKey = $state(untrack(() => mediaSettingsKey(kind, settings)));
 
   let availableCapabilities = $derived(
@@ -74,7 +83,7 @@
       )
   );
   let canSave = $derived(Boolean(settingsReady && selectedCapability && !loading && !saving));
-  let sizeOptions = $derived(parameterOptions("size", ["1024x1024"]));
+  let sizeOptions = $derived(mergedParameterOptions("size", COMMON_IMAGE_SIZES));
   let qualityOptions = $derived(parameterOptions("quality", ["auto"]));
   let outputFormatOptions = $derived(parameterOptions("outputFormat", ["png"]));
   let aspectRatioOptions = $derived(parameterOptions("aspectRatio", ["16:9"]));
@@ -86,6 +95,11 @@
     const values = selectedCapability?.parameterValues?.[key];
     if (!Array.isArray(values) || values.length === 0) return fallback;
     return values;
+  }
+
+  function mergedParameterOptions(key: string, fallback: string[]): string[] {
+    const values = selectedCapability?.parameterValues?.[key];
+    return Array.from(new Set([...(Array.isArray(values) ? values : []), ...fallback]));
   }
 
   function mediaSettingsTitle(mediaKind: MediaKind): string {
@@ -141,6 +155,20 @@
     modelId = availableCapabilities.find((capability) => capability.providerId === value)?.modelId ?? "";
   }
 
+  function providerLabel(value: string): string {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "openai" || normalized === "codex") return "OpenAI";
+    if (normalized === "anthropic" || normalized === "claude") return "Claude";
+    if (normalized === "replicate") return "Replicate";
+    if (normalized === "fal" || normalized === "fal-ai") return "fal.ai";
+    if (normalized === "puffer") return "Puffer";
+    return value
+      .split(/[-_\s]+/)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ") || value;
+  }
+
   function withCurrentImage(): ImageMediaSettings {
     return {
       providerId: providerId || null,
@@ -180,41 +208,9 @@
 
   function close() {
     onClose();
-    if (previouslyFocusedEl?.isConnected) void tick().then(() => previouslyFocusedEl?.focus());
-  }
-
-  function focusableElements(): HTMLElement[] {
-    if (!dialogEl) return [];
-    return Array.from(
-      dialogEl.querySelectorAll<HTMLElement>(
-        "button:not(:disabled), select:not(:disabled), input:not(:disabled)"
-      )
-    ).filter((element) => element.offsetParent !== null);
-  }
-
-  function handleKeydown(event: KeyboardEvent) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      close();
-      return;
-    }
-    if (event.key !== "Tab") return;
-    const focusable = focusableElements();
-    if (focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
   }
 
   onMount(() => {
-    previouslyFocusedEl = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    void tick().then(() => closeButtonEl?.focus());
     const load = async () => {
       loading = true;
       error = null;
@@ -229,10 +225,14 @@
       }
     };
     void load();
-    document.addEventListener("keydown", handleKeydown);
-    return () => {
-      document.removeEventListener("keydown", handleKeydown);
+  });
+
+  $effect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !saving) close();
     };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   });
 
   $effect(() => {
@@ -245,272 +245,337 @@
   });
 </script>
 
-<div class="pf-media-modal-backdrop" role="presentation">
+<div
+  class="pf-modal-scrim"
+  role="presentation"
+  onclick={() => {
+    if (!saving) close();
+  }}
+  onkeydown={() => {}}
+>
   <div
-    bind:this={dialogEl}
-    class="pf-media-modal"
+    class="pf-modal pf-media-modal"
+    onclick={(event) => event.stopPropagation()}
     role="dialog"
     aria-modal="true"
     aria-labelledby="pf-media-modal-title"
+    tabindex="-1"
+    use:focusTrap
+    onkeydown={() => {}}
   >
-    <header class="pf-media-modal-head">
-      <h2 id="pf-media-modal-title">{title}</h2>
+    <header class="pf-modal-head">
+      <div class="pf-modal-title-group">
+        <div id="pf-media-modal-title" class="pf-modal-title">{title}</div>
+      </div>
       <button
-        bind:this={closeButtonEl}
         type="button"
-        class="pf-media-icon-btn"
+        class="pf-modal-close"
         aria-label={closeLabel}
+        disabled={saving}
         onclick={close}
       >
-        <Icon name="x" size={15} />
+        <Icon name="x" size={14} />
       </button>
     </header>
 
-    <div class="pf-media-modal-body">
+    <div class="pf-modal-body pf-media-modal-body">
       {#if !settingsReady}
         <p class="pf-media-state">Loading generation settings...</p>
       {:else if loading}
         <p class="pf-media-state">Loading {kind} capabilities...</p>
       {:else if error}
-        <p class="pf-media-state warn" role="alert">{error}</p>
+        <p class="pf-media-state" data-warning="true" role="alert">{error}</p>
       {:else if !hasAvailableCapabilities}
         <p class="pf-media-state">No {kind} capabilities available.</p>
       {:else}
         {#if savedSelectionMissing}
-          <p class="pf-media-state warn" role="alert">Saved model is no longer available.</p>
+          <p class="pf-media-state" data-warning="true" role="alert">Saved model is no longer available.</p>
         {/if}
 
-        <label>
-          <span>Provider</span>
-          <select value={providerId} onchange={(event) => handleProviderChange(event.currentTarget.value)}>
-            {#if providerId && !providerOptions.includes(providerId)}
-              <option value={providerId} disabled>{providerId} unavailable</option>
-            {/if}
-            {#each providerOptions as provider}
-              <option value={provider}>{provider}</option>
-            {/each}
-          </select>
-        </label>
+        <div class="pf-media-form-grid">
+          <label class="pf-media-field">
+            <span class="pf-field-label">Provider</span>
+            <select value={providerId} onchange={(event) => handleProviderChange(event.currentTarget.value)}>
+              {#if providerId && !providerOptions.includes(providerId)}
+                <option value={providerId} disabled>{providerId} unavailable</option>
+              {/if}
+              {#each providerOptions as provider}
+                <option value={provider}>{providerLabel(provider)}</option>
+              {/each}
+            </select>
+          </label>
 
-        <label>
-          <span>Model</span>
-          <select value={modelId} onchange={(event) => (modelId = event.currentTarget.value)}>
-            {#if modelId && !modelOptions.some((capability) => capability.modelId === modelId)}
-              <option value={modelId} disabled>{modelId} unavailable</option>
-            {/if}
-            {#each modelOptions as capability}
-              <option value={capability.modelId}>{capability.modelId}</option>
-            {/each}
-          </select>
-        </label>
+          <label class="pf-media-field">
+            <span class="pf-field-label">Model</span>
+            <select value={modelId} onchange={(event) => (modelId = event.currentTarget.value)}>
+              {#if modelId && !modelOptions.some((capability) => capability.modelId === modelId)}
+                <option value={modelId} disabled>{modelId} unavailable</option>
+              {/if}
+              {#each modelOptions as capability}
+                <option value={capability.modelId}>{capability.modelId}</option>
+              {/each}
+            </select>
+          </label>
 
-        {#if kind === "image"}
-          <div class="pf-media-grid">
-            <label>
-              <span>Size</span>
+          {#if kind === "image"}
+            <label class="pf-media-field">
+              <span class="pf-field-label">Size</span>
               <select value={size} onchange={(event) => (size = event.currentTarget.value)}>
                 {#each sizeOptions as option}
                   <option value={option}>{option}</option>
                 {/each}
               </select>
             </label>
-            <label>
-              <span>Quality</span>
+            <label class="pf-media-field">
+              <span class="pf-field-label">Quality</span>
               <select value={quality} onchange={(event) => (quality = event.currentTarget.value)}>
                 {#each qualityOptions as option}
                   <option value={option}>{option}</option>
                 {/each}
               </select>
             </label>
-            <label>
-              <span>Output format</span>
+            <label class="pf-media-field">
+              <span class="pf-field-label">Output format</span>
               <select value={outputFormat} onchange={(event) => (outputFormat = event.currentTarget.value)}>
                 {#each outputFormatOptions as option}
                   <option value={option}>{option}</option>
                 {/each}
               </select>
             </label>
-          </div>
-        {:else}
-          <div class="pf-media-grid">
-            <label>
-              <span>Aspect ratio</span>
+          {:else}
+            <label class="pf-media-field">
+              <span class="pf-field-label">Aspect ratio</span>
               <select value={aspectRatio} onchange={(event) => (aspectRatio = event.currentTarget.value)}>
                 {#each aspectRatioOptions as option}
                   <option value={option}>{option}</option>
                 {/each}
               </select>
             </label>
-            <label>
-              <span>Duration</span>
+            <label class="pf-media-field">
+              <span class="pf-field-label">Duration</span>
               <select value={String(durationSeconds)} onchange={(event) => (durationSeconds = Number(event.currentTarget.value))}>
                 {#each durationOptions as option}
                   <option value={String(option)}>{option}s</option>
                 {/each}
               </select>
             </label>
-          </div>
-        {/if}
+          {/if}
+        </div>
       {/if}
     </div>
 
-    <footer class="pf-media-modal-actions">
-      <button type="button" class="pf-media-secondary-btn" onclick={close}>Cancel</button>
-      <button type="button" class="pf-media-primary-btn" disabled={!canSave} onclick={save}>
-        {saving ? "Saving..." : saveLabel}
-      </button>
+    <footer class="pf-modal-foot">
+      <div class="pf-modal-foot-btns">
+        <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" onclick={close} disabled={saving}>
+          Cancel
+        </button>
+        <button type="button" class="sc-btn" data-variant="default" data-size="sm" disabled={!canSave} onclick={save}>
+          <Icon name="check" size={13} />{saving ? "Saving..." : saveLabel}
+        </button>
+      </div>
     </footer>
   </div>
 </div>
 
 <style>
-  .pf-media-modal-backdrop {
+  .pf-modal-scrim {
     position: fixed;
     inset: 0;
-    z-index: 80;
-    display: grid;
-    place-items: center;
-    padding: 20px;
-    background: color-mix(in oklab, var(--background) 68%, transparent);
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 24px;
+    background: color-mix(in oklch, var(--background) 30%, transparent 70%);
+    animation: pf-modal-scrim-in 140ms ease-out;
+  }
+
+  @keyframes pf-modal-scrim-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  .pf-modal {
+    max-height: calc(100vh - 96px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--card);
+    color: var(--card-foreground);
+    box-shadow: 0 24px 64px -12px oklch(0 0 0 / 0.35), 0 4px 16px -4px oklch(0 0 0 / 0.2);
+    animation: pf-modal-in 160ms cubic-bezier(0.2, 0.9, 0.3, 1);
+  }
+
+  @keyframes pf-modal-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
   }
 
   .pf-media-modal {
-    width: min(460px, 100%);
-    max-height: min(620px, calc(100vh - 40px));
+    width: min(480px, calc(100vw - 28px));
+  }
+
+  .pf-modal-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding: 12px 20px 6px;
+    flex-shrink: 0;
+  }
+
+  .pf-modal-title-group {
+    display: flex;
+    flex: 1 1 0;
+    min-width: 0;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .pf-modal-title {
+    color: var(--foreground);
+    font-size: 17px;
+    line-height: 22px;
+    font-weight: 600;
+    letter-spacing: 0;
+  }
+
+  .pf-modal-close {
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--foreground);
+    cursor: pointer;
+  }
+
+  .pf-modal-close:hover:not(:disabled) {
+    background: var(--muted);
+    color: var(--foreground);
+  }
+
+  .pf-modal-close:disabled {
+    cursor: default;
+    opacity: 0.5;
+  }
+
+  .pf-modal-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
     display: flex;
     flex-direction: column;
+    gap: 14px;
+    padding: 16px 20px 4px;
+  }
+
+  .pf-media-modal-body {
+    font-size: 12px;
+  }
+
+  .pf-media-form-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .pf-media-field {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .pf-field-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--foreground);
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+  }
+
+  .pf-media-field select {
+    width: 100%;
+    min-width: 0;
+    min-height: 32px;
+    padding: 0 10px;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--background);
     color: var(--foreground);
-    box-shadow: var(--shadow-lg);
-  }
-
-  .pf-media-modal-head,
-  .pf-media-modal-actions {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 12px 14px;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .pf-media-modal-actions {
-    justify-content: flex-end;
-    border-top: 1px solid var(--border);
-    border-bottom: 0;
-  }
-
-  .pf-media-modal-head h2 {
-    margin: 0;
-    font-size: 14px;
-    line-height: 1.2;
-  }
-
-  .pf-media-icon-btn {
-    width: 28px;
-    height: 28px;
-    display: inline-grid;
-    place-items: center;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: transparent;
-    color: var(--muted-foreground);
-    cursor: pointer;
-  }
-
-  .pf-media-icon-btn:hover {
-    background: var(--accent);
-    color: var(--foreground);
-  }
-
-  .pf-media-modal-body {
-    display: grid;
-    gap: 12px;
-    padding: 14px;
-    overflow: auto;
-  }
-
-  .pf-media-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 10px;
-  }
-
-  .pf-media-modal label {
-    display: grid;
-    gap: 6px;
-    min-width: 0;
-    font-size: 12px;
-    font-weight: 650;
-    color: var(--muted-foreground);
-  }
-
-  .pf-media-modal select {
-    min-width: 0;
-    height: 34px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--background);
-    color: var(--foreground);
     font: inherit;
-    font-weight: 600;
-    padding: 0 8px;
+    font-size: 12.5px;
+    transition: border-color 120ms, box-shadow 120ms;
+  }
+
+  .pf-media-field select:focus {
+    border-color: var(--puffer-accent);
+    box-shadow: 0 0 0 3px color-mix(in oklch, var(--puffer-accent) 15%, transparent);
   }
 
   .pf-media-state {
     margin: 0;
-    min-height: 34px;
+    min-height: 36px;
     display: flex;
     align-items: center;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 0 10px;
     color: var(--muted-foreground);
-    font-size: 12.5px;
+    background: color-mix(in oklab, var(--background) 94%, var(--muted));
+    font-size: 12px;
+    line-height: 1.4;
   }
 
-  .pf-media-state.warn {
-    border-color: color-mix(in oklab, var(--pf-run-failed) 35%, var(--border));
+  .pf-media-state[data-warning="true"] {
+    border-color: color-mix(in oklab, var(--destructive) 30%, var(--border));
+    background: color-mix(in oklab, var(--destructive) 8%, var(--background));
     color: var(--foreground);
   }
 
-  .pf-media-primary-btn,
-  .pf-media-secondary-btn {
-    height: 32px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 0 12px;
-    font: inherit;
-    font-size: 12.5px;
-    font-weight: 700;
-    cursor: pointer;
+  .pf-modal-foot {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+    flex-shrink: 0;
+    padding: 12px 20px;
   }
 
-  .pf-media-primary-btn {
-    border-color: color-mix(in oklab, var(--puffer-accent) 42%, var(--border));
-    background: var(--puffer-accent);
-    color: var(--puffer-accent-foreground);
-  }
-
-  .pf-media-primary-btn:disabled {
-    cursor: not-allowed;
-    opacity: 0.5;
-  }
-
-  .pf-media-secondary-btn {
-    background: transparent;
-    color: var(--foreground);
-  }
-
-  .pf-media-secondary-btn:hover {
-    background: var(--accent);
+  .pf-modal-foot-btns {
+    display: flex;
+    flex-shrink: 0;
+    gap: 8px;
+    margin-left: auto;
   }
 
   @media (max-width: 560px) {
-    .pf-media-grid {
-      grid-template-columns: 1fr;
+    .pf-modal-scrim {
+      padding: 24px 14px;
+    }
+
+    .pf-modal-foot-btns,
+    .pf-modal-foot-btns .sc-btn {
+      width: 100%;
+    }
+
+    .pf-modal-foot-btns {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+    }
+
+    .pf-modal-foot-btns .sc-btn {
+      min-width: 0;
     }
   }
 </style>

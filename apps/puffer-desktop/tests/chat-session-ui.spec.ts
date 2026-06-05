@@ -305,11 +305,17 @@ test("composer image generation settings modal saves media config from daemon ca
   await daemon.waitForRequest("list_media_capabilities", (request) => request.params.kind === "image");
   await expect(dialog.getByLabel("Provider")).toHaveValue("openai");
   await expect(dialog.getByLabel("Model")).toHaveValue("gpt-image-1");
+  const sizeOptions = await dialog.getByLabel("Size").locator("option").evaluateAll((options) =>
+    options.map((option) => (option as HTMLOptionElement).value)
+  );
+  expect(sizeOptions).toEqual(
+    expect.arrayContaining(["512x512", "768x768", "1792x1024", "1024x1792", "2048x2048"])
+  );
 
   await dialog.getByLabel("Size").selectOption("1536x1024");
   await dialog.getByLabel("Quality").selectOption("high");
   await dialog.getByLabel("Output format").selectOption("webp");
-  await dialog.getByRole("button", { name: "Save image generation settings" }).click();
+  await dialog.getByRole("button", { name: "Save" }).click();
 
   const update = await daemon.waitForRequest("update_config", (request) => "media" in request.params);
   expect(update.params).toEqual({
@@ -423,7 +429,7 @@ test("composer media generation settings marks stale saved image model invalid",
   const dialog = page.getByRole("dialog", { name: "Image generation settings" });
   await expect(dialog.getByText("Saved model is no longer available.")).toBeVisible();
   await expect(dialog.getByLabel("Model")).toHaveValue("old-image-model");
-  await expect(dialog.getByRole("button", { name: "Save image generation settings" })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Save" })).toBeDisabled();
 });
 
 test("explicit image slash trigger routes to media generation", async ({ page }) => {
