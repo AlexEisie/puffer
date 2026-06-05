@@ -583,6 +583,17 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
         ],
     },
     EnvVar {
+        name: "PUFFER_CEF_PROFILE_DIR",
+        description: "CEF browser profile directory shared by the desktop native CEF bridge and \
+             daemon Browser backend extension-registration checks.",
+        default: Some("$HOME/Library/Application Support/Puffer/cef-profile"),
+        source_files: &[
+            "puffer-cli/src/daemon_browser/session_launch.rs",
+            "apps/puffer-desktop/src-tauri/src/cef_host.rs",
+            "apps/puffer-desktop/src-tauri/src/daemon_launcher.rs",
+        ],
+    },
+    EnvVar {
         name: "PUFFER_CEF_ROOT",
         description: "Compatibility alias for a Puffer CT CEF runtime root. Used with \
              `PUFFER_CEF_PATH` and `CEF_PATH` for native CEF discovery.",
@@ -975,41 +986,5 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
 ];
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashSet;
-
-    #[test]
-    fn all_env_vars_have_unique_names() {
-        let mut seen: HashSet<&'static str> = HashSet::new();
-        for entry in ALL_ENV_VARS {
-            assert!(
-                seen.insert(entry.name),
-                "duplicate env var name in registry: {}",
-                entry.name
-            );
-        }
-    }
-
-    #[test]
-    fn all_env_vars_have_descriptions() {
-        for entry in ALL_ENV_VARS {
-            assert!(
-                !entry.description.trim().is_empty(),
-                "empty description for env var: {}",
-                entry.name
-            );
-            // Names are uppercase identifiers (allow digits, underscores,
-            // and parentheses for `PROGRAMFILES(X86)`).
-            assert!(
-                entry.name.chars().all(|c| c.is_ascii_uppercase()
-                    || c.is_ascii_digit()
-                    || c == '_'
-                    || c == '('
-                    || c == ')'),
-                "non-uppercase env var name: {}",
-                entry.name
-            );
-        }
-    }
-}
+#[path = "env_vars_tests.rs"]
+mod tests;
