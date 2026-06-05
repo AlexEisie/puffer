@@ -308,9 +308,7 @@ test("composer image generation settings modal saves media config from daemon ca
   const sizeOptions = await dialog.getByLabel("Size").locator("option").evaluateAll((options) =>
     options.map((option) => (option as HTMLOptionElement).value)
   );
-  expect(sizeOptions).toEqual(
-    expect.arrayContaining(["512x512", "768x768", "1792x1024", "1024x1792", "2048x2048"])
-  );
+  expect(sizeOptions).toEqual(["1024x1024", "1024x1536", "1536x1024"]);
 
   await dialog.getByLabel("Size").selectOption("1536x1024");
   await dialog.getByLabel("Quality").selectOption("high");
@@ -332,6 +330,78 @@ test("composer image generation settings modal saves media config from daemon ca
         modelId: null,
         aspectRatio: "16:9",
         durationSeconds: 8
+      }
+    }
+  });
+});
+
+test("composer image generation settings clamps unsupported saved parameters", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-image-settings-unsupported-params",
+        displayName: "Unsupported image parameters",
+        title: "Unsupported image parameters",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "image-settings-unsupported-params-seed",
+            text: "Tune unsupported image defaults here.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.setSettingsConfig({
+    media: {
+      image: {
+        providerId: null,
+        modelId: null,
+        size: "2048x2048",
+        quality: "ultra",
+        outputFormat: "gif"
+      },
+      video: {
+        providerId: null,
+        modelId: null,
+        aspectRatio: "16:9",
+        durationSeconds: 8
+      }
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Unsupported image parameters/);
+
+  await page.getByRole("button", { name: "Add content" }).click();
+  await page.getByRole("menuitem", { name: "Image generation settings" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Image generation settings" });
+  await expect(dialog).toBeVisible();
+  await daemon.waitForRequest(
+    "list_media_capabilities",
+    (request) => request.params.kind === "image"
+  );
+  await dialog.getByRole("button", { name: "Save" }).click();
+
+  const update = await daemon.waitForRequest(
+    "update_config",
+    (request) => "media" in request.params
+  );
+  expect(update.params).toMatchObject({
+    media: {
+      image: {
+        providerId: "openai",
+        modelId: "gpt-image-1",
+        size: "1024x1024",
+        quality: "auto",
+        outputFormat: "png"
       }
     }
   });

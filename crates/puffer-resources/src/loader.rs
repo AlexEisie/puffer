@@ -150,6 +150,7 @@ pub fn load_resources(paths: &ConfigPaths, runner: &dyn ToolRunner) -> Result<Lo
             &mut loaded.diagnostics,
         );
     }
+    validate_provider_media_descriptors(&loaded.providers)?;
     apply_runtime_resource_filters(&mut loaded);
     Ok(loaded)
 }
@@ -1018,6 +1019,24 @@ fn merge_by_id<T, F>(
     *existing = merged.into_values().map(|(item, _)| item).collect();
 }
 
+fn validate_provider_media_descriptors(providers: &[LoadedItem<ProviderPack>]) -> Result<()> {
+    for provider in providers {
+        provider
+            .value
+            .clone()
+            .into_descriptor()
+            .validate_media_descriptors()
+            .with_context(|| {
+                format!(
+                    "invalid media descriptor for provider `{}` from {}",
+                    provider.value.id,
+                    provider.source_info.path.display()
+                )
+            })?;
+    }
+    Ok(())
+}
+
 /// Pairs the dedup key used to merge resources with a user-friendly id for diagnostics.
 struct MergeKey {
     dedup: String,
@@ -1232,6 +1251,45 @@ mod tests {
         assert!(loaded.hooks.iter().any(|h| h.value.id == "tool-end"));
         assert!(loaded.skills.iter().any(|s| s.value.name == "reviewer"));
         assert!(loaded.plugins.iter().any(|p| p.value.id == "example"));
+    }
+
+    #[test]
+    fn load_resources_rejects_invalid_provider_media_descriptor() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let resources_dir = root.join("resources/providers");
+        fs::create_dir_all(&resources_dir).unwrap();
+        fs::write(
+            resources_dir.join("bad-media.yaml"),
+            r#"
+id: bad-media
+display_name: Bad Media
+base_url: https://bad-media.example
+default_api: openai-responses
+auth_modes:
+  - api_key
+models: []
+media:
+  image:
+    execution:
+      adapter: openai_images
+      path: /v1/images/generations
+    models:
+      - id: exact-image-model
+        operations:
+          - generate
+        parameters:
+          size: []
+"#,
+        )
+        .unwrap();
+
+        let paths = ConfigPaths::discover(&root);
+        let error = load_resources(&paths, &FsTestRunner).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("invalid media descriptor for provider `bad-media`"));
+        assert!(message.contains("parameters.size"));
     }
 
     #[test]

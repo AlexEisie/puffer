@@ -61,6 +61,7 @@ fn openai_judge_provider(base_url: String) -> ProviderDescriptor {
         headers: Default::default(),
         query_params: Default::default(),
         discovery: None,
+        media: None,
         models: vec![ModelDescriptor {
             id: "gpt-5".to_string(),
             display_name: "GPT-5".to_string(),

@@ -6,6 +6,7 @@ use crate::AppState;
 use anyhow::{bail, Context, Result};
 use puffer_config::ProxyConfig;
 use puffer_provider_openai::OpenAIRequestConfig;
+use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use puffer_runner_api::{
     check_read_freshness, NullChunkSink, ReadStateSnapshot, ReadStateUpdate, StalenessRejection,
@@ -93,6 +94,8 @@ pub(crate) fn is_claude_runtime_handler(handler: &str) -> bool {
 pub(crate) fn execute_tool(
     state: &mut AppState,
     resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &AuthStore,
     registry: &ToolRegistry,
     definition: &ToolDefinition,
     cwd: &Path,
@@ -293,9 +296,13 @@ pub(crate) fn execute_tool(
             Ok(tool_result(definition, true, output))
         }
         _ if definition.handler.starts_with("runtime:workflow:") => {
-            let stdout = execute_workflow_tool(
+            let stdout = execute_workflow_tool_with_media_context(
                 state,
                 resources,
+                Some(workflow::image_generation::ImageGenerationMediaContext {
+                    providers,
+                    auth_store,
+                }),
                 cwd,
                 definition.id.as_str(),
                 input,
@@ -731,6 +738,26 @@ pub fn execute_workflow_tool(
     input: Value,
     structured_output: Option<&StructuredOutputConfig>,
 ) -> Result<String> {
+    execute_workflow_tool_with_media_context(
+        state,
+        resources,
+        None,
+        cwd,
+        tool_id,
+        input,
+        structured_output,
+    )
+}
+
+fn execute_workflow_tool_with_media_context(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    media_context: Option<workflow::image_generation::ImageGenerationMediaContext<'_>>,
+    cwd: &Path,
+    tool_id: &str,
+    input: Value,
+    structured_output: Option<&StructuredOutputConfig>,
+) -> Result<String> {
     match tool_id {
         "Agent" => workflow::agent::execute_agent(state, cwd, input),
         "AnthropicStream" => {
@@ -784,7 +811,7 @@ pub fn execute_workflow_tool(
         "update_goal" => workflow::goal::execute_update_goal(state, cwd, input),
         "HttpRequest" => workflow::http_request::execute_http_request(state, cwd, input),
         "ImageGeneration" => {
-            workflow::image_generation::execute_image_generation(state, cwd, input)
+            workflow::image_generation::execute_image_generation(state, cwd, input, media_context)
         }
         "DebugpyAction" => workflow::debugpy_action::execute_debugpy_action(state, cwd, input),
         "DiscordAction" => workflow::discord_action::execute_discord_action(state, cwd, input),

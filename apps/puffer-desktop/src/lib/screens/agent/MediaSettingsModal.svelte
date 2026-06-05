@@ -83,7 +83,7 @@
       )
   );
   let canSave = $derived(Boolean(settingsReady && selectedCapability && !loading && !saving));
-  let sizeOptions = $derived(mergedParameterOptions("size", COMMON_IMAGE_SIZES));
+  let sizeOptions = $derived(parameterOptions("size", COMMON_IMAGE_SIZES));
   let qualityOptions = $derived(parameterOptions("quality", ["auto"]));
   let outputFormatOptions = $derived(parameterOptions("outputFormat", ["png"]));
   let aspectRatioOptions = $derived(parameterOptions("aspectRatio", ["16:9"]));
@@ -94,12 +94,23 @@
   function parameterOptions(key: string, fallback: string[]): string[] {
     const values = selectedCapability?.parameterValues?.[key];
     if (!Array.isArray(values) || values.length === 0) return fallback;
-    return values;
+    return values.filter(
+      (value): value is string => typeof value === "string" && value.length > 0
+    );
   }
 
-  function mergedParameterOptions(key: string, fallback: string[]): string[] {
-    const values = selectedCapability?.parameterValues?.[key];
-    return Array.from(new Set([...(Array.isArray(values) ? values : []), ...fallback]));
+  function firstSupportedValue(current: string, options: string[]): string {
+    if (options.includes(current)) return current;
+    return options[0] ?? current;
+  }
+
+  function clampImageParameters() {
+    const nextSize = firstSupportedValue(size, sizeOptions);
+    const nextQuality = firstSupportedValue(quality, qualityOptions);
+    const nextOutputFormat = firstSupportedValue(outputFormat, outputFormatOptions);
+    if (size !== nextSize) size = nextSize;
+    if (quality !== nextQuality) quality = nextQuality;
+    if (outputFormat !== nextOutputFormat) outputFormat = nextOutputFormat;
   }
 
   function mediaSettingsTitle(mediaKind: MediaKind): string {
@@ -242,6 +253,11 @@
     appliedSettingsKey = nextKey;
     applySettings(settings);
     chooseDefaultCapability();
+  });
+
+  $effect(() => {
+    if (kind !== "image" || !selectedCapability) return;
+    clampImageParameters();
   });
 </script>
 

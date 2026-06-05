@@ -8,12 +8,14 @@ use crate::dtos::{
     SettingsSessionSummaryDto, SettingsSnapshotDto, TimelineItemDto, VideoMediaSettingsDto,
 };
 use crate::events::EventEmitter;
-use crate::media_capabilities::MediaCapabilityCache;
 use crate::repo_actions;
-use crate::{browser, files, fs_watch, local_model, lsp, pty};
+use crate::{browser, files, fs_watch, local_model, lsp, media_capabilities, pty};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::prelude::*;
-use puffer_config::builtin_captcha_solvers;
+use puffer_config::{builtin_captcha_solvers, ConfigPaths};
+use puffer_core::{generate_exact_image, ExactImageGenerationRequest};
+use puffer_provider_registry::{AuthStore, ProviderRegistry};
+use puffer_resources::load_resources;
 use puffer_secrets::{SecretSummary, SecretUpsert, SecretVault};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -84,7 +86,6 @@ pub(crate) struct BackendState {
     fs_watches: Arc<fs_watch::FsWatchRegistry>,
     browsers: browser::BrowserRegistry,
     local_models: local_model::LocalModelInstaller,
-    media_capabilities: MediaCapabilityCache,
     turns: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
@@ -101,7 +102,6 @@ impl BackendState {
             fs_watches: Arc::new(fs_watch::FsWatchRegistry::new()),
             browsers: browser::BrowserRegistry::new(browser_profile_root),
             local_models: local_model::LocalModelInstaller::new(),
-            media_capabilities: MediaCapabilityCache::new(),
             turns: Mutex::new(HashMap::new()),
         }
     }
@@ -642,9 +642,12 @@ impl BackendState {
 
     fn list_media_capabilities(&self, params: Value) -> Result<Vec<MediaCapabilityInfoDto>> {
         let kind = optional_trimmed_string_param(&params, &["kind"]);
-        Ok(self
-            .media_capabilities
-            .list(self.openai_media_connected()?, kind.as_deref()))
+        let (providers, auth_store) = self.media_runtime_inputs()?;
+        Ok(media_capabilities::list(
+            &providers,
+            &auth_store,
+            kind.as_deref(),
+        ))
     }
 
     fn generate_media(&self, params: Value) -> Result<GenerateMediaResult> {
@@ -685,25 +688,30 @@ impl BackendState {
             (Some(provider_id), Some(model_id)) => (provider_id.to_string(), model_id.to_string()),
             _ => bail!("image media provider/model is not configured"),
         };
-        let capabilities = self.list_media_capabilities(json!({"kind": "image"}))?;
-        let available = capabilities.iter().any(|capability| {
-            capability.kind == "image"
-                && capability.provider_id == provider_id
-                && capability.model_id == model_id
-                && capability.status == "available"
-        });
-        if !available {
-            bail!("image media capability unavailable for {provider_id}/{model_id}");
-        }
+        let image_config = config.media.image;
+        let (providers, auth_store) = self.media_runtime_inputs()?;
+        let generation = generate_exact_image(
+            &providers,
+            &auth_store,
+            &self.default_workspace()?,
+            ExactImageGenerationRequest {
+                provider_id,
+                model_id,
+                prompt: prompt.clone(),
+                size: image_config.size,
+                quality: image_config.quality,
+                output_format: image_config.output_format,
+            },
+        )?;
         Ok(GenerateMediaResult {
-            job_id: format!("media-job-{}", Uuid::new_v4()),
-            artifact_id: None,
+            job_id: generation.job_id,
+            artifact_id: Some(generation.artifact_id),
             kind: "image".to_string(),
-            provider_id,
-            model_id,
-            status: "queued".to_string(),
+            provider_id: generation.provider_id,
+            model_id: generation.model_id,
+            status: generation.status,
             prompt,
-            path: None,
+            path: Some(generation.path.display().to_string()),
         })
     }
 
@@ -746,12 +754,25 @@ impl BackendState {
         bail!("Video generation is not supported yet")
     }
 
-    fn openai_media_connected(&self) -> Result<bool> {
+    fn media_runtime_inputs(&self) -> Result<(ProviderRegistry, AuthStore)> {
+        let config = self.load_config()?;
+        let paths = ConfigPaths::discover(self.default_workspace()?);
+        let resources = load_resources(&paths, &puffer_runner_local::LocalToolRunner::new())?;
+        let mut providers = ProviderRegistry::new();
+        for provider in &resources.providers {
+            providers.register_with_source(
+                provider.value.clone().into_descriptor(),
+                provider.source_info.as_provider_source(),
+            );
+        }
+        providers.apply_openai_base_url_override(config.openai_base_url.as_deref());
+
         let credentials = self.load_credentials()?;
-        Ok(credentials.api_keys.contains_key("codex")
-            || credentials.api_keys.contains_key("openai")
-            || openai_env_key_configured()
-            || home_dir().join(".codex/auth.json").exists())
+        let mut auth_store = AuthStore::default();
+        for (provider_id, key) in credentials.api_keys {
+            auth_store.set_api_key(&provider_id, key);
+        }
+        Ok((providers, auth_store))
     }
 
     fn provider_auth_statuses(&self) -> Result<Vec<AuthProviderStatusDto>> {
@@ -2345,7 +2366,7 @@ mod tests {
     }
 
     #[test]
-    fn media_capabilities_include_openai_image_when_connected() {
+    fn media_capabilities_include_exact_openai_image_models_when_connected() {
         let _lock = TEST_ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set_home(dir.path());
@@ -2368,15 +2389,23 @@ mod tests {
             .and_then(Value::as_array)
             .unwrap();
 
-        assert_eq!(capabilities.len(), 1);
-        assert_eq!(capabilities[0]["providerId"], "openai");
-        assert_eq!(capabilities[0]["modelId"], "gpt-image-1");
-        assert_eq!(capabilities[0]["kind"], "image");
-        assert_eq!(capabilities[0]["status"], "available");
+        let ids = capabilities
+            .iter()
+            .map(|capability| capability["modelId"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"gpt-image-1.5"));
+        assert!(ids.contains(&"gpt-image-1"));
+        assert!(ids.contains(&"gpt-image-1-mini"));
+        assert!(!ids.contains(&"auto"));
+        assert!(capabilities.iter().all(|capability| {
+            capability["providerId"] == "openai"
+                && capability["kind"] == "image"
+                && capability["status"] == "available"
+        }));
     }
 
     #[test]
-    fn media_capabilities_accept_puffer_openai_api_key() {
+    fn media_capabilities_ignore_puffer_openai_api_key_without_auth_store() {
         let _lock = TEST_ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let env = EnvGuard::set_home(dir.path());
@@ -2395,9 +2424,7 @@ mod tests {
             .and_then(Value::as_array)
             .unwrap();
 
-        assert_eq!(capabilities.len(), 1);
-        assert_eq!(capabilities[0]["providerId"], "openai");
-        assert_eq!(capabilities[0]["modelId"], "gpt-image-1");
+        assert!(capabilities.is_empty());
     }
 
     #[test]
@@ -2508,9 +2535,10 @@ mod tests {
             )
             .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("image media capability unavailable"));
+        assert_eq!(
+            error.to_string(),
+            "selected image model unavailable: openai/missing-image-model"
+        );
     }
 
     #[test]
@@ -3208,17 +3236,6 @@ fn optional_trimmed_string_param(params: &Value, names: &[&str]) -> Option<Strin
             Some(trimmed.to_string())
         }
     })
-}
-
-fn openai_env_key_configured() -> bool {
-    env_key_configured("OPENAI_API_KEY") || env_key_configured("PUFFER_OPENAI_API_KEY")
-}
-
-fn env_key_configured(name: &str) -> bool {
-    env::var(name)
-        .ok()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
 }
 
 fn serde_value<T: Serialize>(value: T) -> Result<Value> {

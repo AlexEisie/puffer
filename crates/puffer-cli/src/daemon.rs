@@ -37,10 +37,11 @@ use puffer_config::{
 };
 use puffer_core::{
     command_surface, default_effort_level, dispatch_command, enter_plan_mode, execute_connect_flow,
-    execute_user_turn_streaming_with_permissions_and_cancel, provider_preference_family,
-    supported_effort_levels, with_user_question_prompt_handler, AppState,
-    BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
-    BrowserPermissionPromptTargetClass, CancelToken, MessageRole, ModelPreferenceFamily,
+    execute_user_turn_streaming_with_permissions_and_cancel, generate_exact_image,
+    list_exact_media_capabilities, provider_preference_family, supported_effort_levels,
+    with_user_question_prompt_handler, AppState, BrowserPermissionPromptActionSet,
+    BrowserPermissionPromptSource, BrowserPermissionPromptTargetClass, CancelToken,
+    ExactImageGenerationRequest, MediaCapabilityView, MessageRole, ModelPreferenceFamily,
     PermissionPromptAction, PermissionPromptRequest, ToolCallRequest, ToolInvocation,
     TurnStreamEvent, UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
@@ -70,7 +71,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
 use uuid::Uuid;
 
@@ -2101,66 +2102,39 @@ fn handle_list_media_capabilities(state: &DaemonState, params: &Value) -> Result
     let kind = optional_trimmed_value(params, &["kind"]);
     let inputs = state.build_runtime_inputs_without_discovery()?;
     Ok(json!({
-        "capabilities": list_media_capabilities(&inputs.auth_store, kind.as_deref())
+        "capabilities": list_media_capabilities(
+            &inputs.providers,
+            &inputs.auth_store,
+            kind.as_deref()
+        )
     }))
 }
 
 fn list_media_capabilities(
+    providers: &ProviderRegistry,
     auth_store: &AuthStore,
     kind: Option<&str>,
 ) -> Vec<MediaCapabilityInfoDto> {
-    let mut capabilities = Vec::new();
-    if openai_media_connected(auth_store) {
-        capabilities.push(MediaCapabilityInfoDto {
-            provider_id: "openai".to_string(),
-            model_id: "gpt-image-1".to_string(),
-            kind: "image".to_string(),
-            operations: vec!["generate".to_string()],
-            supports_async: false,
-            supports_streaming: false,
-            parameter_values: json!({
-                "size": ["1024x1024", "1024x1536", "1536x1024"],
-                "quality": ["auto", "low", "medium", "high"],
-                "outputFormat": ["png", "jpeg", "webp"]
-            }),
-            status: "available".to_string(),
-            source: "adapter:openai-images".to_string(),
-            reason: None,
-            checked_at_ms: now_ms(),
-        });
-    }
-    let Some(kind) = kind.map(str::trim).filter(|value| !value.is_empty()) else {
-        return capabilities;
-    };
-    capabilities
+    list_exact_media_capabilities(providers, auth_store, kind)
         .into_iter()
-        .filter(|capability| capability.kind == kind)
+        .map(media_capability_info_dto)
         .collect()
 }
 
-fn openai_media_connected(auth_store: &AuthStore) -> bool {
-    auth_store.has_auth("openai")
-        || auth_store.has_auth("codex")
-        || openai_env_key_configured()
-        || codex_native_auth_exists()
-}
-
-fn openai_env_key_configured() -> bool {
-    env_key_configured("OPENAI_API_KEY") || env_key_configured("PUFFER_OPENAI_API_KEY")
-}
-
-fn env_key_configured(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-}
-
-fn codex_native_auth_exists() -> bool {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("PUFFER_HOME"))
-        .map(std::path::PathBuf::from)
-        .is_some_and(|home| home.join(".codex").join("auth.json").exists())
+fn media_capability_info_dto(capability: MediaCapabilityView) -> MediaCapabilityInfoDto {
+    MediaCapabilityInfoDto {
+        provider_id: capability.provider_id,
+        model_id: capability.model_id,
+        kind: capability.kind,
+        operations: capability.operations,
+        supports_async: capability.supports_async,
+        supports_streaming: capability.supports_streaming,
+        parameter_values: capability.parameter_values,
+        status: capability.status,
+        source: capability.source,
+        reason: capability.reason,
+        checked_at_ms: capability.checked_at_ms,
+    }
 }
 
 fn handle_generate_media(state: &DaemonState, params: &Value) -> Result<Value> {
@@ -2202,46 +2176,42 @@ fn generate_image_media_job(state: &DaemonState, prompt: String) -> Result<Value
         _ => anyhow::bail!("image media provider/model is not configured"),
     };
     let inputs = state.build_runtime_inputs_without_discovery()?;
-    let available = list_media_capabilities(&inputs.auth_store, Some("image"))
-        .into_iter()
-        .any(|capability| {
-            capability.kind == "image"
-                && capability.provider_id == provider_id
-                && capability.model_id == model_id
-                && capability.status == "available"
-        });
-    if !available {
-        anyhow::bail!("image media capability unavailable for {provider_id}/{model_id}");
-    }
+    let image_config = config.media.image;
+    let generation = generate_exact_image(
+        &inputs.providers,
+        &inputs.auth_store,
+        &state.paths.workspace_root,
+        ExactImageGenerationRequest {
+            provider_id,
+            model_id,
+            prompt: prompt.clone(),
+            size: image_config.size,
+            quality: image_config.quality,
+            output_format: image_config.output_format,
+        },
+    )?;
     let result = GenerateMediaResult {
-        job_id: format!("media-job-{}", Uuid::new_v4()),
-        artifact_id: None,
+        job_id: generation.job_id,
+        artifact_id: Some(generation.artifact_id),
         kind: "image".to_string(),
-        provider_id,
-        model_id,
-        status: "queued".to_string(),
+        provider_id: generation.provider_id,
+        model_id: generation.model_id,
+        status: generation.status,
         prompt,
-        path: None,
+        path: Some(generation.path.display().to_string()),
     };
     Ok(serde_json::to_value(result)?)
 }
 
 fn generate_video_media_job(state: &DaemonState, _prompt: String) -> Result<Value> {
     let inputs = state.build_runtime_inputs_without_discovery()?;
-    let available = list_media_capabilities(&inputs.auth_store, Some("video"))
+    let available = list_media_capabilities(&inputs.providers, &inputs.auth_store, Some("video"))
         .into_iter()
         .any(|capability| capability.kind == "video" && capability.status == "available");
     if !available {
         anyhow::bail!("No video capabilities available");
     }
     anyhow::bail!("Video generation is not supported yet")
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 const DEFAULT_REALTIME_MODEL: &str = "gpt-realtime-2";
@@ -5228,15 +5198,16 @@ mod tests {
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
         browser_permission_payload_json, connector_setup_connect_args, connector_setup_id,
         desktop_latency_ms, handle_create_openai_realtime_client_secret, handle_create_session,
-        handle_import_external_credential, handle_list_lambda_skill_libraries,
-        handle_list_media_capabilities, handle_list_permissions, handle_list_provider_models,
-        handle_local_model_status, handle_login_with_api_key, handle_logout_provider,
-        handle_remove_lambda_skill_library, handle_save_lambda_skill_library,
-        handle_save_permissions, handle_save_proxy_settings, handle_set_lambda_skill_approval,
-        handle_set_lambda_skill_enabled, handle_update_config, model_descriptor_dto,
-        permission_review_payload_json, realtime_session_config_from_params, report_cancelled_turn,
-        requires_explicit_subscription, resolve_create_session_model_id, run_off_runtime,
-        start_connector_setup_turn, DaemonState, ServerEnvelope, TurnProgress, TurnRequestOptions,
+        handle_generate_media, handle_import_external_credential,
+        handle_list_lambda_skill_libraries, handle_list_media_capabilities,
+        handle_list_permissions, handle_list_provider_models, handle_local_model_status,
+        handle_login_with_api_key, handle_logout_provider, handle_remove_lambda_skill_library,
+        handle_save_lambda_skill_library, handle_save_permissions, handle_save_proxy_settings,
+        handle_set_lambda_skill_approval, handle_set_lambda_skill_enabled, handle_update_config,
+        model_descriptor_dto, permission_review_payload_json, realtime_session_config_from_params,
+        report_cancelled_turn, requires_explicit_subscription, resolve_create_session_model_id,
+        run_off_runtime, start_connector_setup_turn, DaemonState, ServerEnvelope, TurnProgress,
+        TurnRequestOptions,
     };
     use indexmap::IndexMap;
     use puffer_config::{
@@ -5249,9 +5220,12 @@ mod tests {
     };
     use puffer_session_store::{SessionMetadata, SessionStore, TranscriptEvent};
     use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::thread;
     use uuid::Uuid;
 
     fn discovery_cache_env_lock() -> MutexGuard<'static, ()> {
@@ -5445,6 +5419,44 @@ mod tests {
         }
     }
 
+    fn spawn_image_generation_server() -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let address = listener.local_addr().expect("address");
+        let handle = thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if started.elapsed() > std::time::Duration::from_secs(2) {
+                            return String::new();
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("generation request: {error}"),
+                }
+            };
+            let mut buffer = [0_u8; 8192];
+            let size = stream.read(&mut buffer).expect("read request");
+            let request_text = String::from_utf8_lossy(&buffer[..size]).to_string();
+            let body = json!({
+                "data": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("response");
+            request_text
+        });
+        (format!("http://{address}"), handle)
+    }
+
     #[test]
     fn high_volume_browser_events_require_explicit_subscription() {
         assert!(requires_explicit_subscription(
@@ -5510,16 +5522,22 @@ mod tests {
         let response =
             handle_list_media_capabilities(&state, &json!({"kind": "image"})).expect("response");
         let capabilities = response["capabilities"].as_array().expect("capabilities");
+        let ids = capabilities
+            .iter()
+            .map(|capability| capability["modelId"].as_str().expect("model id"))
+            .collect::<Vec<_>>();
 
-        assert_eq!(capabilities.len(), 1);
-        assert_eq!(capabilities[0]["providerId"], "openai");
-        assert_eq!(capabilities[0]["modelId"], "gpt-image-1");
-        assert_eq!(capabilities[0]["kind"], "image");
-        assert_eq!(capabilities[0]["status"], "available");
+        assert!(ids.contains(&"gpt-image-1"));
+        assert!(!ids.contains(&"auto"));
+        assert!(capabilities.iter().all(|capability| {
+            capability["providerId"] == "openai"
+                && capability["kind"] == "image"
+                && capability["status"] == "available"
+        }));
     }
 
     #[test]
-    fn media_capabilities_handler_accepts_puffer_openai_api_key() {
+    fn media_capabilities_handler_hides_openai_without_auth_store_even_with_env_key() {
         let _home_guard = PufferHomeEnvGuard::set();
         let _openai_env_guard = OpenAiEnvGuard::set_puffer_key("sk-test");
         let temp = tempfile::tempdir().expect("tempdir");
@@ -5538,13 +5556,11 @@ mod tests {
             handle_list_media_capabilities(&state, &json!({"kind": "image"})).expect("response");
         let capabilities = response["capabilities"].as_array().expect("capabilities");
 
-        assert_eq!(capabilities.len(), 1);
-        assert_eq!(capabilities[0]["providerId"], "openai");
-        assert_eq!(capabilities[0]["modelId"], "gpt-image-1");
+        assert!(capabilities.is_empty());
     }
 
     #[test]
-    fn media_capabilities_handler_accepts_codex_native_auth() {
+    fn media_capabilities_handler_hides_openai_without_auth_store_even_with_codex_file() {
         let _home_guard = PufferHomeEnvGuard::set();
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
@@ -5570,9 +5586,126 @@ mod tests {
             handle_list_media_capabilities(&state, &json!({"kind": "image"})).expect("response");
         let capabilities = response["capabilities"].as_array().expect("capabilities");
 
-        assert_eq!(capabilities.len(), 1);
-        assert_eq!(capabilities[0]["providerId"], "openai");
-        assert_eq!(capabilities[0]["modelId"], "gpt-image-1");
+        assert!(capabilities.is_empty());
+    }
+
+    #[test]
+    fn media_capabilities_handler_does_not_expose_worldrouter_auto_as_image() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let mut auth_store = AuthStore::default();
+        auth_store.set_api_key("worldrouter", "sk-test");
+        auth_store
+            .save(&paths.user_config_dir.join("auth.json"))
+            .expect("save auth");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let response =
+            handle_list_media_capabilities(&state, &json!({"kind": "image"})).expect("response");
+        let capabilities = response["capabilities"].as_array().expect("capabilities");
+
+        assert!(capabilities.is_empty());
+    }
+
+    #[test]
+    fn generate_media_rejects_stale_image_config_before_http_request() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let mut auth_store = AuthStore::default();
+        auth_store.set_api_key("openai", "sk-test");
+        auth_store
+            .save(&paths.user_config_dir.join("auth.json"))
+            .expect("save auth");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+        {
+            let mut config = state.config.lock().unwrap();
+            config.openai_base_url = Some("http://127.0.0.1:9".to_string());
+            config.media.image.provider_id = Some("openai".to_string());
+            config.media.image.model_id = Some("stale-image".to_string());
+        }
+
+        let error =
+            handle_generate_media(&state, &json!({"kind": "image", "prompt": "draw an icon"}))
+                .expect_err("stale config should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "selected image model unavailable: openai/stale-image"
+        );
+    }
+
+    #[test]
+    fn generate_media_returns_succeeded_image_artifact_metadata() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let (base_url, server) = spawn_image_generation_server();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let mut auth_store = AuthStore::default();
+        auth_store.set_api_key("openai", "sk-test");
+        auth_store
+            .save(&paths.user_config_dir.join("auth.json"))
+            .expect("save auth");
+        let state = DaemonState::load(
+            workspace_root.clone(),
+            paths,
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+        {
+            let mut config = state.config.lock().unwrap();
+            config.openai_base_url = Some(base_url);
+            config.media.image.provider_id = Some("openai".to_string());
+            config.media.image.model_id = Some("gpt-image-1".to_string());
+            config.media.image.size = "1024x1024".to_string();
+            config.media.image.quality = "auto".to_string();
+            config.media.image.output_format = "png".to_string();
+        }
+
+        let response =
+            handle_generate_media(&state, &json!({"kind": "image", "prompt": "draw an icon"}))
+                .expect("generation response");
+
+        let request_text = server.join().expect("server");
+        assert!(request_text.contains("\"model\":\"gpt-image-1\""));
+        assert_eq!(response["status"], "succeeded");
+        assert_eq!(response["providerId"], "openai");
+        assert_eq!(response["modelId"], "gpt-image-1");
+        assert!(response["artifactId"].as_str().is_some());
+        let path = response["path"].as_str().expect("artifact path");
+        assert!(path.contains(".puffer/media/artifacts"));
+        assert_eq!(std::fs::read(path).expect("artifact bytes"), b"image-bytes");
+        assert!(workspace_root.join(".puffer/media/jobs").is_dir());
+        assert!(workspace_root
+            .join(".puffer/media/artifact-sidecars")
+            .is_dir());
     }
 
     #[test]
@@ -8168,6 +8301,7 @@ input_schema:
             headers: IndexMap::new(),
             query_params: IndexMap::new(),
             discovery: None,
+            media: None,
             models: models
                 .iter()
                 .map(|model| ModelDescriptor {

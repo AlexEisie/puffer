@@ -231,6 +231,8 @@ pub(super) fn execute_tool_call(
             Ok(None) => claude_tools::execute_tool(
                 state,
                 resources,
+                providers,
+                auth_store,
                 registry,
                 &definition,
                 cwd,

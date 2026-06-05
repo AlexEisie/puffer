@@ -30,6 +30,7 @@ fn status_command_reports_richer_session_and_resource_status() {
         headers: Default::default(),
         query_params: Default::default(),
         discovery: None,
+        media: None,
         models: vec![ModelDescriptor {
             provider: "openai".to_string(),
             id: "gpt-5".to_string(),

@@ -1,6 +1,8 @@
 use crate::auth::AuthMode;
+use anyhow::{bail, Result};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Describes the response format used by a provider's model discovery endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -305,6 +307,171 @@ impl ModelCompat {
     }
 }
 
+/// Describes provider-scoped media capabilities.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderMediaDescriptor {
+    #[serde(default)]
+    pub image: Option<ImageMediaDescriptor>,
+}
+
+/// Describes image-generation capability metadata for one provider.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageMediaDescriptor {
+    #[serde(default)]
+    pub discovery: Option<MediaDiscoveryDescriptor>,
+    #[serde(default)]
+    pub execution: Option<MediaExecutionDescriptor>,
+    #[serde(default)]
+    pub models: Vec<MediaModelDescriptor>,
+}
+
+/// Describes how image model candidates may be discovered.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MediaDiscoveryDescriptor {
+    #[serde(default = "default_media_discovery_kind")]
+    pub adapter: MediaDiscoveryKind,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub query: BTreeMap<String, String>,
+}
+
+/// Describes the API-shape adapter used for image execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MediaExecutionDescriptor {
+    pub adapter: MediaExecutionKind,
+    pub path: String,
+}
+
+/// Describes one concrete image model and its supported operations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MediaModelDescriptor {
+    pub id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub operations: Vec<MediaOperation>,
+    #[serde(default)]
+    pub parameters: MediaImageParameters,
+}
+
+/// Describes allowed image generation parameter values for one model.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MediaImageParameters {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub size: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quality: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_format: Vec<String>,
+    #[serde(skip)]
+    declared: MediaImageParameterDeclarations,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct MediaImageParameterDeclarations {
+    size: bool,
+    quality: bool,
+    output_format: bool,
+}
+
+impl<'de> Deserialize<'de> for MediaImageParameters {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawParameters {
+            size: Option<Vec<String>>,
+            quality: Option<Vec<String>>,
+            output_format: Option<Vec<String>>,
+        }
+
+        let raw = RawParameters::deserialize(deserializer)?;
+        let declared = MediaImageParameterDeclarations {
+            size: raw.size.is_some(),
+            quality: raw.quality.is_some(),
+            output_format: raw.output_format.is_some(),
+        };
+        Ok(Self {
+            size: raw.size.unwrap_or_default(),
+            quality: raw.quality.unwrap_or_default(),
+            output_format: raw.output_format.unwrap_or_default(),
+            declared,
+        })
+    }
+}
+
+impl Default for MediaImageParameters {
+    fn default() -> Self {
+        Self {
+            size: Vec::new(),
+            quality: Vec::new(),
+            output_format: Vec::new(),
+            declared: MediaImageParameterDeclarations::default(),
+        }
+    }
+}
+
+impl MediaImageParameters {
+    /// Creates parameter values that are treated as explicitly declared.
+    pub fn new(size: Vec<String>, quality: Vec<String>, output_format: Vec<String>) -> Self {
+        Self {
+            size,
+            quality,
+            output_format,
+            declared: MediaImageParameterDeclarations {
+                size: true,
+                quality: true,
+                output_format: true,
+            },
+        }
+    }
+
+    fn validate(&self, model_location: &str, errors: &mut Vec<String>) {
+        validate_declared_parameter_values(
+            self.declared.size,
+            &self.size,
+            &format!("{model_location}.parameters.size"),
+            errors,
+        );
+        validate_declared_parameter_values(
+            self.declared.quality,
+            &self.quality,
+            &format!("{model_location}.parameters.quality"),
+            errors,
+        );
+        validate_declared_parameter_values(
+            self.declared.output_format,
+            &self.output_format,
+            &format!("{model_location}.parameters.output_format"),
+            errors,
+        );
+    }
+}
+
+/// Describes currently implemented media discovery adapters.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaDiscoveryKind {
+    Static,
+}
+
+/// Describes currently implemented media execution adapters.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaExecutionKind {
+    #[serde(rename = "openai_images")]
+    OpenAiImages,
+}
+
+/// Describes image media operations.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaOperation {
+    Generate,
+}
+
 /// Describes one model provider and the models it exposes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderDescriptor {
@@ -334,7 +501,94 @@ pub struct ProviderDescriptor {
     #[serde(default)]
     pub discovery: Option<ModelDiscoveryConfig>,
     #[serde(default)]
+    pub media: Option<ProviderMediaDescriptor>,
+    #[serde(default)]
     pub models: Vec<ModelDescriptor>,
+}
+
+impl ProviderDescriptor {
+    /// Validates declared provider media descriptors without requiring execution availability.
+    pub fn validate_media_descriptors(&self) -> Result<()> {
+        let Some(media) = &self.media else {
+            return Ok(());
+        };
+        let Some(image) = &media.image else {
+            return Ok(());
+        };
+
+        let mut errors = Vec::new();
+        if let Some(execution) = &image.execution {
+            execution.validate("media.image.execution", &mut errors);
+        }
+        for (index, model) in image.models.iter().enumerate() {
+            let location = format!("media.image.models[{index}]");
+            model.validate(&location, &mut errors);
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            bail!("{}", errors.join("; "))
+        }
+    }
+}
+
+impl MediaExecutionDescriptor {
+    fn validate(&self, location: &str, errors: &mut Vec<String>) {
+        if self.path.trim().is_empty() {
+            errors.push(format!("{location}.path must not be empty"));
+        }
+    }
+}
+
+impl MediaModelDescriptor {
+    fn validate(&self, location: &str, errors: &mut Vec<String>) {
+        let id = self.id.trim();
+        if id.is_empty() {
+            errors.push(format!("{location}.id must not be empty"));
+        } else if id.eq_ignore_ascii_case("auto") {
+            errors.push(format!("{location}.id must be a concrete image model id"));
+        } else if has_wildcard_or_regex_marker(id) {
+            errors.push(format!(
+                "{location}.id must not contain wildcard or regex markers"
+            ));
+        }
+
+        if self.operations.is_empty() {
+            errors.push(format!(
+                "{location}.operations must include at least one operation"
+            ));
+        }
+
+        self.parameters.validate(location, errors);
+    }
+}
+
+fn validate_declared_parameter_values(
+    declared: bool,
+    values: &[String],
+    location: &str,
+    errors: &mut Vec<String>,
+) {
+    if !declared {
+        return;
+    }
+    if values.is_empty() {
+        errors.push(format!("{location} must not be empty when declared"));
+        return;
+    }
+    if values.iter().any(|value| value.trim().is_empty()) {
+        errors.push(format!("{location} must not contain empty values"));
+    }
+}
+
+fn has_wildcard_or_regex_marker(value: &str) -> bool {
+    value.chars().any(|ch| {
+        matches!(
+            ch,
+            '*' | '?' | '[' | ']' | '(' | ')' | '{' | '}' | '|' | '^' | '$' | '\\'
+        )
+    })
 }
 
 /// Stores one provider plus its provenance.
@@ -350,4 +604,189 @@ fn default_items_field() -> String {
 
 fn default_id_field() -> String {
     "id".to_string()
+}
+
+fn default_media_discovery_kind() -> MediaDiscoveryKind {
+    MediaDiscoveryKind::Static
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider_with_media_yaml(media_yaml: &str) -> String {
+        format!(
+            r#"
+id: test-provider
+display_name: Test Provider
+base_url: https://api.test-provider.example
+default_api: openai-responses
+auth_modes:
+  - api_key
+models: []
+{media_yaml}
+"#
+        )
+    }
+
+    #[test]
+    fn existing_provider_yaml_parses_without_media() {
+        let yaml = include_str!("../../../resources/providers/anthropic.yaml");
+        let provider: ProviderDescriptor =
+            serde_yaml::from_str(yaml).expect("anthropic yaml parses");
+
+        assert_eq!(provider.id, "anthropic");
+        assert!(provider.media.is_none());
+        provider
+            .validate_media_descriptors()
+            .expect("missing media is valid");
+    }
+
+    #[test]
+    fn valid_image_media_descriptor_parses_and_validates() {
+        let yaml = provider_with_media_yaml(
+            r#"
+media:
+  image:
+    discovery:
+      adapter: static
+    execution:
+      adapter: openai_images
+      path: /v1/images/generations
+    models:
+      - id: gpt-image-1
+        display_name: GPT Image 1
+        operations:
+          - generate
+        parameters:
+          size:
+            - 1024x1024
+            - 1536x1024
+          quality:
+            - auto
+            - high
+          output_format:
+            - png
+            - jpeg
+"#,
+        );
+
+        let provider: ProviderDescriptor = serde_yaml::from_str(&yaml).expect("provider parses");
+
+        provider
+            .validate_media_descriptors()
+            .expect("media descriptor validates");
+        let image = provider
+            .media
+            .as_ref()
+            .and_then(|media| media.image.as_ref())
+            .expect("image media");
+        assert_eq!(
+            image.execution.as_ref().map(|execution| execution.adapter),
+            Some(MediaExecutionKind::OpenAiImages)
+        );
+        assert_eq!(image.models[0].operations, vec![MediaOperation::Generate]);
+    }
+
+    #[test]
+    fn auto_image_model_is_rejected_by_validation() {
+        let yaml = provider_with_media_yaml(
+            r#"
+media:
+  image:
+    execution:
+      adapter: openai_images
+      path: /v1/images/generations
+    models:
+      - id: auto
+        operations:
+          - generate
+"#,
+        );
+        let provider: ProviderDescriptor = serde_yaml::from_str(&yaml).expect("provider parses");
+
+        let error = provider
+            .validate_media_descriptors()
+            .expect_err("auto model is invalid");
+
+        assert!(
+            error.to_string().contains("media.image.models[0].id"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn missing_image_execution_parses_and_validates_for_later_availability_skip() {
+        let yaml = provider_with_media_yaml(
+            r#"
+media:
+  image:
+    models:
+      - id: gpt-image-1
+        operations:
+          - generate
+"#,
+        );
+        let provider: ProviderDescriptor = serde_yaml::from_str(&yaml).expect("provider parses");
+
+        assert!(provider
+            .media
+            .as_ref()
+            .and_then(|media| media.image.as_ref())
+            .and_then(|image| image.execution.as_ref())
+            .is_none());
+        provider
+            .validate_media_descriptors()
+            .expect("missing execution only affects availability");
+    }
+
+    #[test]
+    fn empty_image_execution_path_is_rejected_by_validation() {
+        let yaml = provider_with_media_yaml(
+            r#"
+media:
+  image:
+    execution:
+      adapter: openai_images
+      path: ""
+    models:
+      - id: gpt-image-1
+        operations:
+          - generate
+"#,
+        );
+        let provider: ProviderDescriptor = serde_yaml::from_str(&yaml).expect("provider parses");
+
+        let error = provider
+            .validate_media_descriptors()
+            .expect_err("empty execution path is invalid");
+
+        assert!(error.to_string().contains("execution.path"), "{error}");
+    }
+
+    #[test]
+    fn empty_declared_image_parameter_array_is_rejected_by_validation() {
+        let yaml = provider_with_media_yaml(
+            r#"
+media:
+  image:
+    execution:
+      adapter: openai_images
+      path: /v1/images/generations
+    models:
+      - id: gpt-image-1
+        operations:
+          - generate
+        parameters:
+          size: []
+"#,
+        );
+        let provider: ProviderDescriptor = serde_yaml::from_str(&yaml).expect("provider parses");
+
+        let error = provider
+            .validate_media_descriptors()
+            .expect_err("empty declared parameter list is invalid");
+
+        assert!(error.to_string().contains("parameters.size"), "{error}");
+    }
 }

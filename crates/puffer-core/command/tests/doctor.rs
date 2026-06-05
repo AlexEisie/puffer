@@ -15,6 +15,7 @@ fn provider(id: &str, auth_modes: Vec<AuthMode>) -> ProviderDescriptor {
         headers: Default::default(),
         query_params: Default::default(),
         discovery: None,
+        media: None,
         models: vec![ModelDescriptor {
             id: if id == "anthropic" {
                 "claude-sonnet-4-5".to_string()

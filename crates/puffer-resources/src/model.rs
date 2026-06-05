@@ -1,6 +1,6 @@
 use puffer_provider_registry::{
-    AuthMode, ModelDescriptor, ModelDiscoveryConfig, ProviderDescriptor, ProviderSource,
-    ProviderSourceKind,
+    AuthMode, ModelDescriptor, ModelDiscoveryConfig, ProviderDescriptor, ProviderMediaDescriptor,
+    ProviderSource, ProviderSourceKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -514,6 +514,8 @@ pub struct ProviderPack {
     #[serde(default)]
     pub discovery: Option<ModelDiscoveryConfig>,
     #[serde(default)]
+    pub media: Option<ProviderMediaDescriptor>,
+    #[serde(default)]
     pub models: Vec<ModelDescriptor>,
 }
 
@@ -530,6 +532,7 @@ impl ProviderPack {
             query_params: self.query_params,
             chat_completions_path: self.chat_completions_path,
             discovery: self.discovery,
+            media: self.media,
             models: self.models,
         }
     }
@@ -603,6 +606,41 @@ mod tests {
         );
     }
 
+    /// Confirms OpenAI declares only concrete executable Image API models for
+    /// the shared exact media resolver.
+    #[test]
+    fn openai_yaml_declares_exact_gpt_image_descriptor() {
+        let yaml = include_str!("../../../resources/providers/openai.yaml");
+        let pack: ProviderPack = serde_yaml::from_str(yaml).expect("openai.yaml parses");
+        let descriptor = pack.into_descriptor();
+
+        descriptor
+            .validate_media_descriptors()
+            .expect("media descriptor validates");
+        let image = descriptor
+            .media
+            .as_ref()
+            .and_then(|media| media.image.as_ref())
+            .expect("image media descriptor");
+        assert_eq!(
+            image
+                .execution
+                .as_ref()
+                .map(|execution| execution.path.as_str()),
+            Some("/v1/images/generations")
+        );
+        assert!(image.models.iter().any(|model| {
+            model.id == "gpt-image-1"
+                && model
+                    .operations
+                    .contains(&puffer_provider_registry::MediaOperation::Generate)
+                && model.parameters.size.contains(&"1024x1024".to_string())
+                && model.parameters.quality.contains(&"auto".to_string())
+                && model.parameters.output_format.contains(&"png".to_string())
+        }));
+        assert!(!image.models.iter().any(|model| model.id == "auto"));
+    }
+
     /// Confirms the bundled provider catalog includes WorldRouter so desktop
     /// provider selection does not depend on workspace-local resource files.
     #[test]
@@ -624,6 +662,10 @@ mod tests {
         assert!(
             descriptor.models.iter().any(|model| model.id == "auto"),
             "WorldRouter should expose the auto routing fallback model"
+        );
+        assert!(
+            descriptor.media.is_none(),
+            "WorldRouter auto chat routing must not become an image capability"
         );
     }
 }

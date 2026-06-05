@@ -3,11 +3,11 @@ pub(crate) mod capabilities;
 pub(crate) mod jobs;
 pub(crate) mod openai_image;
 pub(crate) mod replicate_video;
+pub(crate) mod resolver;
 
 pub(crate) use artifacts::MediaArtifact;
 pub(crate) use capabilities::MediaKind;
 pub(crate) use jobs::{MediaJob, MediaJobStatus};
-pub(crate) use openai_image::OpenAIImageRequest;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
