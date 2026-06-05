@@ -645,7 +645,54 @@ mod tests {
                         && parameter.values.contains(&"png".to_string())
                 })
         }));
+        let gpt_image_2 = image
+            .models
+            .iter()
+            .find(|model| model.id == "gpt-image-2")
+            .expect("OpenAI should include the current GPT Image 2 model");
+        let size = gpt_image_2
+            .parameters
+            .iter()
+            .find(|parameter| parameter.name == "size")
+            .expect("gpt-image-2 size parameter");
+        assert!(size.values.contains(&"2048x2048".to_string()));
+        assert!(size.values.contains(&"3840x2160".to_string()));
         assert!(!image.models.iter().any(|model| model.id == "auto"));
+    }
+
+    /// Confirms provider image model lists include all official static models
+    /// that fit the currently implemented media execution adapters.
+    #[test]
+    fn bundled_static_image_model_lists_cover_official_provider_models() {
+        let cases = [
+            (
+                "xai",
+                include_str!("../../../resources/providers/xai.yaml"),
+                &["grok-imagine-image-quality", "grok-imagine-image"][..],
+            ),
+            (
+                "minimax-cn",
+                include_str!("../../../resources/providers/minimax-cn.yaml"),
+                &["image-01", "image-01-live"][..],
+            ),
+        ];
+
+        for (provider_id, yaml, expected_models) in cases {
+            let pack: ProviderPack = serde_yaml::from_str(yaml).expect("provider yaml parses");
+            assert_eq!(pack.id, provider_id);
+            let descriptor = pack.into_descriptor();
+            let image = descriptor
+                .media
+                .as_ref()
+                .and_then(|media| media.image.as_ref())
+                .expect("image media descriptor");
+            for expected_model in expected_models {
+                assert!(
+                    image.models.iter().any(|model| model.id == *expected_model),
+                    "{provider_id} should include {expected_model}"
+                );
+            }
+        }
     }
 
     /// Confirms cloud providers with documented synchronous JSON image APIs
@@ -781,6 +828,83 @@ mod tests {
             model.execution.as_ref().map(|execution| execution.adapter),
             Some(puffer_provider_registry::MediaExecutionKind::ImagesJson)
         );
+    }
+
+    /// Confirms Vercel's official image-only model list is mirrored as a
+    /// static Images JSON fallback when discovery is unavailable.
+    #[test]
+    fn vercel_static_image_models_cover_official_gateway_image_type() {
+        let yaml = include_str!("../../../resources/providers/vercel-ai-gateway.yaml");
+        let pack: ProviderPack = serde_yaml::from_str(yaml).expect("vercel yaml parses");
+        let descriptor = pack.into_descriptor();
+        let image = descriptor
+            .media
+            .as_ref()
+            .and_then(|media| media.image.as_ref())
+            .expect("image media descriptor");
+        let expected_models = [
+            "bfl/flux-2-flex",
+            "bfl/flux-2-klein-4b",
+            "bfl/flux-2-klein-9b",
+            "bfl/flux-2-max",
+            "bfl/flux-2-pro",
+            "bfl/flux-kontext-max",
+            "bfl/flux-kontext-pro",
+            "bfl/flux-pro-1.0-fill",
+            "bfl/flux-pro-1.1",
+            "bfl/flux-pro-1.1-ultra",
+            "bytedance/seedream-4.0",
+            "bytedance/seedream-4.5",
+            "bytedance/seedream-5.0-lite",
+            "google/imagen-4.0-fast-generate-001",
+            "google/imagen-4.0-generate-001",
+            "google/imagen-4.0-ultra-generate-001",
+            "openai/gpt-image-1",
+            "openai/gpt-image-1-mini",
+            "openai/gpt-image-1.5",
+            "openai/gpt-image-2",
+            "prodia/flux-fast-schnell",
+            "recraft/recraft-v2",
+            "recraft/recraft-v3",
+            "recraft/recraft-v4",
+            "recraft/recraft-v4-pro",
+            "recraft/recraft-v4.1",
+            "recraft/recraft-v4.1-pro",
+            "recraft/recraft-v4.1-utility",
+            "recraft/recraft-v4.1-utility-pro",
+            "xai/grok-imagine-image",
+        ];
+        let expected_model_ids: std::collections::BTreeSet<_> =
+            expected_models.iter().copied().collect();
+        let actual_model_ids: Vec<_> = image
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect();
+        let unique_actual_model_ids: std::collections::BTreeSet<_> =
+            actual_model_ids.iter().copied().collect();
+
+        assert_eq!(
+            actual_model_ids.len(),
+            unique_actual_model_ids.len(),
+            "vercel static image fallback models must not contain duplicates"
+        );
+        assert_eq!(
+            unique_actual_model_ids, expected_model_ids,
+            "vercel static image fallback must exactly mirror official image-type models"
+        );
+
+        for expected_model in expected_models {
+            let model = image
+                .models
+                .iter()
+                .find(|model| model.id == expected_model)
+                .unwrap_or_else(|| panic!("vercel should include {expected_model}"));
+            assert_eq!(
+                model.execution.as_ref().map(|execution| execution.adapter),
+                Some(puffer_provider_registry::MediaExecutionKind::ImagesJson)
+            );
+        }
     }
 
     /// Confirms the bundled provider catalog includes WorldRouter so desktop

@@ -22,6 +22,118 @@ media:
       adapter: chat_image_output
       path: /chat/completions
     models:
+      - id: bfl/flux-2-flex
+        display_name: FLUX 2 Flex
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: bfl/flux-2-klein-4b
+        display_name: FLUX 2 Klein 4B
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: bfl/flux-2-klein-9b
+        display_name: FLUX 2 Klein 9B
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: bfl/flux-2-max
+        display_name: FLUX 2 Max
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: bfl/flux-2-pro
+        display_name: FLUX 2 Pro
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: bfl/flux-kontext-max
+        display_name: FLUX Kontext Max
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: bfl/flux-kontext-pro
+        display_name: FLUX Kontext Pro
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: bfl/flux-pro-1.0-fill
+        display_name: FLUX Fill Pro 1.0
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: bfl/flux-pro-1.1
+        display_name: FLUX Pro 1.1
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: bfl/flux-pro-1.1-ultra
+        display_name: FLUX Pro 1.1 Ultra
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: bytedance/seedream-4.0
+        display_name: Seedream 4.0
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: bytedance/seedream-4.5
+        display_name: Seedream 4.5
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: bytedance/seedream-5.0-lite
+        display_name: Seedream 5.0 Lite
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: google/imagen-4.0-fast-generate-001
+        display_name: Google Imagen 4.0 Fast Generate
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: google/imagen-4.0-generate-001
+        display_name: Google Imagen 4.0 Generate
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: google/imagen-4.0-ultra-generate-001
+        display_name: Google Imagen 4.0 Ultra Generate
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
       - id: openai/gpt-image-2
         display_name: OpenAI GPT Image 2
         execution:
@@ -36,22 +148,85 @@ media:
           path: /images/generations
         operations:
           - generate
-      - id: google/imagen-4.0-ultra-generate-001
-        display_name: Google Imagen 4.0 Ultra Generate
+      - id: openai/gpt-image-1-mini
+        display_name: OpenAI GPT Image 1 Mini
         execution:
           adapter: images_json
           path: /images/generations
         operations:
           - generate
-      - id: google/imagen-4.0-generate-001
-        display_name: Google Imagen 4.0 Generate
+      - id: openai/gpt-image-1.5
+        display_name: OpenAI GPT Image 1.5
         execution:
           adapter: images_json
           path: /images/generations
         operations:
           - generate
-      - id: bfl/flux-2-flex
-        display_name: FLUX 2 Flex
+      - id: prodia/flux-fast-schnell
+        display_name: Prodia Flux Schnell
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: recraft/recraft-v2
+        display_name: Recraft V2
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: recraft/recraft-v3
+        display_name: Recraft V3
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: recraft/recraft-v4
+        display_name: Recraft V4
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: recraft/recraft-v4-pro
+        display_name: Recraft V4 Pro
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: recraft/recraft-v4.1
+        display_name: Recraft V4.1
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: recraft/recraft-v4.1-pro
+        display_name: Recraft V4.1 Pro
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: recraft/recraft-v4.1-utility
+        display_name: Recraft V4.1 Utility
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: recraft/recraft-v4.1-utility-pro
+        display_name: Recraft V4.1 Utility Pro
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: xai/grok-imagine-image
+        display_name: Grok Imagine Image
         execution:
           adapter: images_json
           path: /images/generations
