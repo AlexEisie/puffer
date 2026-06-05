@@ -438,9 +438,8 @@ fn media_settings_dto(config: &PufferConfig) -> MediaSettingsDto {
         image: ImageMediaSettingsDto {
             provider_id: config.media.image.provider_id.clone(),
             model_id: config.media.image.model_id.clone(),
-            size: config.media.image.size.clone(),
-            quality: config.media.image.quality.clone(),
-            output_format: config.media.image.output_format.clone(),
+            adapter: config.media.image.adapter.clone(),
+            parameters: config.media.image.parameters.clone(),
         },
         video: VideoMediaSettingsDto {
             provider_id: config.media.video.provider_id.clone(),

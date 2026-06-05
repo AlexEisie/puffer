@@ -1,0 +1,574 @@
+use super::artifacts::MediaArtifact;
+use super::jobs::{MediaJob, MediaJobStatus};
+use super::resolver::{
+    resolve_image_execution_descriptor, validate_image_generate_selection,
+    ImageGenerationSelection, MediaDiscoveryCache,
+};
+use super::{MediaGenerationService, MediaKind};
+use anyhow::{anyhow, bail, Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
+use puffer_provider_registry::{
+    canonical_provider_id, AuthStore, MediaExecutionDescriptor, ProviderDescriptor,
+    ProviderRegistry, StoredCredential,
+};
+use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
+
+const DEFAULT_MINIMAX_REQUEST_TIMEOUT_MS: u64 = 300_000;
+const MINIMAX_ALLOWED_REQUEST_FIELDS: &[&str] = &["aspect_ratio", "size", "response_format"];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MinimaxImageRequest {
+    model: String,
+    prompt: String,
+    parameters: BTreeMap<String, String>,
+}
+
+impl MinimaxImageRequest {
+    fn new(
+        model: impl Into<String>,
+        prompt: impl Into<String>,
+        parameters: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            model: model.into(),
+            prompt: prompt.into(),
+            parameters,
+        }
+    }
+
+    fn to_body(&self) -> Value {
+        let mut body = Map::new();
+        body.insert("model".to_string(), json!(self.model));
+        body.insert("prompt".to_string(), json!(self.prompt));
+        for (name, value) in &self.parameters {
+            body.insert(name.clone(), json!(value));
+        }
+        Value::Object(body)
+    }
+}
+
+/// Carries an exact MiniMax image generation request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MinimaxImageGenerationRequest {
+    pub(crate) provider_id: String,
+    pub(crate) model_id: String,
+    pub(crate) adapter: String,
+    pub(crate) prompt: String,
+    pub(crate) parameters: BTreeMap<String, String>,
+}
+
+/// Carries persisted media records created by the MiniMax image adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MinimaxImageGenerationResult {
+    pub(crate) job: MediaJob,
+    pub(crate) artifact: MediaArtifact,
+}
+
+/// Executes descriptor-driven MiniMax image generation.
+#[derive(Debug, Clone)]
+pub(crate) struct MinimaxImageAdapter {
+    client: Client,
+}
+
+impl MinimaxImageAdapter {
+    /// Creates an adapter with a default blocking HTTP client.
+    pub(crate) fn new() -> Result<Self> {
+        let client = Client::builder()
+            .timeout(Duration::from_millis(DEFAULT_MINIMAX_REQUEST_TIMEOUT_MS))
+            .build()
+            .context("build MiniMax image generation HTTP client")?;
+        Ok(Self { client })
+    }
+
+    /// Executes an exact MiniMax image request and persists job/artifact sidecars.
+    pub(crate) fn execute(
+        &self,
+        registry: &ProviderRegistry,
+        auth_store: &AuthStore,
+        service: &MediaGenerationService,
+        request: MinimaxImageGenerationRequest,
+    ) -> Result<MinimaxImageGenerationResult> {
+        let capability = validate_image_generate_selection(
+            registry,
+            auth_store,
+            &ImageGenerationSelection {
+                provider_id: &request.provider_id,
+                model_id: &request.model_id,
+                adapter: &request.adapter,
+                parameters: &request.parameters,
+            },
+            now_ms(),
+            &MediaDiscoveryCache::default(),
+        )?;
+        let selected_parameters =
+            selected_parameters_with_defaults(&capability, &request.parameters)?;
+
+        let discovery_cache = MediaDiscoveryCache::default();
+        let (provider, execution) = resolve_image_execution_descriptor(
+            registry,
+            &request.provider_id,
+            &request.model_id,
+            &request.adapter,
+            &discovery_cache,
+        )?;
+
+        let job_id = Uuid::new_v4().to_string();
+        let artifact_id = Uuid::new_v4().to_string();
+        let created_at_ms = now_ms();
+        let mut job = MediaJob::new(
+            job_id.clone(),
+            MediaKind::Image,
+            request.provider_id.clone(),
+            request.model_id.clone(),
+            request.prompt.clone(),
+            created_at_ms,
+        );
+        service.save_job(&job)?;
+        job.transition(MediaJobStatus::Running, now_ms())?;
+        service.save_job(&job)?;
+
+        let output = match self.request_image(
+            provider,
+            auth_store,
+            &execution,
+            &request,
+            selected_parameters,
+        ) {
+            Ok(output) => output,
+            Err(error) => {
+                job.error = Some(format!("{error:#}"));
+                job.transition(MediaJobStatus::Failed, now_ms())?;
+                service.save_job(&job)?;
+                return Err(error);
+            }
+        };
+
+        let filename = "image.png";
+        let artifact_path = service.write_artifact_bytes(&artifact_id, filename, &output.bytes)?;
+        let artifact = MediaArtifact {
+            id: artifact_id.clone(),
+            job_id: job_id.clone(),
+            kind: MediaKind::Image,
+            path: artifact_path.clone(),
+            mime_type: "image/png".to_string(),
+            byte_count: output.bytes.len() as u64,
+            metadata: artifact_metadata(&request, &artifact_path, &output, created_at_ms),
+            created_at_ms,
+        };
+        service.save_artifact(&artifact)?;
+        job.attach_artifact(artifact_id, now_ms());
+        job.transition(MediaJobStatus::Succeeded, now_ms())?;
+        service.save_job(&job)?;
+
+        Ok(MinimaxImageGenerationResult { job, artifact })
+    }
+
+    fn request_image(
+        &self,
+        provider: &ProviderDescriptor,
+        auth_store: &AuthStore,
+        execution: &MediaExecutionDescriptor,
+        request: &MinimaxImageGenerationRequest,
+        parameters: BTreeMap<String, String>,
+    ) -> Result<MinimaxOutput> {
+        let url = provider_execution_url(provider, execution)?;
+        let secrets = provider_error_secrets(provider, auth_store);
+        let body =
+            MinimaxImageRequest::new(&request.model_id, &request.prompt, parameters).to_body();
+        let mut http = self.client.post(url).json(&body);
+        for (name, value) in &provider.headers {
+            http = http.header(name.as_str(), value.as_str());
+        }
+        if let Some(token) = bearer_token(provider, auth_store)? {
+            http = http.bearer_auth(token);
+        }
+        let response = http
+            .send()
+            .map_err(|error| anyhow!("{}", redact_secrets(&error.to_string(), &secrets)))
+            .context("send MiniMax image generation request")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .map_err(|error| anyhow!("{}", redact_secrets(&error.to_string(), &secrets)))
+            .context("read MiniMax image generation response")?;
+        if !status.is_success() {
+            bail!(
+                "MiniMax image generation failed with status {}: {}",
+                status.as_u16(),
+                redact_secrets(&body, &secrets)
+            );
+        }
+        let value: Value =
+            serde_json::from_str(&body).context("parse MiniMax image generation response")?;
+        minimax_output_from_response(&self.client, &value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MinimaxOutput {
+    bytes: Vec<u8>,
+    remote_source_url: Option<String>,
+}
+
+fn selected_parameters_with_defaults(
+    capability: &crate::runtime::media::capabilities::MediaCapability,
+    selected: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    let mut request_parameters = BTreeMap::new();
+    for parameter in &capability.parameters {
+        let request_field = parameter
+            .request_field
+            .as_deref()
+            .unwrap_or(parameter.name.as_str());
+        if !MINIMAX_ALLOWED_REQUEST_FIELDS.contains(&request_field) {
+            bail!("MiniMax image request field unsupported: {request_field}");
+        }
+        let value = selected
+            .get(&parameter.name)
+            .cloned()
+            .unwrap_or_else(|| parameter.default.clone());
+        request_parameters.insert(request_field.to_string(), value);
+    }
+    Ok(request_parameters)
+}
+
+fn minimax_output_from_response(client: &Client, value: &Value) -> Result<MinimaxOutput> {
+    if let Some(base_resp) = value.get("base_resp") {
+        let status_code = base_resp
+            .get("status_code")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        if status_code != 0 {
+            let status_msg = base_resp
+                .get("status_msg")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown MiniMax error");
+            bail!("MiniMax image generation failed: {status_code} {status_msg}");
+        }
+    }
+    let data = value
+        .get("data")
+        .context("MiniMax image generation response did not contain data")?;
+    if let Some(encoded) = first_string(data.get("image_base64")) {
+        let bytes = BASE64_STANDARD
+            .decode(encoded.trim())
+            .context("decode MiniMax image_base64")?;
+        return Ok(MinimaxOutput {
+            bytes,
+            remote_source_url: None,
+        });
+    }
+    if let Some(url) = first_string(data.get("image_urls")) {
+        let bytes = download_image_url(client, url)?;
+        return Ok(MinimaxOutput {
+            bytes,
+            remote_source_url: Some(url.to_string()),
+        });
+    }
+    bail!("MiniMax image generation response did not contain an image")
+}
+
+fn first_string(value: Option<&Value>) -> Option<&str> {
+    match value? {
+        Value::String(text) => Some(text),
+        Value::Array(items) => items.iter().find_map(Value::as_str),
+        _ => None,
+    }
+}
+
+fn download_image_url(client: &Client, url: &str) -> Result<Vec<u8>> {
+    let parsed = reqwest::Url::parse(url).context("MiniMax image URL must be absolute")?;
+    match parsed.scheme() {
+        "https" => {}
+        "http" if url_host_is_loopback(&parsed) => {}
+        other => bail!("unsupported MiniMax image URL scheme `{other}`"),
+    }
+    let response = client
+        .get(parsed)
+        .send()
+        .context("download MiniMax generated image")?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!(
+            "download MiniMax generated image failed with status {}",
+            status.as_u16()
+        );
+    }
+    Ok(response
+        .bytes()
+        .context("read MiniMax generated image bytes")?
+        .to_vec())
+}
+
+fn url_host_is_loopback(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn provider_execution_url(
+    provider: &ProviderDescriptor,
+    execution: &MediaExecutionDescriptor,
+) -> Result<reqwest::Url> {
+    let base_url = execution.base_url.as_deref().unwrap_or(&provider.base_url);
+    let base = format!("{}/", base_url.trim_end_matches('/'));
+    let path = execution.path.trim_start_matches('/');
+    let mut url = reqwest::Url::parse(&base)
+        .and_then(|base| base.join(path))
+        .with_context(|| {
+            format!(
+                "build MiniMax image generation URL from {} and {}",
+                base_url, execution.path
+            )
+        })?;
+    if !provider.query_params.is_empty() {
+        let mut query = url.query_pairs_mut();
+        for (key, value) in &provider.query_params {
+            query.append_pair(key, value);
+        }
+    }
+    Ok(url)
+}
+
+fn bearer_token(provider: &ProviderDescriptor, auth_store: &AuthStore) -> Result<Option<String>> {
+    if provider.auth_modes.is_empty() {
+        return Ok(None);
+    }
+    let Some(credential) = provider_credential(provider, auth_store) else {
+        bail!(
+            "missing credentials configured for provider {}",
+            provider.id
+        );
+    };
+    match credential {
+        StoredCredential::ApiKey { key } => non_empty_token(key, &provider.id).map(Some),
+        StoredCredential::OAuth(credential) => {
+            non_empty_token(&credential.access_token, &provider.id).map(Some)
+        }
+    }
+}
+
+fn provider_credential<'a>(
+    provider: &ProviderDescriptor,
+    auth_store: &'a AuthStore,
+) -> Option<&'a StoredCredential> {
+    let canonical = canonical_provider_id(&provider.id);
+    auth_store.get(&provider.id).or_else(|| {
+        (canonical != provider.id.as_str())
+            .then(|| auth_store.get(&canonical))
+            .flatten()
+    })
+}
+
+fn non_empty_token(value: &str, provider_id: &str) -> Result<String> {
+    let token = value.trim();
+    if token.is_empty() {
+        bail!("empty credentials configured for provider {provider_id}");
+    }
+    Ok(token.to_string())
+}
+
+fn provider_error_secrets(provider: &ProviderDescriptor, auth_store: &AuthStore) -> Vec<String> {
+    let mut secrets = Vec::new();
+    if let Some(credential) = provider_credential(provider, auth_store) {
+        match credential {
+            StoredCredential::ApiKey { key } => secrets.push(key.clone()),
+            StoredCredential::OAuth(credential) => {
+                secrets.push(credential.access_token.clone());
+                secrets.push(credential.refresh_token.clone());
+            }
+        }
+    }
+    secrets.extend(provider.headers.values().cloned());
+    secrets.extend(provider.query_params.values().cloned());
+    secrets
+        .into_iter()
+        .map(|secret| secret.trim().to_string())
+        .filter(|secret| !secret.is_empty())
+        .collect()
+}
+
+fn redact_secrets(text: &str, secrets: &[String]) -> String {
+    secrets.iter().fold(text.to_string(), |redacted, secret| {
+        redacted.replace(secret, "[redacted]")
+    })
+}
+
+fn artifact_metadata(
+    request: &MinimaxImageGenerationRequest,
+    path: &std::path::Path,
+    output: &MinimaxOutput,
+    created_at_ms: u64,
+) -> Value {
+    let mut metadata = json!({
+        "providerId": request.provider_id,
+        "modelId": request.model_id,
+        "adapter": request.adapter,
+        "prompt": request.prompt,
+        "parameters": request.parameters,
+        "mimeType": "image/png",
+        "localPath": path,
+        "byteCount": output.bytes.len() as u64,
+        "createdAtMs": created_at_ms,
+    });
+    if let Some(remote_source_url) = &output.remote_source_url {
+        metadata["remoteSourceUrl"] = json!(remote_source_url);
+    }
+    metadata
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::media::MediaGenerationService;
+    use indexmap::IndexMap;
+    use puffer_provider_registry::{
+        AuthMode, AuthStore, ImageMediaDescriptor, MediaExecutionDescriptor, MediaExecutionKind,
+        MediaModelDescriptor, MediaOperation, MediaParameterSpec, ModelDescriptor,
+        ProviderDescriptor, ProviderMediaDescriptor, ProviderRegistry,
+    };
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use tempfile::tempdir;
+
+    fn registry_with_provider(base_url: String) -> ProviderRegistry {
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderDescriptor {
+            id: "minimax".to_string(),
+            display_name: "MiniMax".to_string(),
+            base_url: "https://api.minimax.io/anthropic".to_string(),
+            default_api: "anthropic-messages".to_string(),
+            auth_modes: vec![AuthMode::ApiKey],
+            headers: IndexMap::new(),
+            query_params: IndexMap::new(),
+            chat_completions_path: None,
+            discovery: None,
+            media: Some(ProviderMediaDescriptor {
+                image: Some(ImageMediaDescriptor {
+                    discovery: None,
+                    execution: Some(MediaExecutionDescriptor {
+                        adapter: MediaExecutionKind::MinimaxImage,
+                        base_url: Some(base_url),
+                        path: "/v1/image_generation".to_string(),
+                    }),
+                    models: vec![MediaModelDescriptor {
+                        id: "image-01".to_string(),
+                        display_name: Some("Image 01".to_string()),
+                        execution: None,
+                        operations: vec![MediaOperation::Generate],
+                        parameters: vec![
+                            MediaParameterSpec {
+                                name: "aspect_ratio".to_string(),
+                                label: "Aspect ratio".to_string(),
+                                values: vec!["1:1".to_string(), "16:9".to_string()],
+                                default: "1:1".to_string(),
+                                request_field: Some("aspect_ratio".to_string()),
+                            },
+                            MediaParameterSpec {
+                                name: "response_format".to_string(),
+                                label: "Response format".to_string(),
+                                values: vec!["url".to_string(), "base64".to_string()],
+                                default: "base64".to_string(),
+                                request_field: Some("response_format".to_string()),
+                            },
+                        ],
+                    }],
+                }),
+            }),
+            models: Vec::<ModelDescriptor>::new(),
+        });
+        registry
+    }
+
+    fn auth_store() -> AuthStore {
+        let mut auth = AuthStore::default();
+        auth.set_api_key("minimax", "sk-minimax");
+        auth
+    }
+
+    fn request() -> MinimaxImageGenerationRequest {
+        MinimaxImageGenerationRequest {
+            provider_id: "minimax".to_string(),
+            model_id: "image-01".to_string(),
+            adapter: "minimax_image".to_string(),
+            prompt: "draw a precise icon".to_string(),
+            parameters: BTreeMap::from([
+                ("aspect_ratio".to_string(), "16:9".to_string()),
+                ("response_format".to_string(), "base64".to_string()),
+            ]),
+        }
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        let mut buffer = [0_u8; 8192];
+        let size = stream.read(&mut buffer).expect("read request");
+        String::from_utf8_lossy(&buffer[..size]).to_string()
+    }
+
+    #[test]
+    fn minimax_image_posts_generation_request_and_decodes_base64() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let request_text = read_http_request(&mut stream);
+            let body = json!({
+                "data": {"image_base64": ["aW1hZ2UtYnl0ZXM="]},
+                "base_resp": {"status_code": 0, "status_msg": "success"}
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("response");
+            request_text
+        });
+        let registry = registry_with_provider(format!("http://{address}"));
+        let service_dir = tempdir().expect("tempdir");
+
+        let result = MinimaxImageAdapter::new()
+            .expect("adapter")
+            .execute(
+                &registry,
+                &auth_store(),
+                &MediaGenerationService::new(service_dir.path()),
+                request(),
+            )
+            .expect("generation succeeds");
+
+        let request_text = server.join().expect("server");
+        assert!(request_text.starts_with("POST /v1/image_generation HTTP/1.1"));
+        assert!(request_text.contains("authorization: Bearer sk-minimax"));
+        assert!(request_text.contains("\"model\":\"image-01\""));
+        assert!(request_text.contains("\"aspect_ratio\":\"16:9\""));
+        assert!(request_text.contains("\"response_format\":\"base64\""));
+        assert_eq!(
+            std::fs::read(&result.artifact.path).unwrap(),
+            b"image-bytes"
+        );
+        assert_eq!(result.artifact.metadata["adapter"], "minimax_image");
+    }
+}

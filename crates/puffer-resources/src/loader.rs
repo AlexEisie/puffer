@@ -1272,14 +1272,17 @@ models: []
 media:
   image:
     execution:
-      adapter: openai_images
+      adapter: images_json
       path: /v1/images/generations
     models:
       - id: exact-image-model
         operations:
           - generate
         parameters:
-          size: []
+          - name: size
+            label: Size
+            values: []
+            default: 1024x1024
 "#,
         )
         .unwrap();
@@ -1289,7 +1292,7 @@ media:
         let message = format!("{error:#}");
 
         assert!(message.contains("invalid media descriptor for provider `bad-media`"));
-        assert!(message.contains("parameters.size"));
+        assert!(message.contains("parameters[0].values"));
     }
 
     #[test]

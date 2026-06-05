@@ -61,9 +61,8 @@
     image: {
       providerId: null,
       modelId: null,
-      size: "1024x1024",
-      quality: "auto",
-      outputFormat: "png"
+      adapter: null,
+      parameters: {}
     },
     video: {
       providerId: null,

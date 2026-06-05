@@ -161,12 +161,10 @@ pub struct ImageMediaConfig {
     pub provider_id: Option<String>,
     #[serde(default, alias = "modelId")]
     pub model_id: Option<String>,
-    #[serde(default = "default_image_size")]
-    pub size: String,
-    #[serde(default = "default_image_quality")]
-    pub quality: String,
-    #[serde(default = "default_image_output_format", alias = "outputFormat")]
-    pub output_format: String,
+    #[serde(default)]
+    pub adapter: Option<String>,
+    #[serde(default)]
+    pub parameters: BTreeMap<String, String>,
 }
 
 impl Default for ImageMediaConfig {
@@ -174,9 +172,8 @@ impl Default for ImageMediaConfig {
         Self {
             provider_id: None,
             model_id: None,
-            size: default_image_size(),
-            quality: default_image_quality(),
-            output_format: default_image_output_format(),
+            adapter: None,
+            parameters: BTreeMap::new(),
         }
     }
 }
@@ -328,18 +325,6 @@ fn default_editor_mode() -> String {
 
 fn default_remote_runner_wait_for_ready() -> bool {
     true
-}
-
-fn default_image_size() -> String {
-    "1024x1024".to_string()
-}
-
-fn default_image_quality() -> String {
-    "auto".to_string()
-}
-
-fn default_image_output_format() -> String {
-    "png".to_string()
 }
 
 fn default_video_aspect_ratio() -> String {

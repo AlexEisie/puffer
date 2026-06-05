@@ -6,6 +6,7 @@
   import type {
     ImageMediaSettings,
     MediaCapabilityInfo,
+    MediaCapabilityParameterInfo,
     MediaKind,
     MediaSettings,
     VideoMediaSettings
@@ -27,17 +28,8 @@
   const saveLabel = $derived(kind === "image" ? "Save" : `Save ${title.toLowerCase()}`);
   const closeLabel = $derived(`Close ${title.toLowerCase()}`);
   const saved = $derived(mediaSettingsForKind(kind, settings));
-  const COMMON_IMAGE_SIZES = [
-    "256x256",
-    "512x512",
-    "768x768",
-    "1024x1024",
-    "1024x1536",
-    "1536x1024",
-    "1024x1792",
-    "1792x1024",
-    "2048x2048"
-  ];
+  const aspectRatioOptions = ["16:9"];
+  const durationOptions = [8];
 
   let capabilities = $state<MediaCapabilityInfo[]>([]);
   let loading = $state(true);
@@ -45,9 +37,8 @@
   let error = $state<string | null>(null);
   let providerId = $state(initialSaved.providerId ?? "");
   let modelId = $state(initialSaved.modelId ?? "");
-  let size = $state(initialImage.size);
-  let quality = $state(initialImage.quality);
-  let outputFormat = $state(initialImage.outputFormat);
+  let adapter = $state(initialImage.adapter ?? "");
+  let parameters = $state<Record<string, string>>({ ...initialImage.parameters });
   let aspectRatio = $state(initialVideo.aspectRatio);
   let durationSeconds = $state(initialVideo.durationSeconds);
   let appliedSettingsKey = $state(untrack(() => mediaSettingsKey(kind, settings)));
@@ -57,11 +48,14 @@
   );
   let providerOptions = $derived.by(() => {
     const seen = new Set<string>();
-    const out: string[] = [];
+    const out: { id: string; label: string }[] = [];
     for (const capability of availableCapabilities) {
       if (seen.has(capability.providerId)) continue;
       seen.add(capability.providerId);
-      out.push(capability.providerId);
+      out.push({
+        id: capability.providerId,
+        label: capability.providerDisplayName || capability.providerId
+      });
     }
     return out;
   });
@@ -70,48 +64,19 @@
   );
   let selectedCapability = $derived(
     availableCapabilities.find(
-      (capability) => capability.providerId === providerId && capability.modelId === modelId
+      (capability) =>
+        capability.providerId === providerId &&
+        capability.modelId === modelId &&
+        capability.adapter === adapter
     ) ?? null
   );
   let hasAvailableCapabilities = $derived(availableCapabilities.length > 0);
   let savedSelectionMissing = $derived(
     !loading &&
-      Boolean(saved.providerId && saved.modelId) &&
-      !availableCapabilities.some(
-        (capability) =>
-          capability.providerId === saved.providerId && capability.modelId === saved.modelId
-      )
+      savedSelectionIsConfigured(kind, settings) &&
+      !savedSelectionIsAvailable(kind, settings, availableCapabilities)
   );
   let canSave = $derived(Boolean(settingsReady && selectedCapability && !loading && !saving));
-  let sizeOptions = $derived(parameterOptions("size", COMMON_IMAGE_SIZES));
-  let qualityOptions = $derived(parameterOptions("quality", ["auto"]));
-  let outputFormatOptions = $derived(parameterOptions("outputFormat", ["png"]));
-  let aspectRatioOptions = $derived(parameterOptions("aspectRatio", ["16:9"]));
-  let durationOptions = $derived(
-    parameterOptions("durationSeconds", ["8"]).map((value) => Number(value)).filter(Boolean)
-  );
-
-  function parameterOptions(key: string, fallback: string[]): string[] {
-    const values = selectedCapability?.parameterValues?.[key];
-    if (!Array.isArray(values) || values.length === 0) return fallback;
-    return values.filter(
-      (value): value is string => typeof value === "string" && value.length > 0
-    );
-  }
-
-  function firstSupportedValue(current: string, options: string[]): string {
-    if (options.includes(current)) return current;
-    return options[0] ?? current;
-  }
-
-  function clampImageParameters() {
-    const nextSize = firstSupportedValue(size, sizeOptions);
-    const nextQuality = firstSupportedValue(quality, qualityOptions);
-    const nextOutputFormat = firstSupportedValue(outputFormat, outputFormatOptions);
-    if (size !== nextSize) size = nextSize;
-    if (quality !== nextQuality) quality = nextQuality;
-    if (outputFormat !== nextOutputFormat) outputFormat = nextOutputFormat;
-  }
 
   function mediaSettingsTitle(mediaKind: MediaKind): string {
     return mediaKind === "image" ? "Image generation settings" : "Video generation settings";
@@ -128,9 +93,8 @@
       mediaKind,
       image.providerId ?? "",
       image.modelId ?? "",
-      image.size,
-      image.quality,
-      image.outputFormat,
+      image.adapter ?? "",
+      serializeParameters(image.parameters),
       video.providerId ?? "",
       video.modelId ?? "",
       video.aspectRatio,
@@ -142,9 +106,8 @@
     const current = mediaSettingsForKind(kind, mediaSettings);
     providerId = current.providerId ?? "";
     modelId = current.modelId ?? "";
-    size = mediaSettings.image.size;
-    quality = mediaSettings.image.quality;
-    outputFormat = mediaSettings.image.outputFormat;
+    adapter = mediaSettings.image.adapter ?? "";
+    parameters = { ...mediaSettings.image.parameters };
     aspectRatio = mediaSettings.video.aspectRatio;
     durationSeconds = mediaSettings.video.durationSeconds;
   }
@@ -152,41 +115,120 @@
   function chooseDefaultCapability() {
     if (availableCapabilities.length === 0) return;
     const savedCapability = availableCapabilities.find(
-      (capability) => capability.providerId === providerId && capability.modelId === modelId
+      (capability) =>
+        capability.providerId === providerId &&
+        capability.modelId === modelId &&
+        capability.adapter === adapter
     );
     if (savedCapability) return;
-    if (saved.providerId && saved.modelId) return;
+    if (savedSelectionIsConfigured(kind, settings)) return;
     const first = availableCapabilities[0];
-    providerId = first.providerId;
-    modelId = first.modelId;
+    selectCapability(first);
   }
 
   function handleProviderChange(value: string) {
-    providerId = value;
-    modelId = availableCapabilities.find((capability) => capability.providerId === value)?.modelId ?? "";
+    const first = availableCapabilities.find((capability) => capability.providerId === value);
+    if (first) {
+      selectCapability(first);
+    } else {
+      providerId = value;
+      modelId = "";
+      adapter = "";
+      parameters = {};
+    }
   }
 
-  function providerLabel(value: string): string {
-    const normalized = value.trim().toLowerCase();
-    if (normalized === "openai" || normalized === "codex") return "OpenAI";
-    if (normalized === "anthropic" || normalized === "claude") return "Claude";
-    if (normalized === "replicate") return "Replicate";
-    if (normalized === "fal" || normalized === "fal-ai") return "fal.ai";
-    if (normalized === "puffer") return "Puffer";
-    return value
-      .split(/[-_\s]+/)
-      .filter(Boolean)
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-      .join(" ") || value;
+  function handleCapabilityChange(value: string) {
+    const next = modelOptions.find((capability) => capabilityKey(capability) === value);
+    if (next) selectCapability(next);
+  }
+
+  function selectCapability(capability: MediaCapabilityInfo) {
+    providerId = capability.providerId;
+    modelId = capability.modelId;
+    adapter = capability.adapter;
+    parameters = { ...capability.defaults };
+  }
+
+  function capabilityKey(capability: MediaCapabilityInfo): string {
+    return [capability.providerId, capability.modelId, capability.adapter].join("\u0000");
+  }
+
+  function modelLabel(capability: MediaCapabilityInfo): string {
+    const label = capability.modelDisplayName || capability.modelId;
+    return modelOptions.filter((candidate) => candidate.modelId === capability.modelId).length > 1
+      ? `${label} (${capability.adapter})`
+      : label;
+  }
+
+  function parameterValue(parameter: MediaCapabilityParameterInfo): string {
+    return parameters[parameter.name] ?? parameter.default;
+  }
+
+  function setParameterValue(name: string, value: string) {
+    parameters = { ...parameters, [name]: value };
+  }
+
+  function normalizeParameters(
+    capability: MediaCapabilityInfo,
+    current: Record<string, string>
+  ): Record<string, string> {
+    const next: Record<string, string> = {};
+    for (const parameter of capability.parameters) {
+      const currentValue = current[parameter.name];
+      next[parameter.name] = parameter.values.includes(currentValue)
+        ? currentValue
+        : parameter.default;
+    }
+    return next;
+  }
+
+  function serializeParameters(value: Record<string, string>): string {
+    return Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, val]) => `${key}=${val}`)
+      .join("\u0000");
+  }
+
+  function savedSelectionIsConfigured(mediaKind: MediaKind, mediaSettings: MediaSettings): boolean {
+    if (mediaKind === "image") {
+      const image = mediaSettings.image;
+      return Boolean(image.providerId || image.modelId || image.adapter);
+    }
+    const video = mediaSettings.video;
+    return Boolean(video.providerId || video.modelId);
+  }
+
+  function savedSelectionIsAvailable(
+    mediaKind: MediaKind,
+    mediaSettings: MediaSettings,
+    available: MediaCapabilityInfo[]
+  ): boolean {
+    if (mediaKind === "image") {
+      const image = mediaSettings.image;
+      return available.some(
+        (capability) =>
+          capability.providerId === image.providerId &&
+          capability.modelId === image.modelId &&
+          capability.adapter === image.adapter
+      );
+    }
+    const video = mediaSettings.video;
+    return available.some(
+      (capability) =>
+        capability.providerId === video.providerId && capability.modelId === video.modelId
+    );
   }
 
   function withCurrentImage(): ImageMediaSettings {
+    const normalizedParameters = selectedCapability
+      ? normalizeParameters(selectedCapability, parameters)
+      : { ...parameters };
     return {
       providerId: providerId || null,
       modelId: modelId || null,
-      size,
-      quality,
-      outputFormat
+      adapter: adapter || null,
+      parameters: normalizedParameters
     };
   }
 
@@ -257,7 +299,10 @@
 
   $effect(() => {
     if (kind !== "image" || !selectedCapability) return;
-    clampImageParameters();
+    const next = normalizeParameters(selectedCapability, parameters);
+    if (serializeParameters(next) !== serializeParameters(parameters)) {
+      parameters = next;
+    }
   });
 </script>
 
@@ -316,52 +361,48 @@
               value={providerId}
               onchange={(event) => handleProviderChange(event.currentTarget.value)}
             >
-              {#if providerId && !providerOptions.includes(providerId)}
+              {#if providerId && !providerOptions.some((provider) => provider.id === providerId)}
                 <option value={providerId} disabled>{providerId} unavailable</option>
               {/if}
               {#each providerOptions as provider}
-                <option value={provider}>{providerLabel(provider)}</option>
+                <option value={provider.id}>{provider.label}</option>
               {/each}
             </select>
           </label>
 
           <label class="pf-media-field">
             <span class="pf-field-label">Model</span>
-            <select class="sc-input" value={modelId} onchange={(event) => (modelId = event.currentTarget.value)}>
-              {#if modelId && !modelOptions.some((capability) => capability.modelId === modelId)}
+            <select
+              class="sc-input"
+              value={selectedCapability ? capabilityKey(selectedCapability) : ""}
+              onchange={(event) => handleCapabilityChange(event.currentTarget.value)}
+            >
+              {#if modelId && !modelOptions.some((capability) => capability.modelId === modelId && capability.adapter === adapter)}
                 <option value={modelId} disabled>{modelId} unavailable</option>
               {/if}
               {#each modelOptions as capability}
-                <option value={capability.modelId}>{capability.modelId}</option>
+                <option value={capabilityKey(capability)}>{modelLabel(capability)}</option>
               {/each}
             </select>
           </label>
 
           {#if kind === "image"}
-            <label class="pf-media-field">
-              <span class="pf-field-label">Size</span>
-              <select class="sc-input" value={size} onchange={(event) => (size = event.currentTarget.value)}>
-                {#each sizeOptions as option}
-                  <option value={option}>{option}</option>
-                {/each}
-              </select>
-            </label>
-            <label class="pf-media-field">
-              <span class="pf-field-label">Quality</span>
-              <select class="sc-input" value={quality} onchange={(event) => (quality = event.currentTarget.value)}>
-                {#each qualityOptions as option}
-                  <option value={option}>{option}</option>
-                {/each}
-              </select>
-            </label>
-            <label class="pf-media-field">
-              <span class="pf-field-label">Output format</span>
-              <select class="sc-input" value={outputFormat} onchange={(event) => (outputFormat = event.currentTarget.value)}>
-                {#each outputFormatOptions as option}
-                  <option value={option}>{option}</option>
-                {/each}
-              </select>
-            </label>
+            {#if selectedCapability}
+              {#each selectedCapability.parameters as parameter (parameter.name)}
+                <label class="pf-media-field">
+                  <span class="pf-field-label">{parameter.label}</span>
+                  <select
+                    class="sc-input"
+                    value={parameterValue(parameter)}
+                    onchange={(event) => setParameterValue(parameter.name, event.currentTarget.value)}
+                  >
+                    {#each parameter.values as option}
+                      <option value={option}>{option}</option>
+                    {/each}
+                  </select>
+                </label>
+              {/each}
+            {/if}
           {:else}
             <label class="pf-media-field">
               <span class="pf-field-label">Aspect ratio</span>

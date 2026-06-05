@@ -1,89 +1,94 @@
 use super::artifacts::MediaArtifact;
 use super::jobs::{MediaJob, MediaJobStatus};
 use super::resolver::{
-    validate_image_generate_selection, ImageGenerationSelection, MediaDiscoveryCache,
+    resolve_image_execution_descriptor, validate_image_generate_selection,
+    ImageGenerationSelection, MediaDiscoveryCache,
 };
 use super::{MediaGenerationService, MediaKind};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use puffer_provider_registry::{
-    canonical_provider_id, AuthStore, MediaExecutionKind, ProviderDescriptor, ProviderRegistry,
-    StoredCredential,
+    canonical_provider_id, AuthStore, MediaExecutionDescriptor, ProviderDescriptor,
+    ProviderRegistry, StoredCredential,
 };
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const DEFAULT_IMAGE_REQUEST_TIMEOUT_MS: u64 = 300_000;
+const IMAGES_JSON_ALLOWED_REQUEST_FIELDS: &[&str] = &[
+    "model",
+    "prompt",
+    "n",
+    "size",
+    "quality",
+    "output_format",
+    "response_format",
+    "aspect_ratio",
+    "resolution",
+];
 
 /// Request shape for OpenAI image generation after media settings resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct OpenAIImageRequest {
+struct ImagesJsonRequest {
     model: String,
     prompt: String,
-    size: String,
-    quality: String,
-    output_format: String,
+    parameters: BTreeMap<String, String>,
 }
 
-impl OpenAIImageRequest {
+impl ImagesJsonRequest {
     fn new(
         model: impl Into<String>,
         prompt: impl Into<String>,
-        size: impl Into<String>,
-        quality: impl Into<String>,
-        output_format: impl Into<String>,
+        parameters: BTreeMap<String, String>,
     ) -> Self {
         Self {
             model: model.into(),
             prompt: prompt.into(),
-            size: size.into(),
-            quality: quality.into(),
-            output_format: output_format.into(),
+            parameters,
         }
     }
 
     fn to_body(&self) -> Value {
-        json!({
-            "model": self.model,
-            "prompt": self.prompt,
-            "size": self.size,
-            "quality": self.quality,
-            "output_format": self.output_format,
-            "n": 1
-        })
+        let mut body = Map::new();
+        body.insert("model".to_string(), json!(self.model));
+        body.insert("prompt".to_string(), json!(self.prompt));
+        for (name, value) in &self.parameters {
+            body.insert(name.clone(), json!(value));
+        }
+        Value::Object(body)
     }
 }
 
 /// Carries an exact OpenAI Images-compatible generation request.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OpenAIImagesGenerationRequest {
+pub(crate) struct ImagesJsonGenerationRequest {
     pub(crate) provider_id: String,
     pub(crate) model_id: String,
+    pub(crate) adapter: String,
     pub(crate) prompt: String,
-    pub(crate) size: String,
-    pub(crate) quality: String,
-    pub(crate) output_format: String,
+    pub(crate) parameters: BTreeMap<String, String>,
 }
 
 /// Carries persisted media records created by the OpenAI Images adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OpenAIImagesGenerationResult {
+pub(crate) struct ImagesJsonGenerationResult {
     pub(crate) job: MediaJob,
     pub(crate) artifact: MediaArtifact,
 }
 
 /// Executes descriptor-driven OpenAI Images-compatible generation.
 #[derive(Debug, Clone)]
-pub(crate) struct OpenAIImagesAdapter {
+pub(crate) struct ImagesJsonAdapter {
     client: Client,
 }
 
-impl OpenAIImagesAdapter {
+impl ImagesJsonAdapter {
     /// Creates an adapter with a default blocking HTTP client.
     pub(crate) fn new() -> Result<Self> {
         let client = Client::builder()
@@ -99,45 +104,31 @@ impl OpenAIImagesAdapter {
         registry: &ProviderRegistry,
         auth_store: &AuthStore,
         service: &MediaGenerationService,
-        request: OpenAIImagesGenerationRequest,
-    ) -> Result<OpenAIImagesGenerationResult> {
-        validate_image_generate_selection(
+        request: ImagesJsonGenerationRequest,
+    ) -> Result<ImagesJsonGenerationResult> {
+        let capability = validate_image_generate_selection(
             registry,
             auth_store,
             &ImageGenerationSelection {
                 provider_id: &request.provider_id,
                 model_id: &request.model_id,
-                size: &request.size,
-                quality: &request.quality,
-                output_format: &request.output_format,
+                adapter: &request.adapter,
+                parameters: &request.parameters,
             },
             now_ms(),
             &MediaDiscoveryCache::default(),
         )?;
+        let selected_parameters =
+            selected_parameters_with_defaults(&capability, &request.parameters)?;
 
-        let provider = registry.provider(&request.provider_id).with_context(|| {
-            format!(
-                "selected image model unavailable: {}/{}",
-                request.provider_id, request.model_id
-            )
-        })?;
-        let execution = provider
-            .media
-            .as_ref()
-            .and_then(|media| media.image.as_ref())
-            .and_then(|image| image.execution.as_ref())
-            .with_context(|| {
-                format!(
-                    "selected image model unavailable: {}/{}",
-                    request.provider_id, request.model_id
-                )
-            })?;
-        if !matches!(execution.adapter, MediaExecutionKind::OpenAiImages) {
-            bail!(
-                "image media adapter unavailable for {:?}",
-                execution.adapter
-            );
-        }
+        let discovery_cache = MediaDiscoveryCache::default();
+        let (provider, execution) = resolve_image_execution_descriptor(
+            registry,
+            &request.provider_id,
+            &request.model_id,
+            &request.adapter,
+            &discovery_cache,
+        )?;
 
         let job_id = Uuid::new_v4().to_string();
         let artifact_id = Uuid::new_v4().to_string();
@@ -154,7 +145,13 @@ impl OpenAIImagesAdapter {
         job.transition(MediaJobStatus::Running, now_ms())?;
         service.save_job(&job)?;
 
-        let output = match self.request_image(provider, auth_store, &request, &execution.path) {
+        let output = match self.request_image(
+            provider,
+            auth_store,
+            &request,
+            selected_parameters,
+            &execution,
+        ) {
             Ok(output) => output,
             Err(error) => {
                 job.error = Some(format!("{error:#}"));
@@ -164,17 +161,15 @@ impl OpenAIImagesAdapter {
             }
         };
 
-        let filename = format!(
-            "image.{}",
-            extension_for_output_format(&request.output_format)
-        );
+        let output_format = output_format_for_parameters(&request.parameters);
+        let filename = format!("image.{}", extension_for_output_format(&output_format));
         let artifact_path = service.write_artifact_bytes(&artifact_id, &filename, &output.bytes)?;
         let artifact = MediaArtifact {
             id: artifact_id.clone(),
             job_id: job_id.clone(),
             kind: MediaKind::Image,
             path: artifact_path.clone(),
-            mime_type: mime_type_for_output_format(&request.output_format).to_string(),
+            mime_type: mime_type_for_output_format(&output_format).to_string(),
             byte_count: output.bytes.len() as u64,
             metadata: artifact_metadata(&request, &artifact_path, &output, created_at_ms),
             created_at_ms,
@@ -184,28 +179,21 @@ impl OpenAIImagesAdapter {
         job.transition(MediaJobStatus::Succeeded, now_ms())?;
         service.save_job(&job)?;
 
-        Ok(OpenAIImagesGenerationResult { job, artifact })
+        Ok(ImagesJsonGenerationResult { job, artifact })
     }
 
     fn request_image(
         &self,
         provider: &ProviderDescriptor,
         auth_store: &AuthStore,
-        request: &OpenAIImagesGenerationRequest,
-        execution_path: &str,
+        request: &ImagesJsonGenerationRequest,
+        parameters: BTreeMap<String, String>,
+        execution: &MediaExecutionDescriptor,
     ) -> Result<ImageOutput> {
-        let url = provider_execution_url(provider, execution_path)?;
+        let url = provider_execution_url(provider, execution)?;
         let secrets = provider_error_secrets(provider, auth_store);
-        let mut http = self.client.post(url).json(
-            &OpenAIImageRequest::new(
-                &request.model_id,
-                &request.prompt,
-                &request.size,
-                &request.quality,
-                &request.output_format,
-            )
-            .to_body(),
-        );
+        let body = ImagesJsonRequest::new(&request.model_id, &request.prompt, parameters).to_body();
+        let mut http = self.client.post(url).json(&body);
         for (name, value) in &provider.headers {
             http = http.header(name.as_str(), value.as_str());
         }
@@ -239,6 +227,28 @@ struct ImageOutput {
     bytes: Vec<u8>,
     revised_prompt: Option<String>,
     remote_source_url: Option<String>,
+}
+
+fn selected_parameters_with_defaults(
+    capability: &crate::runtime::media::capabilities::MediaCapability,
+    selected: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    let mut request_parameters = BTreeMap::new();
+    for parameter in &capability.parameters {
+        let request_field = parameter
+            .request_field
+            .as_deref()
+            .unwrap_or(parameter.name.as_str());
+        if !IMAGES_JSON_ALLOWED_REQUEST_FIELDS.contains(&request_field) {
+            bail!("image generation request field unsupported: {request_field}");
+        }
+        let value = selected
+            .get(&parameter.name)
+            .cloned()
+            .unwrap_or_else(|| parameter.default.clone());
+        request_parameters.insert(request_field.to_string(), value);
+    }
+    Ok(request_parameters)
 }
 
 fn image_output_from_response(client: &Client, value: &Value) -> Result<ImageOutput> {
@@ -311,16 +321,17 @@ fn url_host_is_loopback(url: &reqwest::Url) -> bool {
 
 fn provider_execution_url(
     provider: &ProviderDescriptor,
-    execution_path: &str,
+    execution: &MediaExecutionDescriptor,
 ) -> Result<reqwest::Url> {
-    let base = format!("{}/", provider.base_url.trim_end_matches('/'));
-    let path = execution_path.trim_start_matches('/');
+    let base_url = execution.base_url.as_deref().unwrap_or(&provider.base_url);
+    let base = format!("{}/", base_url.trim_end_matches('/'));
+    let path = execution.path.trim_start_matches('/');
     let mut url = reqwest::Url::parse(&base)
         .and_then(|base| base.join(path))
         .with_context(|| {
             format!(
                 "build image generation URL from {} and {}",
-                provider.base_url, execution_path
+                base_url, execution.path
             )
         })?;
     if !provider.query_params.is_empty() {
@@ -378,20 +389,19 @@ fn non_empty_token(value: &str, provider_id: &str) -> Result<String> {
 }
 
 fn artifact_metadata(
-    request: &OpenAIImagesGenerationRequest,
+    request: &ImagesJsonGenerationRequest,
     path: &std::path::Path,
     output: &ImageOutput,
     created_at_ms: u64,
 ) -> Value {
+    let output_format = output_format_for_parameters(&request.parameters);
     let mut metadata = json!({
         "providerId": request.provider_id,
         "modelId": request.model_id,
-        "adapter": "openai_images",
+        "adapter": request.adapter,
         "prompt": request.prompt,
-        "size": request.size,
-        "quality": request.quality,
-        "outputFormat": request.output_format,
-        "mimeType": mime_type_for_output_format(&request.output_format),
+        "parameters": request.parameters,
+        "mimeType": mime_type_for_output_format(&output_format),
         "localPath": path,
         "byteCount": output.bytes.len() as u64,
         "createdAtMs": created_at_ms,
@@ -403,6 +413,14 @@ fn artifact_metadata(
         metadata["remoteSourceUrl"] = json!(remote_source_url);
     }
     metadata
+}
+
+fn output_format_for_parameters(parameters: &BTreeMap<String, String>) -> String {
+    parameters
+        .get("output_format")
+        .or_else(|| parameters.get("outputFormat"))
+        .cloned()
+        .unwrap_or_else(|| "png".to_string())
 }
 
 fn provider_error_secrets(provider: &ProviderDescriptor, auth_store: &AuthStore) -> Vec<String> {
@@ -461,7 +479,7 @@ mod tests {
     use indexmap::IndexMap;
     use puffer_provider_registry::{
         AuthMode, AuthStore, ImageMediaDescriptor, MediaExecutionDescriptor, MediaExecutionKind,
-        MediaImageParameters, MediaModelDescriptor, MediaOperation, ModelDescriptor,
+        MediaModelDescriptor, MediaOperation, MediaParameterSpec, ModelDescriptor,
         ProviderDescriptor, ProviderMediaDescriptor, ProviderRegistry,
     };
     use serde_json::json;
@@ -475,6 +493,14 @@ mod tests {
     }
 
     fn registry_with_provider_id(provider_id: &str, base_url: String) -> ProviderRegistry {
+        registry_with_provider_parameters(provider_id, base_url, image_parameters())
+    }
+
+    fn registry_with_provider_parameters(
+        provider_id: &str,
+        base_url: String,
+        parameters: Vec<MediaParameterSpec>,
+    ) -> ProviderRegistry {
         let mut registry = ProviderRegistry::new();
         registry.register(ProviderDescriptor {
             id: provider_id.to_string(),
@@ -490,24 +516,48 @@ mod tests {
                 image: Some(ImageMediaDescriptor {
                     discovery: None,
                     execution: Some(MediaExecutionDescriptor {
-                        adapter: MediaExecutionKind::OpenAiImages,
+                        adapter: MediaExecutionKind::ImagesJson,
+                        base_url: None,
                         path: "/custom/images".to_string(),
                     }),
                     models: vec![MediaModelDescriptor {
                         id: "exact-image-model".to_string(),
                         display_name: Some("Exact Image Model".to_string()),
+                        execution: None,
                         operations: vec![MediaOperation::Generate],
-                        parameters: MediaImageParameters::new(
-                            vec!["1024x1024".to_string()],
-                            vec!["auto".to_string()],
-                            vec!["png".to_string()],
-                        ),
+                        parameters,
                     }],
                 }),
             }),
             models: Vec::<ModelDescriptor>::new(),
         });
         registry
+    }
+
+    fn image_parameters() -> Vec<MediaParameterSpec> {
+        vec![
+            MediaParameterSpec {
+                name: "size".to_string(),
+                label: "Size".to_string(),
+                values: vec!["1024x1024".to_string()],
+                default: "1024x1024".to_string(),
+                request_field: Some("size".to_string()),
+            },
+            MediaParameterSpec {
+                name: "quality".to_string(),
+                label: "Quality".to_string(),
+                values: vec!["auto".to_string()],
+                default: "auto".to_string(),
+                request_field: Some("quality".to_string()),
+            },
+            MediaParameterSpec {
+                name: "output_format".to_string(),
+                label: "Output format".to_string(),
+                values: vec!["png".to_string(), "webp".to_string()],
+                default: "png".to_string(),
+                request_field: Some("output_format".to_string()),
+            },
+        ]
     }
 
     fn auth_store() -> AuthStore {
@@ -522,14 +572,17 @@ mod tests {
         auth
     }
 
-    fn request() -> OpenAIImagesGenerationRequest {
-        OpenAIImagesGenerationRequest {
+    fn request() -> ImagesJsonGenerationRequest {
+        ImagesJsonGenerationRequest {
             provider_id: "exact-provider".to_string(),
             model_id: "exact-image-model".to_string(),
+            adapter: "images_json".to_string(),
             prompt: "draw a precise icon".to_string(),
-            size: "1024x1024".to_string(),
-            quality: "auto".to_string(),
-            output_format: "png".to_string(),
+            parameters: BTreeMap::from([
+                ("size".to_string(), "1024x1024".to_string()),
+                ("quality".to_string(), "auto".to_string()),
+                ("output_format".to_string(), "png".to_string()),
+            ]),
         }
     }
 
@@ -561,7 +614,7 @@ mod tests {
         let registry = registry_with_provider(format!("http://{address}"));
         let service_dir = tempdir().expect("tempdir");
 
-        let result = OpenAIImagesAdapter::new()
+        let result = ImagesJsonAdapter::new()
             .expect("adapter")
             .execute(
                 &registry,
@@ -576,11 +629,63 @@ mod tests {
         assert!(request_text.contains("authorization: Bearer sk-secret"));
         assert!(request_text.contains("x-provider-header: present"));
         assert!(request_text.contains("\"model\":\"exact-image-model\""));
+        assert!(request_text.contains("\"size\":\"1024x1024\""));
         assert_eq!(
             std::fs::read(&result.artifact.path).unwrap(),
             b"image-bytes"
         );
-        assert_eq!(result.artifact.metadata["adapter"], "openai_images");
+        assert_eq!(result.artifact.metadata["adapter"], "images_json");
+    }
+
+    #[test]
+    fn request_body_uses_descriptor_request_field_mapping() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let request_text = read_http_request(&mut stream);
+            let body = json!({
+                "data": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("response");
+            request_text
+        });
+        let mut parameters = image_parameters();
+        parameters[0].name = "resolution_choice".to_string();
+        parameters[0].request_field = Some("resolution".to_string());
+        parameters[0].values = vec!["2k".to_string()];
+        parameters[0].default = "2k".to_string();
+        let registry = registry_with_provider_parameters(
+            "exact-provider",
+            format!("http://{address}"),
+            parameters,
+        );
+        let service_dir = tempdir().expect("tempdir");
+        let mut request = request();
+        request.parameters.remove("size");
+        request
+            .parameters
+            .insert("resolution_choice".to_string(), "2k".to_string());
+
+        ImagesJsonAdapter::new()
+            .expect("adapter")
+            .execute(
+                &registry,
+                &auth_store(),
+                &MediaGenerationService::new(service_dir.path()),
+                request,
+            )
+            .expect("generation succeeds");
+
+        let request_text = server.join().expect("server");
+        assert!(request_text.contains("\"resolution\":\"2k\""));
+        assert!(!request_text.contains("\"resolution_choice\""));
     }
 
     #[test]
@@ -617,7 +722,7 @@ mod tests {
         let registry = registry_with_provider(format!("http://{address}"));
         let service_dir = tempdir().expect("tempdir");
 
-        let result = OpenAIImagesAdapter::new()
+        let result = ImagesJsonAdapter::new()
             .expect("adapter")
             .execute(
                 &registry,
@@ -664,7 +769,7 @@ mod tests {
         let registry = registry_with_provider(format!("http://{address}"));
         let service_dir = tempdir().expect("tempdir");
 
-        let error = OpenAIImagesAdapter::new()
+        let error = ImagesJsonAdapter::new()
             .expect("adapter")
             .execute(
                 &registry,
@@ -701,9 +806,11 @@ mod tests {
         let registry = registry_with_provider("http://127.0.0.1:9".to_string());
         let service_dir = tempdir().expect("tempdir");
         let mut request = request();
-        request.size = "2048x2048".to_string();
+        request
+            .parameters
+            .insert("size".to_string(), "2048x2048".to_string());
 
-        let error = OpenAIImagesAdapter::new()
+        let error = ImagesJsonAdapter::new()
             .expect("adapter")
             .execute(
                 &registry,
@@ -717,6 +824,68 @@ mod tests {
             error.to_string(),
             "image generation parameter unsupported: size=2048x2048"
         );
+    }
+
+    #[test]
+    fn unsupported_request_field_fails_before_http_request() {
+        let mut parameters = image_parameters();
+        parameters[0].request_field = Some("watermark".to_string());
+        let registry = registry_with_provider_parameters(
+            "exact-provider",
+            "http://127.0.0.1:9".to_string(),
+            parameters,
+        );
+        let service_dir = tempdir().expect("tempdir");
+
+        let error = ImagesJsonAdapter::new()
+            .expect("adapter")
+            .execute(
+                &registry,
+                &auth_store(),
+                &MediaGenerationService::new(service_dir.path()),
+                request(),
+            )
+            .expect_err("unsupported request field should fail before HTTP");
+
+        assert_eq!(
+            error.to_string(),
+            "image generation request field unsupported: watermark"
+        );
+    }
+
+    #[test]
+    fn provider_secrets_are_redacted_from_error_responses() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let _request_text = read_http_request(&mut stream);
+            let body = "bad sk-secret 2026-06-05";
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("response");
+        });
+        let registry = registry_with_provider(format!("http://{address}"));
+        let service_dir = tempdir().expect("tempdir");
+
+        let error = ImagesJsonAdapter::new()
+            .expect("adapter")
+            .execute(
+                &registry,
+                &auth_store(),
+                &MediaGenerationService::new(service_dir.path()),
+                request(),
+            )
+            .expect_err("provider error should fail");
+
+        server.join().expect("server");
+        let message = error.to_string();
+        assert!(message.contains("[redacted]"), "{message}");
+        assert!(!message.contains("sk-secret"), "{message}");
+        assert!(!message.contains("2026-06-05"), "{message}");
     }
 
     #[test]
@@ -740,13 +909,13 @@ mod tests {
         });
         let registry = registry_with_provider_id("openai", format!("http://{address}"));
         let service_dir = tempdir().expect("tempdir");
-        let request = OpenAIImagesGenerationRequest {
+        let request = ImagesJsonGenerationRequest {
             provider_id: "openai".to_string(),
             model_id: "exact-image-model".to_string(),
             ..request()
         };
 
-        OpenAIImagesAdapter::new()
+        ImagesJsonAdapter::new()
             .expect("adapter")
             .execute(
                 &registry,

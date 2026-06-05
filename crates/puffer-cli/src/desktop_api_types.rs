@@ -505,9 +505,8 @@ pub(crate) struct MediaSettingsDto {
 pub(crate) struct ImageMediaSettingsDto {
     pub(crate) provider_id: Option<String>,
     pub(crate) model_id: Option<String>,
-    pub(crate) size: String,
-    pub(crate) quality: String,
-    pub(crate) output_format: String,
+    pub(crate) adapter: Option<String>,
+    pub(crate) parameters: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -523,16 +522,28 @@ pub(crate) struct VideoMediaSettingsDto {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MediaCapabilityInfoDto {
     pub(crate) provider_id: String,
+    pub(crate) provider_display_name: String,
     pub(crate) model_id: String,
+    pub(crate) model_display_name: String,
     pub(crate) kind: String,
-    pub(crate) operations: Vec<String>,
-    pub(crate) supports_async: bool,
-    pub(crate) supports_streaming: bool,
-    pub(crate) parameter_values: Value,
+    pub(crate) operation: String,
+    pub(crate) adapter: String,
+    pub(crate) parameters: Vec<MediaCapabilityParameterDto>,
+    pub(crate) defaults: std::collections::BTreeMap<String, String>,
     pub(crate) status: String,
     pub(crate) source: String,
     pub(crate) reason: Option<String>,
     pub(crate) checked_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaCapabilityParameterDto {
+    pub(crate) name: String,
+    pub(crate) label: String,
+    pub(crate) values: Vec<String>,
+    pub(crate) default: String,
+    pub(crate) request_field: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

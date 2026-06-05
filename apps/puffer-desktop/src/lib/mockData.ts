@@ -656,9 +656,12 @@ export const mockSettingsSnapshot: SettingsSnapshot = {
       image: {
         providerId: "openai",
         modelId: "gpt-image-1",
-        size: "1024x1024",
-        quality: "auto",
-        outputFormat: "png"
+        adapter: "images_json",
+        parameters: {
+          size: "1024x1024",
+          quality: "auto",
+          output_format: "png"
+        }
       },
       video: {
         providerId: null,

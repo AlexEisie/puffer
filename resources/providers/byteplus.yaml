@@ -1,0 +1,37 @@
+id: byteplus
+display_name: BytePlus
+base_url: https://ark.ap-southeast.bytepluses.com/api/v3
+chat_completions_path: /chat/completions
+default_api: openai-completions
+auth_modes:
+  - api_key
+discovery:
+  path: /models
+  response: open_ai_models
+  api: openai-completions
+  context_window: 128000
+  max_output_tokens: 16384
+  supports_reasoning: true
+media:
+  image:
+    discovery:
+      adapter: static
+    execution:
+      adapter: images_json
+      path: /images/generations
+    models:
+      - id: seedream-5-0-260128
+        display_name: Seedream 5.0
+        operations:
+          - generate
+        parameters:
+          - name: size
+            label: Size
+            values: [2K]
+            default: 2K
+            request_field: size
+          - name: output_format
+            label: Output format
+            values: [png, jpeg]
+            default: png
+            request_field: output_format

@@ -340,6 +340,8 @@ pub struct MediaDiscoveryDescriptor {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MediaExecutionDescriptor {
     pub adapter: MediaExecutionKind,
+    #[serde(default)]
+    pub base_url: Option<String>,
     pub path: String,
 }
 
@@ -350,104 +352,23 @@ pub struct MediaModelDescriptor {
     #[serde(default)]
     pub display_name: Option<String>,
     #[serde(default)]
+    pub execution: Option<MediaExecutionDescriptor>,
+    #[serde(default)]
     pub operations: Vec<MediaOperation>,
     #[serde(default)]
-    pub parameters: MediaImageParameters,
+    pub parameters: Vec<MediaParameterSpec>,
 }
 
-/// Describes allowed image generation parameter values for one model.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct MediaImageParameters {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub size: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub quality: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub output_format: Vec<String>,
-    #[serde(skip)]
-    declared: MediaImageParameterDeclarations,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct MediaImageParameterDeclarations {
-    size: bool,
-    quality: bool,
-    output_format: bool,
-}
-
-impl<'de> Deserialize<'de> for MediaImageParameters {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct RawParameters {
-            size: Option<Vec<String>>,
-            quality: Option<Vec<String>>,
-            output_format: Option<Vec<String>>,
-        }
-
-        let raw = RawParameters::deserialize(deserializer)?;
-        let declared = MediaImageParameterDeclarations {
-            size: raw.size.is_some(),
-            quality: raw.quality.is_some(),
-            output_format: raw.output_format.is_some(),
-        };
-        Ok(Self {
-            size: raw.size.unwrap_or_default(),
-            quality: raw.quality.unwrap_or_default(),
-            output_format: raw.output_format.unwrap_or_default(),
-            declared,
-        })
-    }
-}
-
-impl Default for MediaImageParameters {
-    fn default() -> Self {
-        Self {
-            size: Vec::new(),
-            quality: Vec::new(),
-            output_format: Vec::new(),
-            declared: MediaImageParameterDeclarations::default(),
-        }
-    }
-}
-
-impl MediaImageParameters {
-    /// Creates parameter values that are treated as explicitly declared.
-    pub fn new(size: Vec<String>, quality: Vec<String>, output_format: Vec<String>) -> Self {
-        Self {
-            size,
-            quality,
-            output_format,
-            declared: MediaImageParameterDeclarations {
-                size: true,
-                quality: true,
-                output_format: true,
-            },
-        }
-    }
-
-    fn validate(&self, model_location: &str, errors: &mut Vec<String>) {
-        validate_declared_parameter_values(
-            self.declared.size,
-            &self.size,
-            &format!("{model_location}.parameters.size"),
-            errors,
-        );
-        validate_declared_parameter_values(
-            self.declared.quality,
-            &self.quality,
-            &format!("{model_location}.parameters.quality"),
-            errors,
-        );
-        validate_declared_parameter_values(
-            self.declared.output_format,
-            &self.output_format,
-            &format!("{model_location}.parameters.output_format"),
-            errors,
-        );
-    }
+/// Describes one select-only image generation parameter.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MediaParameterSpec {
+    pub name: String,
+    pub label: String,
+    pub values: Vec<String>,
+    pub default: String,
+    #[serde(default)]
+    pub request_field: Option<String>,
 }
 
 /// Describes currently implemented media discovery adapters.
@@ -455,14 +376,16 @@ impl MediaImageParameters {
 #[serde(rename_all = "snake_case")]
 pub enum MediaDiscoveryKind {
     Static,
+    TrustedImageOutput,
 }
 
 /// Describes currently implemented media execution adapters.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaExecutionKind {
-    #[serde(rename = "openai_images")]
-    OpenAiImages,
+    ImagesJson,
+    ChatImageOutput,
+    MinimaxImage,
 }
 
 /// Describes image media operations.
@@ -535,6 +458,13 @@ impl ProviderDescriptor {
 
 impl MediaExecutionDescriptor {
     fn validate(&self, location: &str, errors: &mut Vec<String>) {
+        if self
+            .base_url
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            errors.push(format!("{location}.base_url must not be empty"));
+        }
         if self.path.trim().is_empty() {
             errors.push(format!("{location}.path must not be empty"));
         }
@@ -560,25 +490,44 @@ impl MediaModelDescriptor {
             ));
         }
 
-        self.parameters.validate(location, errors);
+        if let Some(execution) = &self.execution {
+            execution.validate(&format!("{location}.execution"), errors);
+        }
+
+        for (index, parameter) in self.parameters.iter().enumerate() {
+            parameter.validate(&format!("{location}.parameters[{index}]"), errors);
+        }
     }
 }
 
-fn validate_declared_parameter_values(
-    declared: bool,
-    values: &[String],
-    location: &str,
-    errors: &mut Vec<String>,
-) {
-    if !declared {
-        return;
-    }
-    if values.is_empty() {
-        errors.push(format!("{location} must not be empty when declared"));
-        return;
-    }
-    if values.iter().any(|value| value.trim().is_empty()) {
-        errors.push(format!("{location} must not contain empty values"));
+impl MediaParameterSpec {
+    fn validate(&self, location: &str, errors: &mut Vec<String>) {
+        if self.name.trim().is_empty() {
+            errors.push(format!("{location}.name must not be empty"));
+        }
+        if self.label.trim().is_empty() {
+            errors.push(format!("{location}.label must not be empty"));
+        }
+        if self.values.is_empty() {
+            errors.push(format!("{location}.values must not be empty"));
+        }
+        if self.values.iter().any(|value| value.trim().is_empty()) {
+            errors.push(format!("{location}.values must not contain empty values"));
+        }
+        if self.default.trim().is_empty() {
+            errors.push(format!("{location}.default must not be empty"));
+        } else if !self.values.iter().any(|value| value == &self.default) {
+            errors.push(format!(
+                "{location}.default must be one of the declared values"
+            ));
+        }
+        if self
+            .request_field
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            errors.push(format!("{location}.request_field must not be empty"));
+        }
     }
 }
 
@@ -651,7 +600,8 @@ media:
     discovery:
       adapter: static
     execution:
-      adapter: openai_images
+      adapter: images_json
+      base_url: https://api.test-provider.example
       path: /v1/images/generations
     models:
       - id: gpt-image-1
@@ -659,15 +609,27 @@ media:
         operations:
           - generate
         parameters:
-          size:
-            - 1024x1024
-            - 1536x1024
-          quality:
-            - auto
-            - high
-          output_format:
-            - png
-            - jpeg
+          - name: size
+            label: Size
+            values:
+              - 1024x1024
+              - 1536x1024
+            default: 1024x1024
+            request_field: size
+          - name: quality
+            label: Quality
+            values:
+              - auto
+              - high
+            default: auto
+            request_field: quality
+          - name: output_format
+            label: Output format
+            values:
+              - png
+              - jpeg
+            default: png
+            request_field: output_format
 "#,
         );
 
@@ -683,7 +645,14 @@ media:
             .expect("image media");
         assert_eq!(
             image.execution.as_ref().map(|execution| execution.adapter),
-            Some(MediaExecutionKind::OpenAiImages)
+            Some(MediaExecutionKind::ImagesJson)
+        );
+        assert_eq!(
+            image
+                .execution
+                .as_ref()
+                .and_then(|execution| execution.base_url.as_deref()),
+            Some("https://api.test-provider.example")
         );
         assert_eq!(image.models[0].operations, vec![MediaOperation::Generate]);
     }
@@ -695,7 +664,7 @@ media:
 media:
   image:
     execution:
-      adapter: openai_images
+      adapter: images_json
       path: /v1/images/generations
     models:
       - id: auto
@@ -747,7 +716,7 @@ media:
 media:
   image:
     execution:
-      adapter: openai_images
+      adapter: images_json
       path: ""
     models:
       - id: gpt-image-1
@@ -771,14 +740,17 @@ media:
 media:
   image:
     execution:
-      adapter: openai_images
+      adapter: images_json
       path: /v1/images/generations
     models:
       - id: gpt-image-1
         operations:
           - generate
         parameters:
-          size: []
+          - name: size
+            label: Size
+            values: []
+            default: 1024x1024
 "#,
         );
         let provider: ProviderDescriptor = serde_yaml::from_str(&yaml).expect("provider parses");
@@ -787,6 +759,126 @@ media:
             .validate_media_descriptors()
             .expect_err("empty declared parameter list is invalid");
 
-        assert!(error.to_string().contains("parameters.size"), "{error}");
+        assert!(
+            error.to_string().contains("parameters[0].values"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn image_media_descriptor_uses_select_parameter_specs() {
+        let yaml = provider_with_media_yaml(
+            r#"
+media:
+  image:
+    execution:
+      adapter: images_json
+      path: /v1/images/generations
+    models:
+      - id: gpt-image-1
+        display_name: GPT Image 1
+        operations:
+          - generate
+        parameters:
+          - name: size
+            label: Size
+            values:
+              - 1024x1024
+              - 1536x1024
+            default: 1024x1024
+            request_field: size
+          - name: output_format
+            label: Output format
+            values:
+              - png
+              - jpeg
+            default: png
+"#,
+        );
+
+        let provider: ProviderDescriptor = serde_yaml::from_str(&yaml).expect("provider parses");
+
+        provider
+            .validate_media_descriptors()
+            .expect("media descriptor validates");
+        let image = provider
+            .media
+            .as_ref()
+            .and_then(|media| media.image.as_ref())
+            .expect("image media");
+        assert_eq!(
+            image.execution.as_ref().map(|execution| execution.adapter),
+            Some(MediaExecutionKind::ImagesJson)
+        );
+        assert_eq!(image.models[0].parameters[0].name, "size");
+        assert_eq!(image.models[0].parameters[0].default, "1024x1024");
+        assert_eq!(
+            image.models[0].parameters[0].request_field.as_deref(),
+            Some("size")
+        );
+    }
+
+    #[test]
+    fn image_model_can_override_provider_execution_adapter() {
+        let yaml = provider_with_media_yaml(
+            r#"
+media:
+  image:
+    execution:
+      adapter: chat_image_output
+      path: /chat/completions
+    models:
+      - id: image-only-model
+        operations:
+          - generate
+        execution:
+          adapter: images_json
+          path: /images/generations
+"#,
+        );
+
+        let provider: ProviderDescriptor = serde_yaml::from_str(&yaml).expect("provider parses");
+
+        provider
+            .validate_media_descriptors()
+            .expect("media descriptor validates");
+        let model = provider
+            .media
+            .as_ref()
+            .and_then(|media| media.image.as_ref())
+            .and_then(|image| image.models.first())
+            .expect("image model");
+        assert_eq!(
+            model.execution.as_ref().map(|execution| execution.adapter),
+            Some(MediaExecutionKind::ImagesJson)
+        );
+    }
+
+    #[test]
+    fn non_select_image_parameter_kind_is_rejected() {
+        let yaml = provider_with_media_yaml(
+            r#"
+media:
+  image:
+    execution:
+      adapter: images_json
+      path: /v1/images/generations
+    models:
+      - id: gpt-image-1
+        operations:
+          - generate
+        parameters:
+          - name: width
+            kind: number
+            values:
+              - "1024"
+            default: "1024"
+"#,
+        );
+
+        let error = serde_yaml::from_str::<ProviderDescriptor>(&yaml)
+            .expect_err("non-select parameter kind should be rejected");
+
+        assert!(error.to_string().contains("kind"), "{error}");
     }
 }

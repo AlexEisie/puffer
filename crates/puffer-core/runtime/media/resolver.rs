@@ -1,11 +1,10 @@
-use super::capabilities::{MediaCapability, MediaKind};
-use anyhow::{bail, Result};
+use super::capabilities::{MediaCapability, MediaCapabilityParameter, MediaKind};
+use anyhow::{bail, Context, Result};
 use puffer_provider_registry::{
-    canonical_provider_id, AuthStore, MediaExecutionKind, MediaModelDescriptor, MediaOperation,
-    ProviderDescriptor, ProviderRegistry,
+    canonical_provider_id, AuthStore, MediaExecutionDescriptor, MediaExecutionKind,
+    MediaModelDescriptor, MediaOperation, MediaParameterSpec, ProviderDescriptor, ProviderRegistry,
 };
-use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 /// Carries cached dynamic media discovery records into capability resolution.
 #[derive(Debug, Clone, Default)]
@@ -18,6 +17,7 @@ pub(crate) struct MediaDiscoveryCache {
 pub(crate) struct CachedImageMediaModel {
     pub(crate) provider_id: String,
     pub(crate) model: MediaModelDescriptor,
+    pub(crate) source: String,
 }
 
 /// Describes a saved exact image generation selection to validate.
@@ -25,9 +25,8 @@ pub(crate) struct CachedImageMediaModel {
 pub(crate) struct ImageGenerationSelection<'a> {
     pub(crate) provider_id: &'a str,
     pub(crate) model_id: &'a str,
-    pub(crate) size: &'a str,
-    pub(crate) quality: &'a str,
-    pub(crate) output_format: &'a str,
+    pub(crate) adapter: &'a str,
+    pub(crate) parameters: &'a BTreeMap<String, String>,
 }
 
 /// Resolves selectable exact media capabilities from provider descriptors.
@@ -69,26 +68,62 @@ pub(crate) fn validate_image_generate_selection(
     )
     .into_iter()
     .find(|capability| {
-        capability.provider_id == selection.provider_id && capability.model_id == selection.model_id
+        capability.provider_id == selection.provider_id
+            && capability.model_id == selection.model_id
+            && capability.adapter == selection.adapter
     });
 
     let Some(capability) = capability else {
         bail!(
-            "selected image model unavailable: {}/{}",
+            "selected image model unavailable: {}/{} via {}",
             selection.provider_id,
-            selection.model_id
+            selection.model_id,
+            selection.adapter
         );
     };
 
-    validate_parameter_value(&capability.parameter_values, "size", selection.size)?;
-    validate_parameter_value(&capability.parameter_values, "quality", selection.quality)?;
-    validate_parameter_value(
-        &capability.parameter_values,
-        "output_format",
-        selection.output_format,
-    )?;
+    validate_parameter_values(&capability.parameters, selection.parameters)?;
 
     Ok(capability)
+}
+
+/// Resolves the provider and execution descriptor for a validated exact image selection.
+pub(crate) fn resolve_image_execution_descriptor<'a>(
+    registry: &'a ProviderRegistry,
+    provider_id: &str,
+    model_id: &str,
+    adapter: &str,
+    discovery_cache: &MediaDiscoveryCache,
+) -> Result<(&'a ProviderDescriptor, MediaExecutionDescriptor)> {
+    let unavailable =
+        || format!("selected image model unavailable: {provider_id}/{model_id} via {adapter}");
+    let provider = registry.provider(provider_id).with_context(unavailable)?;
+    let image = provider
+        .media
+        .as_ref()
+        .and_then(|media| media.image.as_ref())
+        .with_context(unavailable)?;
+    let model = image
+        .models
+        .iter()
+        .find(|model| model.id == model_id)
+        .or_else(|| {
+            discovery_cache
+                .image_models
+                .iter()
+                .filter(|cached| cached.provider_id == provider.id)
+                .map(|cached| &cached.model)
+                .find(|model| model.id == model_id)
+        })
+        .with_context(unavailable)?;
+    let execution = image_execution(image.execution.as_ref(), model).with_context(unavailable)?;
+    if !execution_adapter_is_available(execution.adapter)
+        || adapter_id(execution.adapter) != adapter
+    {
+        bail!("image media adapter unavailable for {adapter}");
+    }
+
+    Ok((provider, execution.clone()))
 }
 
 fn resolve_image_capabilities(
@@ -110,43 +145,53 @@ fn resolve_image_capabilities(
         else {
             continue;
         };
-        let Some(execution) = image.execution.as_ref() else {
-            continue;
-        };
-        if !execution_adapter_is_available(execution.adapter) {
-            continue;
-        }
-
         let mut emitted_model_ids = HashSet::new();
-        for model in image.models.iter().chain(
-            discovery_cache
-                .image_models
-                .iter()
-                .filter(|cached| cached.provider_id == provider.id)
-                .map(|cached| &cached.model),
-        ) {
+        let static_models = image.models.iter().map(|model| (model, "static"));
+        let discovered_models = discovery_cache.image_models.iter().filter_map(|cached| {
+            (cached.provider_id == provider.id).then_some((&cached.model, cached.source.as_str()))
+        });
+        for (model, source) in static_models.chain(discovered_models) {
             if !emitted_model_ids.insert(model.id.clone()) {
                 continue;
             }
             if !image_model_is_available(model, operation) {
                 continue;
             }
+            let Some(execution) = image_execution(image.execution.as_ref(), model) else {
+                continue;
+            };
+            if !execution_adapter_is_available(execution.adapter) {
+                continue;
+            }
+            let parameters = image_parameters(model);
             capabilities.push(MediaCapability {
                 provider_id: provider.id.clone(),
+                provider_display_name: provider.display_name.clone(),
                 model_id: model.id.clone(),
+                model_display_name: model
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| model.id.clone()),
                 kind: MediaKind::Image,
-                operations: vec![operation_wire_name(operation).to_string()],
-                supports_async: false,
-                supports_streaming: false,
-                parameter_values: image_parameter_values(model),
+                operation: operation_wire_name(operation).to_string(),
+                adapter: adapter_id(execution.adapter).to_string(),
+                defaults: image_defaults(&parameters),
+                parameters,
                 status: "available".to_string(),
-                source: adapter_source(execution.adapter).to_string(),
+                source: source.to_string(),
                 reason: None,
                 checked_at_ms,
             });
         }
     }
     capabilities
+}
+
+fn image_execution<'a>(
+    provider_execution: Option<&'a MediaExecutionDescriptor>,
+    model: &'a MediaModelDescriptor,
+) -> Option<&'a MediaExecutionDescriptor> {
+    model.execution.as_ref().or(provider_execution)
 }
 
 fn provider_is_connected(provider: &ProviderDescriptor, auth_store: &AuthStore) -> bool {
@@ -164,7 +209,12 @@ fn provider_is_connected(provider: &ProviderDescriptor, auth_store: &AuthStore) 
 }
 
 fn execution_adapter_is_available(adapter: MediaExecutionKind) -> bool {
-    matches!(adapter, MediaExecutionKind::OpenAiImages)
+    matches!(
+        adapter,
+        MediaExecutionKind::ImagesJson
+            | MediaExecutionKind::ChatImageOutput
+            | MediaExecutionKind::MinimaxImage
+    )
 }
 
 fn image_model_is_available(model: &MediaModelDescriptor, operation: MediaOperation) -> bool {
@@ -175,30 +225,44 @@ fn image_model_is_available(model: &MediaModelDescriptor, operation: MediaOperat
         && model.operations.contains(&operation)
 }
 
-fn image_parameter_values(model: &MediaModelDescriptor) -> Value {
-    json!({
-        "size": &model.parameters.size,
-        "quality": &model.parameters.quality,
-        "output_format": &model.parameters.output_format,
-    })
+fn image_parameters(model: &MediaModelDescriptor) -> Vec<MediaCapabilityParameter> {
+    model
+        .parameters
+        .iter()
+        .map(parameter_from_descriptor)
+        .collect()
 }
 
-fn validate_parameter_value(parameters: &Value, name: &str, value: &str) -> Result<()> {
-    let Some(values) = parameters.get(name).and_then(Value::as_array) else {
-        return Ok(());
-    };
-    if values.is_empty() {
-        return Ok(());
+fn parameter_from_descriptor(parameter: &MediaParameterSpec) -> MediaCapabilityParameter {
+    MediaCapabilityParameter {
+        name: parameter.name.clone(),
+        label: parameter.label.clone(),
+        values: parameter.values.clone(),
+        default: parameter.default.clone(),
+        request_field: parameter.request_field.clone(),
     }
-    let supported = values
+}
+
+fn image_defaults(parameters: &[MediaCapabilityParameter]) -> BTreeMap<String, String> {
+    parameters
         .iter()
-        .filter_map(Value::as_str)
-        .any(|candidate| candidate == value);
-    if supported {
-        Ok(())
-    } else {
-        bail!("image generation parameter unsupported: {name}={value}")
+        .map(|parameter| (parameter.name.clone(), parameter.default.clone()))
+        .collect()
+}
+
+fn validate_parameter_values(
+    parameters: &[MediaCapabilityParameter],
+    selected: &BTreeMap<String, String>,
+) -> Result<()> {
+    for (name, value) in selected {
+        let Some(parameter) = parameters.iter().find(|parameter| parameter.name == *name) else {
+            bail!("image generation parameter unsupported: {name}={value}");
+        };
+        if !parameter.values.iter().any(|candidate| candidate == value) {
+            bail!("image generation parameter unsupported: {name}={value}");
+        }
     }
+    Ok(())
 }
 
 fn operation_wire_name(operation: MediaOperation) -> &'static str {
@@ -207,9 +271,11 @@ fn operation_wire_name(operation: MediaOperation) -> &'static str {
     }
 }
 
-fn adapter_source(adapter: MediaExecutionKind) -> &'static str {
+pub(crate) fn adapter_id(adapter: MediaExecutionKind) -> &'static str {
     match adapter {
-        MediaExecutionKind::OpenAiImages => "adapter:openai_images",
+        MediaExecutionKind::ImagesJson => "images_json",
+        MediaExecutionKind::ChatImageOutput => "chat_image_output",
+        MediaExecutionKind::MinimaxImage => "minimax_image",
     }
 }
 
@@ -228,10 +294,9 @@ mod tests {
     use crate::runtime::media::MediaKind;
     use puffer_provider_registry::{
         AuthMode, AuthStore, ImageMediaDescriptor, MediaExecutionDescriptor, MediaExecutionKind,
-        MediaImageParameters, MediaModelDescriptor, MediaOperation, ModelDescriptor,
+        MediaModelDescriptor, MediaOperation, MediaParameterSpec, ModelDescriptor,
         ProviderDescriptor, ProviderMediaDescriptor, ProviderRegistry,
     };
-    use serde_json::json;
 
     fn registry_with(providers: Vec<ProviderDescriptor>) -> ProviderRegistry {
         let mut registry = ProviderRegistry::new();
@@ -264,18 +329,38 @@ mod tests {
             image: Some(ImageMediaDescriptor {
                 discovery: None,
                 execution: Some(MediaExecutionDescriptor {
-                    adapter: MediaExecutionKind::OpenAiImages,
+                    adapter: MediaExecutionKind::ImagesJson,
+                    base_url: None,
                     path: "/v1/images/generations".to_string(),
                 }),
                 models: vec![MediaModelDescriptor {
                     id: model_id.to_string(),
-                    display_name: Some(model_id.to_string()),
+                    display_name: Some("Display Image".to_string()),
+                    execution: None,
                     operations: vec![MediaOperation::Generate],
-                    parameters: MediaImageParameters::new(
-                        vec!["1024x1024".to_string()],
-                        vec!["auto".to_string(), "high".to_string()],
-                        vec!["png".to_string()],
-                    ),
+                    parameters: vec![
+                        MediaParameterSpec {
+                            name: "size".to_string(),
+                            label: "Size".to_string(),
+                            values: vec!["1024x1024".to_string()],
+                            default: "1024x1024".to_string(),
+                            request_field: Some("size".to_string()),
+                        },
+                        MediaParameterSpec {
+                            name: "quality".to_string(),
+                            label: "Quality".to_string(),
+                            values: vec!["auto".to_string(), "high".to_string()],
+                            default: "auto".to_string(),
+                            request_field: Some("quality".to_string()),
+                        },
+                        MediaParameterSpec {
+                            name: "output_format".to_string(),
+                            label: "Output format".to_string(),
+                            values: vec!["png".to_string()],
+                            default: "png".to_string(),
+                            request_field: Some("output_format".to_string()),
+                        },
+                    ],
                 }],
             }),
         }
@@ -305,11 +390,23 @@ mod tests {
 
         assert_eq!(capabilities.len(), 1);
         assert_eq!(capabilities[0].provider_id, "openai");
+        assert_eq!(capabilities[0].provider_display_name, "openai");
         assert_eq!(capabilities[0].model_id, "gpt-image-1");
+        assert_eq!(capabilities[0].model_display_name, "Display Image");
+        assert_eq!(capabilities[0].operation, "generate");
+        assert_eq!(capabilities[0].adapter, "images_json");
+        assert_eq!(capabilities[0].source, "static");
         assert_eq!(capabilities[0].status, "available");
+        assert_eq!(capabilities[0].defaults["size"], "1024x1024");
         assert_eq!(
-            capabilities[0].parameter_values["size"],
-            json!(["1024x1024"])
+            capabilities[0].parameters[0],
+            MediaCapabilityParameter {
+                name: "size".to_string(),
+                label: "Size".to_string(),
+                values: vec!["1024x1024".to_string()],
+                default: "1024x1024".to_string(),
+                request_field: Some("size".to_string()),
+            }
         );
     }
 
@@ -382,9 +479,8 @@ mod tests {
             &ImageGenerationSelection {
                 provider_id: "openai",
                 model_id: "stale-image",
-                size: "1024x1024",
-                quality: "auto",
-                output_format: "png",
+                adapter: "images_json",
+                parameters: &BTreeMap::from([("size".to_string(), "1024x1024".to_string())]),
             },
             42,
             &MediaDiscoveryCache::default(),
@@ -393,7 +489,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "selected image model unavailable: openai/stale-image"
+            "selected image model unavailable: openai/stale-image via images_json"
         );
     }
 
@@ -411,9 +507,8 @@ mod tests {
             &ImageGenerationSelection {
                 provider_id: "openai",
                 model_id: "gpt-image-1",
-                size: "2048x2048",
-                quality: "auto",
-                output_format: "png",
+                adapter: "images_json",
+                parameters: &BTreeMap::from([("size".to_string(), "2048x2048".to_string())]),
             },
             42,
             &MediaDiscoveryCache::default(),
@@ -424,5 +519,66 @@ mod tests {
             error.to_string(),
             "image generation parameter unsupported: size=2048x2048"
         );
+    }
+
+    #[test]
+    fn saved_stale_adapter_is_rejected() {
+        let registry = registry_with(vec![provider(
+            "openai",
+            vec![AuthMode::ApiKey],
+            Some(image_media("gpt-image-1")),
+        )]);
+
+        let error = validate_image_generate_selection(
+            &registry,
+            &auth_for("openai"),
+            &ImageGenerationSelection {
+                provider_id: "openai",
+                model_id: "gpt-image-1",
+                adapter: "stale_adapter",
+                parameters: &BTreeMap::new(),
+            },
+            42,
+            &MediaDiscoveryCache::default(),
+        )
+        .expect_err("stale adapter should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "selected image model unavailable: openai/gpt-image-1 via stale_adapter"
+        );
+    }
+
+    #[test]
+    fn model_execution_overrides_provider_execution_adapter() {
+        let mut media = image_media("image-only-model");
+        let image = media.image.as_mut().expect("image media");
+        image.execution = Some(MediaExecutionDescriptor {
+            adapter: MediaExecutionKind::ChatImageOutput,
+            base_url: None,
+            path: "/chat/completions".to_string(),
+        });
+        image.models[0].execution = Some(MediaExecutionDescriptor {
+            adapter: MediaExecutionKind::ImagesJson,
+            base_url: None,
+            path: "/images/generations".to_string(),
+        });
+        let registry = registry_with(vec![provider(
+            "vercel-ai-gateway",
+            vec![AuthMode::ApiKey],
+            Some(media),
+        )]);
+
+        let capabilities = resolve_media_capabilities(
+            &registry,
+            &auth_for("vercel-ai-gateway"),
+            MediaKind::Image,
+            MediaOperation::Generate,
+            42,
+            &MediaDiscoveryCache::default(),
+        );
+
+        assert_eq!(capabilities.len(), 1);
+        assert_eq!(capabilities[0].adapter, "images_json");
     }
 }

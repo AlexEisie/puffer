@@ -296,12 +296,17 @@ pub(crate) fn execute_tool(
             Ok(tool_result(definition, true, output))
         }
         _ if definition.handler.starts_with("runtime:workflow:") => {
+            let workflow_media_discovery_cache = state
+                .exact_media_discovery_cache
+                .clone()
+                .unwrap_or_else(crate::ExactMediaDiscoveryCache::empty);
             let stdout = execute_workflow_tool_with_media_context(
                 state,
                 resources,
                 Some(workflow::image_generation::ImageGenerationMediaContext {
                     providers,
                     auth_store,
+                    discovery_cache: &workflow_media_discovery_cache,
                 }),
                 cwd,
                 definition.id.as_str(),

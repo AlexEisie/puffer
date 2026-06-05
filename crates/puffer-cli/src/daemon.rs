@@ -36,12 +36,13 @@ use puffer_config::{
     ProxyEndpoint, ProxyScheme, PufferConfig,
 };
 use puffer_core::{
-    command_surface, default_effort_level, dispatch_command, enter_plan_mode, execute_connect_flow,
-    execute_user_turn_streaming_with_permissions_and_cancel, generate_exact_image,
-    list_exact_media_capabilities, provider_preference_family, supported_effort_levels,
-    with_user_question_prompt_handler, AppState, BrowserPermissionPromptActionSet,
-    BrowserPermissionPromptSource, BrowserPermissionPromptTargetClass, CancelToken,
-    ExactImageGenerationRequest, MediaCapabilityView, MessageRole, ModelPreferenceFamily,
+    command_surface, default_effort_level, discover_exact_media_capabilities, dispatch_command,
+    enter_plan_mode, execute_connect_flow, execute_user_turn_streaming_with_permissions_and_cancel,
+    generate_exact_image_with_cache, list_exact_media_capabilities_with_cache,
+    provider_preference_family, supported_effort_levels, with_user_question_prompt_handler,
+    AppState, BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
+    BrowserPermissionPromptTargetClass, CancelToken, ExactImageGenerationRequest,
+    ExactMediaDiscoveryCache, MediaCapabilityView, MessageRole, ModelPreferenceFamily,
     PermissionPromptAction, PermissionPromptRequest, ToolCallRequest, ToolInvocation,
     TurnStreamEvent, UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
@@ -103,9 +104,9 @@ use crate::daemon_ui_state::{
 use crate::desktop_api;
 use crate::desktop_api_types::{
     ExternalCredentialDto, FolderGroupDto, McpServerDto, MediaCapabilityInfoDto,
-    ModelDescriptorDto, ProxyEndpointInputDto, ProxyTestResultDto, RepoActionResultDto,
-    RepoStatusDto, SaveProxySettingsParams, SessionDetailDto, SettingsSnapshotDto,
-    ThinkingOptionDto,
+    MediaCapabilityParameterDto, ModelDescriptorDto, ProxyEndpointInputDto, ProxyTestResultDto,
+    RepoActionResultDto, RepoStatusDto, SaveProxySettingsParams, SessionDetailDto,
+    SettingsSnapshotDto, ThinkingOptionDto,
 };
 
 const PROTOCOL_VERSION: &str = "1";
@@ -278,6 +279,13 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
+fn daemon_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 // ---------------------------------------------------------------------------
 // DaemonState — the shared runtime inputs + in-flight turn registry.
 // ---------------------------------------------------------------------------
@@ -310,6 +318,7 @@ pub(crate) struct DaemonState {
     pub(crate) local_models: crate::daemon_local_model::LocalModelInstaller,
     disable_auto_title: bool,
     yolo: bool,
+    media_discovery_cache: Arc<Mutex<Option<ExactMediaDiscoveryCache>>>,
     /// Transcript replay buffer — a bounded ring of recent session / clone /
     /// workspace events. On a fresh WebSocket connection we replay these
     /// so UIs that disconnected mid-turn don't miss deltas. Size capped at
@@ -422,6 +431,7 @@ impl DaemonState {
             local_models: crate::daemon_local_model::LocalModelInstaller::new(),
             disable_auto_title,
             yolo,
+            media_discovery_cache: Arc::new(Mutex::new(None)),
             recent_events: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_EVENT_CAPACITY))),
         })
     }
@@ -528,6 +538,23 @@ impl DaemonState {
             auth_store,
             session_store,
         })
+    }
+
+    fn exact_media_discovery_cache(&self, inputs: &RuntimeInputs) -> ExactMediaDiscoveryCache {
+        let now_ms = daemon_now_ms();
+        if let Some(cache) = self
+            .media_discovery_cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|cache| cache.is_fresh_at(now_ms))
+            .cloned()
+        {
+            return cache;
+        }
+        let cache = discover_exact_media_capabilities(&inputs.providers, &inputs.auth_store);
+        *self.media_discovery_cache.lock().unwrap() = Some(cache.clone());
+        cache
     }
 }
 
@@ -2101,11 +2128,13 @@ fn handle_list_provider_models(state: &DaemonState, params: &Value) -> Result<Va
 fn handle_list_media_capabilities(state: &DaemonState, params: &Value) -> Result<Value> {
     let kind = optional_trimmed_value(params, &["kind"]);
     let inputs = state.build_runtime_inputs_without_discovery()?;
+    let discovery_cache = state.exact_media_discovery_cache(&inputs);
     Ok(json!({
         "capabilities": list_media_capabilities(
             &inputs.providers,
             &inputs.auth_store,
-            kind.as_deref()
+            kind.as_deref(),
+            &discovery_cache
         )
     }))
 }
@@ -2114,8 +2143,9 @@ fn list_media_capabilities(
     providers: &ProviderRegistry,
     auth_store: &AuthStore,
     kind: Option<&str>,
+    discovery_cache: &ExactMediaDiscoveryCache,
 ) -> Vec<MediaCapabilityInfoDto> {
-    list_exact_media_capabilities(providers, auth_store, kind)
+    list_exact_media_capabilities_with_cache(providers, auth_store, kind, discovery_cache)
         .into_iter()
         .map(media_capability_info_dto)
         .collect()
@@ -2124,12 +2154,24 @@ fn list_media_capabilities(
 fn media_capability_info_dto(capability: MediaCapabilityView) -> MediaCapabilityInfoDto {
     MediaCapabilityInfoDto {
         provider_id: capability.provider_id,
+        provider_display_name: capability.provider_display_name,
         model_id: capability.model_id,
+        model_display_name: capability.model_display_name,
         kind: capability.kind,
-        operations: capability.operations,
-        supports_async: capability.supports_async,
-        supports_streaming: capability.supports_streaming,
-        parameter_values: capability.parameter_values,
+        operation: capability.operation,
+        adapter: capability.adapter,
+        parameters: capability
+            .parameters
+            .into_iter()
+            .map(|parameter| MediaCapabilityParameterDto {
+                name: parameter.name,
+                label: parameter.label,
+                values: parameter.values,
+                default: parameter.default,
+                request_field: parameter.request_field,
+            })
+            .collect(),
+        defaults: capability.defaults,
         status: capability.status,
         source: capability.source,
         reason: capability.reason,
@@ -2171,24 +2213,36 @@ fn generate_image_media_job(state: &DaemonState, prompt: String) -> Result<Value
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let (provider_id, model_id) = match (provider_id, model_id) {
-        (Some(provider_id), Some(model_id)) => (provider_id.to_string(), model_id.to_string()),
-        _ => anyhow::bail!("image media provider/model is not configured"),
+    let adapter = config
+        .media
+        .image
+        .adapter
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let (provider_id, model_id, adapter) = match (provider_id, model_id, adapter) {
+        (Some(provider_id), Some(model_id), Some(adapter)) => (
+            provider_id.to_string(),
+            model_id.to_string(),
+            adapter.to_string(),
+        ),
+        _ => anyhow::bail!("image media provider/model/adapter is not configured"),
     };
     let inputs = state.build_runtime_inputs_without_discovery()?;
     let image_config = config.media.image;
-    let generation = generate_exact_image(
+    let discovery_cache = state.exact_media_discovery_cache(&inputs);
+    let generation = generate_exact_image_with_cache(
         &inputs.providers,
         &inputs.auth_store,
         &state.paths.workspace_root,
         ExactImageGenerationRequest {
             provider_id,
             model_id,
+            adapter,
             prompt: prompt.clone(),
-            size: image_config.size,
-            quality: image_config.quality,
-            output_format: image_config.output_format,
+            parameters: image_config.parameters,
         },
+        &discovery_cache,
     )?;
     let result = GenerateMediaResult {
         job_id: generation.job_id,
@@ -2205,9 +2259,15 @@ fn generate_image_media_job(state: &DaemonState, prompt: String) -> Result<Value
 
 fn generate_video_media_job(state: &DaemonState, _prompt: String) -> Result<Value> {
     let inputs = state.build_runtime_inputs_without_discovery()?;
-    let available = list_media_capabilities(&inputs.providers, &inputs.auth_store, Some("video"))
-        .into_iter()
-        .any(|capability| capability.kind == "video" && capability.status == "available");
+    let discovery_cache = ExactMediaDiscoveryCache::empty();
+    let available = list_media_capabilities(
+        &inputs.providers,
+        &inputs.auth_store,
+        Some("video"),
+        &discovery_cache,
+    )
+    .into_iter()
+    .any(|capability| capability.kind == "video" && capability.status == "available");
     if !available {
         anyhow::bail!("No video capabilities available");
     }
@@ -3944,6 +4004,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             setup_state.turns.lock().unwrap().remove(&turn_id_thread);
             return;
         }
+        app_state.set_exact_media_discovery_cache(setup_state.exact_media_discovery_cache(&inputs));
         let runner = crate::runner_selection::select_tool_runner(
             &cfg_for_turn,
             &inputs.resources,
@@ -5457,6 +5518,98 @@ mod tests {
         (format!("http://{address}"), handle)
     }
 
+    fn spawn_discovered_chat_image_generation_server() -> (String, thread::JoinHandle<Vec<String>>)
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let address = listener.local_addr().expect("address");
+        let handle = thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let mut requests = Vec::new();
+            while requests.len() < 2 {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buffer = [0_u8; 8192];
+                        let size = stream.read(&mut buffer).expect("read request");
+                        let request_text = String::from_utf8_lossy(&buffer[..size]).to_string();
+                        let body = if request_text.starts_with("GET /models") {
+                            json!({
+                                "data": [{
+                                    "id": "openrouter/image-chat",
+                                    "name": "Image Chat",
+                                    "architecture": {"output_modalities": ["text", "image"]}
+                                }]
+                            })
+                            .to_string()
+                        } else {
+                            json!({
+                                "choices": [{
+                                    "message": {
+                                        "images": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
+                                    }
+                                }]
+                            })
+                            .to_string()
+                        };
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        stream.write_all(response.as_bytes()).expect("response");
+                        requests.push(request_text);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if started.elapsed() > std::time::Duration::from_secs(2) {
+                            return requests;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("media request: {error}"),
+                }
+            }
+            requests
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn write_openrouter_resource_override(paths: &ConfigPaths, base_url: &str) {
+        let providers_dir = paths.workspace_config_dir.join("resources/providers");
+        std::fs::create_dir_all(&providers_dir).expect("provider resources dir");
+        std::fs::write(
+            providers_dir.join("openrouter.yaml"),
+            format!(
+                r#"id: openrouter
+display_name: OpenRouter
+base_url: {base_url}
+default_api: openai-completions
+auth_modes:
+  - api_key
+media:
+  image:
+    discovery:
+      adapter: trusted_image_output
+      path: /models
+      query:
+        output_modalities: image
+    execution:
+      adapter: chat_image_output
+      path: /chat/completions
+models:
+  - id: auto
+    display_name: Auto
+    provider: openrouter
+    api: openai-completions
+    context_window: 200000
+    max_output_tokens: 16384
+"#
+            ),
+        )
+        .expect("write openrouter override");
+    }
+
     #[test]
     fn high_volume_browser_events_require_explicit_subscription() {
         assert!(requires_explicit_subscription(
@@ -5532,7 +5685,20 @@ mod tests {
         assert!(capabilities.iter().all(|capability| {
             capability["providerId"] == "openai"
                 && capability["kind"] == "image"
+                && capability["operation"] == "generate"
+                && capability["adapter"] == "images_json"
                 && capability["status"] == "available"
+        }));
+        assert!(capabilities.iter().any(|capability| {
+            capability["parameters"]
+                .as_array()
+                .is_some_and(|parameters| {
+                    parameters.iter().any(|parameter| {
+                        parameter["name"] == "size"
+                            && parameter["requestField"] == "size"
+                            && parameter["default"] == "auto"
+                    })
+                })
         }));
     }
 
@@ -5617,6 +5783,52 @@ mod tests {
     }
 
     #[test]
+    fn media_capabilities_handler_returns_connected_static_cloud_image_providers() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let mut auth_store = AuthStore::default();
+        for provider in [
+            "byteplus",
+            "zhipu",
+            "xai",
+            "vercel-ai-gateway",
+            "worldrouter",
+        ] {
+            auth_store.set_api_key(provider, "sk-test");
+        }
+        auth_store
+            .save(&paths.user_config_dir.join("auth.json"))
+            .expect("save auth");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let response =
+            handle_list_media_capabilities(&state, &json!({"kind": "image"})).expect("response");
+        let capabilities = response["capabilities"].as_array().expect("capabilities");
+        let provider_ids = capabilities
+            .iter()
+            .map(|capability| capability["providerId"].as_str().expect("provider id"))
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(provider_ids.contains("byteplus"));
+        assert!(provider_ids.contains("zhipu"));
+        assert!(provider_ids.contains("xai"));
+        assert!(provider_ids.contains("vercel-ai-gateway"));
+        assert!(!provider_ids.contains("worldrouter"));
+        assert!(capabilities.iter().all(|capability| {
+            capability["adapter"] == "images_json" && capability["status"] == "available"
+        }));
+    }
+
+    #[test]
     fn generate_media_rejects_stale_image_config_before_http_request() {
         let _home_guard = PufferHomeEnvGuard::set();
         let temp = tempfile::tempdir().expect("tempdir");
@@ -5640,6 +5852,7 @@ mod tests {
             config.openai_base_url = Some("http://127.0.0.1:9".to_string());
             config.media.image.provider_id = Some("openai".to_string());
             config.media.image.model_id = Some("stale-image".to_string());
+            config.media.image.adapter = Some("images_json".to_string());
         }
 
         let error =
@@ -5648,7 +5861,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "selected image model unavailable: openai/stale-image"
+            "selected image model unavailable: openai/stale-image via images_json"
         );
     }
 
@@ -5684,9 +5897,12 @@ mod tests {
             config.openai_base_url = Some(base_url);
             config.media.image.provider_id = Some("openai".to_string());
             config.media.image.model_id = Some("gpt-image-1".to_string());
-            config.media.image.size = "1024x1024".to_string();
-            config.media.image.quality = "auto".to_string();
-            config.media.image.output_format = "png".to_string();
+            config.media.image.adapter = Some("images_json".to_string());
+            config.media.image.parameters = std::collections::BTreeMap::from([
+                ("size".to_string(), "1024x1024".to_string()),
+                ("quality".to_string(), "auto".to_string()),
+                ("output_format".to_string(), "png".to_string()),
+            ]);
         }
 
         let response =
@@ -5695,6 +5911,7 @@ mod tests {
 
         let request_text = server.join().expect("server");
         assert!(request_text.contains("\"model\":\"gpt-image-1\""));
+        assert!(request_text.contains("\"size\":\"1024x1024\""));
         assert_eq!(response["status"], "succeeded");
         assert_eq!(response["providerId"], "openai");
         assert_eq!(response["modelId"], "gpt-image-1");
@@ -5706,6 +5923,70 @@ mod tests {
         assert!(workspace_root
             .join(".puffer/media/artifact-sidecars")
             .is_dir());
+    }
+
+    #[test]
+    fn generate_media_uses_discovery_cache_for_chat_image_output_models() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let (base_url, server) = spawn_discovered_chat_image_generation_server();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        write_openrouter_resource_override(&paths, &base_url);
+        let mut auth_store = AuthStore::default();
+        auth_store.set_api_key("openrouter", "sk-test");
+        auth_store
+            .save(&paths.user_config_dir.join("auth.json"))
+            .expect("save auth");
+        let state = DaemonState::load(
+            workspace_root.clone(),
+            paths,
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+        {
+            let mut config = state.config.lock().unwrap();
+            config.media.image.provider_id = Some("openrouter".to_string());
+            config.media.image.model_id = Some("openrouter/image-chat".to_string());
+            config.media.image.adapter = Some("chat_image_output".to_string());
+            config.media.image.parameters = std::collections::BTreeMap::new();
+        }
+        let listed =
+            handle_list_media_capabilities(&state, &json!({"kind": "image"})).expect("list");
+        assert!(listed["capabilities"]
+            .as_array()
+            .is_some_and(|capabilities| {
+                capabilities.iter().any(|capability| {
+                    capability["providerId"] == "openrouter"
+                        && capability["modelId"] == "openrouter/image-chat"
+                        && capability["adapter"] == "chat_image_output"
+                        && capability["source"] == "provider_discovery"
+                })
+            }));
+
+        let response =
+            handle_generate_media(&state, &json!({"kind": "image", "prompt": "draw an icon"}))
+                .expect("generation response");
+
+        let requests = server.join().expect("server");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("GET /models?output_modalities=image HTTP/1.1"));
+        assert!(requests[1].starts_with("POST /chat/completions HTTP/1.1"));
+        assert!(requests[1].contains("\"model\":\"openrouter/image-chat\""));
+        assert_eq!(response["status"], "succeeded");
+        assert_eq!(response["providerId"], "openrouter");
+        assert_eq!(response["modelId"], "openrouter/image-chat");
+        let path = response["path"].as_str().expect("artifact path");
+        assert_eq!(std::fs::read(path).expect("artifact bytes"), b"image-bytes");
     }
 
     #[test]
@@ -5730,9 +6011,12 @@ mod tests {
                     "image": {
                         "providerId": "openai",
                         "modelId": "gpt-image-1",
-                        "size": "1536x1024",
-                        "quality": "high",
-                        "outputFormat": "webp"
+                        "adapter": "images_json",
+                        "parameters": {
+                            "size": "1536x1024",
+                            "quality": "high",
+                            "output_format": "webp"
+                        }
                     },
                     "video": {
                         "providerId": null,
@@ -5751,9 +6035,12 @@ mod tests {
                 "image": {
                     "providerId": "openai",
                     "modelId": "gpt-image-1",
-                    "size": "1536x1024",
-                    "quality": "high",
-                    "outputFormat": "webp"
+                    "adapter": "images_json",
+                    "parameters": {
+                        "size": "1536x1024",
+                        "quality": "high",
+                        "output_format": "webp"
+                    }
                 },
                 "video": {
                     "providerId": null,
@@ -5773,9 +6060,8 @@ mod tests {
                 "image": {
                     "providerId": null,
                     "modelId": null,
-                    "size": "1024x1024",
-                    "quality": "auto",
-                    "outputFormat": "png"
+                    "adapter": null,
+                    "parameters": {}
                 },
                 "video": {
                     "providerId": null,

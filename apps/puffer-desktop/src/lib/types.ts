@@ -321,9 +321,8 @@ export type MediaSettings = {
 export type ImageMediaSettings = {
   providerId: string | null;
   modelId: string | null;
-  size: string;
-  quality: string;
-  outputFormat: string;
+  adapter: string | null;
+  parameters: Record<string, string>;
 };
 
 export type VideoMediaSettings = {
@@ -337,16 +336,26 @@ export type MediaKind = "image" | "video";
 
 export type MediaCapabilityInfo = {
   providerId: string;
+  providerDisplayName: string;
   modelId: string;
+  modelDisplayName: string;
   kind: MediaKind;
-  operations: string[];
-  supportsAsync: boolean;
-  supportsStreaming: boolean;
-  parameterValues: Record<string, string[]>;
+  operation: string;
+  adapter: string;
+  parameters: MediaCapabilityParameterInfo[];
+  defaults: Record<string, string>;
   status: "available" | "unavailable" | "unknown" | string;
   source: string;
   reason: string | null;
   checkedAtMs: number;
+};
+
+export type MediaCapabilityParameterInfo = {
+  name: string;
+  label: string;
+  values: string[];
+  default: string;
+  requestField: string | null;
 };
 
 export type ResourceCounts = {

@@ -1,10 +1,13 @@
 use crate::AppState;
-use crate::{generate_exact_image, ExactImageGenerationRequest};
+use crate::{
+    generate_exact_image_with_cache, ExactImageGenerationRequest, ExactMediaDiscoveryCache,
+};
 use anyhow::{bail, Context, Result};
 use puffer_config::ImageMediaConfig;
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,6 +19,7 @@ const MAX_PROMPT_CHARS: usize = 20_000;
 pub(crate) struct ImageGenerationMediaContext<'a> {
     pub(crate) providers: &'a ProviderRegistry,
     pub(crate) auth_store: &'a AuthStore,
+    pub(crate) discovery_cache: &'a ExactMediaDiscoveryCache,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,9 +42,9 @@ struct ImageGenerationInput {
 struct ImageRequest {
     provider: String,
     model: String,
+    adapter: String,
     prompt: String,
-    size: String,
-    quality: String,
+    parameters: BTreeMap<String, String>,
     output_format: String,
     output_path: PathBuf,
     purpose: Option<String>,
@@ -55,7 +59,7 @@ struct ImageGenerationResult {
     provider: String,
     model: String,
     status: String,
-    size: String,
+    parameters: BTreeMap<String, String>,
     purpose: Option<String>,
     retry_from_error: bool,
 }
@@ -71,18 +75,18 @@ pub fn execute_image_generation(
         serde_json::from_value(input).context("invalid ImageGeneration input")?;
     let request = build_image_request(cwd, parsed, &state.config.media.image)?;
     let media_context = media_context.context("ImageGeneration media runtime is not configured")?;
-    let generated = generate_exact_image(
+    let generated = generate_exact_image_with_cache(
         media_context.providers,
         media_context.auth_store,
         cwd,
         ExactImageGenerationRequest {
             provider_id: request.provider.clone(),
             model_id: request.model.clone(),
+            adapter: request.adapter.clone(),
             prompt: request.prompt.clone(),
-            size: request.size.clone(),
-            quality: request.quality.clone(),
-            output_format: request.output_format.clone(),
+            parameters: request.parameters.clone(),
         },
+        media_context.discovery_cache,
     )?;
 
     if let Some(parent) = request.output_path.parent() {
@@ -99,7 +103,7 @@ pub fn execute_image_generation(
         provider: generated.provider_id,
         model: generated.model_id,
         status: generated.status,
-        size: request.size,
+        parameters: request.parameters,
         purpose: request.purpose,
         retry_from_error: request.retry_from_error.is_some(),
     })
@@ -111,23 +115,32 @@ fn build_image_request(
     settings: &ImageMediaConfig,
 ) -> Result<ImageRequest> {
     let prompt = prompt_text(cwd, &input.prompt, input.prompt_reference.as_deref())?;
-    let (provider, model) = required_provider_model(settings)?;
-    let output_format = normalized_output_format(&settings.output_format)?;
+    let (provider, model, adapter) = required_provider_model_adapter(settings)?;
+    let mut parameters = settings.parameters.clone();
+    if input
+        .aspect
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+    {
+        parameters.insert(
+            "size".to_string(),
+            image_size(input.aspect.as_deref())?.to_string(),
+        );
+    }
+    let output_format = normalized_output_format(
+        parameters
+            .get("output_format")
+            .or_else(|| parameters.get("outputFormat"))
+            .map(String::as_str)
+            .unwrap_or("png"),
+    )?;
     Ok(ImageRequest {
         provider,
         model,
+        adapter,
         prompt,
-        size: if input
-            .aspect
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|value| !value.is_empty())
-        {
-            image_size(input.aspect.as_deref())?.to_string()
-        } else {
-            non_empty_media_value(&settings.size, "size")?
-        },
-        quality: non_empty_media_value(&settings.quality, "quality")?,
+        parameters,
         output_path: resolve_output_path(cwd, input.output_path.as_deref(), &output_format)?,
         output_format,
         purpose: input.purpose,
@@ -135,7 +148,9 @@ fn build_image_request(
     })
 }
 
-fn required_provider_model(settings: &ImageMediaConfig) -> Result<(String, String)> {
+fn required_provider_model_adapter(
+    settings: &ImageMediaConfig,
+) -> Result<(String, String, String)> {
     let provider = settings
         .provider_id
         .as_deref()
@@ -146,9 +161,16 @@ fn required_provider_model(settings: &ImageMediaConfig) -> Result<(String, Strin
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    match (provider, model) {
-        (Some(provider), Some(model)) => Ok((provider.to_string(), model.to_string())),
-        _ => bail!("image media provider/model is not configured"),
+    let adapter = settings
+        .adapter
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (provider, model, adapter) {
+        (Some(provider), Some(model), Some(adapter)) => {
+            Ok((provider.to_string(), model.to_string(), adapter.to_string()))
+        }
+        _ => bail!("image media provider/model/adapter is not configured"),
     }
 }
 
@@ -178,7 +200,7 @@ fn image_generation_output(result: &ImageGenerationResult) -> Result<String> {
         "provider": result.provider,
         "model": result.model,
         "status": result.status,
-        "size": result.size,
+        "parameters": result.parameters,
         "purpose": result.purpose,
         "retryFromError": result.retry_from_error
     }))?)
@@ -280,7 +302,7 @@ mod tests {
     use indexmap::IndexMap;
     use puffer_provider_registry::{
         AuthMode, AuthStore, ImageMediaDescriptor, MediaExecutionDescriptor, MediaExecutionKind,
-        MediaImageParameters, MediaModelDescriptor, MediaOperation, ModelDescriptor,
+        MediaModelDescriptor, MediaOperation, MediaParameterSpec, ModelDescriptor,
         ProviderDescriptor, ProviderMediaDescriptor, ProviderRegistry,
     };
     use puffer_resources::LoadedResources;
@@ -299,9 +321,12 @@ mod tests {
         ImageMediaConfig {
             provider_id: Some("openai".to_string()),
             model_id: Some("gpt-image-1".to_string()),
-            size: "1024x1024".to_string(),
-            quality: "auto".to_string(),
-            output_format: "png".to_string(),
+            adapter: Some("images_json".to_string()),
+            parameters: BTreeMap::from([
+                ("size".to_string(), "1024x1024".to_string()),
+                ("quality".to_string(), "auto".to_string()),
+                ("output_format".to_string(), "png".to_string()),
+            ]),
         }
     }
 
@@ -342,18 +367,38 @@ mod tests {
                 image: Some(ImageMediaDescriptor {
                     discovery: None,
                     execution: Some(MediaExecutionDescriptor {
-                        adapter: MediaExecutionKind::OpenAiImages,
+                        adapter: MediaExecutionKind::ImagesJson,
+                        base_url: None,
                         path: "/custom/images".to_string(),
                     }),
                     models: vec![MediaModelDescriptor {
                         id: "exact-image-model".to_string(),
                         display_name: Some("Exact Image Model".to_string()),
+                        execution: None,
                         operations: vec![MediaOperation::Generate],
-                        parameters: MediaImageParameters::new(
-                            vec!["1024x1024".to_string(), "1536x1024".to_string()],
-                            vec!["auto".to_string(), "high".to_string()],
-                            vec!["png".to_string(), "webp".to_string()],
-                        ),
+                        parameters: vec![
+                            MediaParameterSpec {
+                                name: "size".to_string(),
+                                label: "Size".to_string(),
+                                values: vec!["1024x1024".to_string(), "1536x1024".to_string()],
+                                default: "1024x1024".to_string(),
+                                request_field: Some("size".to_string()),
+                            },
+                            MediaParameterSpec {
+                                name: "quality".to_string(),
+                                label: "Quality".to_string(),
+                                values: vec!["auto".to_string(), "high".to_string()],
+                                default: "auto".to_string(),
+                                request_field: Some("quality".to_string()),
+                            },
+                            MediaParameterSpec {
+                                name: "output_format".to_string(),
+                                label: "Output format".to_string(),
+                                values: vec!["png".to_string(), "webp".to_string()],
+                                default: "png".to_string(),
+                                request_field: Some("output_format".to_string()),
+                            },
+                        ],
                     }],
                 }),
             }),
@@ -362,9 +407,62 @@ mod tests {
         registry
     }
 
+    fn chat_router_registry(base_url: String) -> ProviderRegistry {
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderDescriptor {
+            id: "openrouter".to_string(),
+            display_name: "OpenRouter".to_string(),
+            base_url,
+            default_api: "openai-completions".to_string(),
+            auth_modes: vec![AuthMode::ApiKey],
+            headers: IndexMap::new(),
+            query_params: IndexMap::new(),
+            chat_completions_path: None,
+            discovery: None,
+            media: Some(ProviderMediaDescriptor {
+                image: Some(ImageMediaDescriptor {
+                    discovery: None,
+                    execution: Some(MediaExecutionDescriptor {
+                        adapter: MediaExecutionKind::ChatImageOutput,
+                        base_url: None,
+                        path: "/chat/completions".to_string(),
+                    }),
+                    models: Vec::new(),
+                }),
+            }),
+            models: Vec::<ModelDescriptor>::new(),
+        });
+        registry
+    }
+
+    fn discovered_chat_image_cache() -> ExactMediaDiscoveryCache {
+        ExactMediaDiscoveryCache::from_inner_for_test(
+            crate::runtime::media::resolver::MediaDiscoveryCache {
+                image_models: vec![crate::runtime::media::resolver::CachedImageMediaModel {
+                    provider_id: "openrouter".to_string(),
+                    model: MediaModelDescriptor {
+                        id: "openrouter/image-chat".to_string(),
+                        display_name: Some("Image Chat".to_string()),
+                        execution: None,
+                        operations: vec![MediaOperation::Generate],
+                        parameters: Vec::new(),
+                    },
+                    source: "provider_discovery".to_string(),
+                }],
+            },
+            1_000,
+        )
+    }
+
     fn auth_store() -> AuthStore {
         let mut auth_store = AuthStore::default();
         auth_store.set_api_key("exact-provider", "sk-test");
+        auth_store
+    }
+
+    fn openrouter_auth_store() -> AuthStore {
+        let mut auth_store = AuthStore::default();
+        auth_store.set_api_key("openrouter", "sk-test");
         auth_store
     }
 
@@ -410,6 +508,31 @@ mod tests {
             let request_text = read_http_request(&mut stream);
             let body = json!({
                 "data": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("response");
+            request_text
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn spawn_chat_image_generation_server() -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let request_text = read_http_request(&mut stream);
+            let body = json!({
+                "choices": [{
+                    "message": {
+                        "images": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
+                    }
+                }]
             })
             .to_string();
             let response = format!(
@@ -480,9 +603,8 @@ mod tests {
         let settings = puffer_config::ImageMediaConfig {
             provider_id: Some("openai".to_string()),
             model_id: Some("gpt-image-1".to_string()),
-            size: "1024x1024".to_string(),
-            quality: "auto".to_string(),
-            output_format: "webp".to_string(),
+            adapter: Some("images_json".to_string()),
+            parameters: BTreeMap::from([("output_format".to_string(), "webp".to_string())]),
         };
 
         let request = build_image_request(
@@ -528,7 +650,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(request.prompt, "make a visual summary");
-        assert_eq!(request.size, "1024x1024");
+        assert_eq!(request.parameters["size"], "1024x1024");
         assert_eq!(request.output_path, dir.path().join("out/image.png"));
     }
 
@@ -539,9 +661,12 @@ mod tests {
         let settings = puffer_config::ImageMediaConfig {
             provider_id: Some("openai".to_string()),
             model_id: Some("configured-image-model".to_string()),
-            size: "1024x1024".to_string(),
-            quality: "high".to_string(),
-            output_format: "webp".to_string(),
+            adapter: Some("images_json".to_string()),
+            parameters: BTreeMap::from([
+                ("size".to_string(), "1024x1024".to_string()),
+                ("quality".to_string(), "high".to_string()),
+                ("output_format".to_string(), "webp".to_string()),
+            ]),
         };
 
         let request = build_image_request(
@@ -560,7 +685,7 @@ mod tests {
 
         assert_eq!(request.provider, "openai");
         assert_eq!(request.model, "configured-image-model");
-        assert_eq!(request.quality, "high");
+        assert_eq!(request.parameters["quality"], "high");
         assert_eq!(request.output_format, "webp");
         std::env::remove_var("PUFFER_IMAGE_MODEL");
     }
@@ -571,9 +696,12 @@ mod tests {
         let settings = puffer_config::ImageMediaConfig {
             provider_id: Some("exact-provider".to_string()),
             model_id: Some("exact-image-model".to_string()),
-            size: "1024x1024".to_string(),
-            quality: "auto".to_string(),
-            output_format: "png".to_string(),
+            adapter: Some("images_json".to_string()),
+            parameters: BTreeMap::from([
+                ("size".to_string(), "1024x1024".to_string()),
+                ("quality".to_string(), "auto".to_string()),
+                ("output_format".to_string(), "png".to_string()),
+            ]),
         };
 
         let request = build_image_request(
@@ -599,6 +727,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let registry = registry_with_provider("http://127.0.0.1:9".to_string());
         let auth_store = auth_store();
+        let discovery_cache = ExactMediaDiscoveryCache::empty();
         let mut state = test_state(ImageMediaConfig::default(), dir.path());
 
         let error = execute_image_generation(
@@ -608,13 +737,14 @@ mod tests {
             Some(ImageGenerationMediaContext {
                 providers: &registry,
                 auth_store: &auth_store,
+                discovery_cache: &discovery_cache,
             }),
         )
         .unwrap_err();
 
         assert_eq!(
             error.to_string(),
-            "image media provider/model is not configured"
+            "image media provider/model/adapter is not configured"
         );
     }
 
@@ -623,13 +753,17 @@ mod tests {
         let dir = tempdir().unwrap();
         let registry = registry_with_provider("http://127.0.0.1:9".to_string());
         let auth_store = auth_store();
+        let discovery_cache = ExactMediaDiscoveryCache::empty();
         let mut state = test_state(
             ImageMediaConfig {
                 provider_id: Some("exact-provider".to_string()),
                 model_id: Some("stale-image-model".to_string()),
-                size: "1024x1024".to_string(),
-                quality: "auto".to_string(),
-                output_format: "png".to_string(),
+                adapter: Some("images_json".to_string()),
+                parameters: BTreeMap::from([
+                    ("size".to_string(), "1024x1024".to_string()),
+                    ("quality".to_string(), "auto".to_string()),
+                    ("output_format".to_string(), "png".to_string()),
+                ]),
             },
             dir.path(),
         );
@@ -641,13 +775,14 @@ mod tests {
             Some(ImageGenerationMediaContext {
                 providers: &registry,
                 auth_store: &auth_store,
+                discovery_cache: &discovery_cache,
             }),
         )
         .unwrap_err();
 
         assert_eq!(
             error.to_string(),
-            "selected image model unavailable: exact-provider/stale-image-model"
+            "selected image model unavailable: exact-provider/stale-image-model via images_json"
         );
     }
 
@@ -657,13 +792,17 @@ mod tests {
         let dir = tempdir().unwrap();
         let registry = registry_with_provider(base_url);
         let auth_store = auth_store();
+        let discovery_cache = ExactMediaDiscoveryCache::empty();
         let mut state = test_state(
             ImageMediaConfig {
                 provider_id: Some("exact-provider".to_string()),
                 model_id: Some("exact-image-model".to_string()),
-                size: "1024x1024".to_string(),
-                quality: "auto".to_string(),
-                output_format: "png".to_string(),
+                adapter: Some("images_json".to_string()),
+                parameters: BTreeMap::from([
+                    ("size".to_string(), "1024x1024".to_string()),
+                    ("quality".to_string(), "auto".to_string()),
+                    ("output_format".to_string(), "png".to_string()),
+                ]),
             },
             dir.path(),
         );
@@ -679,6 +818,7 @@ mod tests {
             Some(ImageGenerationMediaContext {
                 providers: &registry,
                 auth_store: &auth_store,
+                discovery_cache: &discovery_cache,
             }),
         )
         .unwrap();
@@ -706,6 +846,51 @@ mod tests {
     }
 
     #[test]
+    fn execute_uses_discovery_cache_for_chat_image_output_model() {
+        let (base_url, server) = spawn_chat_image_generation_server();
+        let dir = tempdir().unwrap();
+        let registry = chat_router_registry(base_url);
+        let auth_store = openrouter_auth_store();
+        let discovery_cache = discovered_chat_image_cache();
+        let mut state = test_state(
+            ImageMediaConfig {
+                provider_id: Some("openrouter".to_string()),
+                model_id: Some("openrouter/image-chat".to_string()),
+                adapter: Some("chat_image_output".to_string()),
+                parameters: BTreeMap::new(),
+            },
+            dir.path(),
+        );
+
+        let output = execute_image_generation(
+            &mut state,
+            dir.path(),
+            json!({
+                "prompt": "draw a ship",
+                "outputPath": "requested/ship.png"
+            }),
+            Some(ImageGenerationMediaContext {
+                providers: &registry,
+                auth_store: &auth_store,
+                discovery_cache: &discovery_cache,
+            }),
+        )
+        .unwrap();
+
+        let request_text = server.join().expect("server");
+        assert!(request_text.starts_with("POST /chat/completions HTTP/1.1"));
+        assert!(request_text.contains("\"model\":\"openrouter/image-chat\""));
+        assert_eq!(
+            fs::read(dir.path().join("requested/ship.png")).unwrap(),
+            b"image-bytes"
+        );
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["provider"], "openrouter");
+        assert_eq!(parsed["model"], "openrouter/image-chat");
+        assert_eq!(parsed["status"], "succeeded");
+    }
+
+    #[test]
     fn dispatcher_passes_media_context_to_image_generation_tool() {
         let (base_url, server) = spawn_image_generation_server();
         let dir = tempdir().unwrap();
@@ -715,9 +900,12 @@ mod tests {
             ImageMediaConfig {
                 provider_id: Some("exact-provider".to_string()),
                 model_id: Some("exact-image-model".to_string()),
-                size: "1024x1024".to_string(),
-                quality: "auto".to_string(),
-                output_format: "png".to_string(),
+                adapter: Some("images_json".to_string()),
+                parameters: BTreeMap::from([
+                    ("size".to_string(), "1024x1024".to_string()),
+                    ("quality".to_string(), "auto".to_string()),
+                    ("output_format".to_string(), "png".to_string()),
+                ]),
             },
             dir.path(),
         );
@@ -759,7 +947,7 @@ mod tests {
             provider: "openai".to_string(),
             model: "gpt-image-1".to_string(),
             status: "succeeded".to_string(),
-            size: "1024x1024".to_string(),
+            parameters: BTreeMap::from([("size".to_string(), "1024x1024".to_string())]),
             purpose: Some("test".to_string()),
             retry_from_error: false,
         })

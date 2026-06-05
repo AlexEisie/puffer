@@ -11,6 +11,52 @@ discovery:
   context_window: 262144
   max_output_tokens: 65536
   supports_reasoning: true
+media:
+  image:
+    discovery:
+      adapter: trusted_image_output
+      path: /models
+      query:
+        output_modalities: image
+    execution:
+      adapter: chat_image_output
+      path: /chat/completions
+    models:
+      - id: openai/gpt-image-2
+        display_name: OpenAI GPT Image 2
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: openai/gpt-image-1
+        display_name: OpenAI GPT Image 1
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: google/imagen-4.0-ultra-generate-001
+        display_name: Google Imagen 4.0 Ultra Generate
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: google/imagen-4.0-generate-001
+        display_name: Google Imagen 4.0 Generate
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
+      - id: bfl/flux-2-flex
+        display_name: FLUX 2 Flex
+        execution:
+          adapter: images_json
+          path: /images/generations
+        operations:
+          - generate
 models:
   - id: anthropic/claude-opus-4.5
     display_name: Claude Opus 4.5

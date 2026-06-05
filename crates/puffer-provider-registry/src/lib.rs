@@ -12,8 +12,8 @@ pub use import::{
 };
 pub use model::{
     AnthropicMessagesCompat, ImageMediaDescriptor, MediaDiscoveryDescriptor, MediaDiscoveryKind,
-    MediaExecutionDescriptor, MediaExecutionKind, MediaImageParameters, MediaModelDescriptor,
-    MediaOperation, Modality, ModelCompat, ModelCost, ModelDescriptor, ModelDiscoveryConfig,
+    MediaExecutionDescriptor, MediaExecutionKind, MediaModelDescriptor, MediaOperation,
+    MediaParameterSpec, Modality, ModelCompat, ModelCost, ModelDescriptor, ModelDiscoveryConfig,
     ModelDiscoveryFormat, OpenAiCompletionsCompat, OpenAiResponsesCompat, ProviderDescriptor,
     ProviderMediaDescriptor, ProviderSource, ProviderSourceKind, RegisteredProvider, ResponsesPath,
     ThinkingFormat,

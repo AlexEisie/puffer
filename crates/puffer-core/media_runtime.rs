@@ -1,28 +1,51 @@
-use crate::runtime::media::openai_image::{OpenAIImagesAdapter, OpenAIImagesGenerationRequest};
+use crate::runtime::media::chat_image_output::{
+    ChatImageOutputAdapter, ChatImageOutputGenerationRequest,
+};
+use crate::runtime::media::discovery::TrustedImageDiscoveryClient;
+use crate::runtime::media::images_json::{ImagesJsonAdapter, ImagesJsonGenerationRequest};
+use crate::runtime::media::minimax_image::{MinimaxImageAdapter, MinimaxImageGenerationRequest};
 use crate::runtime::media::resolver::{resolve_media_capabilities, MediaDiscoveryCache};
-use crate::runtime::media::{MediaGenerationService, MediaJobStatus, MediaKind};
-use anyhow::Result;
+use crate::runtime::media::{
+    MediaArtifact, MediaGenerationService, MediaJob, MediaJobStatus, MediaKind,
+};
+use anyhow::{bail, Result};
 use puffer_provider_registry::{AuthStore, MediaOperation, ProviderRegistry};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Default TTL for trusted media discovery results.
+pub const MEDIA_DISCOVERY_TTL_MS: u64 = 5 * 60 * 1_000;
 
 /// Describes one exact media capability suitable for client display.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaCapabilityView {
     pub provider_id: String,
+    pub provider_display_name: String,
     pub model_id: String,
+    pub model_display_name: String,
     pub kind: String,
-    pub operations: Vec<String>,
-    pub supports_async: bool,
-    pub supports_streaming: bool,
-    pub parameter_values: Value,
+    pub operation: String,
+    pub adapter: String,
+    pub parameters: Vec<MediaCapabilityParameterView>,
+    pub defaults: BTreeMap<String, String>,
     pub status: String,
     pub source: String,
     pub reason: Option<String>,
     pub checked_at_ms: u64,
+}
+
+/// Describes one select parameter suitable for client rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaCapabilityParameterView {
+    pub name: String,
+    pub label: String,
+    pub values: Vec<String>,
+    pub default: String,
+    pub request_field: Option<String>,
 }
 
 /// Carries an exact image generation request from UI or tool configuration.
@@ -31,10 +54,9 @@ pub struct MediaCapabilityView {
 pub struct ExactImageGenerationRequest {
     pub provider_id: String,
     pub model_id: String,
+    pub adapter: String,
     pub prompt: String,
-    pub size: String,
-    pub quality: String,
-    pub output_format: String,
+    pub parameters: BTreeMap<String, String>,
 }
 
 /// Carries the persisted job and artifact produced by exact image generation.
@@ -49,14 +71,63 @@ pub struct ExactImageGenerationResult {
     pub path: PathBuf,
 }
 
+/// Carries trusted media discovery results used by capability resolution.
+#[derive(Debug, Clone)]
+pub struct ExactMediaDiscoveryCache {
+    inner: MediaDiscoveryCache,
+    cached_at_ms: u64,
+}
+
+impl ExactMediaDiscoveryCache {
+    /// Creates an empty media discovery cache.
+    pub fn empty() -> Self {
+        Self {
+            inner: MediaDiscoveryCache::default(),
+            cached_at_ms: 0,
+        }
+    }
+
+    /// Returns the time at which this cache was refreshed.
+    pub fn cached_at_ms(&self) -> u64 {
+        self.cached_at_ms
+    }
+
+    /// Returns whether this cache is fresh at the given timestamp.
+    pub fn is_fresh_at(&self, now_ms: u64) -> bool {
+        now_ms.saturating_sub(self.cached_at_ms) <= MEDIA_DISCOVERY_TTL_MS
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_inner_for_test(inner: MediaDiscoveryCache, cached_at_ms: u64) -> Self {
+        Self {
+            inner,
+            cached_at_ms,
+        }
+    }
+}
+
 /// Lists exact media capabilities from provider media descriptors.
 pub fn list_exact_media_capabilities(
     registry: &ProviderRegistry,
     auth_store: &AuthStore,
     kind_filter: Option<&str>,
 ) -> Vec<MediaCapabilityView> {
+    list_exact_media_capabilities_with_cache(
+        registry,
+        auth_store,
+        kind_filter,
+        &ExactMediaDiscoveryCache::empty(),
+    )
+}
+
+/// Lists exact media capabilities using static descriptors and trusted discovery cache entries.
+pub fn list_exact_media_capabilities_with_cache(
+    registry: &ProviderRegistry,
+    auth_store: &AuthStore,
+    kind_filter: Option<&str>,
+    discovery_cache: &ExactMediaDiscoveryCache,
+) -> Vec<MediaCapabilityView> {
     let checked_at_ms = now_ms();
-    let discovery_cache = MediaDiscoveryCache::default();
     let mut capabilities = Vec::new();
     if kind_filter_matches(kind_filter, "image") {
         capabilities.extend(resolve_media_capabilities(
@@ -65,7 +136,7 @@ pub fn list_exact_media_capabilities(
             MediaKind::Image,
             MediaOperation::Generate,
             checked_at_ms,
-            &discovery_cache,
+            &discovery_cache.inner,
         ));
     }
     if kind_filter_matches(kind_filter, "video") {
@@ -75,13 +146,25 @@ pub fn list_exact_media_capabilities(
             MediaKind::Video,
             MediaOperation::Generate,
             checked_at_ms,
-            &discovery_cache,
+            &discovery_cache.inner,
         ));
     }
     capabilities
         .into_iter()
         .map(MediaCapabilityView::from)
         .collect()
+}
+
+/// Refreshes trusted media discovery cache entries for connected providers.
+pub fn discover_exact_media_capabilities(
+    registry: &ProviderRegistry,
+    auth_store: &AuthStore,
+) -> ExactMediaDiscoveryCache {
+    let inner = TrustedImageDiscoveryClient::new().discover(registry, auth_store);
+    ExactMediaDiscoveryCache {
+        inner,
+        cached_at_ms: now_ms(),
+    }
 }
 
 /// Generates one exact image and persists its media job and artifact sidecars.
@@ -91,43 +174,120 @@ pub fn generate_exact_image(
     workspace_root: &Path,
     request: ExactImageGenerationRequest,
 ) -> Result<ExactImageGenerationResult> {
-    let result = OpenAIImagesAdapter::new()?.execute(
+    generate_exact_image_with_cache(
         registry,
         auth_store,
-        &MediaGenerationService::new(workspace_root),
-        OpenAIImagesGenerationRequest {
-            provider_id: request.provider_id,
-            model_id: request.model_id,
-            prompt: request.prompt,
-            size: request.size,
-            quality: request.quality,
-            output_format: request.output_format,
-        },
-    )?;
-    Ok(ExactImageGenerationResult {
-        job_id: result.job.id,
-        artifact_id: result.artifact.id,
-        provider_id: result.job.provider_id,
-        model_id: result.job.model_id,
-        status: media_job_status_name(result.job.status).to_string(),
-        path: result.artifact.path,
-    })
+        workspace_root,
+        request,
+        &ExactMediaDiscoveryCache::empty(),
+    )
+}
+
+/// Generates one exact image using static descriptors plus trusted discovery cache entries.
+pub fn generate_exact_image_with_cache(
+    registry: &ProviderRegistry,
+    auth_store: &AuthStore,
+    workspace_root: &Path,
+    request: ExactImageGenerationRequest,
+    discovery_cache: &ExactMediaDiscoveryCache,
+) -> Result<ExactImageGenerationResult> {
+    let service = MediaGenerationService::new(workspace_root);
+    match request.adapter.as_str() {
+        "images_json" => {
+            let result = ImagesJsonAdapter::new()?.execute(
+                registry,
+                auth_store,
+                &service,
+                ImagesJsonGenerationRequest {
+                    provider_id: request.provider_id,
+                    model_id: request.model_id,
+                    adapter: request.adapter,
+                    prompt: request.prompt,
+                    parameters: request.parameters,
+                },
+            )?;
+            Ok(exact_generation_result(result.job, result.artifact))
+        }
+        "minimax_image" => {
+            let result = MinimaxImageAdapter::new()?.execute(
+                registry,
+                auth_store,
+                &service,
+                MinimaxImageGenerationRequest {
+                    provider_id: request.provider_id,
+                    model_id: request.model_id,
+                    adapter: request.adapter,
+                    prompt: request.prompt,
+                    parameters: request.parameters,
+                },
+            )?;
+            Ok(exact_generation_result(result.job, result.artifact))
+        }
+        "chat_image_output" => {
+            let result = ChatImageOutputAdapter::new()?.execute_with_discovery_cache(
+                registry,
+                auth_store,
+                &service,
+                ChatImageOutputGenerationRequest {
+                    provider_id: request.provider_id,
+                    model_id: request.model_id,
+                    adapter: request.adapter,
+                    prompt: request.prompt,
+                    parameters: request.parameters,
+                },
+                &discovery_cache.inner,
+            )?;
+            Ok(exact_generation_result(result.job, result.artifact))
+        }
+        adapter => bail!("image media adapter unavailable for {adapter}"),
+    }
+}
+
+fn exact_generation_result(job: MediaJob, artifact: MediaArtifact) -> ExactImageGenerationResult {
+    ExactImageGenerationResult {
+        job_id: job.id,
+        artifact_id: artifact.id,
+        provider_id: job.provider_id,
+        model_id: job.model_id,
+        status: media_job_status_name(job.status).to_string(),
+        path: artifact.path,
+    }
 }
 
 impl From<crate::runtime::media::capabilities::MediaCapability> for MediaCapabilityView {
     fn from(capability: crate::runtime::media::capabilities::MediaCapability) -> Self {
         Self {
             provider_id: capability.provider_id,
+            provider_display_name: capability.provider_display_name,
             model_id: capability.model_id,
+            model_display_name: capability.model_display_name,
             kind: media_kind_name(capability.kind).to_string(),
-            operations: capability.operations,
-            supports_async: capability.supports_async,
-            supports_streaming: capability.supports_streaming,
-            parameter_values: client_parameter_values(capability.parameter_values),
+            operation: capability.operation,
+            adapter: capability.adapter,
+            parameters: capability
+                .parameters
+                .into_iter()
+                .map(MediaCapabilityParameterView::from)
+                .collect(),
+            defaults: capability.defaults,
             status: capability.status,
             source: capability.source,
             reason: capability.reason,
             checked_at_ms: capability.checked_at_ms,
+        }
+    }
+}
+
+impl From<crate::runtime::media::capabilities::MediaCapabilityParameter>
+    for MediaCapabilityParameterView
+{
+    fn from(parameter: crate::runtime::media::capabilities::MediaCapabilityParameter) -> Self {
+        Self {
+            name: parameter.name,
+            label: parameter.label,
+            values: parameter.values,
+            default: parameter.default,
+            request_field: parameter.request_field,
         }
     }
 }
@@ -137,16 +297,6 @@ fn kind_filter_matches(kind_filter: Option<&str>, kind: &str) -> bool {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .is_none_or(|value| value == kind)
-}
-
-fn client_parameter_values(mut value: Value) -> Value {
-    let Some(object) = value.as_object_mut() else {
-        return value;
-    };
-    if let Some(output_format) = object.remove("output_format") {
-        object.insert("outputFormat".to_string(), output_format);
-    }
-    value
 }
 
 fn media_kind_name(kind: MediaKind) -> &'static str {
@@ -171,4 +321,269 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use indexmap::IndexMap;
+    use puffer_provider_registry::{
+        AuthMode, AuthStore, ImageMediaDescriptor, MediaExecutionDescriptor, MediaExecutionKind,
+        MediaModelDescriptor, MediaOperation, MediaParameterSpec, ModelDescriptor,
+        ProviderDescriptor, ProviderMediaDescriptor, ProviderRegistry,
+    };
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use tempfile::tempdir;
+
+    fn minimax_registry(base_url: String) -> ProviderRegistry {
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderDescriptor {
+            id: "minimax".to_string(),
+            display_name: "MiniMax".to_string(),
+            base_url: "https://api.minimax.io/anthropic".to_string(),
+            default_api: "anthropic-messages".to_string(),
+            auth_modes: vec![AuthMode::ApiKey],
+            headers: IndexMap::new(),
+            query_params: IndexMap::new(),
+            chat_completions_path: None,
+            discovery: None,
+            media: Some(ProviderMediaDescriptor {
+                image: Some(ImageMediaDescriptor {
+                    discovery: None,
+                    execution: Some(MediaExecutionDescriptor {
+                        adapter: MediaExecutionKind::MinimaxImage,
+                        base_url: Some(base_url),
+                        path: "/v1/image_generation".to_string(),
+                    }),
+                    models: vec![MediaModelDescriptor {
+                        id: "image-01".to_string(),
+                        display_name: Some("Image 01".to_string()),
+                        execution: None,
+                        operations: vec![MediaOperation::Generate],
+                        parameters: vec![
+                            MediaParameterSpec {
+                                name: "aspect_ratio".to_string(),
+                                label: "Aspect ratio".to_string(),
+                                values: vec!["1:1".to_string(), "16:9".to_string()],
+                                default: "1:1".to_string(),
+                                request_field: Some("aspect_ratio".to_string()),
+                            },
+                            MediaParameterSpec {
+                                name: "response_format".to_string(),
+                                label: "Response format".to_string(),
+                                values: vec!["url".to_string(), "base64".to_string()],
+                                default: "base64".to_string(),
+                                request_field: Some("response_format".to_string()),
+                            },
+                        ],
+                    }],
+                }),
+            }),
+            models: Vec::<ModelDescriptor>::new(),
+        });
+        registry
+    }
+
+    fn chat_router_registry(base_url: String) -> ProviderRegistry {
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderDescriptor {
+            id: "openrouter".to_string(),
+            display_name: "OpenRouter".to_string(),
+            base_url,
+            default_api: "openai-completions".to_string(),
+            auth_modes: vec![AuthMode::ApiKey],
+            headers: IndexMap::new(),
+            query_params: IndexMap::new(),
+            chat_completions_path: None,
+            discovery: None,
+            media: Some(ProviderMediaDescriptor {
+                image: Some(ImageMediaDescriptor {
+                    discovery: None,
+                    execution: Some(MediaExecutionDescriptor {
+                        adapter: MediaExecutionKind::ChatImageOutput,
+                        base_url: None,
+                        path: "/chat/completions".to_string(),
+                    }),
+                    models: Vec::new(),
+                }),
+            }),
+            models: Vec::<ModelDescriptor>::new(),
+        });
+        registry
+    }
+
+    fn discovered_chat_image_cache() -> ExactMediaDiscoveryCache {
+        ExactMediaDiscoveryCache::from_inner_for_test(
+            crate::runtime::media::resolver::MediaDiscoveryCache {
+                image_models: vec![crate::runtime::media::resolver::CachedImageMediaModel {
+                    provider_id: "openrouter".to_string(),
+                    model: MediaModelDescriptor {
+                        id: "openrouter/image-chat".to_string(),
+                        display_name: Some("Image Chat".to_string()),
+                        execution: None,
+                        operations: vec![MediaOperation::Generate],
+                        parameters: Vec::new(),
+                    },
+                    source: "provider_discovery".to_string(),
+                }],
+            },
+            1_000,
+        )
+    }
+
+    fn auth_store() -> AuthStore {
+        let mut auth = AuthStore::default();
+        auth.set_api_key("minimax", "sk-minimax");
+        auth
+    }
+
+    fn auth_store_for(provider_id: &str) -> AuthStore {
+        let mut auth = AuthStore::default();
+        auth.set_api_key(provider_id, "sk-test");
+        auth
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        let mut buffer = [0_u8; 8192];
+        let size = stream.read(&mut buffer).expect("read request");
+        String::from_utf8_lossy(&buffer[..size]).to_string()
+    }
+
+    #[test]
+    fn generate_exact_image_dispatches_to_minimax_adapter() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let request_text = read_http_request(&mut stream);
+            let body = json!({
+                "data": {"image_base64": ["aW1hZ2UtYnl0ZXM="]},
+                "base_resp": {"status_code": 0, "status_msg": "success"}
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("response");
+            request_text
+        });
+        let registry = minimax_registry(format!("http://{address}"));
+        let workspace = tempdir().expect("tempdir");
+
+        let result = generate_exact_image(
+            &registry,
+            &auth_store(),
+            workspace.path(),
+            ExactImageGenerationRequest {
+                provider_id: "minimax".to_string(),
+                model_id: "image-01".to_string(),
+                adapter: "minimax_image".to_string(),
+                prompt: "draw a precise icon".to_string(),
+                parameters: BTreeMap::from([
+                    ("aspect_ratio".to_string(), "16:9".to_string()),
+                    ("response_format".to_string(), "base64".to_string()),
+                ]),
+            },
+        )
+        .expect("generation succeeds");
+
+        let request_text = server.join().expect("server");
+        assert!(request_text.starts_with("POST /v1/image_generation HTTP/1.1"));
+        assert!(request_text.contains("\"aspect_ratio\":\"16:9\""));
+        assert_eq!(result.provider_id, "minimax");
+        assert_eq!(result.model_id, "image-01");
+        assert_eq!(std::fs::read(result.path).unwrap(), b"image-bytes");
+    }
+
+    #[test]
+    fn generate_exact_image_with_cache_executes_discovered_chat_image_model() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let request_text = read_http_request(&mut stream);
+            let body = json!({
+                "choices": [{
+                    "message": {
+                        "images": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
+                    }
+                }]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("response");
+            request_text
+        });
+        let registry = chat_router_registry(format!("http://{address}"));
+        let workspace = tempdir().expect("tempdir");
+        let cache = discovered_chat_image_cache();
+
+        let result = generate_exact_image_with_cache(
+            &registry,
+            &auth_store_for("openrouter"),
+            workspace.path(),
+            ExactImageGenerationRequest {
+                provider_id: "openrouter".to_string(),
+                model_id: "openrouter/image-chat".to_string(),
+                adapter: "chat_image_output".to_string(),
+                prompt: "draw a precise icon".to_string(),
+                parameters: BTreeMap::new(),
+            },
+            &cache,
+        )
+        .expect("generation succeeds");
+
+        let request_text = server.join().expect("server");
+        assert!(request_text.starts_with("POST /chat/completions HTTP/1.1"));
+        assert!(request_text.contains("\"model\":\"openrouter/image-chat\""));
+        assert_eq!(result.provider_id, "openrouter");
+        assert_eq!(result.model_id, "openrouter/image-chat");
+        assert_eq!(std::fs::read(result.path).unwrap(), b"image-bytes");
+    }
+
+    #[test]
+    fn generate_exact_image_with_cache_rejects_discovered_model_missing_from_cache_before_http() {
+        let registry = chat_router_registry("http://127.0.0.1:9".to_string());
+        let workspace = tempdir().expect("tempdir");
+
+        let error = generate_exact_image_with_cache(
+            &registry,
+            &auth_store_for("openrouter"),
+            workspace.path(),
+            ExactImageGenerationRequest {
+                provider_id: "openrouter".to_string(),
+                model_id: "openrouter/image-chat".to_string(),
+                adapter: "chat_image_output".to_string(),
+                prompt: "draw a precise icon".to_string(),
+                parameters: BTreeMap::new(),
+            },
+            &ExactMediaDiscoveryCache::empty(),
+        )
+        .expect_err("missing discovery cache should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "selected image model unavailable: openrouter/openrouter/image-chat via chat_image_output"
+        );
+    }
+
+    #[test]
+    fn exact_media_discovery_cache_uses_ttl_boundary() {
+        let cache = ExactMediaDiscoveryCache::from_inner_for_test(
+            crate::runtime::media::resolver::MediaDiscoveryCache::default(),
+            1_000,
+        );
+
+        assert!(cache.is_fresh_at(1_000 + MEDIA_DISCOVERY_TTL_MS - 1));
+        assert!(!cache.is_fresh_at(1_000 + MEDIA_DISCOVERY_TTL_MS + 1));
+    }
 }

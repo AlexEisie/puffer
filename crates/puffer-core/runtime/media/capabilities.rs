@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// Identifies the broad media asset type a capability or job handles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,16 +14,29 @@ pub(crate) enum MediaKind {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MediaCapability {
     pub(crate) provider_id: String,
+    pub(crate) provider_display_name: String,
     pub(crate) model_id: String,
+    pub(crate) model_display_name: String,
     pub(crate) kind: MediaKind,
-    pub(crate) operations: Vec<String>,
-    pub(crate) supports_async: bool,
-    pub(crate) supports_streaming: bool,
-    pub(crate) parameter_values: Value,
+    pub(crate) operation: String,
+    pub(crate) adapter: String,
+    pub(crate) parameters: Vec<MediaCapabilityParameter>,
+    pub(crate) defaults: BTreeMap<String, String>,
     pub(crate) status: String,
     pub(crate) source: String,
     pub(crate) reason: Option<String>,
     pub(crate) checked_at_ms: u64,
+}
+
+/// Describes one select parameter exposed by a media capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaCapabilityParameter {
+    pub(crate) name: String,
+    pub(crate) label: String,
+    pub(crate) values: Vec<String>,
+    pub(crate) default: String,
+    pub(crate) request_field: Option<String>,
 }
 
 /// Stores image generation defaults resolved before adapter execution.
@@ -32,9 +45,8 @@ pub(crate) struct MediaCapability {
 pub(crate) struct ImageDefaults {
     pub(crate) provider_id: Option<String>,
     pub(crate) model_id: Option<String>,
-    pub(crate) size: String,
-    pub(crate) quality: String,
-    pub(crate) output_format: String,
+    pub(crate) adapter: Option<String>,
+    pub(crate) parameters: BTreeMap<String, String>,
 }
 
 impl Default for ImageDefaults {
@@ -42,9 +54,8 @@ impl Default for ImageDefaults {
         Self {
             provider_id: None,
             model_id: None,
-            size: "1024x1024".to_string(),
-            quality: "auto".to_string(),
-            output_format: "png".to_string(),
+            adapter: None,
+            parameters: BTreeMap::new(),
         }
     }
 }
