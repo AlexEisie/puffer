@@ -2413,7 +2413,7 @@
                 role="menuitem"
                 onclick={() => openMediaSettings("image")}
               >
-                <Icon name="sparkles" size={15} />
+                <Icon name="image" size={15} />
                 <span>{MEDIA_SETTINGS_LABELS.image}</span>
               </button>
               <button
@@ -2422,7 +2422,7 @@
                 role="menuitem"
                 onclick={() => openMediaSettings("video")}
               >
-                <Icon name="settings" size={15} />
+                <Icon name="video" size={15} />
                 <span>{MEDIA_SETTINGS_LABELS.video}</span>
               </button>
             </div>

@@ -19,6 +19,7 @@
     | "git"
     | "branch"
     | "globe"
+    | "image"
     | "check"
     | "x"
     | "settings"
@@ -52,6 +53,7 @@
     | "coin"
     | "token"
     | "wrench"
+    | "video"
     | "pin"
     | "trash"
     | "alert"
@@ -85,6 +87,7 @@
   import GitBranchIcon from "lucide-svelte/icons/git-branch";
   import GitGraphIcon from "lucide-svelte/icons/git-graph";
   import GlobeIcon from "lucide-svelte/icons/globe";
+  import ImageIcon from "lucide-svelte/icons/image";
   import KeyRoundIcon from "lucide-svelte/icons/key-round";
   import LayersIcon from "lucide-svelte/icons/layers";
   import LayoutPanelLeftIcon from "lucide-svelte/icons/layout-panel-left";
@@ -113,6 +116,7 @@
   import TerminalIcon from "lucide-svelte/icons/terminal";
   import Trash2Icon from "lucide-svelte/icons/trash-2";
   import TriangleAlertIcon from "lucide-svelte/icons/triangle-alert";
+  import VideoIcon from "lucide-svelte/icons/video";
   import WrenchIcon from "lucide-svelte/icons/wrench";
   import XIcon from "lucide-svelte/icons/x";
   import ZapIcon from "lucide-svelte/icons/zap";
@@ -144,6 +148,7 @@
     git: GitGraphIcon,
     branch: GitBranchIcon,
     globe: GlobeIcon,
+    image: ImageIcon,
     check: CheckIcon,
     x: XIcon,
     settings: SettingsIcon,
@@ -177,6 +182,7 @@
     coin: CoinsIcon,
     token: BadgeCentIcon,
     wrench: WrenchIcon,
+    video: VideoIcon,
     pin: PinIcon,
     trash: Trash2Icon,
     alert: TriangleAlertIcon,
