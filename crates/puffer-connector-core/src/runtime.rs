@@ -179,6 +179,7 @@ impl ConnectorRuntimeInner {
             session_id,
             TranscriptEvent::UserMessage {
                 text: input.to_string(),
+                attachments: Vec::new(),
                 actor: Some(state.user_actor()),
             },
         )?;

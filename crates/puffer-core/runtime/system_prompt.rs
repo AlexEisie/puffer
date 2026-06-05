@@ -105,6 +105,13 @@ pub(super) fn render_runtime_system_prompt(
     )
     .unwrap_or_else(|| render_fallback_prompt(&variables));
     let mut prompt = normalize_prompt_whitespace(&rendered);
+    // soul.md / user.md are intentionally NOT appended to the system prompt.
+    // The Anthropic system prompt carries `cache_control: ephemeral`, so it is
+    // the cached prefix; user.md is agent-mutable, and even soul edits would
+    // bust the cache. They are injected per-turn in `build_system_reminder`
+    // (the `<system-reminder>` block after the cache breakpoint), which is
+    // rebuilt each turn and never rewrites prior messages. See
+    // openai::conversation::build_system_reminder.
     if let Some(memory) = load_memory_prompt(&state.cwd, provider_id) {
         prompt.push_str("\n\n");
         prompt.push_str(&memory);
@@ -113,6 +120,10 @@ pub(super) fn render_runtime_system_prompt(
 }
 
 const MEMORY_INSTRUCTION_PROMPT: &str = "Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.";
+
+const SOUL_INSTRUCTION_PROMPT: &str = "The following describes your identity: who you are, your values, your voice, and your boundaries. Embody it consistently across the session. A direct user instruction takes precedence - this is context, not a hard rule.";
+
+const USER_INSTRUCTION_PROMPT: &str = "The following are durable facts and preferences about the user you are helping (their environment, tools, and personal preferences). Use them to tailor your work. They are user-provided context, not a hard rule.";
 
 enum MemorySource {
     Project,
@@ -373,7 +384,10 @@ fn load_memory_prompt(cwd: &Path, provider_id: Option<&str>) -> Option<String> {
     load_memory_prompt_for_filename(cwd, "CLAUDE.md")
 }
 
-fn load_memory_prompt_for_filename(cwd: &Path, filename: &str) -> Option<String> {
+/// Reads a context filename from the project dir plus the user-global dirs
+/// (~/.claude, ~/.puffer), returning one "Contents of <path> (<description>):"
+/// block per non-empty file found, nearest (project) first.
+fn load_context_blocks(cwd: &Path, filename: &str) -> Vec<String> {
     let mut sources: Vec<(PathBuf, MemorySource)> = Vec::new();
     sources.push((cwd.join(filename), MemorySource::Project));
     if let Some(home) = env::var_os("HOME") {
@@ -401,13 +415,52 @@ fn load_memory_prompt_for_filename(cwd: &Path, filename: &str) -> Option<String>
             trimmed
         ));
     }
+    blocks
+}
 
+fn load_memory_prompt_for_filename(cwd: &Path, filename: &str) -> Option<String> {
+    let blocks = load_context_blocks(cwd, filename);
     if blocks.is_empty() {
         None
     } else {
         Some(format!(
             "{}\n\n{}",
             MEMORY_INSTRUCTION_PROMPT,
+            blocks.join("\n\n")
+        ))
+    }
+}
+
+/// Loads the agent identity file (soul.md) from the project + user-global dirs.
+/// Universal across providers: identity is not a provider-specific convention
+/// the way AGENTS.md (Codex) vs CLAUDE.md (Anthropic) operating docs are.
+/// Injected per-turn via `build_system_reminder`, not the cached system prompt.
+pub(crate) fn load_soul_prompt(cwd: &Path) -> Option<String> {
+    let blocks = load_context_blocks(cwd, "soul.md");
+    if blocks.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "{}\n\n{}",
+            SOUL_INSTRUCTION_PROMPT,
+            blocks.join("\n\n")
+        ))
+    }
+}
+
+/// Loads the agent-writable user-facts file (`user.md`) from the project +
+/// user-global dirs. The same file the `Remember` tool and the daemon's
+/// `user_memory_*` RPC write to (see `crate::user_memory`). Universal across
+/// providers. Injected per-turn via `build_system_reminder` (not the cached
+/// system prompt) because it is agent-mutable.
+pub(crate) fn load_user_prompt(cwd: &Path) -> Option<String> {
+    let blocks = load_context_blocks(cwd, "user.md");
+    if blocks.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "{}\n\n{}",
+            USER_INSTRUCTION_PROMPT,
             blocks.join("\n\n")
         ))
     }
@@ -460,7 +513,9 @@ fn os_version() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_memory_prompt, render_runtime_system_prompt};
+    use super::{
+        load_memory_prompt, load_soul_prompt, load_user_prompt, render_runtime_system_prompt,
+    };
     use crate::runtime::tests::state;
     use puffer_resources::{
         LoadedItem, LoadedResources, PromptTemplate, SkillSpec, SkillVerificationSpec, SourceInfo,
@@ -756,5 +811,63 @@ mod tests {
         if let Some(text) = &none {
             assert!(!text.contains(tmp.path().to_str().unwrap()));
         }
+    }
+
+    #[test]
+    fn load_soul_prompt_loads_identity_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Absent: nothing.
+        assert!(load_soul_prompt(tmp.path()).is_none());
+        // Present: wrapped in the identity instruction with a Contents block.
+        std::fs::write(tmp.path().join("soul.md"), "I am Puffer.").unwrap();
+        let soul = load_soul_prompt(tmp.path()).unwrap();
+        assert!(
+            soul.contains("your identity"),
+            "missing identity instruction"
+        );
+        assert!(soul.contains("soul.md"));
+        assert!(soul.contains("I am Puffer."));
+    }
+
+    #[test]
+    fn load_user_prompt_loads_user_facts() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(load_user_prompt(tmp.path()).is_none());
+        std::fs::write(tmp.path().join("user.md"), "## home-address\n\n123 Main St").unwrap();
+        let user = load_user_prompt(tmp.path()).unwrap();
+        assert!(user.contains("facts and preferences about the user"));
+        assert!(user.contains("user.md"));
+        assert!(user.contains("123 Main St"));
+    }
+
+    #[test]
+    fn render_system_prompt_keeps_memory_but_excludes_soul_and_user() {
+        // soul.md / user.md must NOT be in the (cache_control'd) system prompt —
+        // they ride in the per-turn build_system_reminder instead. Project
+        // memory (AGENTS.md/CLAUDE.md) stays in the system prompt as before.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("soul.md"), "SOUL_IDENTITY_MARKER").unwrap();
+        std::fs::write(tmp.path().join("user.md"), "## x\n\nUSER_FACTS_MARKER").unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "MEMORY_RULES_MARKER").unwrap();
+        let mut state = state();
+        state.cwd = tmp.path().to_path_buf();
+        state.current_provider = Some("openai".to_string());
+        let resources = LoadedResources::default();
+        let enabled_tools = BTreeSet::new();
+
+        let prompt =
+            render_runtime_system_prompt(&state, &resources, "gpt-5", &enabled_tools).unwrap();
+        assert!(
+            prompt.contains("MEMORY_RULES_MARKER"),
+            "project memory should stay in the system prompt"
+        );
+        assert!(
+            !prompt.contains("SOUL_IDENTITY_MARKER"),
+            "soul.md must NOT be in the cached system prompt"
+        );
+        assert!(
+            !prompt.contains("USER_FACTS_MARKER"),
+            "user.md must NOT be in the cached system prompt"
+        );
     }
 }

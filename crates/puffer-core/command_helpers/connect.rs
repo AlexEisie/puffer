@@ -9,7 +9,9 @@ use super::common::render_svg_qr_data_uri;
 mod catalog;
 mod gcal_browser;
 mod gmail_browser;
+mod lark_cli;
 mod serve_config;
+use lark_cli::*;
 
 const TELEGRAM_QR_APPROVAL_ATTEMPTS: usize = 3;
 const TELEGRAM_QR_APPROVAL_CHECK_SECONDS: u64 = 10;
@@ -25,8 +27,12 @@ pub fn execute_connect_flow(
         "telegram-login" => connect_telegram(state, resources, &target.connection_name)?,
         "slack-app" => connect_slack_app(state, resources, &target.connection_name)?,
         "slack-login" => connect_slack_login(state, resources, &target.connection_name)?,
-        "lark-app" => connect_lark_app(state, resources, &target.connection_name)?,
-        "lark-login" => connect_lark_login(state, resources, &target.connection_name)?,
+        "lark-login" | "lark-bot" => connect_lark_cli(
+            state,
+            resources,
+            &target.connector_slug,
+            &target.connection_name,
+        )?,
         "gmail-browser" => {
             gmail_browser::connect_gmail_browser(state, resources, &target.connection_name)?
         }
@@ -382,97 +388,6 @@ fn connect_slack_login(
     Ok(summary("slack-login", connection, &method, &output))
 }
 
-fn connect_lark_app(
-    state: &mut AppState,
-    resources: &LoadedResources,
-    connection: &str,
-) -> Result<ConnectResult> {
-    let method = ask_choice(
-        state,
-        resources,
-        "Method",
-        "How should Lark authenticate this app connection?",
-        &[
-            ("Manual credentials", "Enter app_id and app_secret."),
-            (
-                "Environment import",
-                "Read Lark credentials from the process environment.",
-            ),
-        ],
-    )?;
-    let output = match method.as_str() {
-        "Manual credentials" => {
-            let brand = ask_brand(state, resources)?;
-            let app_id = ask_input(
-                state,
-                resources,
-                "App ID",
-                "What Lark app_id should Puffer use?",
-            )?;
-            let app_secret = ask_input(
-                state,
-                resources,
-                "Secret",
-                "What Lark app_secret should Puffer use?",
-            )?;
-            call_tool(
-                state,
-                resources,
-                "Lark",
-                json!({
-                    "action": "configure_app",
-                    "connection_slug": connection,
-                    "brand": brand,
-                    "app_id": app_id,
-                    "app_secret": app_secret
-                }),
-            )?
-        }
-        "Environment import" => call_tool(
-            state,
-            resources,
-            "Lark",
-            json!({
-                "action": "import_env",
-                "connection_slug": connection
-            }),
-        )?,
-        _ => bail!("unsupported Lark app method `{method}`"),
-    };
-    Ok(summary("lark-app", connection, &method, &output))
-}
-
-fn connect_lark_login(
-    state: &mut AppState,
-    resources: &LoadedResources,
-    connection: &str,
-) -> Result<ConnectResult> {
-    let brand = ask_brand(state, resources)?;
-    let token = ask_input(
-        state,
-        resources,
-        "Token",
-        "What Lark user_access_token should Puffer use?",
-    )?;
-    let output = call_tool(
-        state,
-        resources,
-        "Lark",
-        json!({
-            "action": "login_token",
-            "connection_slug": connection,
-            "brand": brand,
-            "user_access_token": token
-        }),
-    )?;
-    Ok(summary(
-        "lark-login",
-        connection,
-        "User access token",
-        &output,
-    ))
-}
-
 fn connect_email(
     state: &mut AppState,
     resources: &LoadedResources,
@@ -592,20 +507,6 @@ fn connect_generic(
         "No-auth connection",
         &output,
     ))
-}
-
-fn ask_brand(state: &mut AppState, resources: &LoadedResources) -> Result<String> {
-    let brand = ask_choice(
-        state,
-        resources,
-        "Brand",
-        "Which Lark endpoint family should Puffer use?",
-        &[
-            ("lark", "Use the international Lark endpoints."),
-            ("feishu", "Use the China Feishu endpoints."),
-        ],
-    )?;
-    Ok(brand)
 }
 
 fn ask_port(
@@ -784,170 +685,5 @@ fn status(output: &Value) -> Option<&str> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::runtime::{
-        with_user_question_prompt_handler, UserQuestionPromptRequest, UserQuestionPromptResponse,
-    };
-    use puffer_config::PufferConfig;
-    use puffer_session_store::SessionMetadata;
-    use serde_json::Map;
-    use std::sync::{Arc, Mutex};
-
-    fn temp_state() -> AppState {
-        let tempdir = tempfile::tempdir().unwrap();
-        let cwd = tempdir.keep();
-        let session = SessionMetadata {
-            id: uuid::Uuid::nil(),
-            display_name: None,
-            generated_title: None,
-            cwd: cwd.clone(),
-            created_at_ms: 0,
-            updated_at_ms: 0,
-            parent_session_id: None,
-            slug: None,
-            tags: Vec::new(),
-            note: None,
-        };
-        AppState::new(PufferConfig::default(), cwd, session)
-    }
-
-    fn connector_config(state: &AppState) -> String {
-        std::fs::read_to_string(state.cwd.join(".puffer/connectors.toml")).expect("config")
-    }
-
-    fn answer_connect_question(request: &UserQuestionPromptRequest) -> UserQuestionPromptResponse {
-        let question = request.questions[0]["question"]
-            .as_str()
-            .expect("question text")
-            .to_string();
-        let answer = match question.as_str() {
-            "What Telegram bot token should Puffer use?" => "telegram-token",
-            other => panic!("unexpected question: {other}"),
-        };
-        UserQuestionPromptResponse {
-            answers: Map::from_iter([(question, json!(answer))]),
-            annotations: Map::new(),
-        }
-    }
-
-    #[test]
-    fn parse_target_uses_two_args_without_questions() {
-        let mut state = temp_state();
-        let resources = LoadedResources::default();
-
-        let target = parse_or_ask_target(&mut state, &resources, "telegram-login telegram-user")
-            .expect("target");
-
-        assert_eq!(target.connector_slug, "telegram-login");
-        assert_eq!(target.connection_name, "telegram-user");
-    }
-
-    #[test]
-    fn telegram_qr_approval_question_embeds_qr_markdown_in_question_body() {
-        let question = telegram_qr_approval_question("tg://login?token=abc");
-
-        assert!(question
-            .starts_with("Approve this Telegram QR login URL from a logged-in Telegram app."));
-        assert!(question.contains("![Telegram QR code](data:image/svg+xml;base64,"));
-        assert!(question.contains("tg://login?token=abc"));
-    }
-
-    #[test]
-    fn telegram_qr_wait_input_uses_short_retry_timeout() {
-        let input = telegram_qr_wait_input("telegram-user");
-
-        assert_eq!(input["action"], "login_qr_wait");
-        assert_eq!(input["connection_slug"], "telegram-user");
-        assert_eq!(input["timeout_seconds"], TELEGRAM_QR_APPROVAL_CHECK_SECONDS);
-    }
-
-    #[test]
-    fn parse_target_resolves_unique_connector_search_term() {
-        let mut state = temp_state();
-        let resources = LoadedResources::default();
-
-        let target =
-            parse_or_ask_target(&mut state, &resources, "matrix matrix-main").expect("target");
-
-        assert_eq!(target.connector_slug, "matrix-bot");
-        assert_eq!(target.connection_name, "matrix-main");
-    }
-
-    #[test]
-    fn parse_target_resolves_unique_action_search_term() {
-        let mut state = temp_state();
-        let resources = LoadedResources::default();
-
-        let target =
-            parse_or_ask_target(&mut state, &resources, "vote telegram-user").expect("target");
-
-        assert_eq!(target.connector_slug, "telegram-login");
-        assert_eq!(target.connection_name, "telegram-user");
-    }
-
-    #[test]
-    fn parse_target_uses_default_connection_name_for_connector_only() {
-        let mut state = temp_state();
-        let resources = LoadedResources::default();
-
-        let target = parse_or_ask_target(&mut state, &resources, "email").expect("target");
-
-        assert_eq!(target.connector_slug, "email");
-        assert_eq!(target.connection_name, "email");
-    }
-
-    #[test]
-    fn parse_target_asks_for_connector_and_uses_default_connection_name() {
-        let mut state = temp_state();
-        let resources = LoadedResources::default();
-        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
-        let request_log = Arc::clone(&requests);
-
-        let target = with_user_question_prompt_handler(
-            move |request| {
-                let question = request.questions[0]["question"]
-                    .as_str()
-                    .expect("question text")
-                    .to_string();
-                request_log.lock().unwrap().push(request.questions.clone());
-                UserQuestionPromptResponse {
-                    answers: Map::from_iter([(question, json!("telegram-login"))]),
-                    annotations: Map::new(),
-                }
-            },
-            || parse_or_ask_target(&mut state, &resources, ""),
-        )
-        .expect("target");
-
-        assert_eq!(target.connector_slug, "telegram-login");
-        assert_eq!(target.connection_name, "telegram-user");
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0][0]["type"], "choice");
-        assert_eq!(requests[0][0]["searchable"], true);
-        assert!(requests[0][0]["options"]
-            .as_array()
-            .is_some_and(|options| options
-                .iter()
-                .any(|option| option["label"] == "telegram-login")));
-    }
-
-    #[test]
-    fn execute_connect_flow_dispatches_telegram_bot_setup() {
-        let mut state = temp_state();
-        let resources = LoadedResources::default();
-
-        let turn = with_user_question_prompt_handler(
-            |request| answer_connect_question(&request),
-            || execute_connect_flow(&mut state, &resources, "telegram-bot telegram-bot"),
-        )
-        .expect("connect turn");
-
-        assert!(turn.assistant_text.contains("connector: telegram-bot"));
-        assert!(turn.assistant_text.contains("run `puffer serve`"));
-        let raw = connector_config(&state);
-        assert!(raw.contains("[connectors.telegram]"));
-        assert!(raw.contains("token = \"telegram-token\""));
-    }
-}
+#[path = "connect_tests.rs"]
+mod tests;

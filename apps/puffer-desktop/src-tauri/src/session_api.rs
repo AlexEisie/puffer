@@ -1,6 +1,6 @@
 use crate::dto::{
-    DiffSnapshotDto, FolderGroupDto, PermissionDialogDto, SessionDiffsDto, SessionListItemDto,
-    SessionTimelineDto, TimelineItemDto,
+    ChatAttachmentDto, DiffSnapshotDto, FolderGroupDto, PermissionDialogDto, SessionDiffsDto,
+    SessionListItemDto, SessionTimelineDto, TimelineItemDto,
 };
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
@@ -48,10 +48,11 @@ pub(crate) fn list_grouped_sessions() -> Result<Vec<FolderGroupDto>> {
 
 /// Loads one session timeline with conversation, tool, and snapshot items.
 pub(crate) fn load_session_timeline(session_id: &str) -> Result<SessionTimelineDto> {
-    let record = load_session_record(session_id)?;
+    let store = session_store()?;
+    let record = load_session_record_from_store(&store, session_id)?;
     Ok(SessionTimelineDto {
         session: metadata_to_dto(&record.metadata, record.events.len()),
-        items: timeline_items(&record),
+        items: timeline_items(&store, &record),
     })
 }
 
@@ -105,8 +106,13 @@ fn find_repo_root(path: &Path) -> Option<PathBuf> {
 }
 
 fn load_session_record(session_id: &str) -> Result<SessionRecord> {
+    let store = session_store()?;
+    load_session_record_from_store(&store, session_id)
+}
+
+fn load_session_record_from_store(store: &SessionStore, session_id: &str) -> Result<SessionRecord> {
     let id = Uuid::parse_str(session_id).context("invalid session id")?;
-    session_store()?.load_session(id)
+    store.load_session(id)
 }
 
 fn normalize_session_path(path: &Path) -> String {
@@ -199,7 +205,7 @@ fn snapshot_to_dto(snapshot: &GitDiffSnapshot) -> DiffSnapshotDto {
     }
 }
 
-fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
+fn timeline_items(store: &SessionStore, record: &SessionRecord) -> Vec<TimelineItemDto> {
     let mut items = Vec::new();
     let mut pending_assistant = None;
     for (index, event) in record.events.iter().enumerate() {
@@ -213,18 +219,18 @@ fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
                 });
             }
             TranscriptEvent::SystemMessage { text, .. } if parse_tool_message(text).is_some() => {
-                if let Some(item) = timeline_item(index, event) {
+                if let Some(item) = timeline_item(store, record.metadata.id, index, event) {
                     items.push(item);
                 }
             }
             TranscriptEvent::ToolInvocation { .. } => {
-                if let Some(item) = timeline_item(index, event) {
+                if let Some(item) = timeline_item(store, record.metadata.id, index, event) {
                     items.push(item);
                 }
             }
             _ => {
                 flush_pending_assistant(&mut items, &mut pending_assistant);
-                if let Some(item) = timeline_item(index, event) {
+                if let Some(item) = timeline_item(store, record.metadata.id, index, event) {
                     items.push(item);
                 }
             }
@@ -243,12 +249,22 @@ fn flush_pending_assistant(
     }
 }
 
-fn timeline_item(index: usize, event: &TranscriptEvent) -> Option<TimelineItemDto> {
+fn timeline_item(
+    store: &SessionStore,
+    session_id: Uuid,
+    index: usize,
+    event: &TranscriptEvent,
+) -> Option<TimelineItemDto> {
     let id = format!("event-{index}");
     match event {
-        TranscriptEvent::UserMessage { text, actor } => Some(TimelineItemDto::UserMessage {
+        TranscriptEvent::UserMessage {
+            text,
+            attachments,
+            actor,
+        } => Some(TimelineItemDto::UserMessage {
             id,
             text: text.clone(),
+            attachments: attachment_dtos(store, session_id, attachments),
             actor: actor.clone(),
         }),
         TranscriptEvent::AssistantMessage { text, actor } => {
@@ -285,6 +301,7 @@ fn timeline_item(index: usize, event: &TranscriptEvent) -> Option<TimelineItemDt
             input,
             output,
             success,
+            metadata: _,
             actor,
             subject,
         } => Some(TimelineItemDto::ToolCall {
@@ -343,6 +360,17 @@ fn timeline_item(index: usize, event: &TranscriptEvent) -> Option<TimelineItemDt
         }),
         TranscriptEvent::TranscriptRewritten { .. } => None,
     }
+}
+
+fn attachment_dtos(
+    store: &SessionStore,
+    session_id: Uuid,
+    attachments: &[puffer_session_store::StoredAttachment],
+) -> Vec<ChatAttachmentDto> {
+    attachments
+        .iter()
+        .map(|attachment| ChatAttachmentDto::from_stored(store, session_id, attachment))
+        .collect()
 }
 
 struct ParsedToolMessage {

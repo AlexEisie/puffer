@@ -33,6 +33,7 @@ pub(crate) fn execute_ultrareview(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: submitted.to_string(),
+            attachments: Vec::new(),
             actor: Some(state.user_actor()),
         },
     )?;
@@ -83,7 +84,9 @@ pub(crate) fn execute_ultrareview(
         prompt: submitted.to_string(),
         receiver: event_rx,
         transcript_persisted_len: state.transcript.len(),
+        stream_attempt_transcript_len: state.transcript.len(),
         rendered_tool_invocations: 0,
+        stream_attempt_rendered_tool_invocations: 0,
         pending_tool_calls: Vec::new(),
         started_at: std::time::Instant::now(),
         thinking_active: false,

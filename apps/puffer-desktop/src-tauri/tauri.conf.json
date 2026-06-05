@@ -20,7 +20,8 @@
         "resizable": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "acceptFirstMouse": true
+        "acceptFirstMouse": true,
+        "dragDropEnabled": false
       }
     ],
     "security": {
@@ -30,6 +31,7 @@
   "bundle": {
     "active": true,
     "targets": ["deb", "appimage"],
-    "icon": ["icons/icon.png", "icons/icon.ico"]
+    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "resources": ["../../../resources/browser_extensions"]
   }
 }

@@ -1,11 +1,15 @@
+mod attachments;
 mod events;
 mod metadata;
 mod store;
 
+pub use attachments::{AttachmentPreviewBytes, AttachmentState, StageAttachmentInput};
 pub use events::ClaudeReadSnapshotEvent;
 pub use events::GitDiffSnapshot;
 pub use events::MessageActor;
 pub use events::MessageActorKind;
+pub use events::StoredAttachment;
+pub use events::StoredAttachmentKind;
 pub use events::TranscriptEvent;
 pub use events::TranscriptRewrite;
 pub use metadata::{SessionMetadata, SessionRecord, SessionSummary};

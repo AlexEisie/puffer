@@ -194,6 +194,7 @@ pub(crate) fn run_benchmark_command(
         session_id,
         TranscriptEvent::UserMessage {
             text: prompt.clone(),
+            attachments: Vec::new(),
             actor: Some(state.user_actor()),
         },
     );

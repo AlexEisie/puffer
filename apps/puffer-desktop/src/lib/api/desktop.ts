@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentActivityStatus,
+  AttachmentPreviewResult,
+  AttachmentState,
   AuthProviderStatus,
   AskUserQuestionItem,
   BrowserRenderer,
@@ -17,6 +19,7 @@ import type {
   RepoActionResult,
   RepoStatus,
   ChromeSecretsImportResult,
+  SaveBrowserSettingsInput,
   SaveSecretInput,
   SaveProxySettingsInput,
   SessionDetail,
@@ -24,6 +27,7 @@ import type {
   SessionListItem,
   SettingsSnapshot,
   MessageActor,
+  MessageAttachment,
   OpenAIRealtimeClientSecret,
   OpenAIRealtimeClientSecretOptions,
   TimelineItem,
@@ -138,12 +142,23 @@ type BackendActorFields = {
   subject?: MessageActor | null;
 };
 
+type BackendChatAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  extension: string;
+  kind: "image" | "file";
+  state?: AttachmentState;
+};
+
 type BackendTimelineItem =
   | ({
       kind: "user_message";
       id: string;
       text: string;
       createdAtMs?: number | null;
+      attachments?: BackendChatAttachment[];
     } & BackendActorFields)
   | ({
       kind: "assistant_message";
@@ -251,6 +266,7 @@ type BackendAuthProviderStatus = AuthProviderStatus;
 type BackendProviderSummary = ProviderSummary;
 type BackendNetworkProxySettings = SettingsSnapshot["networkProxy"];
 type BackendSecretsSettings = SettingsSnapshot["secrets"];
+type BackendBrowserSettings = SettingsSnapshot["browser"];
 
 type BackendSettingsSnapshot = {
   workspaceRoot: string;
@@ -263,6 +279,7 @@ type BackendSettingsSnapshot = {
   sessions: BackendSettingsSessionSummary;
   auth: BackendAuthProviderStatus[];
   providers: BackendProviderSummary[];
+  browser: BackendBrowserSettings;
   networkProxy: BackendNetworkProxySettings;
   secrets: BackendSecretsSettings;
 };
@@ -270,6 +287,23 @@ type BackendSettingsSnapshot = {
 type BackendChromeSecretsImportResult = ChromeSecretsImportResult;
 
 type BackendRemoteOperation = RemoteOperation;
+
+type StageChatAttachmentHook = (
+  sessionId: string,
+  attachment: MessageAttachment
+) => Promise<MessageAttachment> | MessageAttachment;
+
+type ReadChatAttachmentPreviewHook = (
+  sessionId: string,
+  attachmentId: string
+) => Promise<AttachmentPreviewResult> | AttachmentPreviewResult;
+
+declare global {
+  interface Window {
+    __PUFFER_TEST_STAGE_CHAT_ATTACHMENT__?: StageChatAttachmentHook;
+    __PUFFER_TEST_READ_CHAT_ATTACHMENT_PREVIEW__?: ReadChatAttachmentPreviewHook;
+  }
+}
 
 /** Exposed to Svelte components so they can branch on whether the daemon
  *  is reachable. Tauri can spawn it automatically; browser mode needs a
@@ -330,6 +364,18 @@ function normalizeDiff(value: BackendDiff): DiffSnapshot {
     unstagedDiffstat: value.unstagedDiffstat,
     stagedDiffstat: value.stagedDiffstat,
     patch: value.patch || value.patchExcerpt
+  };
+}
+
+function normalizeMessageAttachment(value: BackendChatAttachment): MessageAttachment {
+  return {
+    id: value.id,
+    name: value.name,
+    mimeType: value.mimeType,
+    size: value.size,
+    extension: value.extension,
+    kind: value.kind,
+    state: value.state
   };
 }
 
@@ -446,7 +492,8 @@ function normalizeActivityStatus(value: string | null | undefined): AgentActivit
 
 function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
   switch (value.kind) {
-    case "user_message":
+    case "user_message": {
+      const attachments = (value.attachments ?? []).map(normalizeMessageAttachment);
       return {
         id: value.id,
         kind: "user",
@@ -455,8 +502,10 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         summary: preview(value.text),
         body: value.text,
         meta: [],
+        ...(attachments.length > 0 ? { attachments } : {}),
         actor: value.actor ?? null
       };
+    }
     case "assistant_message":
       return {
         id: value.id,
@@ -838,6 +887,13 @@ export async function saveProxySettings(
 ): Promise<SettingsSnapshot> {
   const client = await ensureLocalDaemonClient();
   return client.request<BackendSettingsSnapshot>("save_proxy_settings", input);
+}
+
+export async function saveBrowserSettings(
+  input: SaveBrowserSettingsInput
+): Promise<SettingsSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<BackendSettingsSnapshot>("save_browser_settings", input);
 }
 
 export async function saveSecret(input: SaveSecretInput): Promise<SettingsSnapshot> {
@@ -1375,7 +1431,77 @@ export type AgentTurnOptions = {
   fastMode?: boolean;
   permissionMode?: AgentPermissionMode;
   mode?: AgentTurnMode;
+  attachmentIds?: string[];
 };
+export type AgentTurnSubmitOptions = AgentTurnOptions & {
+  displayAttachments?: MessageAttachment[];
+};
+export type StaleTurnRecoveryResult =
+  | { recovery: "retry_started"; turnId: string }
+  | { recovery: "already_retried" }
+  | { recovery: "not_recoverable"; reason?: string | null; turnId?: string | null };
+
+export async function stageChatAttachment(
+  sessionId: string,
+  attachment: MessageAttachment
+): Promise<MessageAttachment> {
+  const hook = devStageChatAttachmentHook();
+  if (hook) return hook(sessionId, attachment);
+
+  if (!canInvokeTauri()) {
+    throw new Error("Attachment staging requires the Tauri desktop shell.");
+  }
+  if (!attachment.file) {
+    throw new Error("Attachment staging requires a local File.");
+  }
+
+  const bytes = Array.from(new Uint8Array(await attachment.file.arrayBuffer()));
+  const response = await invoke<BackendChatAttachment>("stage_chat_attachment", {
+    sessionId,
+    name: attachment.name,
+    mimeType: attachment.mimeType,
+    extension: attachment.extension,
+    kind: attachment.kind,
+    bytes
+  });
+  return normalizeMessageAttachment(response);
+}
+
+export async function readChatAttachmentPreview(
+  sessionId: string,
+  attachmentId: string
+): Promise<AttachmentPreviewResult> {
+  if (canInvokeTauri()) {
+    return invoke<AttachmentPreviewResult>("read_chat_attachment_preview", {
+      sessionId,
+      attachmentId
+    });
+  }
+
+  if (devAttachmentHooksAllowed()) {
+    const hook = typeof window === "undefined" ? undefined : window.__PUFFER_TEST_READ_CHAT_ATTACHMENT_PREVIEW__;
+    if (hook) return hook(sessionId, attachmentId);
+    if (canReachDaemon()) {
+      const client = await ensureLocalDaemonClient();
+      return client.request<AttachmentPreviewResult>("read_chat_attachment_preview", {
+        sessionId,
+        attachmentId
+      });
+    }
+  }
+
+  throw new Error("Attachment preview requires the Tauri desktop shell.");
+}
+
+function devStageChatAttachmentHook(): StageChatAttachmentHook | undefined {
+  if (!devAttachmentHooksAllowed() || typeof window === "undefined") return undefined;
+  return window.__PUFFER_TEST_STAGE_CHAT_ATTACHMENT__;
+}
+
+function devAttachmentHooksAllowed(): boolean {
+  const viteEnv = (import.meta as unknown as { env?: Record<string, boolean | string | undefined> }).env;
+  return viteEnv?.DEV === true || viteEnv?.MODE === "development" || viteEnv?.MODE === "test";
+}
 
 /** Starts a new agent turn on `sessionId` with `message`. Returns the turn id
  *  so the caller can correlate streamed events and reply to permission
@@ -1399,6 +1525,21 @@ export async function runAgentTurn(
     // Fallback: the in-process Tauri command (same behavior, just no daemon).
     return invoke<string>("run_agent_turn", { sessionId, message, ...options });
   }
+}
+
+/** Retries one stale unanswered turn after the daemon validates that no live
+ *  turn exists and persists a one-shot recovery marker. */
+export async function recoverStaleAgentTurn(
+  sessionId: string,
+  retryAfterMs: number,
+  options: AgentTurnOptions = {}
+): Promise<StaleTurnRecoveryResult> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<StaleTurnRecoveryResult>("recover_stale_turn", {
+    sessionId,
+    retryAfterMs,
+    ...options
+  });
 }
 
 /** Runs a slash command (e.g. `/connect <slug> <conn>`) through the
@@ -1977,6 +2118,11 @@ export async function browserCefNativeHistory(
 /** Close a native CEF browser. */
 export async function browserCefNativeClose(sessionId: string): Promise<void> {
   await invoke("browser_cef_native_close", { sessionId });
+}
+
+/** Hide a native CEF browser without closing its renderer process. */
+export async function browserCefNativeHide(sessionId: string): Promise<void> {
+  await invoke("browser_cef_native_hide", { sessionId });
 }
 
 /** Open or reuse the Chrome-backed browser session for a Puffer session. */

@@ -53,7 +53,9 @@ use puffer_provider_registry::{
     AuthStore, ModelDescriptor, ProviderDescriptor, ProviderRegistry, StoredCredential,
 };
 use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
-use puffer_session_store::{MessageActor, SessionMetadata, SessionStore, TranscriptEvent};
+use puffer_session_store::{
+    MessageActor, SessionMetadata, SessionStore, StoredAttachment, TranscriptEvent,
+};
 use puffer_transport_anthropic::{
     parse_authorization_input as parse_anthropic_authorization_input, ANTHROPIC_API_BASE_URL,
     ANTHROPIC_MANUAL_REDIRECT_URL,
@@ -79,7 +81,7 @@ use crate::auth_credentials::{
 use crate::auth_provider::{
     oauth_family_for_provider, oauth_login_bundle_for_provider, OauthFamily,
 };
-use crate::daemon_browser::BrowserRegistry;
+use crate::daemon_browser::{BrowserLaunchSettings, BrowserRegistry};
 use crate::daemon_fs_watch::FsWatchRegistry;
 use crate::daemon_lambda_skills::{
     handle_list_lambda_skill_libraries, handle_remove_lambda_skill_library,
@@ -87,6 +89,10 @@ use crate::daemon_lambda_skills::{
     handle_set_lambda_skill_enabled,
 };
 use crate::daemon_pty::PtyRegistry;
+use crate::daemon_turn_recovery::{
+    recovery_actor, stale_turn_recovery_decision, StaleTurnRecoveryDecision,
+    DEFAULT_STALE_TURN_RETRY_AFTER_MS,
+};
 use crate::daemon_turn_routing::persist_explicit_turn_routing;
 use crate::daemon_ui_state::{
     load_file_tabs_state, load_pin_state, load_session_routing_state, set_file_tabs_state,
@@ -308,6 +314,31 @@ impl DaemonState {
     pub(crate) fn config_paths(&self) -> &ConfigPaths {
         &self.paths
     }
+
+    /// Returns a clone of the currently loaded daemon config.
+    pub(crate) fn config_snapshot(&self) -> PufferConfig {
+        self.config.lock().unwrap().clone()
+    }
+
+    /// Replaces the currently loaded daemon config.
+    pub(crate) fn replace_config(&self, config: PufferConfig) {
+        *self.config.lock().unwrap() = config;
+    }
+
+    /// Builds the current desktop settings snapshot as a JSON value.
+    pub(crate) fn settings_snapshot_value(&self) -> Result<Value> {
+        let inputs = self.build_runtime_inputs()?;
+        let config = self.config_snapshot();
+        let snapshot: SettingsSnapshotDto = desktop_api::load_settings_snapshot(
+            &self.paths,
+            &config,
+            &inputs.resources,
+            &inputs.providers,
+            &inputs.auth_store,
+            &inputs.session_store,
+        )?;
+        Ok(serde_json::to_value(snapshot)?)
+    }
 }
 
 #[derive(Clone)]
@@ -316,6 +347,7 @@ struct TurnHandle {
     session_uuid: Option<Uuid>,
     channel: String,
     message: String,
+    attachments: Vec<StoredAttachment>,
     cancel: CancelToken,
     cancel_reported: Arc<AtomicBool>,
     user_prompt_persisted: Arc<AtomicBool>,
@@ -328,7 +360,9 @@ struct TurnHandle {
 #[derive(Default)]
 struct TurnProgress {
     assistant_text: String,
+    assistant_text_retry_checkpoint: usize,
     tool_invocations: Vec<ToolInvocation>,
+    tool_invocations_retry_checkpoint: usize,
     pending_tool_calls: Vec<ToolCallRequest>,
     persisted_on_cancel: bool,
 }
@@ -343,6 +377,7 @@ impl DaemonState {
         yolo: bool,
     ) -> Result<Self> {
         let config = load_config(&paths)?;
+        let browser_launch_settings = BrowserLaunchSettings::from_config(&paths, &config)?;
         let (events, _rx) = broadcast::channel::<ServerEnvelope>(256);
         let browser_profile_root = paths.user_config_dir.join("browser-profiles");
         let ptys = Arc::new(PtyRegistry::new());
@@ -357,7 +392,11 @@ impl DaemonState {
             next_request_id: Arc::new(AtomicU64::new(0)),
             ptys,
             fs_watches: Arc::new(FsWatchRegistry::new()),
-            browsers: Arc::new(BrowserRegistry::new(browser_profile_root, !no_browser)),
+            browsers: Arc::new(BrowserRegistry::new(
+                browser_profile_root,
+                !no_browser,
+                browser_launch_settings,
+            )),
             local_models: crate::daemon_local_model::LocalModelInstaller::new(),
             disable_auto_title,
             yolo,
@@ -940,6 +979,11 @@ async fn dispatch_request(
             respond!(detached!(|s, p| handle_import_external_credential(&s, &p)))
         }
         "logout_provider" => respond!(detached!(|s, p| handle_logout_provider(&s, &p))),
+        "save_browser_settings" => {
+            respond!(detached!(|s, p| {
+                crate::daemon_browser_settings::handle_save_browser_settings(&s, &p)
+            }))
+        }
         "list_mcp_servers" => respond!(detached!(|s| handle_list_mcp_servers(&s))),
         "add_mcp_server" => respond!(detached!(|s, p| handle_add_mcp_server(&s, &p))),
         "list_lambda_skill_libraries" => {
@@ -975,6 +1019,10 @@ async fn dispatch_request(
         "list_permissions" => respond!(handle_list_permissions(&state)),
         "save_permissions" => respond!(handle_save_permissions(&state, &params)),
         "update_config" => respond!(detached!(|s, p| handle_update_config(&s, &p))),
+        "user_memory_list" => respond!(handle_user_memory_list()),
+        "user_memory_get" => respond!(handle_user_memory_get(&params)),
+        "user_memory_set" => respond!(handle_user_memory_set(&params)),
+        "user_memory_delete" => respond!(handle_user_memory_delete(&params)),
         "create_pull_request" => respond!(handle_create_pull_request(&state, &params)),
         "merge_pull_request" => respond!(handle_merge_pull_request(&state, &params)),
         "create_session" => {
@@ -1101,6 +1149,31 @@ async fn dispatch_request(
                         result: None,
                         error: Some(RpcError {
                             code: "turn-start-error".to_string(),
+                            message: format!("{e:#}"),
+                        }),
+                    },
+                };
+                let _ = send_envelope(&tx_clone, &env).await;
+            });
+        }
+
+        "recover_stale_turn" => {
+            let tx_clone = tx.clone();
+            let state_clone = state.clone();
+            let id_clone = id.clone();
+            tokio::spawn(async move {
+                let result = recover_stale_turn(state_clone, params).await;
+                let env = match result {
+                    Ok(v) => ServerEnvelope::Response {
+                        id: id_clone,
+                        result: Some(v),
+                        error: None,
+                    },
+                    Err(e) => ServerEnvelope::Response {
+                        id: id_clone,
+                        result: None,
+                        error: Some(RpcError {
+                            code: "stale-turn-recovery-error".to_string(),
                             message: format!("{e:#}"),
                         }),
                     },
@@ -1514,17 +1587,7 @@ fn handle_refresh_repo_status(state: &DaemonState, params: &Value) -> Result<Val
 }
 
 fn handle_load_settings_snapshot(state: &DaemonState) -> Result<Value> {
-    let inputs = state.build_runtime_inputs()?;
-    let config = state.config.lock().unwrap().clone();
-    let snapshot: SettingsSnapshotDto = desktop_api::load_settings_snapshot(
-        &state.paths,
-        &config,
-        &inputs.resources,
-        &inputs.providers,
-        &inputs.auth_store,
-        &inputs.session_store,
-    )?;
-    Ok(serde_json::to_value(snapshot)?)
+    state.settings_snapshot_value()
 }
 
 fn handle_save_secret(state: &DaemonState, params: &Value) -> Result<Value> {
@@ -2646,6 +2709,52 @@ fn handle_default_workspace(state: &DaemonState) -> Result<Value> {
     }))
 }
 
+// ---- global user memory (~/.puffer/user.md) CRUD over the daemon RPC ----
+// Mirrors the agent-side `Remember` tool; lets the desktop UI list/get/set/
+// delete the same keyed user facts the agent reads from context.
+fn user_memory_required_key(params: &Value) -> Result<String> {
+    params
+        .get("key")
+        .and_then(Value::as_str)
+        .filter(|key| !key.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("key is required"))
+}
+
+fn handle_user_memory_list() -> Result<Value> {
+    let memory = puffer_core::user_memory::UserMemory::global()?;
+    Ok(json!({
+        "facts": memory.list()?,
+        "path": memory.path().display().to_string(),
+    }))
+}
+
+fn handle_user_memory_get(params: &Value) -> Result<Value> {
+    let key = user_memory_required_key(params)?;
+    let memory = puffer_core::user_memory::UserMemory::global()?;
+    Ok(json!({
+        "key": puffer_core::user_memory::normalize_key(&key),
+        "value": memory.get(&key)?,
+    }))
+}
+
+fn handle_user_memory_set(params: &Value) -> Result<Value> {
+    let key = user_memory_required_key(params)?;
+    let value = params
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("value is required"))?;
+    let memory = puffer_core::user_memory::UserMemory::global()?;
+    let block = memory.set(&key, value)?;
+    Ok(json!({ "success": true, "key": block.key }))
+}
+
+fn handle_user_memory_delete(params: &Value) -> Result<Value> {
+    let key = user_memory_required_key(params)?;
+    let memory = puffer_core::user_memory::UserMemory::global()?;
+    Ok(json!({ "success": true, "removed": memory.delete(&key)? }))
+}
+
 fn local_model_id_param(params: &Value) -> &str {
     params
         .get("modelId")
@@ -3112,6 +3221,7 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
                 &handle.channel,
                 turn_id,
                 &handle.message,
+                &handle.attachments,
                 &handle.cancel_reported,
                 &handle.user_prompt_persisted,
                 &handle.progress,
@@ -3140,6 +3250,7 @@ fn report_cancelled_turn(
     channel: &str,
     turn_id: &str,
     message: &str,
+    attachments: &[StoredAttachment],
     cancel_reported: &AtomicBool,
     user_prompt_persisted: &AtomicBool,
     progress: &Arc<Mutex<TurnProgress>>,
@@ -3153,6 +3264,7 @@ fn report_cancelled_turn(
             session_uuid,
             TranscriptEvent::UserMessage {
                 text: message.to_string(),
+                attachments: attachments.to_vec(),
                 actor: None,
             },
         )?;
@@ -3289,6 +3401,130 @@ fn parse_agent_turn_mode(params: &Value) -> Result<AgentTurnMode> {
     }
 }
 
+fn parse_attachment_ids(params: &Value) -> Result<Vec<String>> {
+    let Some(value) = params
+        .get("attachmentIds")
+        .or_else(|| params.get("attachment_ids"))
+    else {
+        return Ok(Vec::new());
+    };
+    value
+        .as_array()
+        .context("attachmentIds must be an array")?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_string)
+                .context("attachmentIds must contain strings")
+        })
+        .collect()
+}
+
+fn unix_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+async fn recover_stale_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(|v| v.as_str())
+        .context("missing sessionId")?
+        .to_string();
+    let session_uuid = Uuid::parse_str(&session_id).context("invalid sessionId")?;
+    let retry_after_ms = params
+        .get("retryAfterMs")
+        .or_else(|| params.get("retry_after_ms"))
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_STALE_TURN_RETRY_AFTER_MS);
+
+    {
+        let turns = state.turns.lock().unwrap();
+        if let Some((existing_turn_id, _)) = turns
+            .iter()
+            .find(|(_, handle)| handle.session_uuid == Some(session_uuid))
+        {
+            return Ok(json!({
+                "recovery": "not_recoverable",
+                "reason": "turn_in_flight",
+                "turnId": existing_turn_id,
+            }));
+        }
+    }
+
+    let session_store = SessionStore::from_paths(&state.paths)?;
+    let record = session_store.load_session(session_uuid)?;
+    match stale_turn_recovery_decision(&record, unix_timestamp_ms(), retry_after_ms) {
+        StaleTurnRecoveryDecision::Retry {
+            message,
+            attachment_ids,
+            marker,
+        } => {
+            session_store.append_event(
+                session_uuid,
+                TranscriptEvent::SystemMessage {
+                    text: marker,
+                    actor: Some(recovery_actor()),
+                },
+            )?;
+            state.publish_event(ServerEnvelope::Event {
+                event: "workspace:sessions:changed".to_string(),
+                payload: json!({
+                    "reason": "stale_turn_retry_marker",
+                    "sessionId": session_id.clone(),
+                }),
+            });
+
+            let mut retry_params = params.clone();
+            if let Some(object) = retry_params.as_object_mut() {
+                object.insert("sessionId".to_string(), json!(session_id.clone()));
+                object.insert("message".to_string(), json!(message));
+                if !attachment_ids.is_empty() {
+                    object.insert("attachmentIds".to_string(), json!(attachment_ids));
+                }
+            } else {
+                anyhow::bail!("recover_stale_turn params must be an object");
+            }
+            let result = start_turn(state, retry_params).await?;
+            let turn_id = result
+                .get("turnId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            Ok(json!({
+                "recovery": "retry_started",
+                "turnId": turn_id,
+            }))
+        }
+        StaleTurnRecoveryDecision::AlreadyRetried { marker } => {
+            session_store.append_event(
+                session_uuid,
+                TranscriptEvent::SystemMessage {
+                    text: marker,
+                    actor: Some(recovery_actor()),
+                },
+            )?;
+            state.publish_event(ServerEnvelope::Event {
+                event: "workspace:sessions:changed".to_string(),
+                payload: json!({
+                    "reason": "stale_turn_retry_exhausted",
+                    "sessionId": session_id.clone(),
+                }),
+            });
+            Ok(json!({
+                "recovery": "already_retried",
+            }))
+        }
+        StaleTurnRecoveryDecision::NotRecoverable => Ok(json!({
+            "recovery": "not_recoverable",
+            "reason": "session_not_stale",
+        })),
+    }
+}
+
 async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let session_id = params
         .get("sessionId")
@@ -3303,6 +3539,9 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         .to_string();
     let turn_options = TurnRequestOptions::from_params(&params);
     let turn_mode = parse_agent_turn_mode(&params)?;
+    let attachment_ids = parse_attachment_ids(&params)?;
+    let turn_id = Uuid::new_v4().to_string();
+    let channel = format!("session:{session_id}:event");
 
     // Parse cheap, non-tokio-touching things synchronously so we can fail
     // fast with a clean error. Anything that builds a runtime (i.e. the
@@ -3310,9 +3549,30 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     // we're inside an async task, and dropping that inner runtime from an
     // async context panics. All such setup moved into the worker thread.
     let session_uuid = Uuid::parse_str(&session_id).context("invalid sessionId")?;
+    let staged_attachments = if attachment_ids.is_empty() {
+        Vec::new()
+    } else {
+        match SessionStore::from_paths(&state.paths)?
+            .load_staged_attachments(session_uuid, &attachment_ids)
+            .context("attachment staging")
+        {
+            Ok(attachments) => attachments,
+            Err(error) => {
+                publish_turn_error_event(
+                    &state,
+                    &channel,
+                    &session_id,
+                    &turn_id,
+                    format!("{error:#}"),
+                    None,
+                    Some("attachment-staging"),
+                );
+                state.turns.lock().unwrap().remove(&turn_id);
+                return Ok(json!({ "turnId": turn_id }));
+            }
+        }
+    };
 
-    let turn_id = Uuid::new_v4().to_string();
-    let channel = format!("session:{session_id}:event");
     let pending: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<PermissionPromptAction>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let pending_questions: Arc<
@@ -3338,6 +3598,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 session_uuid: Some(session_uuid),
                 channel: channel.clone(),
                 message: message.clone(),
+                attachments: staged_attachments.clone(),
                 cancel: cancel.clone(),
                 cancel_reported: cancel_reported.clone(),
                 user_prompt_persisted: user_prompt_persisted.clone(),
@@ -3368,6 +3629,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let session_id_for_thread = session_id.clone();
     let turn_options_for_thread = turn_options.clone();
     let turn_mode_for_thread = turn_mode;
+    let staged_attachments_for_thread = staged_attachments.clone();
     std::thread::spawn(move || {
         setup_state.publish_event(ServerEnvelope::Event {
             event: channel_thread.clone(),
@@ -3524,6 +3786,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 &channel_thread,
                 &turn_id_thread,
                 &message_for_thread,
+                &staged_attachments_for_thread,
                 &cancel_reported_thread,
                 &user_prompt_persisted_thread,
                 &progress_thread,
@@ -3580,6 +3843,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 session_uuid,
                 TranscriptEvent::UserMessage {
                     text: message_for_thread.clone(),
+                    attachments: staged_attachments_for_thread.clone(),
                     actor: Some(app_state.user_actor()),
                 },
             );
@@ -3624,9 +3888,22 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 TurnStreamEvent::ToolInvocations(invs) => {
                     {
                         let mut progress = ev_progress.lock().unwrap();
-                        let completed = invs.len().min(progress.pending_tool_calls.len());
+                        let advances_stream_attempt = invs
+                            .iter()
+                            .any(|invocation| !invocation.is_provider_stream_invocation());
+                        let completed = invs
+                            .iter()
+                            .filter(|invocation| !invocation.is_provider_stream_invocation())
+                            .count()
+                            .min(progress.pending_tool_calls.len());
                         progress.pending_tool_calls.drain(0..completed);
                         progress.tool_invocations.extend(invs.clone());
+                        if advances_stream_attempt {
+                            progress.assistant_text_retry_checkpoint =
+                                progress.assistant_text.len();
+                            progress.tool_invocations_retry_checkpoint =
+                                progress.tool_invocations.len();
+                        }
                     }
                     let mut before_gates = Vec::new();
                     let mut after_gates = Vec::new();
@@ -3705,13 +3982,25 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                     attempt,
                     max_attempts,
                     error,
-                } => json!({
-                    "type": "retry-attempt",
-                    "turnId": ev_turn,
-                    "attempt": attempt,
-                    "maxAttempts": max_attempts,
-                    "error": error,
-                }),
+                } => {
+                    let mut progress = ev_progress.lock().unwrap();
+                    let checkpoint = progress
+                        .assistant_text_retry_checkpoint
+                        .min(progress.assistant_text.len());
+                    progress.assistant_text.truncate(checkpoint);
+                    let tool_checkpoint = progress
+                        .tool_invocations_retry_checkpoint
+                        .min(progress.tool_invocations.len());
+                    progress.tool_invocations.truncate(tool_checkpoint);
+                    progress.pending_tool_calls.clear();
+                    json!({
+                        "type": "retry-attempt",
+                        "turnId": ev_turn,
+                        "attempt": attempt,
+                        "maxAttempts": max_attempts,
+                        "error": error,
+                    })
+                }
             };
             let payload = event_payload_with_actor(payload, &ev_actor);
             ev_state.publish_event(ServerEnvelope::Event {
@@ -3955,6 +4244,7 @@ async fn start_slash_command_turn(state: Arc<DaemonState>, params: Value) -> Res
                 session_uuid: Some(session_uuid),
                 channel: channel.clone(),
                 message: message.clone(),
+                attachments: Vec::new(),
                 cancel: cancel.clone(),
                 cancel_reported: cancel_reported.clone(),
                 user_prompt_persisted: user_prompt_persisted.clone(),
@@ -4154,6 +4444,7 @@ async fn start_connector_setup_turn(state: Arc<DaemonState>, params: Value) -> R
                 session_uuid: None,
                 channel: channel.clone(),
                 message: message.clone(),
+                attachments: Vec::new(),
                 cancel: cancel.clone(),
                 cancel_reported: cancel_reported.clone(),
                 user_prompt_persisted,
@@ -4471,6 +4762,8 @@ fn publish_sessionless_turn_error_event(
 ///     cryptic transport-level message.
 ///   * `cancelled` — agent loop bailed because `CancelToken::cancel`
 ///     fired. Mirrors the bail string `"cancelled"`.
+///   * `provider_stream_closed` — provider SSE closed before the OpenAI
+///     Responses stream emitted `response.completed`.
 ///   * `other` — anything we haven't classified.
 fn classify_turn_error(err: &anyhow::Error) -> (String, &'static str) {
     // anyhow walks the chain via Display when you `format!("{:#}", err)`
@@ -4490,6 +4783,12 @@ fn classify_turn_error(err: &anyhow::Error) -> (String, &'static str) {
     }
     if lower == "cancelled" || lower.contains(": cancelled") {
         return (chain, "cancelled");
+    }
+    if lower.contains("failed to parse sse response")
+        || lower.contains("stream closed before response.completed")
+        || lower.contains("idle timeout waiting for sse")
+    {
+        return (chain, "provider_stream_closed");
     }
     (chain, "other")
 }
@@ -5293,6 +5592,7 @@ mod tests {
         .expect("daemon state");
         let progress = Arc::new(Mutex::new(TurnProgress {
             assistant_text: "partial answer".to_string(),
+            assistant_text_retry_checkpoint: 0,
             tool_invocations: vec![ToolInvocation {
                 call_id: "call-done".to_string(),
                 tool_id: "Bash".to_string(),
@@ -5302,6 +5602,7 @@ mod tests {
                 metadata: serde_json::Value::Null,
                 terminate: false,
             }],
+            tool_invocations_retry_checkpoint: 0,
             pending_tool_calls: vec![ToolCallRequest {
                 call_id: "call-pending".to_string(),
                 tool_id: "Bash".to_string(),
@@ -5319,6 +5620,7 @@ mod tests {
             "session:test:event",
             "turn-1",
             "question",
+            &[],
             &cancel_reported,
             &user_prompt_persisted,
             &progress,
@@ -6414,6 +6716,13 @@ mod tests {
         let (msg, cat) = classify_turn_error(&err);
         assert_eq!(cat, "cancelled");
         assert_eq!(msg, "cancelled");
+
+        let err = anyhow::anyhow!("stream closed before response.completed").context(
+            "failed to parse SSE response from https://inference-api.worldrouter.ai/v1/responses",
+        );
+        let (msg, cat) = classify_turn_error(&err);
+        assert_eq!(cat, "provider_stream_closed");
+        assert!(msg.contains("stream closed before response.completed"));
 
         // Anything else falls through with the raw chain preserved.
         let err = anyhow::anyhow!("HTTP 503 from upstream");

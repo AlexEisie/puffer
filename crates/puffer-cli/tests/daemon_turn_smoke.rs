@@ -11,6 +11,152 @@ use tungstenite::{connect, stream::MaybeTlsStream, Message, WebSocket};
 use url::Url;
 
 #[test]
+fn daemon_persists_staged_attachment_ids_on_user_turn() {
+    let mock = MockOpenAiServer::start("Attachment reply");
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let workspace = tempdir.path().join("workspace");
+    let puffer_home = tempdir.path().join("home");
+    let puffer_config = puffer_home.join(".puffer");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::create_dir_all(&puffer_config).expect("puffer config");
+    std::fs::write(
+        puffer_config.join("auth.json"),
+        json!({
+            "format_version": 1,
+            "providers": {
+                "openai": { "kind": "api_key", "key": "sk-test" }
+            }
+        })
+        .to_string(),
+    )
+    .expect("auth store");
+    let discovery_cache = tempdir.path().join("discovery.json");
+    std::fs::write(&discovery_cache, discovery_cache_json()).expect("discovery cache");
+
+    let mut daemon = DaemonProcess::start(&workspace, &puffer_home, &discovery_cache);
+    let mut client = DaemonClient::connect(&daemon.handshake);
+
+    client.rpc(
+        "update_config",
+        json!({
+            "openaiBaseUrl": mock.base_url,
+            "defaultProvider": "openai",
+            "defaultModel": "openai/gpt-5",
+        }),
+    );
+    let session = client.rpc(
+        "create_session",
+        json!({
+            "cwd": workspace.display().to_string(),
+            "providerId": "codex",
+            "modelId": "codex/gpt-5",
+        }),
+    );
+    let session_id = session["sessionId"].as_str().expect("session id");
+    let session_uuid = uuid::Uuid::parse_str(session_id).expect("session uuid");
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("cli crate parent")
+        .parent()
+        .expect("repo root");
+    let paths = puffer_config::ConfigPaths {
+        workspace_root: workspace.clone(),
+        workspace_config_dir: workspace.join(".puffer"),
+        user_config_dir: puffer_config.clone(),
+        builtin_resources_dir: repo_root.join("resources"),
+    };
+    let session_store = puffer_session_store::SessionStore::from_paths(&paths).unwrap();
+    let attachment = session_store
+        .stage_attachment(
+            session_uuid,
+            puffer_session_store::StageAttachmentInput {
+                name: "pixel.png".to_string(),
+                mime_type: "image/png".to_string(),
+                extension: "PNG".to_string(),
+                kind: puffer_session_store::StoredAttachmentKind::Image,
+                bytes: vec![1, 2, 3],
+            },
+        )
+        .unwrap();
+
+    let turn = client.rpc(
+        "run_agent_turn",
+        json!({
+            "sessionId": session_id,
+            "message": "[Image: pixel.png]",
+            "attachmentIds": [attachment.id],
+            "providerId": "codex",
+            "modelId": "codex/gpt-5",
+            "permissionMode": "read-only",
+        }),
+    );
+    let turn_id = turn["turnId"].as_str().expect("turn id");
+    client.wait_for_event(|message| {
+        message["event"] == format!("session:{session_id}:event")
+            && message["payload"]["type"] == "turn-complete"
+            && message["payload"]["turnId"] == turn_id
+    });
+
+    let detail = client.rpc("load_session_detail", json!({ "sessionId": session_id }));
+    let timeline = detail["timeline"].as_array().expect("timeline array");
+    let user = timeline
+        .iter()
+        .find(|item| item["kind"] == "user_message")
+        .expect("user timeline item");
+    assert_eq!(user["attachments"][0]["name"], "pixel.png");
+    assert_eq!(user["attachments"][0]["state"], "available");
+
+    daemon.stop();
+}
+
+#[test]
+fn daemon_turn_with_missing_staged_attachment_publishes_turn_error_without_user_message() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let workspace = tempdir.path().join("workspace");
+    let puffer_home = tempdir.path().join("home");
+    let puffer_config = puffer_home.join(".puffer");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::create_dir_all(&puffer_config).expect("puffer config");
+    let discovery_cache = tempdir.path().join("discovery.json");
+    std::fs::write(&discovery_cache, discovery_cache_json()).expect("discovery cache");
+
+    let mut daemon = DaemonProcess::start(&workspace, &puffer_home, &discovery_cache);
+    let mut client = DaemonClient::connect(&daemon.handshake);
+
+    let session = client.rpc(
+        "create_session",
+        json!({
+            "cwd": workspace.display().to_string(),
+        }),
+    );
+    let session_id = session["sessionId"].as_str().expect("session id");
+    let missing_attachment_id = uuid::Uuid::new_v4().to_string();
+
+    let turn = client.rpc(
+        "run_agent_turn",
+        json!({
+            "sessionId": session_id,
+            "message": "[Image: missing.png]",
+            "attachmentIds": [missing_attachment_id],
+            "permissionMode": "read-only",
+        }),
+    );
+    let turn_id = turn["turnId"].as_str().expect("turn id");
+    let error = client.wait_for_event(|message| {
+        message["event"] == format!("session:{session_id}:event")
+            && message["payload"]["type"] == "turn-error"
+            && message["payload"]["turnId"] == turn_id
+    });
+    assert_eq!(error["payload"]["category"], "attachment-staging");
+
+    let detail = client.rpc("load_session_detail", json!({ "sessionId": session_id }));
+    let timeline = detail["timeline"].as_array().expect("timeline array");
+    assert!(!timeline.iter().any(|item| item["kind"] == "user_message"));
+
+    daemon.stop();
+}
+
+#[test]
 fn daemon_accepts_desktop_alias_and_completes_mock_turn() {
     let mock = MockOpenAiServer::start("Puffer smoke reply");
     let tempdir = tempfile::tempdir().expect("tempdir");
@@ -314,14 +460,14 @@ fn daemon_turn_error_refreshes_workspace_and_marks_session_idle() {
     let discovery_cache = tempdir.path().join("discovery.json");
     std::fs::write(&discovery_cache, discovery_cache_json()).expect("discovery cache");
 
+    let mock = MockOpenAiServer::start_error(500, "controlled provider failure");
     let mut daemon = DaemonProcess::start(&workspace, &puffer_home, &discovery_cache);
     let mut client = DaemonClient::connect(&daemon.handshake);
-    let failing_base_url = closed_http_base_url();
 
     client.rpc(
         "update_config",
         json!({
-            "openaiBaseUrl": failing_base_url,
+            "openaiBaseUrl": mock.base_url,
             "defaultProvider": "openai",
             "defaultModel": "openai/gpt-5",
         }),
@@ -839,7 +985,19 @@ impl MockOpenAiServer {
         Self::start_with_delay(reply, Duration::ZERO)
     }
 
+    fn start_error(status: u16, message: &'static str) -> Self {
+        Self::start_with_response(message, Duration::ZERO, Some(status))
+    }
+
     fn start_with_delay(reply: &'static str, response_delay: Duration) -> Self {
+        Self::start_with_response(reply, response_delay, None)
+    }
+
+    fn start_with_response(
+        reply: &'static str,
+        response_delay: Duration,
+        error_status: Option<u16>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock openai");
         listener.set_nonblocking(true).expect("nonblocking mock");
         let address = listener.local_addr().expect("mock address");
@@ -857,6 +1015,7 @@ impl MockOpenAiServer {
                             stream,
                             reply,
                             response_delay,
+                            error_status,
                             &thread_calls,
                             &thread_body,
                         );
@@ -984,6 +1143,7 @@ fn handle_mock_openai_stream(
     mut stream: TcpStream,
     reply: &str,
     response_delay: Duration,
+    error_status: Option<u16>,
     responses_calls: &AtomicUsize,
     last_body: &Mutex<String>,
 ) {
@@ -1031,6 +1191,17 @@ fn handle_mock_openai_stream(
                 *last_body.lock().unwrap() = body.to_string();
             }
             thread::sleep(response_delay);
+            if let Some(status) = error_status {
+                write_http_response(
+                    &mut stream,
+                    status,
+                    "application/json",
+                    json!({ "error": { "message": reply } })
+                        .to_string()
+                        .as_bytes(),
+                );
+                return;
+            }
             write_http_json(
                 &mut stream,
                 json!({
@@ -1199,7 +1370,12 @@ fn write_http_json(stream: &mut TcpStream, value: Value) {
 }
 
 fn write_http_response(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) {
-    let reason = if status == 200 { "OK" } else { "Not Found" };
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        500 => "Internal Server Error",
+        _ => "Not Found",
+    };
     let header = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -1243,13 +1419,6 @@ models:
         ),
     )
     .expect("write anthropic provider override");
-}
-
-fn closed_http_base_url() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind closed url");
-    let address = listener.local_addr().expect("closed url address");
-    drop(listener);
-    format!("http://{address}")
 }
 
 fn set_daemon_socket_read_timeout(

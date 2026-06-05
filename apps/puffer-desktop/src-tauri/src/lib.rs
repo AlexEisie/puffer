@@ -1,6 +1,7 @@
 mod backend;
 mod browser;
 mod cef_host;
+mod chat_attachments;
 mod codex_app_server;
 mod daemon_launcher;
 mod dtos;
@@ -48,6 +49,8 @@ const REGISTERED_TAURI_COMMANDS: &[&str] = &[
     "ensure_local_daemon",
     "restart_local_daemon",
     "start_ssh_daemon",
+    "stage_chat_attachment",
+    "read_chat_attachment_preview",
     "run_agent_turn",
     "resolve_permission",
     "resolve_user_question",
@@ -63,6 +66,7 @@ const REGISTERED_TAURI_COMMANDS: &[&str] = &[
     "browser_cef_native_reload",
     "browser_cef_native_history",
     "browser_cef_native_close",
+    "browser_cef_native_hide",
 ];
 
 fn backend_call(
@@ -333,6 +337,31 @@ fn start_ssh_daemon(
         .map_err(|error| error.to_string())
 }
 
+fn agent_turn_payload(
+    session_id: String,
+    message: String,
+    provider_id: Option<String>,
+    model_id: Option<String>,
+    fast_mode: Option<bool>,
+    permission_mode: Option<String>,
+    mode: Option<String>,
+    attachment_ids: Option<Vec<String>>,
+) -> Value {
+    let mut payload = json!({
+        "sessionId": session_id,
+        "message": message,
+        "providerId": provider_id,
+        "modelId": model_id,
+        "fastMode": fast_mode.unwrap_or(false),
+        "permissionMode": permission_mode,
+        "mode": mode,
+    });
+    if let Some(attachment_ids) = attachment_ids {
+        payload["attachmentIds"] = json!(attachment_ids);
+    }
+    payload
+}
+
 #[tauri::command]
 fn run_agent_turn(
     app: AppHandle,
@@ -344,21 +373,19 @@ fn run_agent_turn(
     fast_mode: Option<bool>,
     permission_mode: Option<String>,
     mode: Option<String>,
+    attachment_ids: Option<Vec<String>>,
 ) -> Result<String, String> {
-    let value = backend_call(
-        app,
-        state,
-        "run_agent_turn",
-        json!({
-            "sessionId": session_id,
-            "message": message,
-            "providerId": provider_id,
-            "modelId": model_id,
-            "fastMode": fast_mode.unwrap_or(false),
-            "permissionMode": permission_mode,
-            "mode": mode,
-        }),
-    )?;
+    let payload = agent_turn_payload(
+        session_id,
+        message,
+        provider_id,
+        model_id,
+        fast_mode,
+        permission_mode,
+        mode,
+        attachment_ids,
+    );
+    let value = backend_call(app, state, "run_agent_turn", payload)?;
     Ok(value
         .get("turnId")
         .and_then(Value::as_str)
@@ -450,6 +477,8 @@ pub fn run() {
             ensure_local_daemon,
             restart_local_daemon,
             start_ssh_daemon,
+            chat_attachments::stage_chat_attachment,
+            chat_attachments::read_chat_attachment_preview,
             run_agent_turn,
             resolve_permission,
             resolve_user_question,
@@ -465,6 +494,7 @@ pub fn run() {
             cef_host::browser_cef_native_reload,
             cef_host::browser_cef_native_history,
             cef_host::browser_cef_native_close,
+            cef_host::browser_cef_native_hide,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Corbina desktop");
@@ -473,6 +503,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::REGISTERED_TAURI_COMMANDS;
+    use serde_json::json;
     use std::collections::BTreeSet;
 
     fn direct_invoke_commands(source: &str) -> BTreeSet<String> {
@@ -526,6 +557,37 @@ mod tests {
             missing.is_empty(),
             "frontend invokes missing Tauri command registration: {missing:?}"
         );
+    }
+
+    #[test]
+    fn registered_tauri_commands_include_chat_attachment_storage() {
+        let registered = REGISTERED_TAURI_COMMANDS
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+
+        assert!(registered.contains("stage_chat_attachment"));
+        assert!(registered.contains("read_chat_attachment_preview"));
+    }
+
+    #[test]
+    fn run_agent_turn_payload_forwards_attachment_ids_only() {
+        let payload = super::agent_turn_payload(
+            "session-1".to_string(),
+            "hello".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(vec!["attachment-1".to_string(), "attachment-2".to_string()]),
+        );
+
+        assert_eq!(
+            payload["attachmentIds"],
+            json!(["attachment-1", "attachment-2"])
+        );
+        assert!(payload.get("attachments").is_none());
     }
 
     #[test]

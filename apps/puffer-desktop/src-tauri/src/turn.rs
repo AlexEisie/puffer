@@ -367,6 +367,7 @@ fn drive_turn(
         session_uuid,
         TranscriptEvent::UserMessage {
             text: message.clone(),
+            attachments: Vec::new(),
             actor: Some(state.user_actor()),
         },
     )?;

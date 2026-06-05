@@ -138,6 +138,7 @@ mod tests {
     fn detects_unanswered_user_turns_as_running() {
         let events = vec![TranscriptEvent::UserMessage {
             text: "continue".to_string(),
+            attachments: Vec::new(),
             actor: None,
         }];
 
@@ -165,6 +166,7 @@ mod tests {
         let events = vec![
             TranscriptEvent::UserMessage {
                 text: "edit".to_string(),
+                attachments: Vec::new(),
                 actor: None,
             },
             TranscriptEvent::AssistantMessage {
@@ -191,6 +193,7 @@ mod tests {
         let events = vec![
             TranscriptEvent::UserMessage {
                 text: "hello".to_string(),
+                attachments: Vec::new(),
                 actor: None,
             },
             TranscriptEvent::AssistantMessage {
@@ -207,6 +210,7 @@ mod tests {
         let events = vec![
             TranscriptEvent::UserMessage {
                 text: "old prompt".to_string(),
+                attachments: Vec::new(),
                 actor: None,
             },
             TranscriptEvent::TranscriptRewritten {
@@ -222,6 +226,7 @@ mod tests {
         let events = vec![
             TranscriptEvent::UserMessage {
                 text: "hello".to_string(),
+                attachments: Vec::new(),
                 actor: None,
             },
             TranscriptEvent::AssistantMessage {
@@ -230,6 +235,7 @@ mod tests {
             },
             TranscriptEvent::UserMessage {
                 text: "remove this".to_string(),
+                attachments: Vec::new(),
                 actor: None,
             },
             TranscriptEvent::TranscriptRewritten {

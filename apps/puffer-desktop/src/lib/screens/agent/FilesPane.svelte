@@ -360,6 +360,7 @@
     try {
       const state = await loadFileTabs(expectedSessionId);
       if (destroyed || root !== expectedRoot || sessionId !== expectedSessionId) return;
+      if (openPath) return;
       const stateObject = state && typeof state === "object" ? state as FileTabsState : null;
       const restoredTabs = restoredFileTabs(stateObject?.tabs, expectedRoot);
       openTabs = restoredTabs;

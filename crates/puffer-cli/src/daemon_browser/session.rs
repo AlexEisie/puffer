@@ -18,14 +18,16 @@ use tungstenite::{connect, Message, WebSocket};
 use crate::daemon::ServerEnvelope;
 
 use super::chrome::{
-    close_page_target, create_page_target, initial_page_target, read_devtools_ws_url,
-    read_remote_devtools_ws_url, resolve_chrome_executable, wait_for_initial_page_target,
+    close_page_target, create_page_target, ensure_chrome_executable, initial_page_target,
+    read_devtools_ws_url, read_remote_devtools_ws_url, wait_for_initial_page_target,
     ChromePageTarget,
 };
 use super::console::BrowserConsoleRegistry;
 use super::cursor::{cursor_eval_expression, parse_cursor_response};
 use super::devtools::{devtools_event_payload, emit_devtools_payload};
+use super::extension_seed::{ensure_extensions_registered, seed_extensions};
 use super::input::send_input;
+use super::launch_settings::BrowserLaunchSettings;
 use super::recording::BrowserRecordingRegistry;
 use super::screenshot::{
     capture_screenshot_command_params, parse_capture_screenshot_response,
@@ -33,7 +35,8 @@ use super::screenshot::{
 };
 use super::selection::{parse_copy_selection_response, selection_eval_expression};
 use super::session_launch::{
-    cef_remote_debugging_port, configure_chrome_command, remove_stale_devtools_port,
+    cef_profile_dir, cef_remote_debugging_port, configure_chrome_command,
+    remove_stale_devtools_port,
 };
 use super::state_events::{emit_state, emit_state_error, update_state_from_eval};
 use super::upload::{
@@ -78,12 +81,16 @@ pub(super) struct BrowserSession {
 
 impl BrowserRootSession {
     /// Spawns one shared Chrome root owner for a browser session tree.
-    pub(super) fn spawn(profile_dir: PathBuf, width: u32, height: u32) -> Result<Self> {
-        if let Some(root) = Self::spawn_cef_remote_root(&profile_dir)? {
+    pub(super) fn spawn(
+        profile_dir: PathBuf,
+        width: u32,
+        height: u32,
+        launch_settings: BrowserLaunchSettings,
+    ) -> Result<Self> {
+        if let Some(root) = Self::spawn_cef_remote_root(&profile_dir, &launch_settings)? {
             return Ok(root);
         }
-        let chrome = resolve_chrome_executable()
-            .ok_or_else(|| anyhow!("Chrome or Chromium executable not found"))?;
+        let chrome = ensure_chrome_executable()?;
         let launch = prepare_managed_profile(&profile_dir)?;
         if launch.owns_user_data_dir {
             super::chrome::terminate_profile_processes(&launch.user_data_dir);
@@ -91,7 +98,7 @@ impl BrowserRootSession {
         }
 
         let mut command = Command::new(&chrome);
-        configure_chrome_command(&mut command, &launch, width, height);
+        configure_chrome_command(&mut command, &launch, width, height, &launch_settings);
         let mut child = command
             .spawn()
             .with_context(|| format!("launch Chrome at {}", chrome.display()))?;
@@ -103,6 +110,15 @@ impl BrowserRootSession {
                 return Err(error);
             }
         };
+        if let Err(error) = ensure_extensions_registered(
+            &browser_ws,
+            Some(&launch.user_data_dir),
+            launch_settings.extension_dirs(),
+        ) {
+            let _ = child.kill();
+            return Err(error);
+        }
+        seed_extensions(&browser_ws, launch_settings.seeds())?;
         let reusable_target = match initial_page_target(&browser_ws) {
             Ok(target) => target,
             Err(error) => {
@@ -122,7 +138,10 @@ impl BrowserRootSession {
         })
     }
 
-    fn spawn_cef_remote_root(profile_dir: &PathBuf) -> Result<Option<Self>> {
+    fn spawn_cef_remote_root(
+        profile_dir: &PathBuf,
+        launch_settings: &BrowserLaunchSettings,
+    ) -> Result<Option<Self>> {
         let Some(port) = cef_remote_debugging_port() else {
             return Ok(None);
         };
@@ -140,9 +159,16 @@ impl BrowserRootSession {
                     Err(_) => return Ok(None),
                 },
             };
+        let cef_profile_dir = cef_profile_dir().unwrap_or_else(|| profile_dir.clone());
+        ensure_extensions_registered(
+            &browser_ws,
+            Some(&cef_profile_dir),
+            launch_settings.extension_dirs(),
+        )?;
+        seed_extensions(&browser_ws, launch_settings.seeds())?;
         Ok(Some(Self {
             inner: Arc::new(Mutex::new(BrowserRootState {
-                profile_dir: profile_dir.clone(),
+                profile_dir: cef_profile_dir,
                 browser_ws,
                 child: None,
                 owns_targets: false,
@@ -239,6 +265,7 @@ impl BrowserSession {
         root: BrowserRootSession,
         width: u32,
         height: u32,
+        foreground: bool,
     ) -> Result<Self> {
         let target = root.allocate_target()?;
         let (tx, rx) = mpsc::channel();
@@ -267,6 +294,7 @@ impl BrowserSession {
                 worker_alive,
                 width,
                 height,
+                foreground,
             );
         });
         Ok(Self {
@@ -516,6 +544,7 @@ fn run_cdp_worker(
     alive: Arc<AtomicBool>,
     width: u32,
     height: u32,
+    foreground: bool,
 ) {
     let channel_frame = format!("browser:{session_id}:frame");
     let channel_state = format!("browser:{session_id}:state");
@@ -539,7 +568,9 @@ fn run_cdp_worker(
     let _ = send_cdp(&mut socket, &mut next_id, "DOM.enable", json!({}));
     let _ = send_cdp(&mut socket, &mut next_id, "Log.enable", json!({}));
     let _ = send_cdp(&mut socket, &mut next_id, "Network.enable", json!({}));
-    let _ = send_cdp(&mut socket, &mut next_id, "Page.bringToFront", json!({}));
+    if foreground {
+        let _ = send_cdp(&mut socket, &mut next_id, "Page.bringToFront", json!({}));
+    }
     let _ = apply_viewport(&mut socket, &mut next_id, width, height);
     let _ = start_screencast(&mut socket, &mut next_id, width, height);
     let id = send_state_eval(&mut socket, &mut next_id);
@@ -566,6 +597,7 @@ fn run_cdp_worker(
                     &state,
                     &channel_state,
                     &events,
+                    foreground,
                 ),
                 Err(TryRecvError::Empty) => break,
             }
@@ -619,6 +651,7 @@ fn handle_command(
     state: &Arc<Mutex<BrowserState>>,
     channel_state: &str,
     events: &broadcast::Sender<ServerEnvelope>,
+    foreground: bool,
 ) {
     match command {
         BrowserCommand::Navigate(url) => {
@@ -628,7 +661,9 @@ fn handle_command(
                 state.loading = true;
                 emit_state(events, channel_state, &state);
             }
-            let _ = send_cdp(socket, next_id, "Page.bringToFront", json!({}));
+            if foreground {
+                let _ = send_cdp(socket, next_id, "Page.bringToFront", json!({}));
+            }
             let _ = send_cdp(socket, next_id, "Page.navigate", json!({ "url": url }));
         }
         BrowserCommand::Reload => {
@@ -658,7 +693,9 @@ fn handle_command(
                 state.height = height;
                 emit_state(events, channel_state, &state);
             }
-            let _ = send_cdp(socket, next_id, "Page.bringToFront", json!({}));
+            if foreground {
+                let _ = send_cdp(socket, next_id, "Page.bringToFront", json!({}));
+            }
             let _ = apply_viewport(socket, next_id, width, height);
             let _ = send_cdp(socket, next_id, "Page.stopScreencast", json!({}));
             let _ = start_screencast(socket, next_id, width, height);
@@ -723,7 +760,9 @@ fn handle_command(
             files,
             reply,
         } => {
-            let _ = send_cdp(socket, next_id, "Page.bringToFront", json!({}));
+            if foreground {
+                let _ = send_cdp(socket, next_id, "Page.bringToFront", json!({}));
+            }
             let id = send_cdp(
                 socket,
                 next_id,

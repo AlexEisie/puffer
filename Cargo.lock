@@ -4349,7 +4349,6 @@ dependencies = [
  "puffer-connector-slack",
  "puffer-connector-telegram",
  "puffer-core",
- "puffer-lark",
  "puffer-mcp-oauth",
  "puffer-observability",
  "puffer-provider-openai",
@@ -4375,6 +4374,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "tempfile",
  "time",
  "tokio",
@@ -4533,7 +4533,6 @@ dependencies = [
  "notify",
  "psl",
  "puffer-config",
- "puffer-lark",
  "puffer-mcp-oauth",
  "puffer-observability",
  "puffer-provider-openai",
@@ -4550,6 +4549,7 @@ dependencies = [
  "puffer-transport-anthropic",
  "puffer-workflow",
  "qrcode",
+ "rand 0.8.6",
  "regex",
  "reqwest",
  "rmcp",
@@ -4583,18 +4583,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "puffer-lark"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "url",
 ]
 
 [[package]]

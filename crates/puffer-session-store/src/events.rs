@@ -128,12 +128,43 @@ pub enum MessageActorKind {
     Unknown,
 }
 
+/// Stored kind for a chat attachment referenced by a transcript user message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StoredAttachmentKind {
+    /// Image attachment that can be previewed when the backing file exists.
+    Image,
+    /// Non-image file attachment shown as metadata in chat.
+    File,
+}
+
+/// Durable metadata for a staged chat attachment.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredAttachment {
+    /// Stable attachment id scoped to one session.
+    pub id: String,
+    /// Display name shown in chat and prompt fallback text.
+    pub name: String,
+    /// MIME type recorded when the file was staged.
+    pub mime_type: String,
+    /// Byte length recorded when the file was staged.
+    pub size: u64,
+    /// Uppercase file extension used by attachment cards.
+    pub extension: String,
+    /// Attachment rendering and preview category.
+    pub kind: StoredAttachmentKind,
+    /// Session-store-relative key used to locate the stored file.
+    pub storage_key: String,
+}
+
 /// Stores a transcript event in append-only session history.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TranscriptEvent {
     UserMessage {
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<StoredAttachment>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
     },
@@ -228,7 +259,10 @@ pub enum TranscriptEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClaudeReadSnapshotEvent, MessageActor, MessageActorKind, TranscriptEvent};
+    use super::{
+        ClaudeReadSnapshotEvent, MessageActor, MessageActorKind, StoredAttachment,
+        StoredAttachmentKind, TranscriptEvent,
+    };
 
     #[test]
     fn user_message_without_actor_deserializes_for_old_sessions() {
@@ -238,9 +272,33 @@ mod tests {
             event,
             TranscriptEvent::UserMessage {
                 text: "hello".to_string(),
+                attachments: Vec::new(),
                 actor: None,
             }
         );
+    }
+
+    #[test]
+    fn user_message_serializes_stored_attachments() {
+        let event = TranscriptEvent::UserMessage {
+            text: "inspect this".to_string(),
+            attachments: vec![StoredAttachment {
+                id: "att-1".to_string(),
+                name: "diagram.png".to_string(),
+                mime_type: "image/png".to_string(),
+                size: 68,
+                extension: "PNG".to_string(),
+                kind: StoredAttachmentKind::Image,
+                storage_key: "att-1/original".to_string(),
+            }],
+            actor: None,
+        };
+
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["type"], "user_message");
+        assert_eq!(value["attachments"][0]["id"], "att-1");
+        assert_eq!(value["attachments"][0]["kind"], "image");
+        assert_eq!(value["attachments"][0]["storage_key"], "att-1/original");
     }
 
     #[test]

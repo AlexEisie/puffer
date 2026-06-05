@@ -1,6 +1,9 @@
-use puffer_session_store::MessageActor;
+use puffer_session_store::{
+    AttachmentState, MessageActor, SessionStore, StoredAttachment, StoredAttachmentKind,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 /// Describes one session row rendered in the desktop sidebar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +87,45 @@ pub(crate) struct RepoStatusDto {
     pub warnings: Vec<String>,
 }
 
+/// Describes one chat attachment rendered with a timeline user message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChatAttachmentDto {
+    pub id: String,
+    pub name: String,
+    pub mime_type: String,
+    pub size: u64,
+    pub extension: String,
+    pub kind: String,
+    pub state: String,
+}
+
+impl ChatAttachmentDto {
+    /// Builds a desktop attachment DTO from stored metadata and file availability.
+    pub(crate) fn from_stored(
+        store: &SessionStore,
+        session_id: Uuid,
+        attachment: &StoredAttachment,
+    ) -> Self {
+        let state = match store.attachment_state(session_id, attachment) {
+            AttachmentState::Available => "available",
+            AttachmentState::Missing => "missing",
+        };
+        Self {
+            id: attachment.id.clone(),
+            name: attachment.name.clone(),
+            mime_type: attachment.mime_type.clone(),
+            size: attachment.size,
+            extension: attachment.extension.clone(),
+            kind: match attachment.kind {
+                StoredAttachmentKind::Image => "image".to_string(),
+                StoredAttachmentKind::File => "file".to_string(),
+            },
+            state: state.to_string(),
+        }
+    }
+}
+
 /// Describes the outcome of one repo action initiated from the desktop shell.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -102,6 +144,7 @@ pub(crate) enum TimelineItemDto {
     UserMessage {
         id: String,
         text: String,
+        attachments: Vec<ChatAttachmentDto>,
         #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
     },
@@ -231,7 +274,58 @@ pub(crate) struct SettingsSnapshotDto {
     pub sessions: SettingsSessionSummaryDto,
     pub auth: Vec<AuthProviderStatusDto>,
     pub providers: Vec<ProviderSummaryDto>,
+    pub browser: BrowserSettingsDto,
     pub secrets: SecretsSettingsDto,
+}
+
+/// Describes browser extension settings for the settings page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserSettingsDto {
+    pub extensions_enabled: bool,
+    pub extensions: Vec<BrowserExtensionDto>,
+    pub captcha: BrowserCaptchaSettingsDto,
+}
+
+/// Describes one user-added browser extension.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserExtensionDto {
+    pub id: String,
+    pub display_name: String,
+    pub path: String,
+    pub enabled: bool,
+    pub manifest_present: bool,
+    pub source: String,
+}
+
+/// Describes captcha extension settings for browser sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserCaptchaSettingsDto {
+    pub enabled: bool,
+    pub selected_solver: String,
+    pub solvers: Vec<BrowserCaptchaSolverDto>,
+}
+
+/// Describes one built-in captcha solver extension package.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserCaptchaSolverDto {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub base_url: String,
+    pub api_key_secret_id: Option<String>,
+    pub has_api_key: bool,
+    pub version: String,
+    pub bundled: bool,
+    pub extension_path: String,
+    pub release_url: String,
+    pub download_url: String,
+    pub sha256: String,
+    pub license: String,
 }
 
 /// Describes the encrypted secret store status for the settings page.

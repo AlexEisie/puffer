@@ -788,7 +788,6 @@ pub fn execute_workflow_tool(
         }
         "DebugpyAction" => workflow::debugpy_action::execute_debugpy_action(state, cwd, input),
         "DiscordAction" => workflow::discord_action::execute_discord_action(state, cwd, input),
-        "Lark" => workflow::lark::execute_lark(state, cwd, input),
         "LSP" => workflow::lsp::execute_lsp(state, resources, cwd, input),
         "McpToolCall" => workflow::mcp_tool_call::execute_mcp_tool_call(state, cwd, input),
         "McpStatus" => workflow::mcp_status::execute_mcp_status(state, cwd, input),
@@ -799,6 +798,7 @@ pub fn execute_workflow_tool(
         "ProcessControl" => workflow::process_control::execute_process_control(state, cwd, input),
         "PowerShell" => workflow::powershell::execute_powershell(state, cwd, input),
         "Recall" => workflow::recall::execute_recall(state, cwd, input),
+        "Remember" => workflow::remember::execute_remember(state, cwd, input),
         "RequestSecret" => workflow::request_secret::execute_request_secret(state, cwd, input),
         "SecretValue" => workflow::secret_value::execute_secret_value(state, cwd, input),
         "SendMessage" => workflow::send_message::execute_send_message(state, cwd, input),

@@ -30,6 +30,7 @@ fn failed_pending_turn_discards_streamed_assistant_draft() {
             state.session.id,
             TranscriptEvent::UserMessage {
                 text: "fail after partial".to_string(),
+                attachments: Vec::new(),
                 actor: Some(state.user_actor()),
             },
         )
@@ -40,8 +41,10 @@ fn failed_pending_turn_discards_streamed_assistant_draft() {
         prompt: "fail after partial".to_string(),
         receiver,
         transcript_persisted_len: transcript_start_len,
+        stream_attempt_transcript_len: transcript_start_len,
         pending_tool_calls: Vec::new(),
         rendered_tool_invocations: 0,
+        stream_attempt_rendered_tool_invocations: 0,
         started_at: std::time::Instant::now(),
         thinking_active: false,
         status_hint: None,
@@ -119,6 +122,7 @@ fn successful_tool_turn_persists_pre_tool_assistant_draft() {
             state.session.id,
             TranscriptEvent::UserMessage {
                 text: "inspect the file".to_string(),
+                attachments: Vec::new(),
                 actor: Some(state.user_actor()),
             },
         )
@@ -129,8 +133,10 @@ fn successful_tool_turn_persists_pre_tool_assistant_draft() {
         prompt: "inspect the file".to_string(),
         receiver,
         transcript_persisted_len: transcript_start_len,
+        stream_attempt_transcript_len: transcript_start_len,
         pending_tool_calls: Vec::new(),
         rendered_tool_invocations: 0,
+        stream_attempt_rendered_tool_invocations: 0,
         started_at: std::time::Instant::now(),
         thinking_active: false,
         status_hint: None,
