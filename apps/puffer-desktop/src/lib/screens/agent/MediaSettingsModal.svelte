@@ -13,17 +13,19 @@
   type Props = {
     kind: MediaKind;
     settings: MediaSettings;
+    settingsReady?: boolean;
     onClose: () => void;
   };
 
-  let { kind, settings, onClose }: Props = $props();
-  const initialSaved = untrack(() => (kind === "image" ? settings.image : settings.video));
+  let { kind, settings, settingsReady = true, onClose }: Props = $props();
+  const initialSaved = untrack(() => mediaSettingsForKind(kind, settings));
   const initialImage = untrack(() => settings.image);
   const initialVideo = untrack(() => settings.video);
 
-  const title = $derived(kind === "image" ? "Image settings" : "Video settings");
-  const saveLabel = $derived(kind === "image" ? "Save image settings" : "Save video settings");
-  const saved = $derived(kind === "image" ? settings.image : settings.video);
+  const title = $derived(mediaSettingsTitle(kind));
+  const saveLabel = $derived(`Save ${title.toLowerCase()}`);
+  const closeLabel = $derived(`Close ${title.toLowerCase()}`);
+  const saved = $derived(mediaSettingsForKind(kind, settings));
 
   let capabilities = $state<MediaCapabilityInfo[]>([]);
   let loading = $state(true);
@@ -39,6 +41,7 @@
   let dialogEl: HTMLDivElement | undefined;
   let closeButtonEl: HTMLButtonElement | undefined;
   let previouslyFocusedEl: HTMLElement | null = null;
+  let appliedSettingsKey = $state(untrack(() => mediaSettingsKey(kind, settings)));
 
   let availableCapabilities = $derived(
     capabilities.filter((capability) => capability.kind === kind && capability.status === "available")
@@ -70,7 +73,7 @@
           capability.providerId === saved.providerId && capability.modelId === saved.modelId
       )
   );
-  let canSave = $derived(Boolean(selectedCapability && !loading && !saving));
+  let canSave = $derived(Boolean(settingsReady && selectedCapability && !loading && !saving));
   let sizeOptions = $derived(parameterOptions("size", ["1024x1024"]));
   let qualityOptions = $derived(parameterOptions("quality", ["auto"]));
   let outputFormatOptions = $derived(parameterOptions("outputFormat", ["png"]));
@@ -83,6 +86,42 @@
     const values = selectedCapability?.parameterValues?.[key];
     if (!Array.isArray(values) || values.length === 0) return fallback;
     return values;
+  }
+
+  function mediaSettingsTitle(mediaKind: MediaKind): string {
+    return mediaKind === "image" ? "Image generation settings" : "Video generation settings";
+  }
+
+  function mediaSettingsForKind(mediaKind: MediaKind, mediaSettings: MediaSettings) {
+    return mediaKind === "image" ? mediaSettings.image : mediaSettings.video;
+  }
+
+  function mediaSettingsKey(mediaKind: MediaKind, mediaSettings: MediaSettings): string {
+    const image = mediaSettings.image;
+    const video = mediaSettings.video;
+    return [
+      mediaKind,
+      image.providerId ?? "",
+      image.modelId ?? "",
+      image.size,
+      image.quality,
+      image.outputFormat,
+      video.providerId ?? "",
+      video.modelId ?? "",
+      video.aspectRatio,
+      String(video.durationSeconds)
+    ].join("\u0000");
+  }
+
+  function applySettings(mediaSettings: MediaSettings) {
+    const current = mediaSettingsForKind(kind, mediaSettings);
+    providerId = current.providerId ?? "";
+    modelId = current.modelId ?? "";
+    size = mediaSettings.image.size;
+    quality = mediaSettings.image.quality;
+    outputFormat = mediaSettings.image.outputFormat;
+    aspectRatio = mediaSettings.video.aspectRatio;
+    durationSeconds = mediaSettings.video.durationSeconds;
   }
 
   function chooseDefaultCapability() {
@@ -195,6 +234,15 @@
       document.removeEventListener("keydown", handleKeydown);
     };
   });
+
+  $effect(() => {
+    if (!settingsReady) return;
+    const nextKey = mediaSettingsKey(kind, settings);
+    if (nextKey === appliedSettingsKey) return;
+    appliedSettingsKey = nextKey;
+    applySettings(settings);
+    chooseDefaultCapability();
+  });
 </script>
 
 <div class="pf-media-modal-backdrop" role="presentation">
@@ -211,7 +259,7 @@
         bind:this={closeButtonEl}
         type="button"
         class="pf-media-icon-btn"
-        aria-label="Close media settings"
+        aria-label={closeLabel}
         onclick={close}
       >
         <Icon name="x" size={15} />
@@ -219,7 +267,9 @@
     </header>
 
     <div class="pf-media-modal-body">
-      {#if loading}
+      {#if !settingsReady}
+        <p class="pf-media-state">Loading generation settings...</p>
+      {:else if loading}
         <p class="pf-media-state">Loading {kind} capabilities...</p>
       {:else if error}
         <p class="pf-media-state warn" role="alert">{error}</p>

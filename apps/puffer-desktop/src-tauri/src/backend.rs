@@ -750,7 +750,7 @@ impl BackendState {
         let credentials = self.load_credentials()?;
         Ok(credentials.api_keys.contains_key("codex")
             || credentials.api_keys.contains_key("openai")
-            || env::var("OPENAI_API_KEY").is_ok()
+            || openai_env_key_configured()
             || home_dir().join(".codex/auth.json").exists())
     }
 
@@ -2128,6 +2128,7 @@ mod tests {
         corbina_home: Option<OsString>,
         home: Option<OsString>,
         openai_api_key: Option<OsString>,
+        puffer_openai_api_key: Option<OsString>,
     }
 
     impl EnvGuard {
@@ -2136,11 +2137,17 @@ mod tests {
                 corbina_home: env::var_os("CORBINA_HOME"),
                 home: env::var_os("HOME"),
                 openai_api_key: env::var_os("OPENAI_API_KEY"),
+                puffer_openai_api_key: env::var_os("PUFFER_OPENAI_API_KEY"),
             };
             env::set_var("CORBINA_HOME", path);
             env::set_var("HOME", path);
             env::remove_var("OPENAI_API_KEY");
+            env::remove_var("PUFFER_OPENAI_API_KEY");
             guard
+        }
+
+        fn set_puffer_openai_api_key(&self, value: &str) {
+            env::set_var("PUFFER_OPENAI_API_KEY", value);
         }
     }
 
@@ -2160,6 +2167,11 @@ mod tests {
                 env::set_var("OPENAI_API_KEY", value);
             } else {
                 env::remove_var("OPENAI_API_KEY");
+            }
+            if let Some(value) = &self.puffer_openai_api_key {
+                env::set_var("PUFFER_OPENAI_API_KEY", value);
+            } else {
+                env::remove_var("PUFFER_OPENAI_API_KEY");
             }
         }
     }
@@ -2361,6 +2373,31 @@ mod tests {
         assert_eq!(capabilities[0]["modelId"], "gpt-image-1");
         assert_eq!(capabilities[0]["kind"], "image");
         assert_eq!(capabilities[0]["status"], "available");
+    }
+
+    #[test]
+    fn media_capabilities_accept_puffer_openai_api_key() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let env = EnvGuard::set_home(dir.path());
+        env.set_puffer_openai_api_key("sk-test");
+        let backend = BackendState::new();
+
+        let response = backend
+            .handle(
+                EventEmitter::websocket_only(),
+                "list_media_capabilities",
+                json!({"kind": "image"}),
+            )
+            .unwrap();
+        let capabilities = response
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .unwrap();
+
+        assert_eq!(capabilities.len(), 1);
+        assert_eq!(capabilities[0]["providerId"], "openai");
+        assert_eq!(capabilities[0]["modelId"], "gpt-image-1");
     }
 
     #[test]
@@ -3171,6 +3208,17 @@ fn optional_trimmed_string_param(params: &Value, names: &[&str]) -> Option<Strin
             Some(trimmed.to_string())
         }
     })
+}
+
+fn openai_env_key_configured() -> bool {
+    env_key_configured("OPENAI_API_KEY") || env_key_configured("PUFFER_OPENAI_API_KEY")
+}
+
+fn env_key_configured(name: &str) -> bool {
+    env::var(name)
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
 }
 
 fn serde_value<T: Serialize>(value: T) -> Result<Value> {

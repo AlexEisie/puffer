@@ -485,11 +485,54 @@ pub(crate) struct SettingsConfigDto {
     pub(crate) default_model: Option<String>,
     pub(crate) openai_base_url: Option<String>,
     pub(crate) theme: String,
+    pub(crate) media: MediaSettingsDto,
     pub(crate) mascot_id: String,
     pub(crate) mascot_display_name: String,
     pub(crate) mascot_enabled: bool,
     pub(crate) ui_no_alt_screen: bool,
     pub(crate) ui_tmux_golden_mode: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaSettingsDto {
+    pub(crate) image: ImageMediaSettingsDto,
+    pub(crate) video: VideoMediaSettingsDto,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ImageMediaSettingsDto {
+    pub(crate) provider_id: Option<String>,
+    pub(crate) model_id: Option<String>,
+    pub(crate) size: String,
+    pub(crate) quality: String,
+    pub(crate) output_format: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VideoMediaSettingsDto {
+    pub(crate) provider_id: Option<String>,
+    pub(crate) model_id: Option<String>,
+    pub(crate) aspect_ratio: String,
+    pub(crate) duration_seconds: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaCapabilityInfoDto {
+    pub(crate) provider_id: String,
+    pub(crate) model_id: String,
+    pub(crate) kind: String,
+    pub(crate) operations: Vec<String>,
+    pub(crate) supports_async: bool,
+    pub(crate) supports_streaming: bool,
+    pub(crate) parameter_values: Value,
+    pub(crate) status: String,
+    pub(crate) source: String,
+    pub(crate) reason: Option<String>,
+    pub(crate) checked_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]

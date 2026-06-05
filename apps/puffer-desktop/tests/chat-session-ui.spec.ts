@@ -252,13 +252,13 @@ test("composer add content menu attaches image and file drafts", async ({ page }
   await expect(refreshedPreview.getByAltText("sample.png")).toBeVisible();
 });
 
-test("composer image settings modal saves media config from daemon capabilities", async ({ page }) => {
+test("composer image generation settings modal saves media config from daemon capabilities", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
       {
         sessionId: "session-image-settings",
-        displayName: "Image settings session",
-        title: "Image settings session",
+        displayName: "Image generation settings session",
+        title: "Image generation settings session",
         cwd: "/tmp/puffer",
         folderPath: "/tmp/puffer",
         updatedAtMs: baseTime,
@@ -294,13 +294,13 @@ test("composer image settings modal saves media config from daemon capabilities"
   });
   await daemon.install(page);
   await daemon.open(page);
-  await openSession(page, /Image settings session/);
+  await openSession(page, /Image generation settings session/);
 
   await page.getByRole("button", { name: "Add content" }).click();
   await expect(page.getByRole("menuitem", { name: "Add images and files" })).toBeVisible();
-  await page.getByRole("menuitem", { name: "Image settings" }).click();
+  await page.getByRole("menuitem", { name: "Image generation settings" }).click();
 
-  const dialog = page.getByRole("dialog", { name: "Image settings" });
+  const dialog = page.getByRole("dialog", { name: "Image generation settings" });
   await expect(dialog).toBeVisible();
   await daemon.waitForRequest("list_media_capabilities", (request) => request.params.kind === "image");
   await expect(dialog.getByLabel("Provider")).toHaveValue("openai");
@@ -309,7 +309,7 @@ test("composer image settings modal saves media config from daemon capabilities"
   await dialog.getByLabel("Size").selectOption("1536x1024");
   await dialog.getByLabel("Quality").selectOption("high");
   await dialog.getByLabel("Output format").selectOption("webp");
-  await dialog.getByRole("button", { name: "Save image settings" }).click();
+  await dialog.getByRole("button", { name: "Save image generation settings" }).click();
 
   const update = await daemon.waitForRequest("update_config", (request) => "media" in request.params);
   expect(update.params).toEqual({
@@ -331,14 +331,14 @@ test("composer image settings modal saves media config from daemon capabilities"
   });
 });
 
-test("composer video settings modal remains reachable without capabilities", async ({ page }) => {
+test("composer video generation settings modal remains reachable without capabilities", async ({ page }) => {
   const daemon = new FakeDaemon({
     mediaCapabilities: [],
     sessions: [
       {
         sessionId: "session-video-settings",
-        displayName: "Video settings session",
-        title: "Video settings session",
+        displayName: "Video generation settings session",
+        title: "Video generation settings session",
         cwd: "/tmp/puffer",
         folderPath: "/tmp/puffer",
         updatedAtMs: baseTime,
@@ -357,23 +357,23 @@ test("composer video settings modal remains reachable without capabilities", asy
   });
   await daemon.install(page);
   await daemon.open(page);
-  await openSession(page, /Video settings session/);
+  await openSession(page, /Video generation settings session/);
 
   await page.getByRole("button", { name: "Add content" }).click();
-  await expect(page.getByRole("menuitem", { name: "Video settings" })).toBeVisible();
-  await page.getByRole("menuitem", { name: "Video settings" }).click();
+  await expect(page.getByRole("menuitem", { name: "Video generation settings" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Video generation settings" }).click();
 
-  const dialog = page.getByRole("dialog", { name: "Video settings" });
+  const dialog = page.getByRole("dialog", { name: "Video generation settings" });
   await expect(dialog).toBeVisible();
   await daemon.waitForRequest("list_media_capabilities", (request) => request.params.kind === "video");
   await expect(dialog.getByText("No video capabilities available.")).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "Save video settings" })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Save video generation settings" })).toBeDisabled();
 
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
 });
 
-test("composer media settings marks stale saved image model invalid", async ({ page }) => {
+test("composer media generation settings marks stale saved image model invalid", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
       {
@@ -418,12 +418,12 @@ test("composer media settings marks stale saved image model invalid", async ({ p
   await openSession(page, /Stale media settings/);
 
   await page.getByRole("button", { name: "Add content" }).click();
-  await page.getByRole("menuitem", { name: "Image settings" }).click();
+  await page.getByRole("menuitem", { name: "Image generation settings" }).click();
 
-  const dialog = page.getByRole("dialog", { name: "Image settings" });
+  const dialog = page.getByRole("dialog", { name: "Image generation settings" });
   await expect(dialog.getByText("Saved model is no longer available.")).toBeVisible();
   await expect(dialog.getByLabel("Model")).toHaveValue("old-image-model");
-  await expect(dialog.getByRole("button", { name: "Save image settings" })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Save image generation settings" })).toBeDisabled();
 });
 
 test("explicit image slash trigger routes to media generation", async ({ page }) => {

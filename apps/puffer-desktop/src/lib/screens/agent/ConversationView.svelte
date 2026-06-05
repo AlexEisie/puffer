@@ -34,6 +34,7 @@
     DiffTimelineItem,
     MessageTimelineItem,
     MediaKind,
+    MediaSettings,
     UserQuestionTimelineItem
   } from "../../types";
   import type { AgentState } from "../../shell/tweaks";
@@ -56,6 +57,25 @@
   const RECAP_DISPLAY_PREFIX = "\u203B recap: ";
   const COMPOSER_MAX_HEIGHT_PX = 200;
   const THREAD_BOTTOM_THRESHOLD_PX = 100;
+  const DEFAULT_MEDIA_SETTINGS: MediaSettings = {
+    image: {
+      providerId: null,
+      modelId: null,
+      size: "1024x1024",
+      quality: "auto",
+      outputFormat: "png"
+    },
+    video: {
+      providerId: null,
+      modelId: null,
+      aspectRatio: "16:9",
+      durationSeconds: 8
+    }
+  };
+  const MEDIA_SETTINGS_LABELS: Record<MediaKind, string> = {
+    image: "Image generation settings",
+    video: "Video generation settings"
+  };
   type SubmitMessageResult = boolean | void | Promise<boolean | void>;
   type ComposerRoutingPreference = {
     providerId: string | null;
@@ -2394,7 +2414,7 @@
                 onclick={() => openMediaSettings("image")}
               >
                 <Icon name="sparkles" size={15} />
-                <span>Image settings</span>
+                <span>{MEDIA_SETTINGS_LABELS.image}</span>
               </button>
               <button
                 type="button"
@@ -2403,7 +2423,7 @@
                 onclick={() => openMediaSettings("video")}
               >
                 <Icon name="settings" size={15} />
-                <span>Video settings</span>
+                <span>{MEDIA_SETTINGS_LABELS.video}</span>
               </button>
             </div>
           {/if}
@@ -2471,10 +2491,11 @@
     </div>
   </div>
 
-  {#if mediaSettingsKind && settingsSnapshot}
+  {#if mediaSettingsKind}
     <MediaSettingsModal
       kind={mediaSettingsKind}
-      settings={settingsSnapshot.config.media}
+      settings={settingsSnapshot?.config.media ?? DEFAULT_MEDIA_SETTINGS}
+      settingsReady={settingsSnapshot !== null}
       onClose={closeMediaSettings}
     />
   {/if}

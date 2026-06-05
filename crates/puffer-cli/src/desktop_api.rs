@@ -22,10 +22,11 @@ use crate::desktop_api_types::{
     AgentDiffDto, AgentDiffEntryDto, AgentDiffFileDto, AuthProviderStatusDto,
     BrowserCaptchaSettingsDto, BrowserCaptchaSolverDto, BrowserExtensionDto, BrowserSettingsDto,
     ChatAttachmentDto, DiffSummaryDto, DivergenceReportDto, ExternalCredentialDto, FolderGroupDto,
-    NetworkProxySettingsDto, ProviderSummaryDto, RepoActionResultDto, RepoPullRequestDto,
-    RepoStatusDto, ResourceCountsDto, SanitizedProxyEndpointDto, SecretSummaryDto,
-    SecretsSettingsDto, SessionDetailDto, SessionGroupsPageDto, SessionListItemDto,
-    SettingsConfigDto, SettingsSessionSummaryDto, SettingsSnapshotDto, TimelineItemDto,
+    ImageMediaSettingsDto, MediaSettingsDto, NetworkProxySettingsDto, ProviderSummaryDto,
+    RepoActionResultDto, RepoPullRequestDto, RepoStatusDto, ResourceCountsDto,
+    SanitizedProxyEndpointDto, SecretSummaryDto, SecretsSettingsDto, SessionDetailDto,
+    SessionGroupsPageDto, SessionListItemDto, SettingsConfigDto, SettingsSessionSummaryDto,
+    SettingsSnapshotDto, TimelineItemDto, VideoMediaSettingsDto,
 };
 
 /// Runs one hidden desktop JSON command for SSH-backed desktop integrations.
@@ -400,6 +401,7 @@ pub(crate) fn load_settings_snapshot(
             default_model: config.default_model.clone(),
             openai_base_url: config.openai_base_url.clone(),
             theme: config.theme.clone(),
+            media: media_settings_dto(config),
             mascot_id: config.mascot.id.clone(),
             mascot_display_name: config.mascot.display_name.clone(),
             mascot_enabled: config.mascot.enabled,
@@ -429,6 +431,24 @@ pub(crate) fn load_settings_snapshot(
         network_proxy: network_proxy_settings_dto(config),
         secrets: secrets_settings_dto(paths)?,
     })
+}
+
+fn media_settings_dto(config: &PufferConfig) -> MediaSettingsDto {
+    MediaSettingsDto {
+        image: ImageMediaSettingsDto {
+            provider_id: config.media.image.provider_id.clone(),
+            model_id: config.media.image.model_id.clone(),
+            size: config.media.image.size.clone(),
+            quality: config.media.image.quality.clone(),
+            output_format: config.media.image.output_format.clone(),
+        },
+        video: VideoMediaSettingsDto {
+            provider_id: config.media.video.provider_id.clone(),
+            model_id: config.media.video.model_id.clone(),
+            aspect_ratio: config.media.video.aspect_ratio.clone(),
+            duration_seconds: config.media.video.duration_seconds,
+        },
+    }
 }
 
 fn browser_settings_dto(paths: &ConfigPaths, config: &PufferConfig) -> BrowserSettingsDto {
