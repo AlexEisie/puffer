@@ -3082,7 +3082,7 @@
   }
 
   function generatedImageAttachmentId(result: GenerateMediaResult): string {
-    return `generated-image-${result.artifactId ?? result.jobId}`;
+    return `generated-image:${result.artifactId ?? result.jobId}`;
   }
 
   function missingGeneratedImageAttachment(result: GenerateMediaResult): MessageAttachment {
@@ -3094,14 +3094,20 @@
       extension: "IMAGE",
       kind: "image",
       state: "missing",
+      source: { kind: "generated_media", artifactId: result.artifactId ?? result.jobId },
       previewUrl: null
     };
   }
 
-  async function generatedImageAttachment(result: GenerateMediaResult): Promise<MessageAttachment> {
-    if (!result.path) return missingGeneratedImageAttachment(result);
+  async function generatedImageAttachment(
+    sessionId: string,
+    result: GenerateMediaResult
+  ): Promise<MessageAttachment> {
+    if (!result.artifactId) return missingGeneratedImageAttachment(result);
 
-    const preview = await readGeneratedMediaPreview(result.path).catch(() => ({ state: "missing" as const }));
+    const preview = await readGeneratedMediaPreview(sessionId, result.artifactId).catch(() => ({
+      state: "missing" as const
+    }));
     if (preview.state !== "available") return missingGeneratedImageAttachment(result);
 
     const bytes = new Uint8Array(preview.bytes);
@@ -3113,6 +3119,7 @@
       extension: generatedImageExtension(preview.mimeType),
       kind: "image",
       state: "available",
+      source: { kind: "generated_media", artifactId: result.artifactId },
       previewUrl: URL.createObjectURL(new Blob([bytes], { type: preview.mimeType }))
     };
   }
@@ -3121,7 +3128,7 @@
     sessionId: string,
     result: GenerateMediaResult
   ): Promise<void> {
-    const attachment = await generatedImageAttachment(result);
+    const attachment = await generatedImageAttachment(sessionId, result);
     if (selectedSession?.id !== sessionId) {
       if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
       return;

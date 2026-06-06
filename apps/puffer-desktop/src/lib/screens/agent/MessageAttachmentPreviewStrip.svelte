@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
   import AttachmentPreviewStrip from "./AttachmentPreviewStrip.svelte";
-  import { readChatAttachmentPreview } from "../../api/desktop";
+  import { readMessageAttachmentPreview } from "../../api/desktop";
   import type { ChatOpenIntent } from "../../chatOpenIntent";
   import type { MessageAttachment } from "../../types";
 
@@ -97,7 +97,7 @@
 
     previewLoads.add(key);
     try {
-      const preview = await readChatAttachmentPreview(targetSessionId, attachment.id);
+      const preview = await readMessageAttachmentPreview(targetSessionId, attachment);
       if (destroyed || !previewStillNeeded(targetSessionId, attachment.id)) return;
       if (preview.state !== "available") {
         previewMisses.set(key, missState);

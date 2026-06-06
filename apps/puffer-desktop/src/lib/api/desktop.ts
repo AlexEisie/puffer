@@ -145,6 +145,10 @@ type BackendActorFields = {
   subject?: MessageActor | null;
 };
 
+type BackendChatAttachmentSource =
+  | { kind: "user_upload" }
+  | { kind: "generated_media"; artifactId: string };
+
 type BackendChatAttachment = {
   id: string;
   name: string;
@@ -153,6 +157,7 @@ type BackendChatAttachment = {
   extension: string;
   kind: "image" | "file";
   state?: AttachmentState;
+  source: BackendChatAttachmentSource;
 };
 
 type BackendTimelineItem =
@@ -168,6 +173,7 @@ type BackendTimelineItem =
       id: string;
       text: string;
       createdAtMs?: number | null;
+      attachments?: BackendChatAttachment[];
     } & BackendActorFields)
   | ({
       kind: "system_message";
@@ -378,7 +384,8 @@ function normalizeMessageAttachment(value: BackendChatAttachment): MessageAttach
     size: value.size,
     extension: value.extension,
     kind: value.kind,
-    state: value.state
+    state: value.state,
+    source: value.source
   };
 }
 
@@ -509,7 +516,8 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         actor: value.actor ?? null
       };
     }
-    case "assistant_message":
+    case "assistant_message": {
+      const attachments = (value.attachments ?? []).map(normalizeMessageAttachment);
       return {
         id: value.id,
         kind: "assistant",
@@ -518,8 +526,10 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         summary: preview(value.text),
         body: value.text,
         meta: [],
+        ...(attachments.length > 0 ? { attachments } : {}),
         actor: value.actor ?? null
       };
+    }
     case "system_message":
       const systemText = value.text;
       const isVerifiedSkillGate = systemText.trim().startsWith("Verified Skill Gate");
@@ -2456,9 +2466,25 @@ export async function generateMedia(input: GenerateMediaInput): Promise<Generate
   return client.request<GenerateMediaResult>("generate_media", input);
 }
 
-export async function readGeneratedMediaPreview(path: string): Promise<AttachmentPreviewResult> {
+export async function readGeneratedMediaPreview(
+  sessionId: string,
+  artifactId: string
+): Promise<AttachmentPreviewResult> {
   const client = await ensureLocalDaemonClient();
-  return client.request<AttachmentPreviewResult>("read_generated_media_preview", { path });
+  return client.request<AttachmentPreviewResult>("read_generated_media_preview", {
+    sessionId,
+    artifactId
+  });
+}
+
+export async function readMessageAttachmentPreview(
+  sessionId: string,
+  attachment: MessageAttachment
+): Promise<AttachmentPreviewResult> {
+  if (attachment.source.kind === "generated_media") {
+    return readGeneratedMediaPreview(sessionId, attachment.source.artifactId);
+  }
+  return readChatAttachmentPreview(sessionId, attachment.id);
 }
 
 export async function localModelStatus(modelId = "minicpm5"): Promise<LocalModelStatus> {

@@ -61,6 +61,7 @@ export type ComposerAttachmentDraft = {
   size: number;
   extension: string;
   kind: AgentTurnAttachmentKind;
+  source: { kind: "user_upload" };
   previewUrl?: string;
 };
 
@@ -108,6 +109,7 @@ export function attachmentPayloadFromDraft(
 export function messageAttachmentFromDraft(attachment: ComposerAttachmentDraft): MessageAttachment {
   return {
     ...attachmentPayloadFromDraft(attachment),
+    source: { kind: "user_upload" },
     file: attachment.file,
     previewUrl: attachment.previewUrl ?? null
   };
@@ -171,6 +173,7 @@ function createAttachmentDraft(file: File, id: string): ComposerAttachmentDraft 
     size: file.size,
     extension: formatAttachmentExtension(file),
     kind,
+    source: { kind: "user_upload" },
     ...(kind === "image" ? { previewUrl: URL.createObjectURL(file) } : {})
   };
 }

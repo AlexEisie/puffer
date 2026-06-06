@@ -48,8 +48,13 @@ export type AgentTurnAttachment = {
   kind: AgentTurnAttachmentKind;
 };
 
+export type AttachmentPreviewSource =
+  | { kind: "user_upload" }
+  | { kind: "generated_media"; artifactId: string };
+
 export type MessageAttachment = AgentTurnAttachment & {
   state?: AttachmentState;
+  source: AttachmentPreviewSource;
   file?: File;
   previewUrl?: string | null;
 };

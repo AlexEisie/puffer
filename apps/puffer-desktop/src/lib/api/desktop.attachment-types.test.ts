@@ -1,3 +1,4 @@
+import { expect, test } from "vitest";
 import type { AgentTurnOptions } from "./desktop";
 import type { AttachmentPreviewResult, MessageAttachment } from "../types";
 
@@ -11,12 +12,24 @@ const attachment: MessageAttachment = {
   extension: "PNG",
   kind: "image",
   state: "available",
+  source: { kind: "user_upload" },
   file,
   previewUrl: "blob:preview"
 };
 
 const turnOptions: AgentTurnOptions = {
   attachmentIds: [attachment.id]
+};
+
+const generatedAttachment: MessageAttachment = {
+  id: "generated-image:artifact-1",
+  name: "Generated image",
+  mimeType: "image/jpeg",
+  size: 4,
+  extension: "JPEG",
+  kind: "image",
+  state: "available",
+  source: { kind: "generated_media", artifactId: "artifact-1" }
 };
 
 const legacyTurnOptions: AgentTurnOptions = {
@@ -33,3 +46,7 @@ const preview: AttachmentPreviewResult = {
 void turnOptions;
 void legacyTurnOptions;
 void preview;
+
+test("message attachments support generated media preview sources", () => {
+  expect(generatedAttachment.source.kind).toBe("generated_media");
+});
