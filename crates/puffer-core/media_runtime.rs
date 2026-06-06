@@ -85,11 +85,45 @@ pub enum GeneratedMediaPreviewResult {
     Unsupported,
 }
 
+/// Carries generated image attachment metadata without image bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedMediaAttachmentMetadata {
+    pub artifact_id: String,
+    pub mime_type: String,
+    pub byte_count: u64,
+    pub state: String,
+}
+
 /// Carries trusted media discovery results used by capability resolution.
 #[derive(Debug, Clone)]
 pub struct ExactMediaDiscoveryCache {
     inner: MediaDiscoveryCache,
     cached_at_ms: u64,
+}
+
+/// Loads generated image metadata by artifact id.
+pub fn generated_media_attachment_metadata(
+    workspace_root: impl AsRef<Path>,
+    artifact_id: &str,
+) -> Option<GeneratedMediaAttachmentMetadata> {
+    let service = MediaGenerationService::new(workspace_root.as_ref());
+    let artifact = service.load_artifact(artifact_id).ok()?;
+    if artifact.kind != MediaKind::Image {
+        return None;
+    }
+    let state = if artifact.path.is_file() {
+        "available"
+    } else {
+        "missing"
+    };
+    Some(GeneratedMediaAttachmentMetadata {
+        artifact_id: artifact.id,
+        mime_type: canonical_generated_image_mime_type(&artifact.path, Some(&artifact.mime_type))
+            .unwrap_or_else(|| artifact.mime_type.clone()),
+        byte_count: artifact.byte_count,
+        state: state.to_string(),
+    })
 }
 
 /// Reads preview bytes for a generated image below the workspace image directory.
@@ -98,12 +132,34 @@ pub fn read_generated_media_preview(
     path: impl AsRef<Path>,
 ) -> GeneratedMediaPreviewResult {
     let image_root = generated_media_image_root(workspace_root.as_ref());
-    read_generated_media_preview_from_root(&image_root, path.as_ref())
+    read_generated_media_preview_from_root_with_mime(&image_root, path.as_ref(), None)
 }
 
-fn read_generated_media_preview_from_root(
+/// Reads generated image preview bytes by artifact id.
+pub fn read_generated_media_preview_by_artifact(
+    workspace_root: impl AsRef<Path>,
+    artifact_id: &str,
+) -> GeneratedMediaPreviewResult {
+    let service = MediaGenerationService::new(workspace_root.as_ref());
+    let artifact = match service.load_artifact(artifact_id) {
+        Ok(artifact) => artifact,
+        Err(_) => return GeneratedMediaPreviewResult::Missing,
+    };
+    if artifact.kind != MediaKind::Image {
+        return GeneratedMediaPreviewResult::Unsupported;
+    }
+    let image_root = generated_media_image_root(workspace_root.as_ref());
+    read_generated_media_preview_from_root_with_mime(
+        &image_root,
+        &artifact.path,
+        Some(&artifact.mime_type),
+    )
+}
+
+fn read_generated_media_preview_from_root_with_mime(
     image_root: &Path,
     path: &Path,
+    sidecar_mime_type: Option<&str>,
 ) -> GeneratedMediaPreviewResult {
     let canonical_path = match std::fs::canonicalize(path) {
         Ok(path) => path,
@@ -133,15 +189,18 @@ fn read_generated_media_preview_from_root(
     if !metadata.is_file() {
         return GeneratedMediaPreviewResult::Unsupported;
     }
-    let Some(mime_type) = generated_image_mime_type(&canonical_path) else {
-        return GeneratedMediaPreviewResult::Unsupported;
-    };
-    let bytes = match std::fs::read(canonical_path) {
+    let bytes = match std::fs::read(&canonical_path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == ErrorKind::NotFound => {
             return GeneratedMediaPreviewResult::Missing;
         }
         Err(_) => return GeneratedMediaPreviewResult::Missing,
+    };
+    let Some(mime_type) = sniff_generated_image_mime_type(&bytes)
+        .or_else(|| canonical_sidecar_image_mime_type(sidecar_mime_type))
+        .or_else(|| generated_image_mime_type(&canonical_path))
+    else {
+        return GeneratedMediaPreviewResult::Unsupported;
     };
     GeneratedMediaPreviewResult::Available {
         mime_type: mime_type.to_string(),
@@ -178,6 +237,39 @@ fn lexical_normalize_path(path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+fn canonical_sidecar_image_mime_type(value: Option<&str>) -> Option<&'static str> {
+    match value?.trim().to_ascii_lowercase().as_str() {
+        "image/png" => Some("image/png"),
+        "image/jpeg" | "image/jpg" => Some("image/jpeg"),
+        "image/webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+fn canonical_generated_image_mime_type(
+    path: &Path,
+    sidecar_mime_type: Option<&str>,
+) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    sniff_generated_image_mime_type(&bytes)
+        .or_else(|| canonical_sidecar_image_mime_type(sidecar_mime_type))
+        .or_else(|| generated_image_mime_type(path))
+        .map(str::to_string)
+}
+
+fn sniff_generated_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']) {
+        return Some("image/png");
+    }
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
 }
 
 fn generated_image_mime_type(path: &Path) -> Option<&'static str> {
@@ -715,6 +807,99 @@ mod tests {
         let result = read_generated_media_preview(workspace.path(), &link);
 
         assert_eq!(result, GeneratedMediaPreviewResult::Unsupported);
+    }
+
+    #[test]
+    fn generated_media_preview_by_artifact_uses_sidecar_path() {
+        let workspace = tempfile::tempdir().unwrap();
+        let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+        let image_path = service
+            .write_image_artifact_bytes("artifact-1", "image.jpeg", &[0xff, 0xd8, 0xff, 0xd9])
+            .unwrap();
+        service
+            .save_artifact(&crate::runtime::media::MediaArtifact {
+                id: "artifact-1".to_string(),
+                job_id: "job-1".to_string(),
+                kind: crate::runtime::media::MediaKind::Image,
+                path: image_path,
+                mime_type: "image/jpeg".to_string(),
+                byte_count: 4,
+                metadata: serde_json::json!({}),
+                created_at_ms: 1,
+            })
+            .unwrap();
+
+        let result = read_generated_media_preview_by_artifact(workspace.path(), "artifact-1");
+
+        assert_eq!(
+            result,
+            GeneratedMediaPreviewResult::Available {
+                mime_type: "image/jpeg".to_string(),
+                bytes: vec![0xff, 0xd8, 0xff, 0xd9],
+            }
+        );
+    }
+
+    #[test]
+    fn generated_media_preview_by_artifact_rejects_symlink_escape() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_image = outside.path().join("image.jpeg");
+        std::fs::write(&outside_image, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
+        let link_dir = workspace.path().join(".puffer/media/images/artifact-1");
+        std::fs::create_dir_all(&link_dir).unwrap();
+        let link = link_dir.join("image.jpeg");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside_image, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&outside_image, &link).unwrap();
+
+        let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+        service
+            .save_artifact(&crate::runtime::media::MediaArtifact {
+                id: "artifact-1".to_string(),
+                job_id: "job-1".to_string(),
+                kind: crate::runtime::media::MediaKind::Image,
+                path: link,
+                mime_type: "image/jpeg".to_string(),
+                byte_count: 4,
+                metadata: serde_json::json!({}),
+                created_at_ms: 1,
+            })
+            .unwrap();
+
+        assert_eq!(
+            read_generated_media_preview_by_artifact(workspace.path(), "artifact-1"),
+            GeneratedMediaPreviewResult::Unsupported
+        );
+    }
+
+    #[test]
+    fn generated_media_preview_by_artifact_sniffs_mime_when_extension_lies() {
+        let workspace = tempfile::tempdir().unwrap();
+        let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+        let image_path = service
+            .write_image_artifact_bytes("artifact-1", "image.png", &[0xff, 0xd8, 0xff, 0xd9])
+            .unwrap();
+        service
+            .save_artifact(&crate::runtime::media::MediaArtifact {
+                id: "artifact-1".to_string(),
+                job_id: "job-1".to_string(),
+                kind: crate::runtime::media::MediaKind::Image,
+                path: image_path,
+                mime_type: "image/png".to_string(),
+                byte_count: 4,
+                metadata: serde_json::json!({}),
+                created_at_ms: 1,
+            })
+            .unwrap();
+
+        let result = read_generated_media_preview_by_artifact(workspace.path(), "artifact-1");
+
+        assert!(matches!(
+            result,
+            GeneratedMediaPreviewResult::Available { mime_type, .. } if mime_type == "image/jpeg"
+        ));
     }
 
     #[test]
