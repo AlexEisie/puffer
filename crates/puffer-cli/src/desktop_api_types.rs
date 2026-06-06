@@ -107,6 +107,17 @@ pub(crate) struct ChatAttachmentDto {
     pub(crate) extension: String,
     pub(crate) kind: String,
     pub(crate) state: String,
+    pub(crate) source: ChatAttachmentSourceDto,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ChatAttachmentSourceDto {
+    UserUpload,
+    GeneratedMedia {
+        #[serde(rename = "artifactId")]
+        artifact_id: String,
+    },
 }
 
 impl ChatAttachmentDto {
@@ -131,6 +142,7 @@ impl ChatAttachmentDto {
                 StoredAttachmentKind::File => "file".to_string(),
             },
             state: state.to_string(),
+            source: ChatAttachmentSourceDto::UserUpload,
         }
     }
 }
@@ -158,6 +170,7 @@ pub(crate) enum TimelineItemDto {
     AssistantMessage {
         id: String,
         text: String,
+        attachments: Vec<ChatAttachmentDto>,
         #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
     },
