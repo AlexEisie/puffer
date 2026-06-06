@@ -14,12 +14,13 @@
 
   type Props = {
     kind: MediaKind;
+    sessionCwd: string;
     settings: MediaSettings;
     settingsReady?: boolean;
     onClose: () => void;
   };
 
-  let { kind, settings, settingsReady = true, onClose }: Props = $props();
+  let { kind, sessionCwd, settings, settingsReady = true, onClose }: Props = $props();
   const initialSaved = untrack(() => mediaSettingsForKind(kind, settings));
   const initialImage = untrack(() => settings.image);
   const initialVideo = untrack(() => settings.video);

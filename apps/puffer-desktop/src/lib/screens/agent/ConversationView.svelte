@@ -2493,6 +2493,7 @@
   {#if mediaSettingsKind}
     <MediaSettingsModal
       kind={mediaSettingsKind}
+      sessionCwd={session?.cwd ?? ""}
       settings={settingsSnapshot?.config.media ?? DEFAULT_MEDIA_SETTINGS}
       settingsReady={settingsSnapshot !== null}
       onClose={closeMediaSettings}
