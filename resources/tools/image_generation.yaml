@@ -2,13 +2,13 @@ id: ImageGeneration
 name: ImageGeneration
 description: |-
   Generate one image through Puffer's configured image media settings and
-  write the resulting image artifact into the workspace.
+  write the resulting image artifact into the workspace image folder.
 
   Use this for verified Lambda Skill contracts that have a concrete image
   prompt and optional aspect ratio. The tool reads a workspace-relative prompt
   file when the prompt value names one; otherwise it treats prompt as literal
-  text. Output paths must be workspace-relative. The result includes media
-  job and artifact metadata.
+  text. Output paths are image-folder-relative when provided. The result
+  includes media job and artifact metadata.
 handler: runtime:workflow:image_generation
 approval_policy: ask
 sandbox_policy: network

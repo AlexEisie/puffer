@@ -302,6 +302,10 @@ fn apply_aspect_parameter(
     bail!("selected image model does not support ImageGeneration aspect")
 }
 
+fn image_output_root(cwd: &Path) -> PathBuf {
+    cwd.join(IMAGE_OUTPUT_DIR_RELATIVE)
+}
+
 fn resolve_output_path(cwd: &Path, value: Option<&str>, output_format: &str) -> Result<PathBuf> {
     let relative = value
         .map(str::trim)
@@ -311,8 +315,7 @@ fn resolve_output_path(cwd: &Path, value: Option<&str>, output_format: &str) -> 
     if !safe_relative_path(&relative) {
         bail!("ImageGeneration outputPath must be a safe relative path");
     }
-    let image_root = cwd.join(IMAGE_OUTPUT_DIR_RELATIVE);
-    Ok(image_root.join(relative))
+    Ok(image_output_root(cwd).join(relative))
 }
 
 fn default_output_filename(output_format: &str) -> String {
@@ -320,7 +323,10 @@ fn default_output_filename(output_format: &str) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    format!("generated-{stamp}.{}", extension_for_output_format(output_format))
+    format!(
+        "generated-{stamp}.{}",
+        extension_for_output_format(output_format)
+    )
 }
 
 fn extension_for_output_format(format: &str) -> &'static str {
@@ -540,6 +546,10 @@ mod tests {
         }
     }
 
+    fn image_output_path(cwd: &Path, relative: &str) -> PathBuf {
+        image_output_root(cwd).join(relative)
+    }
+
     fn read_http_request(stream: &mut std::net::TcpStream) -> String {
         let mut buffer = [0_u8; 8192];
         let size = stream.read(&mut buffer).expect("read request");
@@ -649,16 +659,15 @@ mod tests {
     #[test]
     fn resolve_output_path_roots_outputs_in_image_folder() {
         let dir = tempdir().unwrap();
-        let image_root = dir.path().join(".puffer/workflows/images");
+        let image_root = image_output_root(dir.path());
 
         let default_path = resolve_output_path(dir.path(), None, "webp").unwrap();
         assert_eq!(default_path.parent(), Some(image_root.as_path()));
-        assert!(
-            default_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .is_some_and(|value| value.starts_with("generated-"))
-        );
+        let default_name = default_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap();
+        assert!(default_name.starts_with("generated-"));
         assert_eq!(
             default_path.extension().and_then(|value| value.to_str()),
             Some("webp")
@@ -666,20 +675,16 @@ mod tests {
 
         assert_eq!(
             resolve_output_path(dir.path(), Some("cup.png"), "png").unwrap(),
-            image_root.join("cup.png")
+            image_output_path(dir.path(), "cup.png")
         );
         assert_eq!(
             resolve_output_path(dir.path(), Some("drafts/cup.png"), "png").unwrap(),
-            image_root.join("drafts/cup.png")
+            image_output_path(dir.path(), "drafts/cup.png")
         );
         assert_eq!(
-            resolve_output_path(
-                dir.path(),
-                Some(".puffer/workflows/images/cup.png"),
-                "png"
-            )
-            .unwrap(),
-            image_root.join(".puffer/workflows/images/cup.png")
+            resolve_output_path(dir.path(), Some(".puffer/workflows/images/cup.png"), "png")
+                .unwrap(),
+            image_output_path(dir.path(), ".puffer/workflows/images/cup.png")
         );
     }
 
@@ -739,7 +744,7 @@ mod tests {
         assert_eq!(request.parameters["size"], "1024x1024");
         assert_eq!(
             request.output_path,
-            dir.path().join(".puffer/workflows/images/out/image.png")
+            image_output_path(dir.path(), "out/image.png")
         );
     }
 
@@ -1007,20 +1012,14 @@ mod tests {
         assert!(request_text.starts_with("POST /custom/images HTTP/1.1"));
         assert!(request_text.contains("\"model\":\"exact-image-model\""));
         assert_eq!(
-            fs::read(
-                dir.path()
-                    .join(".puffer/workflows/images/requested/ship.png")
-            )
-            .unwrap(),
+            fs::read(image_output_path(dir.path(), "requested/ship.png")).unwrap(),
             b"image-bytes"
         );
         assert!(dir.path().join(".puffer/media/jobs").is_dir());
         assert!(dir.path().join(".puffer/media/artifact-sidecars").is_dir());
 
         let parsed: Value = serde_json::from_str(&output).unwrap();
-        let expected_path = dir
-            .path()
-            .join(".puffer/workflows/images/requested/ship.png");
+        let expected_path = image_output_path(dir.path(), "requested/ship.png");
         assert_eq!(
             parsed["path"].as_str(),
             Some(expected_path.to_str().unwrap())

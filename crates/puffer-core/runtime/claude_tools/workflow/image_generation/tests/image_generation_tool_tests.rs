@@ -36,11 +36,7 @@ fn execute_uses_discovery_cache_for_chat_image_output_model() {
     assert!(request_text.starts_with("POST /chat/completions HTTP/1.1"));
     assert!(request_text.contains("\"model\":\"openrouter/image-chat\""));
     assert_eq!(
-        fs::read(
-            dir.path()
-                .join(".puffer/workflows/images/requested/ship.png")
-        )
-        .unwrap(),
+        fs::read(image_output_path(dir.path(), "requested/ship.png")).unwrap(),
         b"image-bytes"
     );
     let parsed: Value = serde_json::from_str(&output).unwrap();
@@ -92,11 +88,7 @@ fn dispatcher_passes_media_context_to_image_generation_tool() {
     assert!(request_text.starts_with("POST /custom/images HTTP/1.1"));
     assert!(request_text.contains("\"model\":\"exact-image-model\""));
     assert_eq!(
-        fs::read(
-            dir.path()
-                .join(".puffer/workflows/images/requested/routed.png")
-        )
-        .unwrap(),
+        fs::read(image_output_path(dir.path(), "requested/routed.png")).unwrap(),
         b"image-bytes"
     );
 }
