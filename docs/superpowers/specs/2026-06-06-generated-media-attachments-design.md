@@ -1,7 +1,7 @@
 # Generated Media Attachments Design
 
 - Date: 2026-06-06
-- Status: Approved design, pending implementation
+- Status: Revised design, pending implementation
 - Scope: Durable preview model for `ImageGeneration` results in desktop chat
 
 ## Summary
@@ -13,8 +13,12 @@ opens the existing attachment overlay for large-image preview. The
 details, but it is not the primary media display surface.
 
 This design intentionally does not preserve older DTO behavior. The target
-schema should model generated media explicitly instead of rebuilding previews
-from local path text.
+schema models generated media explicitly instead of rebuilding previews from
+local path text.
+
+This supersedes the narrower transient `/image` preview design. The transient
+path still describes a useful UI affordance, but the durable architecture below
+is the source of truth for implementation.
 
 ## Context
 
@@ -45,6 +49,8 @@ keeping the implementation narrow.
   by arbitrary transcript text.
 - Keep initial timeline loading lightweight by returning metadata before bytes.
 - Make preview reads stable across sessions with different cwd values.
+- Keep the implementation to a single generated-media attachment source, not a
+  broader artifact system.
 
 ## Non-Goals
 
@@ -58,6 +64,9 @@ keeping the implementation narrow.
 - Do not preserve legacy DTO shapes or add compatibility fallbacks for old
   frontends.
 - Do not introduce a cross-session media search index.
+- Do not reconstruct provider turns or infer ownership from model text.
+- Do not add a new global thumbnail cache; reuse the existing component-level
+  object URL lifecycle.
 
 ## Recommended Architecture
 
@@ -66,9 +75,23 @@ contract.
 
 `AssistantMessage` should be able to carry attachments, matching the way
 `UserMessage` already carries attachments. A generated media attachment should
-use the existing frontend `MessageAttachment` display contract while adding
-backend-only provenance fields where needed, such as artifact id and media
-source.
+use the existing frontend `MessageAttachment` display contract with one new
+typed preview source.
+
+The attachment source should be explicit:
+
+```json
+{ "kind": "user_upload" }
+```
+
+or:
+
+```json
+{ "kind": "generated_media", "artifactId": "<artifact uuid>" }
+```
+
+This avoids string prefixes, arbitrary path previews, and frontend parsing of
+tool output JSON.
 
 The backend should synthesize these attachments from structured
 `ImageGeneration` results and media sidecars:
@@ -78,10 +101,10 @@ The backend should synthesize these attachments from structured
 2. Parse the tool output JSON for `artifactId`, `jobId`, `path`, and status.
 3. Prefer the artifact sidecar for canonical path, MIME type, byte count, and
    metadata.
-4. Attach the generated image to the nearest following assistant message in the
-   same visible turn.
-5. If there is no following assistant message, emit a small assistant timeline
-   item with empty body and the generated attachment.
+4. Buffer generated attachments in a single linear pass over transcript events.
+5. Attach the buffer to the next assistant message.
+6. Flush the buffer as a minimal assistant item when a non-tool event breaks
+   the assistant response or when the transcript ends.
 
 This keeps generated images visible in the conversation, while the tool
 invocation remains in agent activity for debugging.
@@ -103,8 +126,8 @@ Generated image attachment fields should include:
 - `extension`: derived from canonical MIME.
 - `kind`: `image`.
 - `state`: `available` or `missing`.
-- backend provenance: artifact id, session id, and source type if needed for
-  preview reads.
+- `source`: `{ kind: "user_upload" }` or
+  `{ kind: "generated_media", artifactId: "<artifact uuid>" }`.
 
 The frontend should not need to parse `ImageGeneration` JSON to display a
 persisted generated image. It should receive normal timeline attachments and
@@ -113,8 +136,8 @@ render them through existing components.
 ## Preview Read Contract
 
 Replace the path-only generated preview read with a session-aware generated
-media preview request. The request should identify media by session id and
-artifact id, not only by absolute path.
+media preview request. The request identifies media by session id and artifact
+id, not by absolute path.
 
 Recommended request shape:
 
@@ -130,8 +153,8 @@ The backend resolves this request by:
 1. Loading the target session metadata.
 2. Loading the media artifact sidecar by artifact id.
 3. Validating that the artifact belongs to generated media and is an image.
-4. Validating that the canonical file path is under the session's generated
-   media root or trusted media artifact root.
+4. Validating that the canonical file path is under the target session's
+   `.puffer/media/images` root.
 5. Returning bytes and canonical MIME type, or `missing` / `unsupported`.
 
 Absolute path reads may remain as an internal helper, but the public desktop
@@ -148,7 +171,7 @@ MIME should not be inferred from filename extension alone. Use this precedence:
 Path validation should be strict:
 
 - Accept only files associated with a media artifact sidecar.
-- Reject paths outside the session media root or trusted artifact root.
+- Reject paths outside the target session's `.puffer/media/images` root.
 - Reject symlink escapes after canonicalization.
 - Return `missing` for known artifact files that no longer exist.
 - Return `unsupported` for non-image artifacts or invalid provenance.
@@ -169,6 +192,12 @@ attachments:
 - keep object URL creation and revocation within the existing attachment
   preview lifecycle.
 
+`MessageAttachmentPreviewStrip` should use a small frontend helper that reads
+previews based on `attachment.source`:
+
+- `user_upload` uses the existing chat attachment preview request;
+- `generated_media` uses the new session-aware generated media preview request.
+
 The `ImageGeneration` tool card should remain a standard activity item. It may
 display structured execution details, but it should not be the only place where
 the generated image is visible.
@@ -179,7 +208,8 @@ the generated image is visible.
 ImageGeneration tool succeeds
   -> tool output includes artifactId/jobId/path/status
   -> media artifact sidecar stores canonical image metadata
-  -> session timeline loader synthesizes assistant attachment metadata
+  -> session timeline loader buffers generated attachment metadata
+  -> next assistant message receives the generated attachments
   -> frontend normalizes attachment through existing MessageAttachment shape
   -> thumbnail component lazily requests preview bytes by sessionId + artifactId
   -> attachment overlay displays the same preview object URL
@@ -193,8 +223,8 @@ the source of file identity and image metadata.
 - Do not include image bytes in timeline responses.
 - Return only attachment metadata during session load.
 - Lazy-load thumbnails when the message attachment strip mounts.
-- Cache preview bytes or object URLs by `sessionId + artifactId` in the
-  frontend for the lifetime of the loaded session view.
+- Use the existing component-local object URL map for previews. Do not add a
+  separate thumbnail cache layer.
 - Revoke object URLs on session switches, timeline replacement, and overlay
   close, following the existing attachment cleanup pattern.
 - Avoid scanning the filesystem during timeline load. Read only sidecars
@@ -207,8 +237,8 @@ artifacts, not to media directory size.
 
 - Successful tool output with readable image artifact: show thumbnail.
 - Successful tool output with missing file: show unavailable image placeholder.
-- Missing or malformed sidecar but existing structured path: return missing or
-  unsupported instead of exposing the path.
+- Missing or malformed sidecar: return `missing` or `unsupported` instead of
+  falling back to absolute path preview.
 - MIME mismatch: use sidecar or byte-sniffed MIME for display and blob
   creation.
 - Unsupported artifact: omit preview bytes and keep the tool log available.
@@ -239,6 +269,7 @@ Frontend coverage:
 - missing previews show the unavailable thumbnail treatment;
 - normal user image attachments still render and open unchanged;
 - `ImageGeneration` remains available in agent activity as a tool card.
+- frontend does not parse `ImageGeneration` output JSON for persisted previews.
 
 ## Scope Guard
 
@@ -251,8 +282,9 @@ The implementation should stay within:
 - targeted tests for those paths.
 
 Do not add a media gallery, full artifact browser, arbitrary path previewing,
-or cross-session index. If implementation starts requiring any of those, split
-that into a separate design.
+cross-session index, provider-turn reconstruction, or standalone cache service.
+If implementation starts requiring any of those, split that into a separate
+design.
 
 ## Long-Term Benefit
 
