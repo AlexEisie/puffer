@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
   import { onMount, untrack } from "svelte";
   import { listMediaCapabilities, updateConfig } from "../../api/desktop";
   import Icon from "../../design/Icon.svelte";
@@ -21,6 +22,7 @@
   };
 
   let { kind, sessionCwd, settings, settingsReady = true, onClose }: Props = $props();
+  const IMAGE_OUTPUT_DIR_SUFFIX = "/.puffer/workflows/images";
   const initialSaved = untrack(() => mediaSettingsForKind(kind, settings));
   const initialImage = untrack(() => settings.image);
   const initialVideo = untrack(() => settings.video);
@@ -29,6 +31,9 @@
   const saveLabel = $derived(kind === "image" ? "Save" : `Save ${title.toLowerCase()}`);
   const closeLabel = $derived(`Close ${title.toLowerCase()}`);
   const saved = $derived(mediaSettingsForKind(kind, settings));
+  const imageDir = $derived(
+    sessionCwd ? `${sessionCwd.replace(/\/+$/, "")}${IMAGE_OUTPUT_DIR_SUFFIX}` : ""
+  );
   const aspectRatioOptions = ["16:9"];
   const durationOptions = [8];
 
@@ -36,6 +41,7 @@
   let loading = $state(true);
   let saving = $state(false);
   let error = $state<string | null>(null);
+  let openError = $state<string | null>(null);
   let providerId = $state(initialSaved.providerId ?? "");
   let modelId = $state(initialSaved.modelId ?? "");
   let adapter = $state(initialImage.adapter ?? "");
@@ -260,6 +266,15 @@
     }
   }
 
+  async function openImageDir() {
+    openError = null;
+    try {
+      await invoke("open_image_dir", { cwd: sessionCwd });
+    } catch (openDirError) {
+      openError = String(openDirError);
+    }
+  }
+
   function close() {
     onClose();
   }
@@ -403,6 +418,26 @@
                   </select>
                 </label>
               {/each}
+            {/if}
+            {#if imageDir}
+              <label class="pf-media-field">
+                <span class="pf-field-label">Image folder</span>
+                <div class="pf-media-path-row">
+                  <input class="sc-input" type="text" readonly value={imageDir} />
+                  <button
+                    type="button"
+                    class="sc-btn"
+                    data-variant="ghost"
+                    data-size="sm"
+                    onclick={openImageDir}
+                  >
+                    Open folder
+                  </button>
+                </div>
+              </label>
+              {#if openError}
+                <p class="pf-media-open-error" role="alert">{openError}</p>
+              {/if}
             {/if}
           {:else}
             <label class="pf-media-field">
@@ -572,6 +607,33 @@
   .pf-media-field select {
     width: 100%;
     min-width: 0;
+  }
+
+  .pf-media-path-row {
+    display: flex;
+    min-width: 0;
+    gap: 8px;
+  }
+
+  .pf-media-path-row input {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .pf-media-path-row button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .pf-media-open-error {
+    margin: -2px 0 0;
+    border: 1px solid color-mix(in oklab, var(--destructive) 30%, var(--border));
+    border-radius: 8px;
+    padding: 8px 10px;
+    color: var(--foreground);
+    background: color-mix(in oklab, var(--destructive) 8%, var(--background));
+    font-size: 12px;
+    line-height: 1.4;
   }
 
   .pf-media-state {
