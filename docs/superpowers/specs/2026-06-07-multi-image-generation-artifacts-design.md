@@ -50,6 +50,7 @@ identity assumptions.
   new gallery system.
 - Prefer provider-native multi-image execution when available.
 - Keep the implementation narrow and avoid a generic artifact container.
+- Avoid derived fields that can drift from persisted artifact ids.
 
 ## Non-Goals
 
@@ -61,12 +62,16 @@ identity assumptions.
 - Do not preserve old single `artifactId` or `path` response fields.
 - Do not make preview reads accept artifact indexes or arbitrary file paths.
 - Do not add complex partial retry UI.
+- Do not add `count` to persisted media settings or user-selectable provider
+  parameters.
 
 ## Recommended Architecture
 
 Add a count-aware image generation path that normalizes every adapter into a
-vector of image outputs. Runtime code should own the conversion from provider
-outputs to persisted artifacts.
+vector of image outputs. Keep the implementation in the current media adapter
+shape: adapters resolve provider responses and persist artifacts through
+`MediaGenerationService`; the top-level runtime selects an adapter and maps the
+persisted artifacts into the public result.
 
 The request lifecycle:
 
@@ -109,6 +114,17 @@ The same `count` field should be available to desktop `generate_media` image
 requests. Chat text may be interpreted by the agent, but the runtime contract
 only consumes the explicit count.
 
+`count` is a runtime request field, not a media settings parameter. The runtime
+may map it to a provider field such as `n` when the selected adapter supports
+native multi-output generation, but users should not configure `n` through
+global image defaults.
+
+Provider count fields must be written as typed request fields. Do not route
+`count` through the existing string-valued media `parameters` map, because that
+would serialize numeric provider fields such as `n` as strings.
+Provider descriptors must not expose `n` or equivalent count fields as
+user-selectable media parameters.
+
 ## Result Contract
 
 Replace single-artifact generation responses with:
@@ -121,6 +137,7 @@ type GenerateMediaResult = {
   modelId: string;
   status: "succeeded" | "failed";
   prompt: string;
+  requestedCount: number;
   artifacts: GeneratedMediaArtifact[];
 };
 
@@ -146,6 +163,7 @@ Change the exact image result from single artifact to multiple artifacts:
 ```rust
 pub struct ExactImageGenerationResult {
     pub job_id: String,
+    pub requested_count: u8,
     pub artifacts: Vec<ExactGeneratedArtifact>,
     pub provider_id: String,
     pub model_id: String,
@@ -161,7 +179,7 @@ pub struct ExactGeneratedArtifact {
 }
 ```
 
-Adapters should return a small internal vector:
+Adapters should normalize provider responses into a small internal vector:
 
 ```rust
 struct ImageOutput {
@@ -171,9 +189,10 @@ struct ImageOutput {
 }
 ```
 
-The media runtime, not each caller, should persist `Vec<ImageOutput>` into
-artifacts. This keeps path validation, MIME detection, job attachment, and
-sidecar writing in one place.
+Each adapter should persist `Vec<ImageOutput>` into one job's artifacts using
+the existing `MediaGenerationService` APIs. A tiny shared helper for the
+repeated "write artifact, save sidecar, attach id" sequence is acceptable only
+if it stays image-specific and does not become a generic batch framework.
 
 ## Adapter Strategy
 
@@ -181,10 +200,11 @@ Use provider-native multi-image generation when it is deterministic and
 validated by the adapter.
 
 - `images_json`: send provider-supported `n` or equivalent count when the
-  selected capability exposes it. Parse all `data[]` entries instead of only
-  the first.
+  adapter supports it. Parse all `data[]` entries instead of only the first.
 - `chat_image_output`: parse all image outputs from choices, message images,
-  and content parts in stable response order.
+  and content parts in stable response order. Because this adapter has no
+  explicit typed count field today, repeat single-image calls serially until
+  `count` outputs are collected or all attempts fail.
 - adapters without native count support: execute repeated single-image calls
   under the same job. Start with serial execution for stability and rate-limit
   safety. This design does not add parallel execution.
@@ -201,10 +221,15 @@ The job sidecar owns grouping state:
 {
   "id": "<job uuid>",
   "artifactIds": ["<artifact uuid 1>", "<artifact uuid 2>"],
-  "requestedCount": 2,
-  "producedCount": 2
+  "requestedCount": 2
 }
 ```
+
+Do not persist `producedCount`. The produced count is
+`artifactIds.length`; storing it separately creates a second source of truth.
+Do not persist per-image failure lists in this change. For partial success, the
+requested count and artifact id list are enough to observe a shortfall without
+creating a retry model.
 
 Each artifact sidecar remains single-file scoped. Add only narrow metadata:
 
@@ -269,15 +294,16 @@ make the read path slower and more fragile without improving safety.
 
 Use a simple partial-success model:
 
-- `0` produced images: job `failed`, result has `artifacts: []`.
+- `0` produced images: job `failed`; the tool or RPC returns an error after
+  saving the failed job sidecar.
 - `1..count` produced images: job `succeeded`, result includes the produced
   artifacts.
-- The job metadata records `requestedCount`, `producedCount`, and provider
-  error text when some repeated calls failed.
+- The job metadata records `requestedCount`. A partial shortfall is observable
+  when `artifactIds.length < requestedCount`.
 
 Do not drop successfully generated images because a subsequent output failed.
-Do not add per-image retry UI in this change. A future retry can be another
-generation job with a new job id.
+Do not add per-image retry UI, partial-warning fields, or a partial status in
+this change. A future retry can be another generation job with a new job id.
 
 ## Performance
 
@@ -297,6 +323,8 @@ Core tests:
 - `images_json` persists every item in `data[]` up to requested count.
 - Generated artifacts have unique ids and stable indexes.
 - One job sidecar records every artifact id.
+- The job sidecar stores `requestedCount`; produced count is derived from
+  `artifactIds`.
 - Artifact sidecars point at distinct files under
   `.puffer/media/images/<artifact-id>/`.
 - Preview reads work for every generated artifact.
