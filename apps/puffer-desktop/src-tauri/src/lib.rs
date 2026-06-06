@@ -524,7 +524,6 @@ mod tests {
     use super::REGISTERED_TAURI_COMMANDS;
     use serde_json::json;
     use std::collections::BTreeSet;
-    use tauri::AppHandle;
 
     fn direct_invoke_commands(source: &str) -> BTreeSet<String> {
         let mut commands = BTreeSet::new();
@@ -564,6 +563,9 @@ mod tests {
         invoked.extend(direct_invoke_commands(include_str!(
             "../../src/lib/api/daemonClient.ts"
         )));
+        invoked.extend(direct_invoke_commands(include_str!(
+            "../../src/lib/screens/agent/MediaSettingsModal.svelte"
+        )));
         let registered = REGISTERED_TAURI_COMMANDS
             .iter()
             .copied()
@@ -588,17 +590,6 @@ mod tests {
 
         assert!(registered.contains("stage_chat_attachment"));
         assert!(registered.contains("read_chat_attachment_preview"));
-    }
-
-    #[test]
-    fn registered_tauri_commands_include_open_image_dir() {
-        let registered = REGISTERED_TAURI_COMMANDS
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
-
-        assert!(registered.contains("open_image_dir"));
-        let _command: fn(AppHandle, String) -> Result<(), String> = super::open_image_dir;
     }
 
     #[test]

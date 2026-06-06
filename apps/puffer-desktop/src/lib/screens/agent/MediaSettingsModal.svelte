@@ -22,7 +22,7 @@
   };
 
   let { kind, sessionCwd, settings, settingsReady = true, onClose }: Props = $props();
-  const IMAGE_OUTPUT_DIR_SUFFIX = "/.puffer/workflows/images";
+  const IMAGE_OUTPUT_DIR_RELATIVE = ".puffer/workflows/images";
   const initialSaved = untrack(() => mediaSettingsForKind(kind, settings));
   const initialImage = untrack(() => settings.image);
   const initialVideo = untrack(() => settings.video);
@@ -31,9 +31,7 @@
   const saveLabel = $derived(kind === "image" ? "Save" : `Save ${title.toLowerCase()}`);
   const closeLabel = $derived(`Close ${title.toLowerCase()}`);
   const saved = $derived(mediaSettingsForKind(kind, settings));
-  const imageDir = $derived(
-    sessionCwd ? `${sessionCwd.replace(/\/+$/, "")}${IMAGE_OUTPUT_DIR_SUFFIX}` : ""
-  );
+  const imageDir = $derived(imageDirForSessionCwd(sessionCwd));
   const aspectRatioOptions = ["16:9"];
   const durationOptions = [8];
 
@@ -195,6 +193,12 @@
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, val]) => `${key}=${val}`)
       .join("\u0000");
+  }
+
+  function imageDirForSessionCwd(cwd: string): string {
+    if (!cwd) return "";
+    const base = cwd.replace(/[\\/]+$/, "");
+    return base ? `${base}/${IMAGE_OUTPUT_DIR_RELATIVE}` : `/${IMAGE_OUTPUT_DIR_RELATIVE}`;
   }
 
   function savedSelectionIsConfigured(mediaKind: MediaKind, mediaSettings: MediaSettings): boolean {
@@ -420,10 +424,16 @@
               {/each}
             {/if}
             {#if imageDir}
-              <label class="pf-media-field">
-                <span class="pf-field-label">Image folder</span>
+              <div class="pf-media-field">
+                <span id="pf-image-folder-label" class="pf-field-label">Image folder</span>
                 <div class="pf-media-path-row">
-                  <input class="sc-input" type="text" readonly value={imageDir} />
+                  <input
+                    class="sc-input"
+                    type="text"
+                    aria-labelledby="pf-image-folder-label"
+                    readonly
+                    value={imageDir}
+                  />
                   <button
                     type="button"
                     class="sc-btn"
@@ -434,7 +444,7 @@
                     Open folder
                   </button>
                 </div>
-              </label>
+              </div>
               {#if openError}
                 <p class="pf-media-open-error" role="alert">{openError}</p>
               {/if}

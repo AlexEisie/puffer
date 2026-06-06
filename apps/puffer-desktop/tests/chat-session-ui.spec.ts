@@ -303,7 +303,13 @@ test("composer image generation settings modal saves media config from daemon ca
   await expect(dialog).toBeVisible();
   await daemon.waitForRequest("list_media_capabilities", (request) => request.params.kind === "image");
   await expect(dialog.getByLabel("Provider")).toHaveValue("openai");
-  await expect(dialog.getByLabel("Model")).toHaveValue("gpt-image-1");
+  await expect(dialog.getByLabel("Model")).toHaveValue(
+    ["openai", "gpt-image-1", "images_json"].join("\u0000")
+  );
+  const imageFolder = dialog.getByLabel("Image folder");
+  await expect(imageFolder).toHaveValue("/tmp/puffer/.puffer/workflows/images");
+  await expect(imageFolder).toHaveJSProperty("readOnly", true);
+  await expect(dialog.getByRole("button", { name: "Open folder" })).toBeVisible();
   const sizeOptions = await dialog.getByLabel("Size").locator("option").evaluateAll((options) =>
     options.map((option) => (option as HTMLOptionElement).value)
   );
