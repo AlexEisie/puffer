@@ -312,6 +312,11 @@ test("composer image generation settings modal saves media config from daemon ca
   const openFolderButton = dialog.getByRole("button", { name: "Open folder" });
   await expect(openFolderButton).toBeVisible();
   await expect(openFolderButton).toHaveAttribute("data-variant", "outline");
+  const imageFolderBox = await imageFolder.boundingBox();
+  const openFolderButtonBox = await openFolderButton.boundingBox();
+  expect(imageFolderBox).not.toBeNull();
+  expect(openFolderButtonBox).not.toBeNull();
+  expect(openFolderButtonBox!.height).toBe(imageFolderBox!.height);
   const sizeOptions = await dialog.getByLabel("Size").locator("option").evaluateAll((options) =>
     options.map((option) => (option as HTMLOptionElement).value)
   );

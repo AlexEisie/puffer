@@ -438,7 +438,6 @@
                     type="button"
                     class="sc-btn"
                     data-variant="outline"
-                    data-size="sm"
                     onclick={openImageDir}
                   >
                     Open folder
