@@ -14,7 +14,8 @@ The long-term fix is intentionally small:
 - add focused UI and config tests for the save-and-reopen path.
 
 This design does not add a frontend settings store, daemon settings events, or
-session-specific media defaults.
+session-specific media defaults. It also avoids a second settings reload after
+save; the daemon response is already the fresh source of truth.
 
 ## Problem
 
@@ -53,9 +54,9 @@ root has a workspace config, user media settings can be lost on reload.
 
 ## Frontend Contract
 
-`updateConfig` already returns a fresh `SettingsSnapshot`. Settings components
-that save config must either pass that snapshot to the app-level settings owner
-or trigger the existing refresh path.
+`updateConfig` already returns a fresh `SettingsSnapshot`. For this modal, the
+returned snapshot must be passed to the app-level settings owner. Do not add a
+follow-up settings refresh as part of this save path.
 
 For the image generation modal, the preferred contract is:
 
@@ -77,16 +78,25 @@ The modal save flow becomes:
 3. Call `onSaved(snapshot)`.
 4. Close the modal.
 
+`onSaved` must run before `onClose`, so a fast reopen reads from the updated
+parent snapshot instead of the previous props. If the save fails, do not call
+`onSaved`.
+
 The callback should thread through the existing component chain:
 
 `App -> AgentDetail -> AgentDetailContent -> ConversationView -> MediaSettingsModal`
 
 `App` remains the owner of `settingsSnapshot` and updates it directly when
-`onSaved` receives a snapshot.
+`onSaved` receives a snapshot. If the app already has a helper for applying
+settings snapshots, use it; otherwise the implementation can assign
+`settingsSnapshot = snapshot` directly. No extra refresh request should be made
+for this modal save, because that adds latency and can reintroduce ordering
+races.
 
 This keeps ownership explicit and avoids a new state-management layer. The
 callback is narrow: it does not expose partial mutation helpers or component
-internals.
+internals. Thread it only through the active chat component path that opens the
+modal, not through unrelated settings or side-panel surfaces.
 
 ## Backend Contract
 
@@ -105,8 +115,11 @@ No backend API shape change is needed for this issue.
 `media` should be classified as a user-level preference. Workspace config may
 provide media defaults, but user config wins when both exist.
 
-The current anonymous tuple used by `load_config` should be replaced with a
-small internal `UserPreferenceSnapshot` struct. It should capture:
+The current anonymous tuple used by `load_config` is easy to miss when new
+user-level preferences are added. Prefer replacing it with a small private
+`UserPreferenceSnapshot` struct if that keeps the code clearer than extending
+the tuple. This is an internal readability guard only; do not introduce a
+public abstraction or a new config API. The captured fields are:
 
 - `default_provider`
 - `default_model`
@@ -141,18 +154,23 @@ capability resolution.
 
 Add focused coverage:
 
-- Playwright: open Image generation settings, change provider/model or
-  parameters, save, reopen, and assert the new provider/model/parameters are
-  displayed.
+- Playwright: extend the existing image-generation settings modal test to seed
+  at least two image capabilities, select a non-default provider/model or
+  adapter, save, close, reopen, and assert the new provider/model/parameters
+  are displayed.
 - Playwright: keep the existing assertion that `update_config` receives the
-  expected `media` payload.
-- Rust daemon test: `update_config` returns the saved media branch in
-  `response["config"]["media"]`.
+  expected `media` payload and that the fake daemon response is the snapshot
+  consumed by the UI.
+- Rust daemon test: keep or verify existing coverage that `update_config`
+  returns the saved media branch in `response["config"]["media"]`; add a new
+  daemon test only if that coverage is missing.
 - Rust config test: user media config is not overwritten by workspace config.
 - Rust config test: workspace media config applies when user config is absent.
 
 The UI test should use the fake daemon's returned snapshot instead of forcing a
 manual settings refresh. That specifically verifies the stale snapshot fix.
+Avoid a separate UI test file unless the existing focused test becomes too hard
+to read.
 
 ## Scope Guard
 
@@ -164,4 +182,5 @@ Implementation should remain in:
 - targeted tests
 
 If implementation requires a store, event bus, session schema, media runtime
-changes, or large settings refactor, stop and reduce scope.
+changes, manual settings reload after save, or large settings refactor, stop
+and reduce scope.
