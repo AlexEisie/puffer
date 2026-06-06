@@ -1,10 +1,12 @@
 use crate::dtos::{
-    AgentDiffDto, AgentDiffEntryDto, AgentDiffFileDto, ChatAttachmentDto, DiffSummaryDto,
-    DivergenceReportDto, FolderGroupDto, SessionDetailDto, SessionListItemDto, TimelineItemDto,
+    AgentDiffDto, AgentDiffEntryDto, AgentDiffFileDto, ChatAttachmentDto, ChatAttachmentSourceDto,
+    DiffSummaryDto, DivergenceReportDto, FolderGroupDto, SessionDetailDto, SessionListItemDto,
+    TimelineItemDto,
 };
 use crate::repo_actions;
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
+use puffer_core::generated_media_attachment_metadata;
 use puffer_session_store::{
     GitDiffSnapshot, MessageActor, SessionRecord, SessionStore, TranscriptEvent,
 };
@@ -449,6 +451,7 @@ fn extract_paths_from_patch(patch: &str) -> BTreeSet<String> {
 fn timeline_items(store: &SessionStore, record: &SessionRecord) -> Vec<TimelineItemDto> {
     let mut items = Vec::new();
     let mut pending_assistant = None;
+    let mut pending_generated_attachments = Vec::new();
     for (index, event) in record.events.iter().enumerate() {
         match event {
             TranscriptEvent::UserMessage {
@@ -457,6 +460,11 @@ fn timeline_items(store: &SessionStore, record: &SessionRecord) -> Vec<TimelineI
                 actor,
             } => {
                 flush_pending_assistant(&mut items, &mut pending_assistant);
+                flush_pending_generated_attachments(
+                    &mut items,
+                    &mut pending_generated_attachments,
+                    index,
+                );
                 items.push(TimelineItemDto::UserMessage {
                     id: format!("timeline-{index}"),
                     text: text.clone(),
@@ -469,6 +477,7 @@ fn timeline_items(store: &SessionStore, record: &SessionRecord) -> Vec<TimelineI
                 pending_assistant = Some(TimelineItemDto::AssistantMessage {
                     id: format!("timeline-{index}"),
                     text: text.clone(),
+                    attachments: std::mem::take(&mut pending_generated_attachments),
                     actor: actor.clone(),
                 });
             }
@@ -476,11 +485,21 @@ fn timeline_items(store: &SessionStore, record: &SessionRecord) -> Vec<TimelineI
                 let parsed = parse_system_message(index, text, actor.clone());
                 if parse_tool_message(text).is_none() {
                     flush_pending_assistant(&mut items, &mut pending_assistant);
+                    flush_pending_generated_attachments(
+                        &mut items,
+                        &mut pending_generated_attachments,
+                        index,
+                    );
                 }
                 items.extend(parsed);
             }
             TranscriptEvent::CommandInvoked { name, args, actor } => {
                 flush_pending_assistant(&mut items, &mut pending_assistant);
+                flush_pending_generated_attachments(
+                    &mut items,
+                    &mut pending_generated_attachments,
+                    index,
+                );
                 items.push(TimelineItemDto::Command {
                     id: format!("timeline-{index}"),
                     command_name: name.clone(),
@@ -490,6 +509,11 @@ fn timeline_items(store: &SessionStore, record: &SessionRecord) -> Vec<TimelineI
             }
             TranscriptEvent::GitDiffSnapshot { snapshot } => {
                 flush_pending_assistant(&mut items, &mut pending_assistant);
+                flush_pending_generated_attachments(
+                    &mut items,
+                    &mut pending_generated_attachments,
+                    index,
+                );
                 items.push(TimelineItemDto::DiffSnapshot {
                     id: format!("timeline-{index}"),
                     snapshot: diff_summary(index, snapshot),
@@ -497,6 +521,11 @@ fn timeline_items(store: &SessionStore, record: &SessionRecord) -> Vec<TimelineI
             }
             TranscriptEvent::SessionRenamed { name } => {
                 flush_pending_assistant(&mut items, &mut pending_assistant);
+                flush_pending_generated_attachments(
+                    &mut items,
+                    &mut pending_generated_attachments,
+                    index,
+                );
                 items.push(TimelineItemDto::SystemMessage {
                     id: format!("timeline-{index}"),
                     text: format!("Session renamed to {name}."),
@@ -531,14 +560,61 @@ fn timeline_items(store: &SessionStore, record: &SessionRecord) -> Vec<TimelineI
                     output_text: output.clone(),
                     actor: actor.clone(),
                     subject: subject.clone(),
-                })
+                });
+                if *success && tool_id == "ImageGeneration" {
+                    if let Some(attachment) =
+                        generated_image_attachment(&record.metadata.cwd, output)
+                    {
+                        pending_generated_attachments.push(attachment);
+                    }
+                }
             }
             TranscriptEvent::TranscriptRewritten { .. } | TranscriptEvent::StateSnapshot { .. } => {
+                flush_pending_generated_attachments(
+                    &mut items,
+                    &mut pending_generated_attachments,
+                    index,
+                );
             }
         }
     }
+    flush_pending_generated_attachments(
+        &mut items,
+        &mut pending_generated_attachments,
+        record.events.len(),
+    );
     flush_pending_assistant(&mut items, &mut pending_assistant);
     items
+}
+
+fn generated_image_attachment(cwd: &Path, output: &str) -> Option<ChatAttachmentDto> {
+    let value: serde_json::Value = serde_json::from_str(output).ok()?;
+    let artifact_id = value.get("artifactId")?.as_str()?.trim();
+    if artifact_id.is_empty() {
+        return None;
+    }
+    let metadata = generated_media_attachment_metadata(cwd, artifact_id)?;
+    Some(ChatAttachmentDto {
+        id: format!("generated-image:{artifact_id}"),
+        name: "Generated image".to_string(),
+        mime_type: metadata.mime_type.clone(),
+        size: metadata.byte_count,
+        extension: generated_image_extension(&metadata.mime_type).to_string(),
+        kind: "image".to_string(),
+        state: metadata.state,
+        source: ChatAttachmentSourceDto::GeneratedMedia {
+            artifact_id: artifact_id.to_string(),
+        },
+    })
+}
+
+fn generated_image_extension(mime_type: &str) -> &'static str {
+    match mime_type {
+        "image/png" => "PNG",
+        "image/jpeg" => "JPEG",
+        "image/webp" => "WEBP",
+        _ => "IMAGE",
+    }
 }
 
 fn attachment_dtos(
@@ -559,6 +635,22 @@ fn flush_pending_assistant(
     if let Some(item) = pending_assistant.take() {
         items.push(item);
     }
+}
+
+fn flush_pending_generated_attachments(
+    items: &mut Vec<TimelineItemDto>,
+    pending: &mut Vec<ChatAttachmentDto>,
+    index: usize,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    items.push(TimelineItemDto::AssistantMessage {
+        id: format!("timeline-{index}-generated-media"),
+        text: String::new(),
+        attachments: std::mem::take(pending),
+        actor: None,
+    });
 }
 
 fn parse_system_message(
@@ -673,7 +765,59 @@ fn summarize_tool_input(tool_id: &str, input_text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_tool_message, permission_state, summarize_tool_input};
+    use super::{parse_tool_message, permission_state, summarize_tool_input, timeline_items};
+    use crate::dtos::{ChatAttachmentSourceDto, TimelineItemDto};
+    use puffer_config::ConfigPaths;
+    use puffer_session_store::{SessionMetadata, SessionRecord, SessionStore, TranscriptEvent};
+    use std::path::{Path, PathBuf};
+    use uuid::Uuid;
+
+    fn session_record_with_events(cwd: PathBuf, events: Vec<TranscriptEvent>) -> SessionRecord {
+        SessionRecord {
+            metadata: SessionMetadata {
+                id: Uuid::nil(),
+                display_name: None,
+                generated_title: None,
+                cwd,
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                parent_session_id: None,
+                slug: None,
+                tags: Vec::new(),
+                note: None,
+            },
+            events,
+        }
+    }
+
+    fn write_generated_image_artifact(
+        workspace: &Path,
+        artifact_id: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) {
+        let image_dir = workspace.join(".puffer/media/images").join(artifact_id);
+        std::fs::create_dir_all(&image_dir).unwrap();
+        let image_path = image_dir.join(filename);
+        std::fs::write(&image_path, bytes).unwrap();
+        let sidecar_dir = workspace.join(".puffer/media/artifact-sidecars");
+        std::fs::create_dir_all(&sidecar_dir).unwrap();
+        std::fs::write(
+            sidecar_dir.join(format!("{artifact_id}.json")),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": artifact_id,
+                "jobId": "job-1",
+                "kind": "image",
+                "path": image_path,
+                "mimeType": "image/jpeg",
+                "byteCount": bytes.len(),
+                "metadata": {},
+                "createdAtMs": 1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn parses_tool_messages() {
@@ -692,5 +836,51 @@ mod tests {
             summarize_tool_input(&parsed.tool_id, &parsed.input_text),
             Some("Setting: theme".to_string())
         );
+    }
+
+    #[test]
+    fn tauri_timeline_attaches_generated_image_to_assistant_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        write_generated_image_artifact(&workspace, "artifact-1", "image.jpeg", b"\xff\xd8\xff\xd9");
+        let record = session_record_with_events(
+            workspace,
+            vec![
+                TranscriptEvent::ToolInvocation {
+                    call_id: "call-img".to_string(),
+                    tool_id: "ImageGeneration".to_string(),
+                    input: "{}".to_string(),
+                    output: serde_json::json!({
+                        "artifactId": "artifact-1",
+                        "status": "succeeded"
+                    })
+                    .to_string(),
+                    success: true,
+                    actor: None,
+                    subject: None,
+                    metadata: None,
+                },
+                TranscriptEvent::AssistantMessage {
+                    text: "Done".to_string(),
+                    actor: None,
+                },
+            ],
+        );
+        let store = SessionStore::from_paths(&ConfigPaths::discover(temp.path())).unwrap();
+
+        let items = timeline_items(&store, &record);
+
+        let Some(TimelineItemDto::AssistantMessage { attachments, .. }) = items
+            .iter()
+            .find(|item| matches!(item, TimelineItemDto::AssistantMessage { .. }))
+        else {
+            panic!("assistant message exists");
+        };
+        assert_eq!(attachments.len(), 1);
+        assert!(matches!(
+            attachments[0].source,
+            ChatAttachmentSourceDto::GeneratedMedia { ref artifact_id } if artifact_id == "artifact-1"
+        ));
     }
 }

@@ -1,11 +1,12 @@
 use crate::codex_app_server::{self, CapturedTurnEvent, CodexTurnOptions, CodexTurnOutcome};
 use crate::dtos::{
     AgentDiffDto, AgentDiffEntryDto, AgentDiffFileDto, AuthProviderStatusDto,
-    BrowserCaptchaSettingsDto, BrowserCaptchaSolverDto, BrowserSettingsDto, DiffSummaryDto,
-    DivergenceReportDto, ExternalCredentialDto, FolderGroupDto, ImageMediaSettingsDto,
-    MediaCapabilityInfoDto, MediaSettingsDto, ProviderSummaryDto, ResourceCountsDto,
-    SecretSummaryDto, SecretsSettingsDto, SessionDetailDto, SessionListItemDto, SettingsConfigDto,
-    SettingsSessionSummaryDto, SettingsSnapshotDto, TimelineItemDto, VideoMediaSettingsDto,
+    BrowserCaptchaSettingsDto, BrowserCaptchaSolverDto, BrowserSettingsDto, ChatAttachmentDto,
+    ChatAttachmentSourceDto, DiffSummaryDto, DivergenceReportDto, ExternalCredentialDto,
+    FolderGroupDto, ImageMediaSettingsDto, MediaCapabilityInfoDto, MediaSettingsDto,
+    ProviderSummaryDto, ResourceCountsDto, SecretSummaryDto, SecretsSettingsDto, SessionDetailDto,
+    SessionListItemDto, SettingsConfigDto, SettingsSessionSummaryDto, SettingsSnapshotDto,
+    TimelineItemDto, VideoMediaSettingsDto,
 };
 use crate::events::EventEmitter;
 use crate::repo_actions;
@@ -15,8 +16,8 @@ use base64::prelude::*;
 use puffer_config::{builtin_captcha_solvers, ConfigPaths};
 use puffer_core::{
     discover_exact_media_capabilities, generate_exact_image_with_cache,
-    read_generated_media_preview, ExactImageGenerationRequest, ExactMediaDiscoveryCache,
-    GeneratedMediaPreviewResult,
+    generated_media_attachment_metadata, read_generated_media_preview_by_artifact,
+    ExactImageGenerationRequest, ExactMediaDiscoveryCache, GeneratedMediaPreviewResult,
 };
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::load_resources;
@@ -88,7 +89,8 @@ struct GenerateMediaResult {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GeneratedMediaPreviewParams {
-    path: String,
+    session_id: String,
+    artifact_id: String,
 }
 
 pub(crate) struct BackendState {
@@ -472,46 +474,76 @@ impl BackendState {
         latest_diff: Option<DiffSummaryDto>,
     ) -> Vec<TimelineItemDto> {
         let mut items = Vec::new();
+        let mut pending_generated_attachments = Vec::new();
         for (idx, event) in record.events.iter().enumerate() {
             let id = format!("event-{idx}");
             match event {
-                StoredEvent::User { text, .. } => items.push(TimelineItemDto::UserMessage {
-                    id,
-                    text: text.clone(),
-                    attachments: Vec::new(),
-                    actor: None,
-                }),
+                StoredEvent::User { text, .. } => {
+                    Self::flush_pending_generated_attachments(
+                        &mut items,
+                        &mut pending_generated_attachments,
+                        idx,
+                    );
+                    items.push(TimelineItemDto::UserMessage {
+                        id,
+                        text: text.clone(),
+                        attachments: Vec::new(),
+                        actor: None,
+                    });
+                }
                 StoredEvent::Assistant { text, .. } => {
                     items.push(TimelineItemDto::AssistantMessage {
                         id,
                         text: text.clone(),
+                        attachments: std::mem::take(&mut pending_generated_attachments),
                         actor: None,
                     })
                 }
-                StoredEvent::System { text, .. } => items.push(TimelineItemDto::SystemMessage {
-                    id,
-                    text: text.clone(),
-                    actor: None,
-                }),
+                StoredEvent::System { text, .. } => {
+                    Self::flush_pending_generated_attachments(
+                        &mut items,
+                        &mut pending_generated_attachments,
+                        idx,
+                    );
+                    items.push(TimelineItemDto::SystemMessage {
+                        id,
+                        text: text.clone(),
+                        actor: None,
+                    });
+                }
                 StoredEvent::Tool {
                     tool_id,
                     input,
                     output,
                     success,
                     ..
-                } => items.push(TimelineItemDto::ToolCall {
-                    id,
-                    tool_id: tool_id.clone(),
-                    status: if *success { "completed" } else { "failed" }.to_string(),
-                    summary: Some(tool_id.clone()),
-                    input_text: input.clone(),
-                    input_json: serde_json::from_str(input).ok(),
-                    output_text: output.clone(),
-                    actor: None,
-                    subject: None,
-                }),
+                } => {
+                    items.push(TimelineItemDto::ToolCall {
+                        id,
+                        tool_id: tool_id.clone(),
+                        status: if *success { "completed" } else { "failed" }.to_string(),
+                        summary: Some(tool_id.clone()),
+                        input_text: input.clone(),
+                        input_json: serde_json::from_str(input).ok(),
+                        output_text: output.clone(),
+                        actor: None,
+                        subject: None,
+                    });
+                    if *success && tool_id == "ImageGeneration" {
+                        if let Some(attachment) =
+                            Self::generated_image_attachment(Path::new(&record.cwd), output)
+                        {
+                            pending_generated_attachments.push(attachment);
+                        }
+                    }
+                }
             }
         }
+        Self::flush_pending_generated_attachments(
+            &mut items,
+            &mut pending_generated_attachments,
+            record.events.len(),
+        );
         if let Some(snapshot) = latest_diff {
             items.push(TimelineItemDto::DiffSnapshot {
                 id: "current-diff".to_string(),
@@ -519,6 +551,52 @@ impl BackendState {
             });
         }
         items
+    }
+
+    fn generated_image_attachment(cwd: &Path, output: &str) -> Option<ChatAttachmentDto> {
+        let value: serde_json::Value = serde_json::from_str(output).ok()?;
+        let artifact_id = value.get("artifactId")?.as_str()?.trim();
+        if artifact_id.is_empty() {
+            return None;
+        }
+        let metadata = generated_media_attachment_metadata(cwd, artifact_id)?;
+        Some(ChatAttachmentDto {
+            id: format!("generated-image:{artifact_id}"),
+            name: "Generated image".to_string(),
+            mime_type: metadata.mime_type.clone(),
+            size: metadata.byte_count,
+            extension: Self::generated_image_extension(&metadata.mime_type).to_string(),
+            kind: "image".to_string(),
+            state: metadata.state,
+            source: ChatAttachmentSourceDto::GeneratedMedia {
+                artifact_id: artifact_id.to_string(),
+            },
+        })
+    }
+
+    fn generated_image_extension(mime_type: &str) -> &'static str {
+        match mime_type {
+            "image/png" => "PNG",
+            "image/jpeg" => "JPEG",
+            "image/webp" => "WEBP",
+            _ => "IMAGE",
+        }
+    }
+
+    fn flush_pending_generated_attachments(
+        items: &mut Vec<TimelineItemDto>,
+        pending: &mut Vec<ChatAttachmentDto>,
+        index: usize,
+    ) {
+        if pending.is_empty() {
+            return;
+        }
+        items.push(TimelineItemDto::AssistantMessage {
+            id: format!("event-{index}-generated-media"),
+            text: String::new(),
+            attachments: std::mem::take(pending),
+            actor: None,
+        });
     }
 
     fn rename_session(&self, session_id: &str, title: String) -> Result<()> {
@@ -786,9 +864,10 @@ impl BackendState {
     fn read_generated_media_preview(&self, params: Value) -> Result<GeneratedMediaPreviewResult> {
         let input: GeneratedMediaPreviewParams =
             serde_json::from_value(params).context("invalid generated media preview params")?;
-        Ok(read_generated_media_preview(
-            self.default_workspace()?,
-            Path::new(&input.path),
+        let record = self.load_session(&input.session_id)?;
+        Ok(read_generated_media_preview_by_artifact(
+            PathBuf::from(record.cwd),
+            &input.artifact_id,
         ))
     }
 
@@ -2252,26 +2331,37 @@ mod tests {
         }
     }
 
-    struct CurrentDirGuard {
-        previous: PathBuf,
-    }
-
-    impl CurrentDirGuard {
-        fn set(path: &Path) -> Self {
-            let previous = env::current_dir().unwrap();
-            env::set_current_dir(path).unwrap();
-            Self { previous }
-        }
-    }
-
-    impl Drop for CurrentDirGuard {
-        fn drop(&mut self) {
-            env::set_current_dir(&self.previous).unwrap();
-        }
-    }
-
     fn generated_media_images_dir(workspace_root: &Path) -> PathBuf {
         workspace_root.join(".puffer").join("media").join("images")
+    }
+
+    fn write_generated_image_artifact(
+        workspace: &Path,
+        artifact_id: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) {
+        let image_dir = generated_media_images_dir(workspace).join(artifact_id);
+        fs::create_dir_all(&image_dir).unwrap();
+        let image_path = image_dir.join(filename);
+        fs::write(&image_path, bytes).unwrap();
+        let sidecar_dir = workspace.join(".puffer/media/artifact-sidecars");
+        fs::create_dir_all(&sidecar_dir).unwrap();
+        fs::write(
+            sidecar_dir.join(format!("{artifact_id}.json")),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": artifact_id,
+                "jobId": "job-1",
+                "kind": "image",
+                "path": image_path,
+                "mimeType": "image/jpeg",
+                "byteCount": bytes.len(),
+                "metadata": {},
+                "createdAtMs": 1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     }
 
     fn test_session_record(
@@ -2654,26 +2744,33 @@ mod tests {
         let _env = EnvGuard::set_home(dir.path());
         let workspace_root = dir.path().join("workspace");
         fs::create_dir_all(&workspace_root).unwrap();
-        let _cwd = CurrentDirGuard::set(&workspace_root);
-        let path = generated_media_images_dir(&workspace_root)
-            .join("artifact-1")
-            .join("generated.png");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, b"image-bytes").unwrap();
+        write_generated_image_artifact(
+            &workspace_root,
+            "artifact-1",
+            "generated.png",
+            b"\x89PNG\r\n\x1a\nimage-bytes",
+        );
         let backend = BackendState::new();
+        let mut record = test_session_record("codex", Some("gpt-5.4"), Vec::new());
+        record.id = "session-preview".to_string();
+        record.cwd = workspace_root.display().to_string();
+        backend.save_sessions(&[record]).unwrap();
 
         let response = backend
             .handle(
                 EventEmitter::websocket_only(),
                 "read_generated_media_preview",
-                json!({"path": path.display().to_string()}),
+                json!({
+                    "sessionId": "session-preview",
+                    "artifactId": "artifact-1"
+                }),
             )
             .unwrap();
         let bytes: Vec<u8> = serde_json::from_value(response["bytes"].clone()).unwrap();
 
         assert_eq!(response["state"], "available");
         assert_eq!(response["mimeType"], "image/png");
-        assert_eq!(bytes, b"image-bytes");
+        assert_eq!(bytes, b"\x89PNG\r\n\x1a\nimage-bytes");
         assert!(response.get("path").is_none());
     }
 
@@ -2756,6 +2853,52 @@ mod tests {
             panic!("expected user message");
         };
         assert!(attachments.is_empty());
+    }
+
+    #[test]
+    fn tauri_timeline_attaches_generated_image_to_assistant_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        write_generated_image_artifact(&workspace, "artifact-1", "image.jpeg", b"\xff\xd8\xff\xd9");
+        let backend = BackendState::new();
+        let mut record = test_session_record(
+            "codex",
+            Some("gpt-5.4"),
+            vec![
+                StoredEvent::Tool {
+                    at_ms: 1,
+                    tool_id: "ImageGeneration".to_string(),
+                    input: "{}".to_string(),
+                    output: serde_json::json!({
+                        "artifactId": "artifact-1",
+                        "status": "succeeded"
+                    })
+                    .to_string(),
+                    success: true,
+                },
+                StoredEvent::Assistant {
+                    at_ms: 2,
+                    text: "Done".to_string(),
+                },
+            ],
+        );
+        record.cwd = workspace.display().to_string();
+
+        let items = backend.timeline_items(&record, None);
+
+        let Some(TimelineItemDto::AssistantMessage { attachments, .. }) = items
+            .iter()
+            .find(|item| matches!(item, TimelineItemDto::AssistantMessage { .. }))
+        else {
+            panic!("assistant message exists");
+        };
+        assert_eq!(attachments.len(), 1);
+        assert!(matches!(
+            attachments[0].source,
+            crate::dtos::ChatAttachmentSourceDto::GeneratedMedia { ref artifact_id }
+                if artifact_id == "artifact-1"
+        ));
     }
 
     #[test]
