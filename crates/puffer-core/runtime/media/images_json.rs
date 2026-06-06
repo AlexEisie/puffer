@@ -164,7 +164,7 @@ impl ImagesJsonAdapter {
             }
         };
 
-        let output_format = output_format_for_parameters(&request_parameters);
+        let output_format = resolved_output_format(&request_parameters, &output.bytes);
         let filename = format!("image.{}", extension_for_output_format(&output_format));
         let artifact_path = service.write_artifact_bytes(&artifact_id, &filename, &output.bytes)?;
         let artifact = MediaArtifact {
@@ -304,7 +304,7 @@ fn artifact_metadata(
     output: &ImageOutput,
     created_at_ms: u64,
 ) -> Value {
-    let output_format = output_format_for_parameters(parameters);
+    let output_format = resolved_output_format(parameters, &output.bytes);
     let mut metadata = json!({
         "providerId": request.provider_id,
         "modelId": request.model_id,
@@ -323,6 +323,30 @@ fn artifact_metadata(
         metadata["remoteSourceUrl"] = json!(remote_source_url);
     }
     metadata
+}
+
+/// Determines the artifact output format from the response bytes, falling back to
+/// the declared `output_format` parameter (then PNG) when the bytes carry no
+/// recognized image signature. Sniffing the bytes keeps the saved extension and
+/// MIME truthful even when the model omits an `output_format` parameter and the
+/// provider returns a different format than requested.
+fn resolved_output_format(parameters: &BTreeMap<String, String>, bytes: &[u8]) -> String {
+    detect_image_format(bytes)
+        .map(str::to_string)
+        .unwrap_or_else(|| output_format_for_parameters(parameters))
+}
+
+/// Recognizes common image formats from their leading magic bytes.
+fn detect_image_format(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some("png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpeg")
+    } else if bytes.len() >= 12 && bytes[0..4] == *b"RIFF" && bytes[8..12] == *b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
 }
 
 fn output_format_for_parameters(parameters: &BTreeMap<String, String>) -> String {
@@ -626,6 +650,68 @@ mod tests {
         assert_eq!(
             result.artifact.metadata["parameters"]["output_format"],
             "jpeg"
+        );
+        assert_eq!(result.artifact.metadata["mimeType"], "image/jpeg");
+    }
+
+    #[test]
+    fn artifact_format_follows_response_bytes_when_output_format_undeclared() {
+        let jpeg_b64 = BASE64_STANDARD.encode([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]);
+        let response_b64 = jpeg_b64.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            read_http_request(&mut stream);
+            let body = json!({ "data": [{"b64_json": response_b64}] }).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("response");
+        });
+        // Model declares no output_format parameter (mirrors BytePlus Seedream 4.5/4.0).
+        let parameters = vec![MediaParameterSpec {
+            name: "size".to_string(),
+            label: "Size".to_string(),
+            values: vec!["2K".to_string()],
+            default: "2K".to_string(),
+            request_field: Some("size".to_string()),
+        }];
+        let registry = registry_with_provider_parameters(
+            "exact-provider",
+            format!("http://{address}"),
+            parameters,
+        );
+        let service_dir = tempdir().expect("tempdir");
+        let request = ImagesJsonGenerationRequest {
+            provider_id: "exact-provider".to_string(),
+            model_id: "exact-image-model".to_string(),
+            adapter: "images_json".to_string(),
+            prompt: "draw a precise icon".to_string(),
+            parameters: BTreeMap::from([("size".to_string(), "2K".to_string())]),
+        };
+
+        let result = ImagesJsonAdapter::new()
+            .expect("adapter")
+            .execute(
+                &registry,
+                &auth_store(),
+                &MediaGenerationService::new(service_dir.path()),
+                request,
+            )
+            .expect("generation succeeds");
+
+        server.join().expect("server");
+        assert_eq!(result.artifact.mime_type, "image/jpeg");
+        assert_eq!(
+            result
+                .artifact
+                .path
+                .extension()
+                .and_then(|value| value.to_str()),
+            Some("jpeg")
         );
         assert_eq!(result.artifact.metadata["mimeType"], "image/jpeg");
     }
