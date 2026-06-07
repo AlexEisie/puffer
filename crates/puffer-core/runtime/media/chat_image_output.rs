@@ -437,6 +437,7 @@ mod tests {
                         adapter: MediaExecutionKind::ChatImageOutput,
                         base_url: None,
                         path: "/chat/completions".to_string(),
+                        max_images_per_call: None,
                     }),
                     models: vec![MediaModelDescriptor {
                         id: "openrouter/image-chat".to_string(),

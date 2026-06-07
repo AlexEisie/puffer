@@ -332,6 +332,7 @@ mod tests {
                     adapter: MediaExecutionKind::ImagesJson,
                     base_url: None,
                     path: "/v1/images/generations".to_string(),
+                    max_images_per_call: None,
                 }),
                 models: vec![MediaModelDescriptor {
                     id: model_id.to_string(),
@@ -557,11 +558,13 @@ mod tests {
             adapter: MediaExecutionKind::ChatImageOutput,
             base_url: None,
             path: "/chat/completions".to_string(),
+            max_images_per_call: None,
         });
         image.models[0].execution = Some(MediaExecutionDescriptor {
             adapter: MediaExecutionKind::ImagesJson,
             base_url: None,
             path: "/images/generations".to_string(),
+            max_images_per_call: None,
         });
         let registry = registry_with(vec![provider(
             "vercel-ai-gateway",

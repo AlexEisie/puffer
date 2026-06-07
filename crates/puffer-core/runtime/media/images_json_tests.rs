@@ -25,6 +25,15 @@ fn registry_with_provider_parameters(
     base_url: String,
     parameters: Vec<MediaParameterSpec>,
 ) -> ProviderRegistry {
+    registry_with_provider_parameters_and_execution_limit(provider_id, base_url, parameters, None)
+}
+
+fn registry_with_provider_parameters_and_execution_limit(
+    provider_id: &str,
+    base_url: String,
+    parameters: Vec<MediaParameterSpec>,
+    max_images_per_call: Option<u8>,
+) -> ProviderRegistry {
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderDescriptor {
         id: provider_id.to_string(),
@@ -43,6 +52,7 @@ fn registry_with_provider_parameters(
                     adapter: MediaExecutionKind::ImagesJson,
                     base_url: None,
                     path: "/custom/images".to_string(),
+                    max_images_per_call,
                 }),
                 models: vec![MediaModelDescriptor {
                     id: "exact-image-model".to_string(),
@@ -146,6 +156,31 @@ fn spawn_image_server_with_body(body: &'static str) -> (String, std::thread::Joi
     (format!("http://{addr}"), handle)
 }
 
+fn spawn_repeated_image_server_with_body(
+    body: &'static str,
+    expected_requests: usize,
+) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        for _ in 0..expected_requests {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let n = stream.read(&mut buffer).unwrap();
+            requests.push(String::from_utf8_lossy(&buffer[..n]).to_string());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+        requests
+    });
+    (format!("http://{addr}"), handle)
+}
+
 fn load_single_saved_job(root: &std::path::Path) -> crate::runtime::media::MediaJob {
     let jobs_dir = root.join(".puffer").join("media").join("jobs");
     let paths = std::fs::read_dir(&jobs_dir)
@@ -154,6 +189,60 @@ fn load_single_saved_job(root: &std::path::Path) -> crate::runtime::media::Media
         .collect::<Vec<_>>();
     assert_eq!(paths.len(), 1);
     serde_json::from_slice(&std::fs::read(&paths[0]).expect("job sidecar")).expect("job json")
+}
+
+#[test]
+fn image_call_counts_split_by_execution_limit() {
+    assert_eq!(image_call_counts(2, None), vec![2]);
+    assert_eq!(image_call_counts(2, Some(1)), vec![1, 1]);
+    assert_eq!(image_call_counts(4, Some(3)), vec![3, 1]);
+}
+
+#[test]
+fn images_json_repeats_single_image_calls_when_descriptor_limits_batch_size() {
+    let (base_url, server) =
+        spawn_repeated_image_server_with_body(r#"{"data":[{"b64_json":"aW1hZ2U="}]}"#, 2);
+    let mut parameters = image_parameters();
+    parameters.push(sequential_generation_parameter());
+    let registry = registry_with_provider_parameters_and_execution_limit(
+        "exact-provider",
+        base_url,
+        parameters,
+        Some(1),
+    );
+    let mut auth_store = AuthStore::default();
+    auth_store.set_api_key("exact-provider", "sk-test");
+    let service_dir = tempfile::tempdir().unwrap();
+    let service = MediaGenerationService::new(service_dir.path());
+    let request = ImagesJsonGenerationRequest {
+        provider_id: "exact-provider".to_string(),
+        model_id: "exact-image-model".to_string(),
+        adapter: "images_json".to_string(),
+        prompt: "draw two images".to_string(),
+        parameters: BTreeMap::from([
+            ("size".to_string(), "1024x1024".to_string()),
+            ("quality".to_string(), "auto".to_string()),
+            ("output_format".to_string(), "png".to_string()),
+        ]),
+        count: 2,
+    };
+
+    let result = ImagesJsonAdapter::new()
+        .unwrap()
+        .execute(&registry, &auth_store, &service, request)
+        .unwrap();
+
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| !request.contains("\"n\"")));
+    assert!(requests
+        .iter()
+        .all(|request| request.contains("\"sequential_image_generation\":\"disabled\"")));
+    assert_eq!(result.job.requested_count, 2);
+    assert_eq!(result.job.artifact_ids.len(), 2);
+    assert_eq!(result.artifacts.len(), 2);
+    assert_eq!(result.artifacts[0].metadata["index"], 0);
+    assert_eq!(result.artifacts[1].metadata["index"], 1);
 }
 
 #[test]

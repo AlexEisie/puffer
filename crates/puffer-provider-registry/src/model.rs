@@ -343,6 +343,9 @@ pub struct MediaExecutionDescriptor {
     #[serde(default)]
     pub base_url: Option<String>,
     pub path: String,
+    /// Maximum images the endpoint accepts in one execution request.
+    #[serde(default)]
+    pub max_images_per_call: Option<u8>,
 }
 
 /// Describes one concrete image model and its supported operations.
@@ -467,6 +470,9 @@ impl MediaExecutionDescriptor {
         }
         if self.path.trim().is_empty() {
             errors.push(format!("{location}.path must not be empty"));
+        }
+        if self.max_images_per_call == Some(0) {
+            errors.push(format!("{location}.max_images_per_call must be at least 1"));
         }
     }
 }
@@ -603,6 +609,7 @@ media:
       adapter: images_json
       base_url: https://api.test-provider.example
       path: /v1/images/generations
+      max_images_per_call: 4
     models:
       - id: gpt-image-1
         display_name: GPT Image 1
@@ -653,6 +660,13 @@ media:
                 .as_ref()
                 .and_then(|execution| execution.base_url.as_deref()),
             Some("https://api.test-provider.example")
+        );
+        assert_eq!(
+            image
+                .execution
+                .as_ref()
+                .and_then(|execution| execution.max_images_per_call),
+            Some(4)
         );
         assert_eq!(image.models[0].operations, vec![MediaOperation::Generate]);
     }
@@ -731,6 +745,34 @@ media:
             .expect_err("empty execution path is invalid");
 
         assert!(error.to_string().contains("execution.path"), "{error}");
+    }
+
+    #[test]
+    fn zero_image_execution_batch_limit_is_rejected_by_validation() {
+        let yaml = provider_with_media_yaml(
+            r#"
+media:
+  image:
+    execution:
+      adapter: images_json
+      path: /v1/images/generations
+      max_images_per_call: 0
+    models:
+      - id: gpt-image-1
+        operations:
+          - generate
+"#,
+        );
+        let provider: ProviderDescriptor = serde_yaml::from_str(&yaml).expect("provider parses");
+
+        let error = provider
+            .validate_media_descriptors()
+            .expect_err("zero batch limit is invalid");
+
+        assert!(
+            error.to_string().contains("execution.max_images_per_call"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -184,6 +184,27 @@ fn openrouter_remains_discovery_driven_without_static_image_fallbacks() {
 }
 
 #[test]
+fn zhipu_images_json_limits_batches_to_single_image_calls() {
+    let descriptor = provider_descriptor(
+        "zhipu",
+        include_str!("../../../resources/providers/zhipu.yaml"),
+    );
+    let image = descriptor
+        .media
+        .as_ref()
+        .and_then(|media| media.image.as_ref())
+        .expect("zhipu image media descriptor");
+    let execution = image
+        .execution
+        .as_ref()
+        .expect("zhipu image execution descriptor");
+
+    assert_eq!(execution.adapter, MediaExecutionKind::ImagesJson);
+    assert_eq!(execution.path, "/images/generations");
+    assert_eq!(execution.max_images_per_call, Some(1));
+}
+
+#[test]
 fn openai_catalog_declares_current_image_api_models() {
     let descriptor = provider_descriptor(
         "openai",

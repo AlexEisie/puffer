@@ -375,6 +375,7 @@ mod tests {
                         adapter: MediaExecutionKind::MinimaxImage,
                         base_url: Some(base_url),
                         path: "/v1/image_generation".to_string(),
+                        max_images_per_call: None,
                     }),
                     models: vec![MediaModelDescriptor {
                         id: "image-01".to_string(),
