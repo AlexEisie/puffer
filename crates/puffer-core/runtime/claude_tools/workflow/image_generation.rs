@@ -384,7 +384,7 @@ mod tests {
                         adapter: MediaExecutionKind::ImagesJson,
                         base_url: None,
                         path: "/custom/images".to_string(),
-                        max_images_per_call: None,
+                        batch: puffer_provider_registry::MediaBatchDescriptor::default(),
                     }),
                     models: vec![MediaModelDescriptor {
                         id: "exact-image-model".to_string(),
@@ -441,7 +441,7 @@ mod tests {
                         adapter: MediaExecutionKind::ChatImageOutput,
                         base_url: None,
                         path: "/chat/completions".to_string(),
-                        max_images_per_call: None,
+                        batch: puffer_provider_registry::MediaBatchDescriptor::default(),
                     }),
                     models: Vec::new(),
                 }),

@@ -139,7 +139,7 @@ impl ImagesJsonAdapter {
             &request.adapter,
             &discovery_cache,
         )?;
-        let call_counts = image_call_counts(request.count, execution.max_images_per_call);
+        let call_counts = image_call_counts(request.count, execution.batch.max_images_per_call);
         let max_call_count = call_counts.iter().copied().max().unwrap_or(request.count);
         let request_parameters = parameters_for_image_count(
             selected_parameters_with_defaults(&capability, &request.parameters)?,

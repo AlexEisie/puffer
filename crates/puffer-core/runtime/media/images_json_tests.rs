@@ -52,7 +52,13 @@ fn registry_with_provider_parameters_and_execution_limit(
                     adapter: MediaExecutionKind::ImagesJson,
                     base_url: None,
                     path: "/custom/images".to_string(),
-                    max_images_per_call,
+                    batch: match max_images_per_call {
+                        Some(limit) => puffer_provider_registry::MediaBatchDescriptor {
+                            mode: puffer_provider_registry::MediaBatchMode::Exact,
+                            max_images_per_call: Some(limit),
+                        },
+                        None => puffer_provider_registry::MediaBatchDescriptor::default(),
+                    },
                 }),
                 models: vec![MediaModelDescriptor {
                     id: "exact-image-model".to_string(),

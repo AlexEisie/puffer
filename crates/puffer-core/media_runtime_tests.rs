@@ -30,7 +30,7 @@ fn minimax_registry(base_url: String) -> ProviderRegistry {
                     adapter: MediaExecutionKind::MinimaxImage,
                     base_url: Some(base_url),
                     path: "/v1/image_generation".to_string(),
-                    max_images_per_call: None,
+                    batch: puffer_provider_registry::MediaBatchDescriptor::default(),
                 }),
                 models: vec![MediaModelDescriptor {
                     id: "image-01".to_string(),
@@ -80,7 +80,7 @@ fn chat_router_registry(base_url: String) -> ProviderRegistry {
                     adapter: MediaExecutionKind::ChatImageOutput,
                     base_url: None,
                     path: "/chat/completions".to_string(),
-                    max_images_per_call: None,
+                    batch: puffer_provider_registry::MediaBatchDescriptor::default(),
                 }),
                 models: Vec::new(),
             }),
@@ -109,7 +109,7 @@ fn byteplus_seedream_registry(base_url: String) -> ProviderRegistry {
                     adapter: MediaExecutionKind::ImagesJson,
                     base_url: None,
                     path: "/images/generations".to_string(),
-                    max_images_per_call: None,
+                    batch: puffer_provider_registry::MediaBatchDescriptor::default(),
                 }),
                 models: vec![MediaModelDescriptor {
                     id: "seedream-4-5-251128".to_string(),

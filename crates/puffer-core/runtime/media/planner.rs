@@ -1,0 +1,138 @@
+use anyhow::{bail, Result};
+use puffer_provider_registry::{MediaBatchDescriptor, MediaBatchMode};
+
+/// Describes a complete image generation execution plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImageGenerationPlan {
+    pub(crate) calls: Vec<ImageCallPlan>,
+}
+
+impl ImageGenerationPlan {
+    /// Returns the largest image count requested by one provider call.
+    pub(crate) fn max_call_count(&self) -> u8 {
+        self.calls
+            .iter()
+            .map(|call| call.requested_count)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Returns the total number of images requested by this plan.
+    pub(crate) fn total_requested_count(&self) -> u8 {
+        self.calls
+            .iter()
+            .map(|call| call.requested_count)
+            .sum::<u8>()
+    }
+}
+
+/// Describes one provider request within an image generation plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImageCallPlan {
+    pub(crate) call_index: usize,
+    pub(crate) requested_count: u8,
+}
+
+/// Plans image generation provider calls for a requested output count.
+pub(crate) fn plan_image_generation(
+    requested_count: u8,
+    batch: &MediaBatchDescriptor,
+) -> Result<ImageGenerationPlan> {
+    if requested_count == 0 {
+        bail!("image generation count must be between 1 and 4");
+    }
+
+    let call_counts = match batch.mode {
+        MediaBatchMode::PerImage => vec![1; requested_count as usize],
+        MediaBatchMode::Exact => {
+            let limit = batch.max_images_per_call.unwrap_or(0);
+            if limit < 2 {
+                bail!("exact image batch mode requires max_images_per_call of at least 2");
+            }
+            split_exact_batches(requested_count, limit)
+        }
+    };
+
+    Ok(ImageGenerationPlan {
+        calls: call_counts
+            .into_iter()
+            .enumerate()
+            .map(|(call_index, requested_count)| ImageCallPlan {
+                call_index,
+                requested_count,
+            })
+            .collect(),
+    })
+}
+
+fn split_exact_batches(total: u8, limit: u8) -> Vec<u8> {
+    let mut remaining = total;
+    let mut counts = Vec::new();
+    while remaining > 0 {
+        let count = remaining.min(limit);
+        counts.push(count);
+        remaining -= count;
+    }
+    counts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use puffer_provider_registry::MediaBatchMode;
+
+    fn per_image_batch() -> MediaBatchDescriptor {
+        MediaBatchDescriptor {
+            mode: MediaBatchMode::PerImage,
+            max_images_per_call: None,
+        }
+    }
+
+    fn exact_batch(limit: u8) -> MediaBatchDescriptor {
+        MediaBatchDescriptor {
+            mode: MediaBatchMode::Exact,
+            max_images_per_call: Some(limit),
+        }
+    }
+
+    fn counts(plan: &ImageGenerationPlan) -> Vec<u8> {
+        plan.calls.iter().map(|call| call.requested_count).collect()
+    }
+
+    #[test]
+    fn per_image_plan_splits_every_image_into_its_own_call() {
+        let plan = plan_image_generation(4, &per_image_batch()).expect("plan");
+
+        assert_eq!(counts(&plan), vec![1, 1, 1, 1]);
+        assert_eq!(plan.max_call_count(), 1);
+        assert_eq!(plan.total_requested_count(), 4);
+        assert_eq!(plan.calls[0].call_index, 0);
+        assert_eq!(plan.calls[3].call_index, 3);
+    }
+
+    #[test]
+    fn exact_plan_splits_by_declared_limit() {
+        let plan = plan_image_generation(4, &exact_batch(2)).expect("plan");
+
+        assert_eq!(counts(&plan), vec![2, 2]);
+        assert_eq!(plan.max_call_count(), 2);
+        assert_eq!(plan.total_requested_count(), 4);
+    }
+
+    #[test]
+    fn exact_plan_uses_remainder_call() {
+        let plan = plan_image_generation(4, &exact_batch(3)).expect("plan");
+
+        assert_eq!(counts(&plan), vec![3, 1]);
+        assert_eq!(plan.max_call_count(), 3);
+        assert_eq!(plan.total_requested_count(), 4);
+    }
+
+    #[test]
+    fn missing_batch_descriptor_defaults_to_per_image() {
+        let plan =
+            plan_image_generation(2, &MediaBatchDescriptor::default()).expect("default plan");
+
+        assert_eq!(counts(&plan), vec![1, 1]);
+    }
+}
