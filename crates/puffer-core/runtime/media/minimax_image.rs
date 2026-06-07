@@ -160,16 +160,10 @@ impl MinimaxImageAdapter {
                 }
             }
         }
-        if outputs.len() != request.count as usize {
+        if outputs.is_empty() {
             let error = last_error
                 .map(|error| format!("{error:#}"))
-                .unwrap_or_else(|| {
-                    format!(
-                        "MiniMax image generation returned {} image(s), expected {}",
-                        outputs.len(),
-                        request.count
-                    )
-                });
+                .unwrap_or_else(|| "MiniMax image generation produced no images".to_string());
             job.error = Some(error.clone());
             job.transition(MediaJobStatus::Failed, now_ms())?;
             service.save_job(&job)?;
@@ -501,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn minimax_image_failed_later_call_writes_no_artifacts() {
+    fn minimax_image_failed_later_call_preserves_first_artifact() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
         let server = thread::spawn(move || {
@@ -536,7 +530,7 @@ mod tests {
         let mut request = request();
         request.count = 2;
 
-        let error = MinimaxImageAdapter::new()
+        let result = MinimaxImageAdapter::new()
             .expect("adapter")
             .execute(
                 &registry,
@@ -544,14 +538,15 @@ mod tests {
                 &MediaGenerationService::new(service_dir.path()),
                 request,
             )
-            .expect_err("second call fails");
+            .expect("partial generation succeeds");
 
-        assert_eq!(
-            error.to_string(),
-            "MiniMax image generation failed: 1001 failed"
-        );
         assert_eq!(server.join().expect("server").len(), 2);
-        assert!(!service_dir.path().join(".puffer/media/images").exists());
+        assert_eq!(result.job.requested_count, 2);
+        assert_eq!(result.job.status, MediaJobStatus::Succeeded);
+        assert_eq!(result.job.produced_count(), 1);
+        assert_eq!(result.artifacts.len(), 1);
+        assert_eq!(std::fs::read(&result.artifacts[0].path).unwrap(), b"image");
+        assert!(service_dir.path().join(".puffer/media/images").exists());
     }
 
     #[test]
