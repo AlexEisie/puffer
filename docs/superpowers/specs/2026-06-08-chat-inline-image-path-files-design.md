@@ -34,7 +34,7 @@ In scope:
 Out of scope:
 
 - Opening text image paths directly in the attachment overlay.
-- Streaming image reads, download support, or new backend endpoints.
+- Streaming image reads, download support, MIME sniffing, or new backend endpoints.
 - Autolinking arbitrary substrings inside code snippets or fenced code blocks.
 - Special cases for generated media paths beyond normal local file handling.
 
@@ -53,7 +53,10 @@ a simpler, stable rule set with low runtime cost.
   file link with code visual styling.
 - Otherwise render it as plain `<code>`.
 
-This avoids scanning code fragments and keeps link detection deterministic.
+This includes `file://` paths and line suffixes already accepted by
+`chatFileTarget()`. It intentionally does not scan code fragments. A code span
+such as `` run /tmp/file `` stays plain code because the whole span is not one
+file target.
 
 ### Chat Open Intent
 
@@ -63,6 +66,11 @@ Files tab for file intents.
 
 ### Files Pane Preview
 
+Use the existing rich-preview path, not a new read path. `FilesPane` already
+raises the read cap from the default 256 KiB to `RICH_PREVIEW_MAX_BYTES` when
+`hasRichFilePreviewPath()` is true. Image files need that same path because
+generated images often exceed 256 KiB.
+
 `filePreview.ts` should add an `image` preview format for:
 
 - `.jpg`
@@ -71,9 +79,18 @@ Files tab for file intents.
 - `.webp`
 - `.gif`
 
-`FilesPane.svelte` should render image previews from the existing `ReadFileResult`
-base64 content using a data URL. It should not introduce a separate image read
-path. The current backend hard limit and truncation behavior remain the guardrail.
+The image preview should be a small data object, for example:
+
+- `kind: "image"`
+- `src: "data:<mime>;base64,<content>"`
+- `alt: <file basename>`
+
+The MIME type should be inferred from the file extension. Do not sniff bytes,
+call the backend for MIME metadata, or create object URLs.
+
+`FilesPane.svelte` should render the image preview with an `<img>` that fits
+inside the existing viewer body. The current backend hard limit and truncation
+behavior remain the guardrail.
 
 ## Data Flow
 
@@ -97,8 +114,12 @@ Attachment thumbnails skip this path and continue to emit
 - Missing or disallowed files use the existing Files pane error display from
   `readFile()` or `listDir()`.
 - Truncated image reads should not render partial images as successful previews.
-  If `ReadFileResult.truncated` is true, Files should show a clear preview error
-  instead of a broken image.
+  If `ReadFileResult.truncated` is true, image preview construction should throw
+  a clear error so Files shows the existing preview-error state instead of a
+  broken image or the generic binary placeholder.
+- If an image extension returns non-base64 content, image preview construction
+  should throw a clear error. This is unexpected for real binary images but
+  keeps fake or malformed daemon responses explicit.
 - Unsupported image extensions remain binary files unless another preview type
   handles them.
 
@@ -110,6 +131,9 @@ bounded by message length and avoids broad regex scanning inside code.
 Image preview uses the existing capped `readFile()` response. No new watchers,
 background preloads, streaming, or caching layers are required.
 
+The preview object contains one data URL string. There is no object URL
+allocation, lifecycle management, or cache invalidation to add.
+
 ## Testing
 
 Add focused tests:
@@ -119,6 +143,8 @@ Add focused tests:
 - Chat UI: clicking that inline-code link switches to Files and opens the path.
 - Files UI: opening a `.jpeg` file backed by base64 content renders an image
   preview instead of the binary placeholder.
+- Files UI: image files request `read_file` with the rich preview byte cap, not
+  the default 256 KiB cap.
 - Existing generated image attachment tests continue to pass, proving thumbnail
   overlay behavior is unchanged.
 
