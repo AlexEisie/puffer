@@ -4,6 +4,7 @@ import {
   FakeDaemon,
   type FakeMediaCapability
 } from "./support/fakeDaemon";
+import type { MessageAttachment } from "../src/lib/types";
 
 const baseTime = Date.now();
 const onePixelPngBytes = Array.from(
@@ -31,6 +32,19 @@ const configuredImageMedia = {
     durationSeconds: 8
   }
 };
+
+function generatedAttachment(jobId: string, artifactId: string, index: number): MessageAttachment {
+  return {
+    id: `generated-image:${artifactId}`,
+    name: "Generated image",
+    mimeType: "image/png",
+    size: 8,
+    extension: "PNG",
+    kind: "image",
+    state: "available",
+    source: { kind: "generated_media", jobId, artifactId, index }
+  };
+}
 
 async function openSession(page: Page, name: RegExp): Promise<void> {
   await page.getByRole("button", { name }).first().click();
@@ -655,7 +669,6 @@ test("explicit image slash trigger routes to media generation", async ({ page })
 
   const request = await daemon.waitForRequest("generate_media");
   expect(request.params).toMatchObject({
-    sessionId: "session-image-trigger",
     kind: "image",
     prompt: "draw a compact icon"
   });
@@ -682,7 +695,17 @@ test("persisted ImageGeneration results render as assistant image attachments", 
             status: "ok",
             inputText: JSON.stringify({ prompt: "draw an icon" }),
             outputText: JSON.stringify({
-              artifactId: "artifact-generated-1",
+              jobId: "job-generated-1",
+              requestedCount: 1,
+              artifacts: [
+                {
+                  artifactId: "artifact-generated-1",
+                  index: 0,
+                  path: "/tmp/puffer/.puffer/media/images/artifact-generated-1.png",
+                  mimeType: "image/png",
+                  size: onePixelPngBytes.length
+                }
+              ],
               status: "succeeded"
             }),
             createdAtMs: baseTime - 20_000
@@ -701,7 +724,12 @@ test("persisted ImageGeneration results render as assistant image attachments", 
                 extension: "PNG",
                 kind: "image",
                 state: "available",
-                source: { kind: "generated_media", artifactId: "artifact-generated-1" }
+                source: {
+                  kind: "generated_media",
+                  jobId: "job-generated-1",
+                  artifactId: "artifact-generated-1",
+                  index: 0
+                }
               }
             ]
           }
@@ -725,6 +753,53 @@ test("persisted ImageGeneration results render as assistant image attachments", 
   await expect(page.getByText("/tmp/puffer/.puffer/media/images")).toHaveCount(0);
   await thumbnail.click();
   await expect(page.getByTestId("attachment-overlay")).toBeVisible();
+});
+
+test("shows two generated image attachments from one image generation result", async ({ page }) => {
+  const sessionId = "session-generated-two";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId,
+        displayName: "Generated images",
+        title: "Generated images",
+        cwd: "/workspace/generated",
+        folderPath: "/workspace/generated",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "assistant-generated-two",
+            text: "",
+            summary: "Generated 2 images",
+            createdAtMs: baseTime - 10_000,
+            attachments: [
+              generatedAttachment("job-1", "artifact-1", 0),
+              generatedAttachment("job-1", "artifact-2", 1)
+            ]
+          }
+        ]
+      }
+    ]
+  });
+  daemon.seedGeneratedMediaPreview(sessionId, "artifact-1", {
+    state: "available",
+    mimeType: "image/png",
+    bytes: onePixelPngBytes
+  });
+  daemon.seedGeneratedMediaPreview(sessionId, "artifact-2", {
+    state: "available",
+    mimeType: "image/png",
+    bytes: onePixelPngBytes
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Generated images/);
+
+  await expect(page.getByRole("img", { name: /Generated image/i })).toHaveCount(2);
 });
 
 test("image slash success renders generated thumbnail without media metadata", async ({ page }) => {
@@ -754,9 +829,17 @@ test("image slash success renders generated thumbnail without media metadata", a
   daemon.setSettingsConfig({ media: configuredImageMedia });
   daemon.setGeneratedMediaResult({
     jobId: "media-job-preview-success",
-    artifactId: "artifact-preview-success",
-    status: "succeeded",
-    path: generatedPath
+    requestedCount: 1,
+    artifacts: [
+      {
+        artifactId: "artifact-preview-success",
+        index: 0,
+        path: generatedPath,
+        mimeType: "image/png",
+        size: onePixelPngBytes.length
+      }
+    ],
+    status: "succeeded"
   });
   daemon.seedGeneratedMediaPreview("session-image-preview", "artifact-preview-success", {
     state: "available",
@@ -822,9 +905,17 @@ test("missing generated image preview shows unavailable thumbnail without path f
   daemon.setSettingsConfig({ media: configuredImageMedia });
   daemon.setGeneratedMediaResult({
     jobId: "media-job-preview-missing",
-    artifactId: "artifact-preview-missing",
-    status: "succeeded",
-    path: generatedPath
+    requestedCount: 1,
+    artifacts: [
+      {
+        artifactId: "artifact-preview-missing",
+        index: 0,
+        path: generatedPath,
+        mimeType: "image/png",
+        size: onePixelPngBytes.length
+      }
+    ],
+    status: "succeeded"
   });
   daemon.seedGeneratedMediaPreview("session-image-preview-missing", "artifact-preview-missing", {
     state: "missing"
@@ -852,7 +943,8 @@ test("missing generated image preview shows unavailable thumbnail without path f
   await expect(generatedRow).not.toContainText("media-job-preview-missing");
 });
 
-test("image slash success without persisted path shows unavailable thumbnail", async ({ page }) => {
+test("image slash success without preview shows unavailable thumbnail", async ({ page }) => {
+  const generatedPath = "/tmp/puffer/.puffer/media/images/no-preview-generated.png";
   const daemon = new FakeDaemon({
     sessions: [
       {
@@ -878,9 +970,17 @@ test("image slash success without persisted path shows unavailable thumbnail", a
   daemon.setSettingsConfig({ media: configuredImageMedia });
   daemon.setGeneratedMediaResult({
     jobId: "media-job-preview-no-path",
-    artifactId: "artifact-preview-no-path",
-    status: "succeeded",
-    path: null
+    requestedCount: 1,
+    artifacts: [
+      {
+        artifactId: "artifact-preview-no-path",
+        index: 0,
+        path: generatedPath,
+        mimeType: "image/png",
+        size: onePixelPngBytes.length
+      }
+    ],
+    status: "succeeded"
   });
   await daemon.install(page);
   await daemon.open(page);
@@ -955,9 +1055,17 @@ test("generated image preview is not restored after session switch", async ({ pa
   daemon.setSettingsConfig({ media: configuredImageMedia });
   daemon.setGeneratedMediaResult({
     jobId: "media-job-preview-transient",
-    artifactId: "artifact-preview-transient",
-    status: "succeeded",
-    path: generatedPath
+    requestedCount: 1,
+    artifacts: [
+      {
+        artifactId: "artifact-preview-transient",
+        index: 0,
+        path: generatedPath,
+        mimeType: "image/png",
+        size: onePixelPngBytes.length
+      }
+    ],
+    status: "succeeded"
   });
   daemon.seedGeneratedMediaPreview("session-image-preview-transient", "artifact-preview-transient", {
     state: "available",
@@ -1057,7 +1165,6 @@ test("explicit video slash trigger fails clearly without capability", async ({ p
 
   const request = await daemon.waitForRequest("generate_media");
   expect(request.params).toMatchObject({
-    sessionId: "session-video-trigger",
     kind: "video",
     prompt: "animate this logo"
   });
