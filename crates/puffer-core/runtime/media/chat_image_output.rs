@@ -144,17 +144,12 @@ impl ChatImageOutputAdapter {
             ) {
                 Ok(mut response_outputs) => {
                     let take_count = call.requested_count as usize;
-                    if response_outputs.len() < take_count {
-                        last_error = Some(anyhow::anyhow!(
-                            "chat image-output returned {} image(s), expected {} for call {}",
-                            response_outputs.len(),
-                            take_count,
-                            call.call_index
-                        ));
-                        break;
-                    }
+                    let short_response = response_outputs.len() < take_count;
                     response_outputs.truncate(take_count);
                     outputs.append(&mut response_outputs);
+                    if short_response {
+                        break;
+                    }
                 }
                 Err(error) => {
                     last_error = Some(error);
@@ -166,21 +161,6 @@ impl ChatImageOutputAdapter {
             let error = last_error
                 .map(|error| format!("{error:#}"))
                 .unwrap_or_else(|| "chat image-output produced no images".to_string());
-            job.error = Some(error.clone());
-            job.transition(MediaJobStatus::Failed, now_ms())?;
-            service.save_job(&job)?;
-            bail!(error);
-        }
-        if outputs.len() != request.count as usize {
-            let error = last_error
-                .map(|error| format!("{error:#}"))
-                .unwrap_or_else(|| {
-                    format!(
-                        "chat image-output returned {} image(s), expected {}",
-                        outputs.len(),
-                        request.count
-                    )
-                });
             job.error = Some(error.clone());
             job.transition(MediaJobStatus::Failed, now_ms())?;
             service.save_job(&job)?;
@@ -283,9 +263,6 @@ fn chat_outputs_from_response(
     }
     if let Some(images) = value.get("images") {
         collect_chat_outputs_from_image_array(client, images, count, &mut outputs)?;
-    }
-    if outputs.is_empty() {
-        bail!("chat image-output response did not contain an image");
     }
     Ok(outputs)
 }
@@ -523,6 +500,79 @@ mod tests {
         assert_eq!(outputs.len(), 2);
         assert_eq!(outputs[0].bytes, b"image-1");
         assert_eq!(outputs[1].bytes, b"image-2");
+    }
+
+    #[test]
+    fn chat_image_output_returns_empty_outputs_when_response_has_no_images() {
+        let value = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": [{"type": "text", "text": "no image"}]
+                }
+            }]
+        });
+        let client = Client::new();
+
+        let outputs = chat_outputs_from_response(&client, &value, 2).unwrap();
+
+        assert!(outputs.is_empty());
+    }
+
+    #[test]
+    fn chat_image_output_later_empty_call_preserves_first_artifact() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().expect("request");
+                requests.push(read_http_request(&mut stream));
+                let body = if index == 0 {
+                    json!({
+                        "choices": [{
+                            "message": {"images": [{"b64_json": "aW1hZ2U="}]}
+                        }]
+                    })
+                    .to_string()
+                } else {
+                    json!({
+                        "choices": [{
+                            "message": {"content": [{"type": "text", "text": "no image"}]}
+                        }]
+                    })
+                    .to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).expect("response");
+            }
+            requests
+        });
+        let registry = registry_with_provider(format!("http://{address}"));
+        let service_dir = tempdir().expect("tempdir");
+        let mut request = request();
+        request.count = 2;
+
+        let result = ChatImageOutputAdapter::new()
+            .expect("adapter")
+            .execute_with_discovery_cache(
+                &registry,
+                &auth_store(),
+                &MediaGenerationService::new(service_dir.path()),
+                request,
+                &MediaDiscoveryCache::default(),
+            )
+            .expect("partial generation succeeds");
+
+        assert_eq!(server.join().expect("server").len(), 2);
+        assert_eq!(result.job.requested_count, 2);
+        assert_eq!(result.job.status, MediaJobStatus::Succeeded);
+        assert_eq!(result.job.produced_count(), 1);
+        assert_eq!(result.artifacts.len(), 1);
+        assert_eq!(std::fs::read(&result.artifacts[0].path).unwrap(), b"image");
     }
 
     #[test]
