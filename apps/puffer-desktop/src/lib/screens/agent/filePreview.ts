@@ -24,9 +24,16 @@ export type LegacyOfficePreview = {
   html?: string;
 };
 
+export type ImagePreview = {
+  kind: "image";
+  src: string;
+  alt: string;
+};
+
 export type FilePreview =
   | { kind: "markdown"; html: string }
   | CsvPreview
+  | ImagePreview
   | PdfPreview
   | DocxPreview
   | { kind: "pptx"; slides: { title: string; lines: string[] }[] }
@@ -68,6 +75,8 @@ export async function buildFilePreview(file: ReadFileResult): Promise<FilePrevie
       return file.encoding === "utf8" ? { kind: "markdown", html: renderMarkdown(file.content) } : null;
     case "csv":
       return file.encoding === "utf8" ? { kind: "csv", rows: parseCsv(file.content) } : null;
+    case "image":
+      return previewImage(file);
     case "pdf":
       return previewPdf(file);
     case "docx":
@@ -87,6 +96,7 @@ function previewFormat(path: string):
   | "text"
   | "markdown"
   | "csv"
+  | "image"
   | "pdf"
   | "docx"
   | "pptx"
@@ -95,6 +105,7 @@ function previewFormat(path: string):
   const lower = path.toLowerCase();
   if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "markdown";
   if (lower.endsWith(".csv")) return "csv";
+  if (imageMimeType(path)) return "image";
   if (lower.endsWith(".pdf")) return "pdf";
   if (lower.endsWith(".docx")) return "docx";
   if (lower.endsWith(".pptx")) return "pptx";
@@ -109,6 +120,37 @@ function previewFormat(path: string):
     return "legacy-office";
   }
   return "text";
+}
+
+function imageMimeType(path: string): string | null {
+  const lower = path.toLowerCase();
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".gif")) return "image/gif";
+  return null;
+}
+
+function previewImage(file: ReadFileResult): ImagePreview {
+  if (file.truncated) {
+    throw new Error(`Image preview is unavailable because ${file.path} was truncated.`);
+  }
+  if (file.encoding !== "base64") {
+    throw new Error(`Image preview requires base64 content for ${file.path}.`);
+  }
+  const mimeType = imageMimeType(file.path);
+  if (!mimeType) {
+    throw new Error(`Image preview is unavailable for unsupported image path ${file.path}.`);
+  }
+  return {
+    kind: "image",
+    src: `data:${mimeType};base64,${file.content}`,
+    alt: fileBaseName(file.path)
+  };
+}
+
+function fileBaseName(path: string): string {
+  return path.split("/").filter(Boolean).at(-1) ?? path;
 }
 
 function previewPdf(file: ReadFileResult): PdfPreview | null {

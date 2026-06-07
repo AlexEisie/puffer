@@ -2,6 +2,7 @@ import { expect, type Page, test } from "@playwright/test";
 import {
   defaultFakeMediaCapabilities,
   FakeDaemon,
+  ONE_PIXEL_JPEG_BASE64,
   type FakeMediaCapability
 } from "./support/fakeDaemon";
 import type { MessageAttachment } from "../src/lib/types";
@@ -873,6 +874,61 @@ test("assistant generated image paths render as links before generated thumbnail
 
   await page.locator(".pf-agent-tabs").getByRole("button", { name: "Chat", exact: true }).click();
   await firstThumbnail.click();
+  await expect(page.getByTestId("attachment-overlay")).toBeVisible();
+});
+
+test("inline-code image path opens Files preview while generated image attachment still opens overlay", async ({ page }) => {
+  const sessionId = "session-inline-code-image-path";
+  const imagePath = "/tmp/puffer/.puffer/media/images/artifact-1/image.jpeg";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId,
+        displayName: "Inline-code image path",
+        title: "Inline-code image path",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "assistant-inline-code-image-path",
+            text: `Image: \`${imagePath}\``,
+            createdAtMs: baseTime - 10_000,
+            attachments: [
+              generatedAttachment("job-inline-code", "artifact-inline-code-thumb", 0)
+            ]
+          }
+        ]
+      }
+    ]
+  });
+  daemon.seedGeneratedMediaPreview(sessionId, "artifact-inline-code-thumb", {
+    state: "available",
+    mimeType: "image/png",
+    bytes: onePixelPngBytes
+  });
+  daemon.seedBinaryFile(imagePath, ONE_PIXEL_JPEG_BASE64);
+
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Inline-code image path/);
+
+  const inlinePathLink = page.getByRole("link", { name: imagePath });
+  await expect(inlinePathLink).toBeVisible();
+  await inlinePathLink.click();
+  const readRequest = await daemon.waitForRequest(
+    "read_file",
+    (request) => request.params.path === imagePath
+  );
+  expect(readRequest.params.maxBytes).toBe(24 * 1024 * 1024);
+  await expect(page.getByRole("button", { name: "Files" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".viewer").getByRole("img", { name: "image.jpeg" })).toBeVisible();
+
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Chat", exact: true }).click();
+  await page.getByRole("button", { name: "Open image attachment Generated image" }).click();
   await expect(page.getByTestId("attachment-overlay")).toBeVisible();
 });
 

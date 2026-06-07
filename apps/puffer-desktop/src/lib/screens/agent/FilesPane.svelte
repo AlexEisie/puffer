@@ -1504,6 +1504,10 @@
           <div class="file-preview pdf-shell" aria-label="PDF preview">
             <PdfDocumentPreview base64={activePreview.base64} textLines={activePreview.lines} />
           </div>
+        {:else if activePreview && activePreview.kind === "image"}
+          <div class="file-preview image-preview" aria-label="Image preview">
+            <img src={activePreview.src} alt={activePreview.alt} />
+          </div>
         {:else if activePreview && activePreview.kind === "docx"}
           <article class="file-preview office-preview" aria-label="DOCX preview">
             {#each activePreview.paragraphs as paragraph}
@@ -2042,6 +2046,22 @@
     height: 100%;
     overflow: hidden;
     background: color-mix(in oklab, var(--background) 94%, var(--muted));
+  }
+  .image-preview {
+    height: 100%;
+    min-height: 100%;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background: color-mix(in oklab, var(--background) 96%, var(--muted));
+  }
+  .image-preview img {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
   }
   .office-preview section,
   .spreadsheet-preview section {
