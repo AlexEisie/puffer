@@ -1063,6 +1063,12 @@
     return item.body;
   }
 
+  function hasGeneratedMediaAttachments(item: MessageTimelineItem): boolean {
+    return Boolean(
+      item.attachments?.some((attachment) => attachment.source.kind === "generated_media")
+    );
+  }
+
   $effect(() => {
     // Keep unsent composer text isolated per session while switching threads.
     const nextSessionId = session?.id ?? null;
@@ -2316,15 +2322,23 @@
                     </div>
                   {/if}
                   {#if row.item}
-                    {@const visibleBody = visibleMessageBody(row.item as MessageTimelineItem)}
-                    {#if row.item.attachments?.length}
+                    {@const messageItem = row.item as MessageTimelineItem}
+                    {@const visibleBody = visibleMessageBody(messageItem)}
+                    {@const hasVisibleBody = Boolean(visibleBody.trim())}
+                    {@const hasGeneratedMedia = hasGeneratedMediaAttachments(messageItem)}
+                    {#if hasGeneratedMedia && hasVisibleBody}
+                      <div class="pf-msg-text">
+                        <MessageBody body={visibleBody} {onOpenChatIntent} />
+                      </div>
+                    {/if}
+                    {#if messageItem.attachments?.length}
                       <MessageAttachmentPreviewStrip
                         sessionId={session?.id ?? null}
-                        attachments={row.item.attachments}
+                        attachments={messageItem.attachments}
                         {onOpenChatIntent}
                       />
                     {/if}
-                    {#if visibleBody.trim()}
+                    {#if !hasGeneratedMedia && hasVisibleBody}
                       <div class="pf-msg-text">
                         <MessageBody body={visibleBody} {onOpenChatIntent} />
                       </div>

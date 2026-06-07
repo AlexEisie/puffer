@@ -802,6 +802,80 @@ test("shows two generated image attachments from one image generation result", a
   await expect(page.getByRole("img", { name: /Generated image/i })).toHaveCount(2);
 });
 
+test("assistant generated image paths render as links before generated thumbnails", async ({ page }) => {
+  const sessionId = "session-generated-links";
+  const firstPath = "/tmp/puffer/.puffer/media/images/generated-local-link-1.png";
+  const secondPath = "/tmp/puffer/.puffer/media/images/generated-local-link-2.png";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId,
+        displayName: "Generated image links",
+        title: "Generated image links",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "assistant-generated-links",
+            text: `Generated images:\n${firstPath}\n${secondPath}`,
+            createdAtMs: baseTime - 10_000,
+            attachments: [
+              generatedAttachment("job-links", "artifact-link-1", 0),
+              generatedAttachment("job-links", "artifact-link-2", 1)
+            ]
+          }
+        ]
+      }
+    ]
+  });
+  daemon.seedGeneratedMediaPreview(sessionId, "artifact-link-1", {
+    state: "available",
+    mimeType: "image/png",
+    bytes: onePixelPngBytes
+  });
+  daemon.seedGeneratedMediaPreview(sessionId, "artifact-link-2", {
+    state: "available",
+    mimeType: "image/png",
+    bytes: onePixelPngBytes
+  });
+  daemon.seedFile(firstPath, "first generated image bytes\n");
+  daemon.seedFile(secondPath, "second generated image bytes\n");
+
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Generated image links/);
+
+  const firstPathLink = page.getByRole("link", { name: firstPath });
+  const secondPathLink = page.getByRole("link", { name: secondPath });
+  await expect(firstPathLink).toBeVisible();
+  await expect(secondPathLink).toBeVisible();
+
+  const firstThumbnail = page.getByRole("button", { name: "Open image attachment Generated image" }).first();
+  await expect(firstThumbnail).toBeVisible();
+  const thumbnailHandle = await firstThumbnail.elementHandle();
+  expect(thumbnailHandle).not.toBeNull();
+  try {
+    expect(
+      await firstPathLink.evaluate((link, thumbnail) => {
+        return Boolean(link.compareDocumentPosition(thumbnail) & Node.DOCUMENT_POSITION_FOLLOWING);
+      }, thumbnailHandle)
+    ).toBe(true);
+  } finally {
+    await thumbnailHandle?.dispose();
+  }
+
+  await firstPathLink.click();
+  await daemon.waitForRequest("read_file", (request) => request.params.path === firstPath);
+
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Chat", exact: true }).click();
+  await firstThumbnail.click();
+  await expect(page.getByTestId("attachment-overlay")).toBeVisible();
+});
+
 test("image slash success renders generated thumbnail without media metadata", async ({ page }) => {
   const generatedPath = "/tmp/puffer/.puffer/media/images/generated-icon.png";
   const daemon = new FakeDaemon({
