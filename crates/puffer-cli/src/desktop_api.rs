@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use puffer_config::{load_config, save_user_config, ConfigPaths, PufferConfig};
-use puffer_core::generated_media_attachment_metadata;
+use puffer_core::generated_media_attachment_metadata_with_fallback;
 use puffer_provider_registry::{
     detect_import_candidates, AuthMode, AuthStore, ExternalImportCandidate, ExternalImportFamily,
     ExternalImportSource, ProviderRegistry, StoredCredential,
@@ -1337,7 +1337,20 @@ fn generated_image_attachment(
         .get("index")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0) as usize;
-    let metadata = generated_media_attachment_metadata(cwd, artifact_id)?;
+    let fallback_mime_type = artifact
+        .get("mimeType")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("image/png");
+    let fallback_size = artifact
+        .get("size")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let metadata = generated_media_attachment_metadata_with_fallback(
+        cwd,
+        artifact_id,
+        fallback_mime_type,
+        fallback_size,
+    )?;
     let extension = generated_image_extension(&metadata.mime_type).to_string();
     Some(ChatAttachmentDto {
         id: format!("generated-image:{artifact_id}"),
@@ -2154,6 +2167,55 @@ mod tests {
             ChatAttachmentSourceDto::GeneratedMedia { ref job_id, ref artifact_id, index }
                 if job_id == "job-1" && artifact_id == "artifact-1" && index == 0
         ));
+    }
+
+    #[test]
+    fn timeline_keeps_generated_attachment_when_sidecar_is_missing() {
+        let (temp, store) = test_store();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let session = record_with_cwd(
+            workspace,
+            vec![
+                TranscriptEvent::ToolInvocation {
+                    call_id: "call-img".to_string(),
+                    tool_id: "ImageGeneration".to_string(),
+                    input: serde_json::json!({"prompt": "draw", "count": 1}).to_string(),
+                    output: serde_json::json!({
+                        "jobId": "job-1",
+                        "requestedCount": 1,
+                        "status": "succeeded",
+                        "artifacts": [
+                            {"artifactId": "artifact-1", "index": 0, "path": "/missing.png", "mimeType": "image/webp", "size": 42}
+                        ]
+                    })
+                    .to_string(),
+                    success: true,
+                    actor: None,
+                    subject: None,
+                    metadata: None,
+                },
+                TranscriptEvent::AssistantMessage {
+                    text: "Done".to_string(),
+                    actor: None,
+                },
+            ],
+        );
+
+        let items = timeline_items(&store, &session);
+
+        let Some(TimelineItemDto::AssistantMessage { attachments, .. }) = items
+            .iter()
+            .find(|item| matches!(item, TimelineItemDto::AssistantMessage { .. }))
+        else {
+            panic!("assistant message exists");
+        };
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].id, "generated-image:artifact-1");
+        assert_eq!(attachments[0].state, "missing");
+        assert_eq!(attachments[0].mime_type, "image/webp");
+        assert_eq!(attachments[0].extension, "WEBP");
+        assert_eq!(attachments[0].size, 42);
     }
 
     #[test]

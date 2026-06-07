@@ -16,7 +16,7 @@ use base64::prelude::*;
 use puffer_config::{builtin_captcha_solvers, ConfigPaths};
 use puffer_core::{
     discover_exact_media_capabilities, generate_exact_image_with_cache,
-    generated_media_attachment_metadata, read_generated_media_preview_by_artifact,
+    generated_media_attachment_metadata_with_fallback, read_generated_media_preview_by_artifact,
     ExactImageGenerationRequest, ExactMediaDiscoveryCache, GeneratedMediaPreviewResult,
 };
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
@@ -602,7 +602,20 @@ impl BackendState {
             .get("index")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0) as usize;
-        let metadata = generated_media_attachment_metadata(cwd, artifact_id)?;
+        let fallback_mime_type = artifact
+            .get("mimeType")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("image/png");
+        let fallback_size = artifact
+            .get("size")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let metadata = generated_media_attachment_metadata_with_fallback(
+            cwd,
+            artifact_id,
+            fallback_mime_type,
+            fallback_size,
+        )?;
         Some(ChatAttachmentDto {
             id: format!("generated-image:{artifact_id}"),
             name: "Generated image".to_string(),
@@ -3009,6 +3022,55 @@ mod tests {
                 index
             } if job_id == "job-1" && artifact_id == "artifact-2" && index == 1
         ));
+    }
+
+    #[test]
+    fn tauri_timeline_keeps_generated_attachment_when_sidecar_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let backend = BackendState::new();
+        let mut record = test_session_record(
+            "codex",
+            Some("gpt-5.4"),
+            vec![
+                StoredEvent::Tool {
+                    at_ms: 1,
+                    tool_id: "ImageGeneration".to_string(),
+                    input: "{}".to_string(),
+                    output: serde_json::json!({
+                        "jobId": "job-1",
+                        "requestedCount": 1,
+                        "status": "succeeded",
+                        "artifacts": [
+                            {"artifactId": "artifact-1", "index": 0, "path": "/missing.png", "mimeType": "image/webp", "size": 42}
+                        ]
+                    })
+                    .to_string(),
+                    success: true,
+                },
+                StoredEvent::Assistant {
+                    at_ms: 2,
+                    text: "Done".to_string(),
+                },
+            ],
+        );
+        record.cwd = workspace.display().to_string();
+
+        let items = backend.timeline_items(&record, None);
+
+        let Some(TimelineItemDto::AssistantMessage { attachments, .. }) = items
+            .iter()
+            .find(|item| matches!(item, TimelineItemDto::AssistantMessage { .. }))
+        else {
+            panic!("assistant message exists");
+        };
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].id, "generated-image:artifact-1");
+        assert_eq!(attachments[0].state, "missing");
+        assert_eq!(attachments[0].mime_type, "image/webp");
+        assert_eq!(attachments[0].extension, "WEBP");
+        assert_eq!(attachments[0].size, 42);
     }
 
     #[test]

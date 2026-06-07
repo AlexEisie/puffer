@@ -121,10 +121,60 @@ pub fn generated_media_attachment_metadata(
 ) -> Option<GeneratedMediaAttachmentMetadata> {
     let service = MediaGenerationService::new(workspace_root.as_ref());
     let artifact = service.load_artifact(artifact_id).ok()?;
+    generated_media_attachment_metadata_from_artifact(workspace_root.as_ref(), artifact)
+}
+
+/// Loads generated image metadata or falls back to missing metadata from a tool result.
+pub fn generated_media_attachment_metadata_with_fallback(
+    workspace_root: impl AsRef<Path>,
+    artifact_id: &str,
+    fallback_mime_type: &str,
+    fallback_byte_count: u64,
+) -> Option<GeneratedMediaAttachmentMetadata> {
+    let artifact_id = artifact_id.trim();
+    if !valid_generated_media_artifact_id(artifact_id) {
+        return None;
+    }
+    let service = MediaGenerationService::new(workspace_root.as_ref());
+    match service.load_artifact(artifact_id) {
+        Ok(artifact) => {
+            generated_media_attachment_metadata_from_artifact(workspace_root.as_ref(), artifact)
+        }
+        Err(_) => {
+            if !generated_media_artifact_sidecar_missing(workspace_root.as_ref(), artifact_id) {
+                return None;
+            }
+            let mime_type = canonical_sidecar_image_mime_type(Some(fallback_mime_type))?;
+            Some(GeneratedMediaAttachmentMetadata {
+                artifact_id: artifact_id.to_string(),
+                mime_type: mime_type.to_string(),
+                byte_count: fallback_byte_count,
+                state: "missing".to_string(),
+            })
+        }
+    }
+}
+
+fn generated_media_artifact_sidecar_missing(workspace_root: &Path, artifact_id: &str) -> bool {
+    let sidecar_path = workspace_root
+        .join(".puffer")
+        .join("media")
+        .join("artifact-sidecars")
+        .join(format!("{artifact_id}.json"));
+    matches!(
+        std::fs::symlink_metadata(sidecar_path),
+        Err(error) if error.kind() == ErrorKind::NotFound
+    )
+}
+
+fn generated_media_attachment_metadata_from_artifact(
+    workspace_root: &Path,
+    artifact: MediaArtifact,
+) -> Option<GeneratedMediaAttachmentMetadata> {
     if artifact.kind != MediaKind::Image {
         return None;
     }
-    let image_root = generated_media_image_root(workspace_root.as_ref());
+    let image_root = generated_media_image_root(workspace_root);
     let canonical_path = match canonical_generated_media_image_path(&image_root, &artifact.path) {
         Ok(path) => Some(path),
         Err(GeneratedMediaPathError::Missing) => None,
@@ -149,6 +199,13 @@ pub fn generated_media_attachment_metadata(
         byte_count: artifact.byte_count,
         state: state.to_string(),
     })
+}
+
+fn valid_generated_media_artifact_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 /// Reads generated image preview bytes by artifact id.

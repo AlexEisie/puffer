@@ -101,6 +101,81 @@ fn generated_media_attachment_metadata_rejects_symlink_escape() {
 }
 
 #[test]
+fn generated_media_attachment_metadata_falls_back_when_sidecar_is_missing() {
+    let workspace = tempdir().unwrap();
+
+    let metadata = generated_media_attachment_metadata_with_fallback(
+        workspace.path(),
+        "artifact-1",
+        "image/webp",
+        42,
+    )
+    .unwrap();
+
+    assert_eq!(metadata.artifact_id, "artifact-1");
+    assert_eq!(metadata.mime_type, "image/webp");
+    assert_eq!(metadata.byte_count, 42);
+    assert_eq!(metadata.state, "missing");
+}
+
+#[test]
+fn generated_media_attachment_metadata_fallback_does_not_bypass_unsafe_sidecar() {
+    let workspace = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let outside_image = outside.path().join("image.jpeg");
+    std::fs::write(&outside_image, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
+    let link_dir = workspace.path().join(".puffer/media/images/artifact-1");
+    std::fs::create_dir_all(&link_dir).unwrap();
+    let link = link_dir.join("image.jpeg");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside_image, &link).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(&outside_image, &link).unwrap();
+
+    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    service
+        .save_artifact(&crate::runtime::media::MediaArtifact {
+            id: "artifact-1".to_string(),
+            job_id: "job-1".to_string(),
+            kind: crate::runtime::media::MediaKind::Image,
+            path: link,
+            mime_type: "image/jpeg".to_string(),
+            byte_count: 4,
+            metadata: serde_json::json!({}),
+            created_at_ms: 1,
+        })
+        .unwrap();
+
+    assert_eq!(
+        generated_media_attachment_metadata_with_fallback(
+            workspace.path(),
+            "artifact-1",
+            "image/webp",
+            42,
+        ),
+        None
+    );
+}
+
+#[test]
+fn generated_media_attachment_metadata_fallback_does_not_mask_corrupt_sidecar() {
+    let workspace = tempdir().unwrap();
+    let sidecar_dir = workspace.path().join(".puffer/media/artifact-sidecars");
+    std::fs::create_dir_all(&sidecar_dir).unwrap();
+    std::fs::write(sidecar_dir.join("artifact-1.json"), b"{not-json").unwrap();
+
+    assert_eq!(
+        generated_media_attachment_metadata_with_fallback(
+            workspace.path(),
+            "artifact-1",
+            "image/webp",
+            42,
+        ),
+        None
+    );
+}
+
+#[test]
 fn generated_media_preview_by_artifact_sniffs_mime_when_extension_lies() {
     let workspace = tempdir().unwrap();
     let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
