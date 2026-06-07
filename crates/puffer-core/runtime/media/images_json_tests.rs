@@ -1,0 +1,640 @@
+use super::*;
+use crate::runtime::media::MediaGenerationService;
+use indexmap::IndexMap;
+use puffer_provider_registry::{
+    AuthMode, AuthStore, ImageMediaDescriptor, MediaExecutionDescriptor, MediaExecutionKind,
+    MediaModelDescriptor, MediaOperation, MediaParameterSpec, ModelDescriptor, ProviderDescriptor,
+    ProviderMediaDescriptor, ProviderRegistry,
+};
+use serde_json::json;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::thread;
+use tempfile::tempdir;
+
+fn registry_with_provider(base_url: String) -> ProviderRegistry {
+    registry_with_provider_id("exact-provider", base_url)
+}
+
+fn registry_with_provider_id(provider_id: &str, base_url: String) -> ProviderRegistry {
+    registry_with_provider_parameters(provider_id, base_url, image_parameters())
+}
+
+fn registry_with_provider_parameters(
+    provider_id: &str,
+    base_url: String,
+    parameters: Vec<MediaParameterSpec>,
+) -> ProviderRegistry {
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderDescriptor {
+        id: provider_id.to_string(),
+        display_name: "Exact Provider".to_string(),
+        base_url,
+        default_api: "openai-responses".to_string(),
+        auth_modes: vec![AuthMode::ApiKey],
+        headers: IndexMap::from([("x-provider-header".to_string(), "present".to_string())]),
+        query_params: IndexMap::from([("api-version".to_string(), "2026-06-05".to_string())]),
+        chat_completions_path: None,
+        discovery: None,
+        media: Some(ProviderMediaDescriptor {
+            image: Some(ImageMediaDescriptor {
+                discovery: None,
+                execution: Some(MediaExecutionDescriptor {
+                    adapter: MediaExecutionKind::ImagesJson,
+                    base_url: None,
+                    path: "/custom/images".to_string(),
+                }),
+                models: vec![MediaModelDescriptor {
+                    id: "exact-image-model".to_string(),
+                    display_name: Some("Exact Image Model".to_string()),
+                    execution: None,
+                    operations: vec![MediaOperation::Generate],
+                    parameters,
+                }],
+            }),
+        }),
+        models: Vec::<ModelDescriptor>::new(),
+    });
+    registry
+}
+
+fn image_parameters() -> Vec<MediaParameterSpec> {
+    vec![
+        MediaParameterSpec {
+            name: "size".to_string(),
+            label: "Size".to_string(),
+            values: vec!["1024x1024".to_string()],
+            default: "1024x1024".to_string(),
+            request_field: Some("size".to_string()),
+        },
+        MediaParameterSpec {
+            name: "quality".to_string(),
+            label: "Quality".to_string(),
+            values: vec!["auto".to_string()],
+            default: "auto".to_string(),
+            request_field: Some("quality".to_string()),
+        },
+        MediaParameterSpec {
+            name: "output_format".to_string(),
+            label: "Output format".to_string(),
+            values: vec!["png".to_string(), "webp".to_string()],
+            default: "png".to_string(),
+            request_field: Some("output_format".to_string()),
+        },
+    ]
+}
+
+fn auth_store() -> AuthStore {
+    let mut auth = AuthStore::default();
+    auth.set_api_key("exact-provider", "sk-secret");
+    auth
+}
+
+fn codex_auth_store() -> AuthStore {
+    let mut auth = AuthStore::default();
+    auth.set_api_key("codex", "sk-codex-secret");
+    auth
+}
+
+fn request() -> ImagesJsonGenerationRequest {
+    ImagesJsonGenerationRequest {
+        provider_id: "exact-provider".to_string(),
+        model_id: "exact-image-model".to_string(),
+        adapter: "images_json".to_string(),
+        prompt: "draw a precise icon".to_string(),
+        parameters: BTreeMap::from([
+            ("size".to_string(), "1024x1024".to_string()),
+            ("quality".to_string(), "auto".to_string()),
+            ("output_format".to_string(), "png".to_string()),
+        ]),
+        count: 1,
+    }
+}
+
+fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+    let mut buffer = [0_u8; 8192];
+    let size = stream.read(&mut buffer).expect("read request");
+    String::from_utf8_lossy(&buffer[..size]).to_string()
+}
+
+fn spawn_image_server_with_body(body: &'static str) -> (String, std::thread::JoinHandle<String>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0_u8; 4096];
+        let n = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..n]).to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        request
+    });
+    (format!("http://{addr}"), handle)
+}
+
+#[test]
+fn images_json_persists_multiple_response_images_under_one_job() {
+    let (base_url, server) = spawn_image_server_with_body(
+        r#"{"data":[{"b64_json":"aW1hZ2UtMQ=="},{"b64_json":"aW1hZ2UtMg=="}]}"#,
+    );
+    let registry = registry_with_provider(base_url);
+    let mut auth_store = AuthStore::default();
+    auth_store.set_api_key("exact-provider", "sk-test");
+    let service_dir = tempfile::tempdir().unwrap();
+    let service = MediaGenerationService::new(service_dir.path());
+    let request = ImagesJsonGenerationRequest {
+        provider_id: "exact-provider".to_string(),
+        model_id: "exact-image-model".to_string(),
+        adapter: "images_json".to_string(),
+        prompt: "draw two images".to_string(),
+        parameters: BTreeMap::from([
+            ("size".to_string(), "1024x1024".to_string()),
+            ("quality".to_string(), "auto".to_string()),
+            ("output_format".to_string(), "png".to_string()),
+        ]),
+        count: 2,
+    };
+
+    let result = ImagesJsonAdapter::new()
+        .unwrap()
+        .execute(&registry, &auth_store, &service, request)
+        .unwrap();
+
+    let request_text = server.join().unwrap();
+    assert!(request_text.contains("\"n\":2"));
+    assert_eq!(result.job.requested_count, 2);
+    assert_eq!(result.job.artifact_ids.len(), 2);
+    assert_eq!(result.artifacts.len(), 2);
+    assert_ne!(result.artifacts[0].id, result.artifacts[1].id);
+    assert_eq!(
+        std::fs::read(&result.artifacts[0].path).unwrap(),
+        b"image-1"
+    );
+    assert_eq!(
+        std::fs::read(&result.artifacts[1].path).unwrap(),
+        b"image-2"
+    );
+    assert_eq!(result.artifacts[0].metadata["index"], 0);
+    assert_eq!(result.artifacts[1].metadata["index"], 1);
+}
+
+#[test]
+fn request_body_uses_selected_model_and_descriptor_path() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("request");
+        let request_text = read_http_request(&mut stream);
+        let body = json!({
+            "data": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).expect("response");
+        request_text
+    });
+    let registry = registry_with_provider(format!("http://{address}"));
+    let service_dir = tempdir().expect("tempdir");
+
+    let result = ImagesJsonAdapter::new()
+        .expect("adapter")
+        .execute(
+            &registry,
+            &auth_store(),
+            &MediaGenerationService::new(service_dir.path()),
+            request(),
+        )
+        .expect("generation succeeds");
+
+    let request_text = server.join().expect("server");
+    assert!(request_text.starts_with("POST /custom/images?api-version=2026-06-05 HTTP/1.1"));
+    assert!(request_text.contains("authorization: Bearer sk-secret"));
+    assert!(request_text.contains("x-provider-header: present"));
+    assert!(request_text.contains("\"model\":\"exact-image-model\""));
+    assert!(request_text.contains("\"size\":\"1024x1024\""));
+    assert_eq!(
+        std::fs::read(&result.artifacts[0].path).unwrap(),
+        b"image-bytes"
+    );
+    assert_eq!(result.artifacts[0].metadata["adapter"], "images_json");
+}
+
+#[test]
+fn request_body_uses_descriptor_request_field_mapping() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("request");
+        let request_text = read_http_request(&mut stream);
+        let body = json!({
+            "data": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).expect("response");
+        request_text
+    });
+    let mut parameters = image_parameters();
+    parameters[0].name = "resolution_choice".to_string();
+    parameters[0].request_field = Some("resolution".to_string());
+    parameters[0].values = vec!["2k".to_string()];
+    parameters[0].default = "2k".to_string();
+    let registry = registry_with_provider_parameters(
+        "exact-provider",
+        format!("http://{address}"),
+        parameters,
+    );
+    let service_dir = tempdir().expect("tempdir");
+    let mut request = request();
+    request.parameters.remove("size");
+    request
+        .parameters
+        .insert("resolution_choice".to_string(), "2k".to_string());
+
+    ImagesJsonAdapter::new()
+        .expect("adapter")
+        .execute(
+            &registry,
+            &auth_store(),
+            &MediaGenerationService::new(service_dir.path()),
+            request,
+        )
+        .expect("generation succeeds");
+
+    let request_text = server.join().expect("server");
+    assert!(request_text.contains("\"resolution\":\"2k\""));
+    assert!(!request_text.contains("\"resolution_choice\""));
+}
+
+#[test]
+fn artifact_metadata_uses_resolved_descriptor_defaults() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("request");
+        let request_text = read_http_request(&mut stream);
+        let body = json!({
+            "data": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).expect("response");
+        request_text
+    });
+    let mut parameters = image_parameters();
+    parameters[2].values = vec!["png".to_string(), "jpeg".to_string()];
+    parameters[2].default = "jpeg".to_string();
+    let registry = registry_with_provider_parameters(
+        "exact-provider",
+        format!("http://{address}"),
+        parameters,
+    );
+    let service_dir = tempdir().expect("tempdir");
+    let mut request = request();
+    request.parameters.remove("output_format");
+
+    let result = ImagesJsonAdapter::new()
+        .expect("adapter")
+        .execute(
+            &registry,
+            &auth_store(),
+            &MediaGenerationService::new(service_dir.path()),
+            request,
+        )
+        .expect("generation succeeds");
+
+    let request_text = server.join().expect("server");
+    assert!(request_text.contains("\"output_format\":\"jpeg\""));
+    assert_eq!(result.artifacts[0].mime_type, "image/jpeg");
+    assert_eq!(
+        result.artifacts[0]
+            .path
+            .extension()
+            .and_then(|value| value.to_str()),
+        Some("jpeg")
+    );
+    assert_eq!(
+        result.artifacts[0].metadata["parameters"]["output_format"],
+        "jpeg"
+    );
+    assert_eq!(result.artifacts[0].metadata["mimeType"], "image/jpeg");
+}
+
+#[test]
+fn artifact_format_follows_response_bytes_when_output_format_undeclared() {
+    let jpeg_b64 = BASE64_STANDARD.encode([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]);
+    let response_b64 = jpeg_b64.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("request");
+        read_http_request(&mut stream);
+        let body = json!({ "data": [{"b64_json": response_b64}] }).to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).expect("response");
+    });
+    // Model declares no output_format parameter (mirrors BytePlus Seedream 4.5/4.0).
+    let parameters = vec![MediaParameterSpec {
+        name: "size".to_string(),
+        label: "Size".to_string(),
+        values: vec!["2K".to_string()],
+        default: "2K".to_string(),
+        request_field: Some("size".to_string()),
+    }];
+    let registry = registry_with_provider_parameters(
+        "exact-provider",
+        format!("http://{address}"),
+        parameters,
+    );
+    let service_dir = tempdir().expect("tempdir");
+    let request = ImagesJsonGenerationRequest {
+        provider_id: "exact-provider".to_string(),
+        model_id: "exact-image-model".to_string(),
+        adapter: "images_json".to_string(),
+        prompt: "draw a precise icon".to_string(),
+        parameters: BTreeMap::from([("size".to_string(), "2K".to_string())]),
+        count: 1,
+    };
+
+    let result = ImagesJsonAdapter::new()
+        .expect("adapter")
+        .execute(
+            &registry,
+            &auth_store(),
+            &MediaGenerationService::new(service_dir.path()),
+            request,
+        )
+        .expect("generation succeeds");
+
+    server.join().expect("server");
+    assert_eq!(result.artifacts[0].mime_type, "image/jpeg");
+    assert_eq!(
+        result.artifacts[0]
+            .path
+            .extension()
+            .and_then(|value| value.to_str()),
+        Some("jpeg")
+    );
+    assert_eq!(result.artifacts[0].metadata["mimeType"], "image/jpeg");
+}
+
+#[test]
+fn url_response_is_downloaded_before_success() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("generation request");
+        let generation_request = read_http_request(&mut stream);
+        let body = json!({
+            "data": [{
+                "url": format!("http://{address}/generated.png"),
+                "revised_prompt": "draw a more precise icon"
+            }]
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("generation response");
+
+        let (mut stream, _) = listener.accept().expect("download request");
+        let download_request = read_http_request(&mut stream);
+        let response = "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: 12\r\nconnection: close\r\n\r\ndownloaded!!";
+        stream
+            .write_all(response.as_bytes())
+            .expect("download response");
+        (generation_request, download_request)
+    });
+    let registry = registry_with_provider(format!("http://{address}"));
+    let service_dir = tempdir().expect("tempdir");
+
+    let result = ImagesJsonAdapter::new()
+        .expect("adapter")
+        .execute(
+            &registry,
+            &auth_store(),
+            &MediaGenerationService::new(service_dir.path()),
+            request(),
+        )
+        .expect("generation succeeds");
+
+    let (_, download_request) = server.join().expect("server");
+    assert!(download_request.starts_with("GET /generated.png HTTP/1.1"));
+    assert_eq!(
+        std::fs::read(&result.artifacts[0].path).unwrap(),
+        b"downloaded!!"
+    );
+    assert_eq!(
+        result.job.status,
+        crate::runtime::media::MediaJobStatus::Succeeded
+    );
+    assert_eq!(
+        result.artifacts[0].metadata["revisedPrompt"],
+        "draw a more precise icon"
+    );
+    assert_eq!(
+        result.artifacts[0].metadata["remoteSourceUrl"],
+        format!("http://{address}/generated.png")
+    );
+}
+
+#[test]
+fn missing_image_data_returns_stable_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("request");
+        let body = json!({"data": [{}]}).to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).expect("response");
+    });
+    let registry = registry_with_provider(format!("http://{address}"));
+    let service_dir = tempdir().expect("tempdir");
+
+    let error = ImagesJsonAdapter::new()
+        .expect("adapter")
+        .execute(
+            &registry,
+            &auth_store(),
+            &MediaGenerationService::new(service_dir.path()),
+            request(),
+        )
+        .expect_err("missing image data should fail");
+
+    server.join().expect("server");
+    assert_eq!(
+        error.to_string(),
+        "image generation response did not contain an image"
+    );
+}
+
+#[test]
+fn external_http_image_url_is_rejected_before_download() {
+    let value = json!({
+        "data": [{"url": "http://example.com/generated.png"}]
+    });
+
+    let error = image_outputs_from_response(&Client::new(), &value, 1)
+        .expect_err("external http URL should fail before download");
+
+    assert_eq!(
+        error.to_string(),
+        "unsupported image response URL scheme `http`"
+    );
+}
+
+#[test]
+fn unsupported_parameter_fails_before_http_request() {
+    let registry = registry_with_provider("http://127.0.0.1:9".to_string());
+    let service_dir = tempdir().expect("tempdir");
+    let mut request = request();
+    request
+        .parameters
+        .insert("size".to_string(), "2048x2048".to_string());
+
+    let error = ImagesJsonAdapter::new()
+        .expect("adapter")
+        .execute(
+            &registry,
+            &auth_store(),
+            &MediaGenerationService::new(service_dir.path()),
+            request,
+        )
+        .expect_err("unsupported parameter should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "image generation parameter unsupported: size=2048x2048"
+    );
+}
+
+#[test]
+fn unsupported_request_field_fails_before_http_request() {
+    let mut parameters = image_parameters();
+    parameters[0].request_field = Some("watermark".to_string());
+    let registry = registry_with_provider_parameters(
+        "exact-provider",
+        "http://127.0.0.1:9".to_string(),
+        parameters,
+    );
+    let service_dir = tempdir().expect("tempdir");
+
+    let error = ImagesJsonAdapter::new()
+        .expect("adapter")
+        .execute(
+            &registry,
+            &auth_store(),
+            &MediaGenerationService::new(service_dir.path()),
+            request(),
+        )
+        .expect_err("unsupported request field should fail before HTTP");
+
+    assert_eq!(
+        error.to_string(),
+        "image generation request field unsupported: watermark"
+    );
+}
+
+#[test]
+fn provider_secrets_are_redacted_from_error_responses() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("request");
+        let _request_text = read_http_request(&mut stream);
+        let body = "bad sk-secret 2026-06-05";
+        let response = format!(
+            "HTTP/1.1 400 Bad Request\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).expect("response");
+    });
+    let registry = registry_with_provider(format!("http://{address}"));
+    let service_dir = tempdir().expect("tempdir");
+
+    let error = ImagesJsonAdapter::new()
+        .expect("adapter")
+        .execute(
+            &registry,
+            &auth_store(),
+            &MediaGenerationService::new(service_dir.path()),
+            request(),
+        )
+        .expect_err("provider error should fail");
+
+    server.join().expect("server");
+    let message = error.to_string();
+    assert!(message.contains("[redacted]"), "{message}");
+    assert!(!message.contains("sk-secret"), "{message}");
+    assert!(!message.contains("2026-06-05"), "{message}");
+}
+
+#[test]
+fn openai_provider_uses_codex_credentials_for_generation() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("request");
+        let request_text = read_http_request(&mut stream);
+        let body = json!({
+            "data": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).expect("response");
+        request_text
+    });
+    let registry = registry_with_provider_id("openai", format!("http://{address}"));
+    let service_dir = tempdir().expect("tempdir");
+    let request = ImagesJsonGenerationRequest {
+        provider_id: "openai".to_string(),
+        model_id: "exact-image-model".to_string(),
+        ..request()
+    };
+
+    ImagesJsonAdapter::new()
+        .expect("adapter")
+        .execute(
+            &registry,
+            &codex_auth_store(),
+            &MediaGenerationService::new(service_dir.path()),
+            request,
+        )
+        .expect("generation succeeds");
+
+    let request_text = server.join().expect("server");
+    assert!(request_text.contains("authorization: Bearer sk-codex-secret"));
+}
