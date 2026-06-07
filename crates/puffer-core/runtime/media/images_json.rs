@@ -141,10 +141,8 @@ impl ImagesJsonAdapter {
             &discovery_cache,
         )?;
         let plan = plan_image_generation(request.count, &execution.batch)?;
-        let request_parameters = parameters_for_image_count(
-            selected_parameters_with_defaults(&capability, &request.parameters)?,
-            plan.max_call_count(),
-        );
+        let request_parameters =
+            selected_parameters_with_defaults(&capability, &request.parameters)?;
 
         let job_id = Uuid::new_v4().to_string();
         let created_at_ms = now_ms();
@@ -177,21 +175,6 @@ impl ImagesJsonAdapter {
                 return Err(error);
             }
         };
-
-        if outputs.len() != request.count as usize {
-            job.error = Some(format!(
-                "image generation returned {} image(s), expected {}",
-                outputs.len(),
-                request.count
-            ));
-            job.transition(MediaJobStatus::Failed, now_ms())?;
-            service.save_job(&job)?;
-            bail!(
-                "image generation returned {} image(s), expected {}",
-                outputs.len(),
-                request.count
-            );
-        }
 
         let mut artifacts = Vec::new();
         for (index, output) in outputs.into_iter().enumerate() {
@@ -248,44 +231,62 @@ impl ImagesJsonAdapter {
         let token = bearer_token(provider, auth_store, CredentialAliasMode::OpenAiCodexAlias)?;
         let mut outputs = Vec::new();
         for call in &plan.calls {
-            let body = ImagesJsonRequest::new(
-                &request.model_id,
-                &request.prompt,
-                parameters.clone(),
-                call.requested_count,
-            )
-            .to_body();
-            let mut http = self.client.post(url.clone()).json(&body);
-            for (name, value) in &provider.headers {
-                http = http.header(name.as_str(), value.as_str());
+            let call_result = (|| -> Result<Vec<ImageOutput>> {
+                let body = ImagesJsonRequest::new(
+                    &request.model_id,
+                    &request.prompt,
+                    parameters.clone(),
+                    call.requested_count,
+                )
+                .to_body();
+                let mut http = self.client.post(url.clone()).json(&body);
+                for (name, value) in &provider.headers {
+                    http = http.header(name.as_str(), value.as_str());
+                }
+                if let Some(token) = &token {
+                    http = http.bearer_auth(token);
+                }
+                let response = http
+                    .send()
+                    .map_err(|error| anyhow!("{}", redact_secrets(&error.to_string(), &secrets)))
+                    .context("send image generation request")?;
+                let status = response.status();
+                let body = response
+                    .text()
+                    .map_err(|error| anyhow!("{}", redact_secrets(&error.to_string(), &secrets)))
+                    .context("read image generation response")?;
+                if !status.is_success() {
+                    bail!(
+                        "image generation failed with status {}: {}",
+                        status.as_u16(),
+                        redact_secrets(&body, &secrets)
+                    );
+                }
+                let value: Value =
+                    serde_json::from_str(&body).context("parse image generation response")?;
+                image_outputs_from_response(
+                    &self.client,
+                    &value,
+                    call.requested_count,
+                    call.call_index,
+                )
+            })();
+
+            match call_result {
+                Ok(mut call_outputs) => {
+                    let short_response = call_outputs.len() < call.requested_count as usize;
+                    outputs.append(&mut call_outputs);
+                    if short_response {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    if outputs.is_empty() {
+                        return Err(error);
+                    }
+                    break;
+                }
             }
-            if let Some(token) = &token {
-                http = http.bearer_auth(token);
-            }
-            let response = http
-                .send()
-                .map_err(|error| anyhow!("{}", redact_secrets(&error.to_string(), &secrets)))
-                .context("send image generation request")?;
-            let status = response.status();
-            let body = response
-                .text()
-                .map_err(|error| anyhow!("{}", redact_secrets(&error.to_string(), &secrets)))
-                .context("read image generation response")?;
-            if !status.is_success() {
-                bail!(
-                    "image generation failed with status {}: {}",
-                    status.as_u16(),
-                    redact_secrets(&body, &secrets)
-                );
-            }
-            let value: Value =
-                serde_json::from_str(&body).context("parse image generation response")?;
-            outputs.extend(image_outputs_from_response(
-                &self.client,
-                &value,
-                call.requested_count,
-                call.call_index,
-            )?);
         }
         Ok(outputs)
     }
@@ -320,47 +321,19 @@ fn selected_parameters_with_defaults(
     Ok(request_parameters)
 }
 
-fn parameters_for_image_count(
-    mut parameters: BTreeMap<String, String>,
-    count: u8,
-) -> BTreeMap<String, String> {
-    if count > 1
-        && parameters
-            .get("sequential_image_generation")
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("disabled"))
-    {
-        parameters.insert(
-            "sequential_image_generation".to_string(),
-            "auto".to_string(),
-        );
-    }
-    parameters
-}
-
 fn image_outputs_from_response(
     client: &Client,
     value: &Value,
     count: u8,
-    call_index: usize,
+    _call_index: usize,
 ) -> Result<Vec<ImageOutput>> {
     let Some(items) = value.get("data").and_then(Value::as_array) else {
         bail!("image generation response did not contain an image");
     };
     let requested_count = count as usize;
-    if items.len() < requested_count {
-        bail!(
-            "image generation returned {} image(s), expected {} for call {}",
-            items.len(),
-            requested_count,
-            call_index
-        );
-    }
     let mut outputs = Vec::new();
     for item in items.iter().take(requested_count) {
         outputs.push(image_output_from_item(client, item)?);
-    }
-    if outputs.is_empty() {
-        bail!("image generation response did not contain an image");
     }
     Ok(outputs)
 }
