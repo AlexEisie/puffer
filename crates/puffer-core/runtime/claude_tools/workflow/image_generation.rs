@@ -30,10 +30,16 @@ struct ImageGenerationInput {
     prompt_reference: Option<String>,
     #[serde(default)]
     aspect: Option<String>,
+    #[serde(default = "default_image_count")]
+    count: u8,
     #[serde(default)]
     purpose: Option<String>,
     #[serde(default)]
     retry_from_error: Option<Value>,
+}
+
+fn default_image_count() -> u8 {
+    1
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -43,15 +49,25 @@ struct ImageRequest {
     adapter: String,
     prompt: String,
     parameters: BTreeMap<String, String>,
+    count: u8,
     purpose: Option<String>,
     retry_from_error: Option<Value>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
+struct ImageGenerationArtifactResult {
+    artifact_id: String,
+    index: usize,
+    path: PathBuf,
+    mime_type: String,
+    byte_count: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct ImageGenerationResult {
     job_id: String,
-    artifact_id: String,
-    path: PathBuf,
+    requested_count: u8,
+    artifacts: Vec<ImageGenerationArtifactResult>,
     provider: String,
     model: String,
     status: String,
@@ -80,7 +96,7 @@ pub fn execute_image_generation(
             adapter: request.adapter.clone(),
             prompt: request.prompt.clone(),
             parameters: request.parameters.clone(),
-            count: 1,
+            count: request.count,
         },
         media_context.discovery_cache,
     )?;
@@ -94,20 +110,26 @@ pub fn execute_image_generation(
             adapter: request.adapter.clone(),
             prompt: request.prompt.clone(),
             parameters: request.parameters.clone(),
-            count: 1,
+            count: request.count,
         },
         media_context.discovery_cache,
     )?;
-    let artifact = generated
+    let artifacts = generated
         .artifacts
         .into_iter()
-        .next()
-        .context("image generation produced no artifacts")?;
+        .map(|artifact| ImageGenerationArtifactResult {
+            artifact_id: artifact.artifact_id,
+            index: artifact.index,
+            path: artifact.path,
+            mime_type: artifact.mime_type,
+            byte_count: artifact.byte_count,
+        })
+        .collect();
 
     image_generation_output(&ImageGenerationResult {
         job_id: generated.job_id,
-        artifact_id: artifact.artifact_id,
-        path: artifact.path,
+        requested_count: generated.requested_count,
+        artifacts,
         provider: generated.provider_id,
         model: generated.model_id,
         status: generated.status,
@@ -132,6 +154,7 @@ fn build_image_request(
         adapter,
         prompt,
         parameters,
+        count: input.count,
         purpose: input.purpose,
         retry_from_error: input.retry_from_error,
     })
@@ -166,8 +189,14 @@ fn required_provider_model_adapter(
 fn image_generation_output(result: &ImageGenerationResult) -> Result<String> {
     Ok(serde_json::to_string_pretty(&json!({
         "jobId": result.job_id,
-        "artifactId": result.artifact_id,
-        "path": result.path,
+        "requestedCount": result.requested_count,
+        "artifacts": result.artifacts.iter().map(|artifact| json!({
+            "artifactId": artifact.artifact_id,
+            "index": artifact.index,
+            "path": artifact.path,
+            "mimeType": artifact.mime_type,
+            "size": artifact.byte_count
+        })).collect::<Vec<_>>(),
         "provider": result.provider,
         "model": result.model,
         "status": result.status,
@@ -598,6 +627,7 @@ mod tests {
                 prompt: "prompt.md".to_string(),
                 prompt_reference: None,
                 aspect: Some("square".to_string()),
+                count: 1,
                 purpose: Some("test".to_string()),
                 retry_from_error: None,
             },
@@ -628,6 +658,7 @@ mod tests {
                 prompt: "make a visual summary".to_string(),
                 prompt_reference: None,
                 aspect: Some("landscape".to_string()),
+                count: 1,
                 purpose: None,
                 retry_from_error: None,
             },
@@ -658,6 +689,7 @@ mod tests {
                 prompt: "make a visual summary".to_string(),
                 prompt_reference: None,
                 aspect: Some("portrait".to_string()),
+                count: 1,
                 purpose: None,
                 retry_from_error: None,
             },
@@ -684,6 +716,7 @@ mod tests {
                 prompt: "make a visual summary".to_string(),
                 prompt_reference: None,
                 aspect: Some("square".to_string()),
+                count: 1,
                 purpose: None,
                 retry_from_error: None,
             },
@@ -718,6 +751,7 @@ mod tests {
                 prompt: "make a visual summary".to_string(),
                 prompt_reference: None,
                 aspect: None,
+                count: 1,
                 purpose: None,
                 retry_from_error: None,
             },
@@ -751,6 +785,7 @@ mod tests {
                 prompt: "make a visual summary".to_string(),
                 prompt_reference: None,
                 aspect: None,
+                count: 1,
                 purpose: None,
                 retry_from_error: None,
             },
@@ -827,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_uses_descriptor_adapter_and_returns_single_artifact_path() {
+    fn execute_uses_descriptor_adapter_and_returns_artifacts_array() {
         let (base_url, server) = spawn_image_generation_server();
         let dir = tempdir().unwrap();
         let registry = registry_with_provider(base_url);
@@ -869,8 +904,12 @@ mod tests {
         assert!(dir.path().join(".puffer/media/artifact-sidecars").is_dir());
 
         let parsed: Value = serde_json::from_str(&output).unwrap();
-        let artifact_id = parsed["artifactId"].as_str().unwrap();
-        let artifact_path = PathBuf::from(parsed["path"].as_str().unwrap());
+        assert!(parsed.get("artifactId").is_none());
+        assert!(parsed.get("path").is_none());
+        assert_eq!(parsed["requestedCount"], 1);
+        let artifact = &parsed["artifacts"][0];
+        let artifact_id = artifact["artifactId"].as_str().unwrap();
+        let artifact_path = PathBuf::from(artifact["path"].as_str().unwrap());
         assert_eq!(fs::read(&artifact_path).unwrap(), b"image-bytes");
         assert!(artifact_path.starts_with(dir.path().join(".puffer/media/images")));
         assert_eq!(

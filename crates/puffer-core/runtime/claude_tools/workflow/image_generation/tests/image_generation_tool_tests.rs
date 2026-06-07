@@ -33,7 +33,7 @@ fn execute_uses_discovery_cache_for_chat_image_output_model() {
     assert!(request_text.starts_with("POST /chat/completions HTTP/1.1"));
     assert!(request_text.contains("\"model\":\"openrouter/image-chat\""));
     let parsed: Value = serde_json::from_str(&output).unwrap();
-    let artifact_path = PathBuf::from(parsed["path"].as_str().unwrap());
+    let artifact_path = PathBuf::from(parsed["artifacts"][0]["path"].as_str().unwrap());
     assert_eq!(fs::read(&artifact_path).unwrap(), b"image-bytes");
     assert_eq!(parsed["provider"], "openrouter");
     assert_eq!(parsed["model"], "openrouter/image-chat");
@@ -80,29 +80,46 @@ fn dispatcher_passes_media_context_to_image_generation_tool() {
     assert!(request_text.starts_with("POST /custom/images HTTP/1.1"));
     assert!(request_text.contains("\"model\":\"exact-image-model\""));
     let parsed: Value = serde_json::from_str(&result.output.stdout).unwrap();
-    let artifact_path = PathBuf::from(parsed["path"].as_str().unwrap());
+    let artifact_path = PathBuf::from(parsed["artifacts"][0]["path"].as_str().unwrap());
     assert_eq!(fs::read(&artifact_path).unwrap(), b"image-bytes");
 }
 
 #[test]
-fn image_generation_output_includes_job_and_artifact_metadata() {
+fn image_generation_output_includes_artifacts_array() {
     let output = image_generation_output(&ImageGenerationResult {
         job_id: "job-1".to_string(),
-        artifact_id: "artifact-1".to_string(),
-        path: PathBuf::from("out/image.png"),
+        requested_count: 2,
+        artifacts: vec![
+            ImageGenerationArtifactResult {
+                artifact_id: "artifact-1".to_string(),
+                index: 0,
+                path: PathBuf::from("/tmp/image-1.png"),
+                mime_type: "image/png".to_string(),
+                byte_count: 10,
+            },
+            ImageGenerationArtifactResult {
+                artifact_id: "artifact-2".to_string(),
+                index: 1,
+                path: PathBuf::from("/tmp/image-2.png"),
+                mime_type: "image/png".to_string(),
+                byte_count: 11,
+            },
+        ],
         provider: "openai".to_string(),
         model: "gpt-image-1".to_string(),
         status: "succeeded".to_string(),
-        parameters: BTreeMap::from([("size".to_string(), "1024x1024".to_string())]),
-        purpose: Some("test".to_string()),
+        parameters: BTreeMap::new(),
+        purpose: None,
         retry_from_error: false,
     })
     .unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
 
     assert_eq!(parsed["jobId"], "job-1");
-    assert_eq!(parsed["artifactId"], "artifact-1");
-    assert_eq!(parsed["provider"], "openai");
-    assert_eq!(parsed["model"], "gpt-image-1");
-    assert_eq!(parsed["status"], "succeeded");
+    assert_eq!(parsed["requestedCount"], 2);
+    assert!(parsed.get("artifactId").is_none());
+    assert!(parsed.get("path").is_none());
+    assert_eq!(parsed["artifacts"].as_array().unwrap().len(), 2);
+    assert_eq!(parsed["artifacts"][0]["artifactId"], "artifact-1");
+    assert_eq!(parsed["artifacts"][1]["index"], 1);
 }

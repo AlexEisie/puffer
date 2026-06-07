@@ -24,6 +24,11 @@ input_schema:
     aspect:
       type: string
       description: Aspect ratio such as square, landscape, portrait, 1:1, 16:9, 9:16, or auto.
+    count:
+      type: integer
+      description: Number of images to generate in one request. Must be between 1 and 4.
+      minimum: 1
+      maximum: 4
     purpose:
       type: string
       description: Optional caller purpose preserved in the result metadata.
