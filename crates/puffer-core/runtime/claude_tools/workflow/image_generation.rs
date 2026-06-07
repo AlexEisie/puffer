@@ -1,3 +1,4 @@
+use crate::runtime::media::planner::validate_image_generation_count;
 use crate::AppState;
 use crate::{
     generate_exact_image_with_cache, resolved_exact_image_parameters_with_cache,
@@ -139,6 +140,7 @@ fn build_image_request(
     input: ImageGenerationInput,
     settings: &ImageMediaConfig,
 ) -> Result<ImageRequest> {
+    validate_image_generation_count(input.count)?;
     let prompt = prompt_text(cwd, &input.prompt, input.prompt_reference.as_deref())?;
     let (provider, model, adapter) = required_provider_model_adapter(settings)?;
     let mut parameters = settings.parameters.clone();
@@ -624,6 +626,32 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("missing field `count`"));
+    }
+
+    #[test]
+    fn rejects_image_generation_count_outside_supported_range_at_tool_boundary() {
+        let dir = tempdir().unwrap();
+
+        for count in [0, 5] {
+            let error = build_image_request(
+                dir.path(),
+                ImageGenerationInput {
+                    prompt: "make a visual summary".to_string(),
+                    prompt_reference: None,
+                    aspect: None,
+                    count,
+                    purpose: None,
+                    retry_from_error: None,
+                },
+                &image_settings(),
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                "image generation count must be between 1 and 4"
+            );
+        }
     }
 
     #[test]

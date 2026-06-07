@@ -825,7 +825,7 @@ fn external_http_image_url_is_rejected_before_download() {
         "data": [{"url": "http://example.com/generated.png"}]
     });
 
-    let error = image_outputs_from_response(&Client::new(), &value, 1, 0)
+    let error = image_outputs_from_response(&Client::new(), &value, 1)
         .expect_err("external http URL should fail before download");
 
     assert_eq!(

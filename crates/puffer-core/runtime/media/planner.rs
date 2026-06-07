@@ -7,30 +7,18 @@ pub(crate) struct ImageGenerationPlan {
     pub(crate) calls: Vec<ImageCallPlan>,
 }
 
-impl ImageGenerationPlan {
-    /// Returns the largest image count requested by one provider call.
-    pub(crate) fn max_call_count(&self) -> u8 {
-        self.calls
-            .iter()
-            .map(|call| call.requested_count)
-            .max()
-            .unwrap_or(0)
-    }
-
-    /// Returns the total number of images requested by this plan.
-    pub(crate) fn total_requested_count(&self) -> u8 {
-        self.calls
-            .iter()
-            .map(|call| call.requested_count)
-            .sum::<u8>()
-    }
-}
-
 /// Describes one provider request within an image generation plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ImageCallPlan {
-    pub(crate) call_index: usize,
     pub(crate) requested_count: u8,
+}
+
+/// Validates the supported model-facing image generation count range.
+pub(crate) fn validate_image_generation_count(requested_count: u8) -> Result<()> {
+    if requested_count == 0 || requested_count > 4 {
+        bail!("image generation count must be between 1 and 4");
+    }
+    Ok(())
 }
 
 /// Plans image generation provider calls for a requested output count.
@@ -38,9 +26,7 @@ pub(crate) fn plan_image_generation(
     requested_count: u8,
     batch: &MediaBatchDescriptor,
 ) -> Result<ImageGenerationPlan> {
-    if requested_count == 0 || requested_count > 4 {
-        bail!("image generation count must be between 1 and 4");
-    }
+    validate_image_generation_count(requested_count)?;
 
     let call_counts = match batch.mode {
         MediaBatchMode::PerImage => vec![1; requested_count as usize],
@@ -56,11 +42,7 @@ pub(crate) fn plan_image_generation(
     Ok(ImageGenerationPlan {
         calls: call_counts
             .into_iter()
-            .enumerate()
-            .map(|(call_index, requested_count)| ImageCallPlan {
-                call_index,
-                requested_count,
-            })
+            .map(|requested_count| ImageCallPlan { requested_count })
             .collect(),
     })
 }
@@ -104,10 +86,6 @@ mod tests {
         let plan = plan_image_generation(4, &per_image_batch()).expect("plan");
 
         assert_eq!(counts(&plan), vec![1, 1, 1, 1]);
-        assert_eq!(plan.max_call_count(), 1);
-        assert_eq!(plan.total_requested_count(), 4);
-        assert_eq!(plan.calls[0].call_index, 0);
-        assert_eq!(plan.calls[3].call_index, 3);
     }
 
     #[test]
@@ -115,8 +93,6 @@ mod tests {
         let plan = plan_image_generation(4, &exact_batch(2)).expect("plan");
 
         assert_eq!(counts(&plan), vec![2, 2]);
-        assert_eq!(plan.max_call_count(), 2);
-        assert_eq!(plan.total_requested_count(), 4);
     }
 
     #[test]
@@ -124,8 +100,6 @@ mod tests {
         let plan = plan_image_generation(4, &exact_batch(3)).expect("plan");
 
         assert_eq!(counts(&plan), vec![3, 1]);
-        assert_eq!(plan.max_call_count(), 3);
-        assert_eq!(plan.total_requested_count(), 4);
     }
 
     #[test]

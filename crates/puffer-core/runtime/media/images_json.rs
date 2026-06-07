@@ -264,12 +264,7 @@ impl ImagesJsonAdapter {
                 }
                 let value: Value =
                     serde_json::from_str(&body).context("parse image generation response")?;
-                image_outputs_from_response(
-                    &self.client,
-                    &value,
-                    call.requested_count,
-                    call.call_index,
-                )
+                image_outputs_from_response(&self.client, &value, call.requested_count)
             })();
 
             match call_result {
@@ -325,7 +320,6 @@ fn image_outputs_from_response(
     client: &Client,
     value: &Value,
     count: u8,
-    _call_index: usize,
 ) -> Result<Vec<ImageOutput>> {
     let Some(items) = value.get("data").and_then(Value::as_array) else {
         bail!("image generation response did not contain an image");
