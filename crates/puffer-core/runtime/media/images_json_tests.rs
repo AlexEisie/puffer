@@ -84,6 +84,16 @@ fn image_parameters() -> Vec<MediaParameterSpec> {
     ]
 }
 
+fn sequential_generation_parameter() -> MediaParameterSpec {
+    MediaParameterSpec {
+        name: "sequential_image_generation".to_string(),
+        label: "Sequential image generation".to_string(),
+        values: vec!["disabled".to_string(), "auto".to_string()],
+        default: "disabled".to_string(),
+        request_field: Some("sequential_image_generation".to_string()),
+    }
+}
+
 fn auth_store() -> AuthStore {
     let mut auth = AuthStore::default();
     auth.set_api_key("exact-provider", "sk-secret");
@@ -136,6 +146,16 @@ fn spawn_image_server_with_body(body: &'static str) -> (String, std::thread::Joi
     (format!("http://{addr}"), handle)
 }
 
+fn load_single_saved_job(root: &std::path::Path) -> crate::runtime::media::MediaJob {
+    let jobs_dir = root.join(".puffer").join("media").join("jobs");
+    let paths = std::fs::read_dir(&jobs_dir)
+        .expect("jobs dir")
+        .map(|entry| entry.expect("job dir entry").path())
+        .collect::<Vec<_>>();
+    assert_eq!(paths.len(), 1);
+    serde_json::from_slice(&std::fs::read(&paths[0]).expect("job sidecar")).expect("job json")
+}
+
 #[test]
 fn images_json_persists_multiple_response_images_under_one_job() {
     let (base_url, server) = spawn_image_server_with_body(
@@ -180,6 +200,53 @@ fn images_json_persists_multiple_response_images_under_one_job() {
     );
     assert_eq!(result.artifacts[0].metadata["index"], 0);
     assert_eq!(result.artifacts[1].metadata["index"], 1);
+}
+
+#[test]
+fn images_json_fails_when_response_contains_fewer_images_than_requested() {
+    let (base_url, server) =
+        spawn_image_server_with_body(r#"{"data":[{"b64_json":"aW1hZ2UtMQ=="}]}"#);
+    let registry = registry_with_provider(base_url);
+    let mut auth_store = AuthStore::default();
+    auth_store.set_api_key("exact-provider", "sk-test");
+    let service_dir = tempfile::tempdir().unwrap();
+    let service = MediaGenerationService::new(service_dir.path());
+    let request = ImagesJsonGenerationRequest {
+        provider_id: "exact-provider".to_string(),
+        model_id: "exact-image-model".to_string(),
+        adapter: "images_json".to_string(),
+        prompt: "draw two images".to_string(),
+        parameters: BTreeMap::from([
+            ("size".to_string(), "1024x1024".to_string()),
+            ("quality".to_string(), "auto".to_string()),
+            ("output_format".to_string(), "png".to_string()),
+        ]),
+        count: 2,
+    };
+
+    let error = ImagesJsonAdapter::new()
+        .unwrap()
+        .execute(&registry, &auth_store, &service, request)
+        .expect_err("under-produced response should fail");
+
+    let request_text = server.join().unwrap();
+    let saved_job = load_single_saved_job(service_dir.path());
+    assert!(request_text.contains("\"n\":2"));
+    assert_eq!(
+        error.to_string(),
+        "image generation returned 1 image(s), expected 2"
+    );
+    assert_eq!(
+        saved_job.status,
+        crate::runtime::media::MediaJobStatus::Failed
+    );
+    assert_eq!(saved_job.requested_count, 2);
+    assert!(saved_job.artifact_ids.is_empty());
+    assert_eq!(
+        saved_job.error.as_deref(),
+        Some("image generation returned 1 image(s), expected 2")
+    );
+    assert!(!service_dir.path().join(".puffer/media/images").exists());
 }
 
 #[test]
@@ -276,6 +343,36 @@ fn request_body_uses_descriptor_request_field_mapping() {
     let request_text = server.join().expect("server");
     assert!(request_text.contains("\"resolution\":\"2k\""));
     assert!(!request_text.contains("\"resolution_choice\""));
+}
+
+#[test]
+fn request_body_enables_sequential_generation_when_requesting_multiple_images() {
+    let (base_url, server) = spawn_image_server_with_body(
+        r#"{"data":[{"b64_json":"aW1hZ2UtMQ=="},{"b64_json":"aW1hZ2UtMg=="}]}"#,
+    );
+    let mut parameters = image_parameters();
+    parameters.push(sequential_generation_parameter());
+    let registry = registry_with_provider_parameters("exact-provider", base_url, parameters);
+    let service_dir = tempfile::tempdir().unwrap();
+    let service = MediaGenerationService::new(service_dir.path());
+    let mut request = ImagesJsonGenerationRequest {
+        count: 2,
+        ..request()
+    };
+    request.prompt = "draw two images".to_string();
+
+    let result = ImagesJsonAdapter::new()
+        .unwrap()
+        .execute(&registry, &auth_store(), &service, request)
+        .unwrap();
+
+    let request_text = server.join().unwrap();
+    assert!(request_text.contains("\"n\":2"));
+    assert!(request_text.contains("\"sequential_image_generation\":\"auto\""));
+    assert_eq!(
+        result.artifacts[0].metadata["parameters"]["sequential_image_generation"],
+        "auto"
+    );
 }
 
 #[test]

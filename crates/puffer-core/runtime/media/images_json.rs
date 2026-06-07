@@ -32,6 +32,7 @@ const IMAGES_JSON_ALLOWED_REQUEST_FIELDS: &[&str] = &[
     "response_format",
     "aspect_ratio",
     "resolution",
+    "sequential_image_generation",
 ];
 
 /// Request shape for OpenAI image generation after media settings resolution.
@@ -130,8 +131,10 @@ impl ImagesJsonAdapter {
             now_ms(),
             &MediaDiscoveryCache::default(),
         )?;
-        let request_parameters =
-            selected_parameters_with_defaults(&capability, &request.parameters)?;
+        let request_parameters = parameters_for_image_count(
+            selected_parameters_with_defaults(&capability, &request.parameters)?,
+            request.count,
+        );
 
         let discovery_cache = MediaDiscoveryCache::default();
         let (provider, execution) = resolve_image_execution_descriptor(
@@ -291,6 +294,23 @@ fn selected_parameters_with_defaults(
     Ok(request_parameters)
 }
 
+fn parameters_for_image_count(
+    mut parameters: BTreeMap<String, String>,
+    count: u8,
+) -> BTreeMap<String, String> {
+    if count > 1
+        && parameters
+            .get("sequential_image_generation")
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("disabled"))
+    {
+        parameters.insert(
+            "sequential_image_generation".to_string(),
+            "auto".to_string(),
+        );
+    }
+    parameters
+}
+
 fn image_outputs_from_response(
     client: &Client,
     value: &Value,
@@ -299,8 +319,16 @@ fn image_outputs_from_response(
     let Some(items) = value.get("data").and_then(Value::as_array) else {
         bail!("image generation response did not contain an image");
     };
+    let requested_count = count as usize;
+    if items.len() < requested_count {
+        bail!(
+            "image generation returned {} image(s), expected {}",
+            items.len(),
+            requested_count
+        );
+    }
     let mut outputs = Vec::new();
-    for item in items.iter().take(count as usize) {
+    for item in items.iter().take(requested_count) {
         outputs.push(image_output_from_item(client, item)?);
     }
     if outputs.is_empty() {

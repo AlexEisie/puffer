@@ -357,10 +357,23 @@ fn byteplus_catalog_declares_only_current_native_seedream_models() {
             "b64_json",
             "response_format",
         );
+        assert_select_parameter(
+            model,
+            "sequential_image_generation",
+            "Sequential image generation",
+            &["disabled", "auto"],
+            "disabled",
+            "sequential_image_generation",
+        );
         if model_id == "seedream-5-0-260128" {
             assert_eq!(
                 parameter_names,
-                BTreeSet::from(["size", "output_format", "response_format"]),
+                BTreeSet::from([
+                    "size",
+                    "output_format",
+                    "response_format",
+                    "sequential_image_generation",
+                ]),
                 "{model_id} should declare exactly the adapter-supported BytePlus parameters"
             );
             assert_select_parameter(
@@ -374,8 +387,8 @@ fn byteplus_catalog_declares_only_current_native_seedream_models() {
         } else {
             assert_eq!(
                 parameter_names,
-                BTreeSet::from(["size", "response_format"]),
-                "{model_id} should omit unsupported output_format but keep API-level response_format"
+                BTreeSet::from(["size", "response_format", "sequential_image_generation"]),
+                "{model_id} should omit unsupported output_format but keep API-level parameters"
             );
         }
     }

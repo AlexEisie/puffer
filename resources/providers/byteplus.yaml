@@ -40,6 +40,11 @@ media:
             values: [b64_json, url]
             default: b64_json
             request_field: response_format
+          - name: sequential_image_generation
+            label: Sequential image generation
+            values: [disabled, auto]
+            default: disabled
+            request_field: sequential_image_generation
       - id: seedream-4-5-251128
         display_name: Seedream 4.5
         operations:
@@ -55,6 +60,11 @@ media:
             values: [b64_json, url]
             default: b64_json
             request_field: response_format
+          - name: sequential_image_generation
+            label: Sequential image generation
+            values: [disabled, auto]
+            default: disabled
+            request_field: sequential_image_generation
       - id: seedream-4-0-250828
         display_name: Seedream 4.0
         operations:
@@ -70,3 +80,8 @@ media:
             values: [b64_json, url]
             default: b64_json
             request_field: response_format
+          - name: sequential_image_generation
+            label: Sequential image generation
+            values: [disabled, auto]
+            default: disabled
+            request_field: sequential_image_generation
