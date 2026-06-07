@@ -115,8 +115,11 @@ pub(crate) struct ChatAttachmentDto {
 pub(crate) enum ChatAttachmentSourceDto {
     UserUpload,
     GeneratedMedia {
+        #[serde(rename = "jobId")]
+        job_id: String,
         #[serde(rename = "artifactId")]
         artifact_id: String,
+        index: usize,
     },
 }
 

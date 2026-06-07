@@ -71,19 +71,35 @@ struct DeleteSecretParams {
 struct GenerateMediaParams {
     kind: String,
     prompt: String,
+    #[serde(default = "default_generate_media_count")]
+    count: u8,
+}
+
+fn default_generate_media_count() -> u8 {
+    1
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerateMediaArtifactResult {
+    artifact_id: String,
+    index: usize,
+    path: String,
+    mime_type: String,
+    size: u64,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GenerateMediaResult {
     job_id: String,
-    artifact_id: Option<String>,
+    requested_count: u8,
+    artifacts: Vec<GenerateMediaArtifactResult>,
     kind: String,
     provider_id: String,
     model_id: String,
     status: String,
     prompt: String,
-    path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -555,6 +571,10 @@ impl BackendState {
 
     fn generated_image_attachment(cwd: &Path, output: &str) -> Option<ChatAttachmentDto> {
         let value: serde_json::Value = serde_json::from_str(output).ok()?;
+        let job_id = value.get("jobId")?.as_str()?.trim();
+        if job_id.is_empty() {
+            return None;
+        }
         let artifact_id = value.get("artifactId")?.as_str()?.trim();
         if artifact_id.is_empty() {
             return None;
@@ -569,7 +589,9 @@ impl BackendState {
             kind: "image".to_string(),
             state: metadata.state,
             source: ChatAttachmentSourceDto::GeneratedMedia {
+                job_id: job_id.to_string(),
                 artifact_id: artifact_id.to_string(),
+                index: 0,
             },
         })
     }
@@ -756,14 +778,15 @@ impl BackendState {
         if prompt.is_empty() {
             bail!("/{kind} requires a prompt");
         }
+        let count = input.count;
         match kind.as_str() {
-            "image" => self.generate_image_media_job(prompt),
+            "image" => self.generate_image_media_job(prompt, count),
             "video" => self.generate_video_media_job(prompt),
             _ => unreachable!("media kind was validated"),
         }
     }
 
-    fn generate_image_media_job(&self, prompt: String) -> Result<GenerateMediaResult> {
+    fn generate_image_media_job(&self, prompt: String, count: u8) -> Result<GenerateMediaResult> {
         let config = self.load_config()?;
         let provider_id = config
             .media
@@ -807,18 +830,30 @@ impl BackendState {
                 adapter,
                 prompt: prompt.clone(),
                 parameters: image_config.parameters,
+                count,
             },
             &discovery_cache,
         )?;
+        let artifacts = generation
+            .artifacts
+            .into_iter()
+            .map(|artifact| GenerateMediaArtifactResult {
+                artifact_id: artifact.artifact_id,
+                index: artifact.index,
+                path: artifact.path.display().to_string(),
+                mime_type: artifact.mime_type,
+                size: artifact.byte_count,
+            })
+            .collect();
         Ok(GenerateMediaResult {
             job_id: generation.job_id,
-            artifact_id: Some(generation.artifact_id),
+            requested_count: generation.requested_count,
+            artifacts,
             kind: "image".to_string(),
             provider_id: generation.provider_id,
             model_id: generation.model_id,
             status: generation.status,
             prompt,
-            path: Some(generation.path.display().to_string()),
         })
     }
 
@@ -2279,6 +2314,41 @@ mod tests {
 
     static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[test]
+    fn generate_media_result_serializes_artifacts_array() {
+        let result = GenerateMediaResult {
+            job_id: "job-1".to_string(),
+            requested_count: 2,
+            artifacts: vec![
+                GenerateMediaArtifactResult {
+                    artifact_id: "artifact-1".to_string(),
+                    index: 0,
+                    path: "/tmp/image-1.png".to_string(),
+                    mime_type: "image/png".to_string(),
+                    size: 10,
+                },
+                GenerateMediaArtifactResult {
+                    artifact_id: "artifact-2".to_string(),
+                    index: 1,
+                    path: "/tmp/image-2.png".to_string(),
+                    mime_type: "image/png".to_string(),
+                    size: 11,
+                },
+            ],
+            kind: "image".to_string(),
+            provider_id: "openai".to_string(),
+            model_id: "gpt-image-1".to_string(),
+            status: "succeeded".to_string(),
+            prompt: "draw".to_string(),
+        };
+        let value = serde_json::to_value(result).unwrap();
+
+        assert!(value.get("artifactId").is_none());
+        assert!(value.get("path").is_none());
+        assert_eq!(value["requestedCount"], 2);
+        assert_eq!(value["artifacts"].as_array().unwrap().len(), 2);
+    }
+
     struct EnvGuard {
         corbina_home: Option<OsString>,
         home: Option<OsString>,
@@ -2871,6 +2941,7 @@ mod tests {
                     tool_id: "ImageGeneration".to_string(),
                     input: "{}".to_string(),
                     output: serde_json::json!({
+                        "jobId": "job-1",
                         "artifactId": "artifact-1",
                         "status": "succeeded"
                     })
@@ -2896,8 +2967,11 @@ mod tests {
         assert_eq!(attachments.len(), 1);
         assert!(matches!(
             attachments[0].source,
-            crate::dtos::ChatAttachmentSourceDto::GeneratedMedia { ref artifact_id }
-                if artifact_id == "artifact-1"
+            crate::dtos::ChatAttachmentSourceDto::GeneratedMedia {
+                ref job_id,
+                ref artifact_id,
+                index
+            } if job_id == "job-1" && artifact_id == "artifact-1" && index == 0
         ));
     }
 

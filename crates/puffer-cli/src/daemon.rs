@@ -127,19 +127,35 @@ pub(crate) struct Handshake {
 struct GenerateMediaParams {
     kind: String,
     prompt: String,
+    #[serde(default = "default_generate_media_count")]
+    count: u8,
+}
+
+fn default_generate_media_count() -> u8 {
+    1
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerateMediaArtifactResult {
+    artifact_id: String,
+    index: usize,
+    path: String,
+    mime_type: String,
+    size: u64,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GenerateMediaResult {
     job_id: String,
-    artifact_id: Option<String>,
+    requested_count: u8,
+    artifacts: Vec<GenerateMediaArtifactResult>,
     kind: String,
     provider_id: String,
     model_id: String,
     status: String,
     prompt: String,
-    path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2220,14 +2236,15 @@ fn handle_generate_media(state: &DaemonState, params: &Value) -> Result<Value> {
     if prompt.is_empty() {
         anyhow::bail!("/{kind} requires a prompt");
     }
+    let count = input.count;
     match kind.as_str() {
-        "image" => generate_image_media_job(state, prompt),
+        "image" => generate_image_media_job(state, prompt, count),
         "video" => generate_video_media_job(state, prompt),
         _ => unreachable!("media kind was validated"),
     }
 }
 
-fn generate_image_media_job(state: &DaemonState, prompt: String) -> Result<Value> {
+fn generate_image_media_job(state: &DaemonState, prompt: String, count: u8) -> Result<Value> {
     let config = state.config_snapshot();
     let provider_id = config
         .media
@@ -2271,18 +2288,30 @@ fn generate_image_media_job(state: &DaemonState, prompt: String) -> Result<Value
             adapter,
             prompt: prompt.clone(),
             parameters: image_config.parameters,
+            count,
         },
         &discovery_cache,
     )?;
+    let artifacts = generation
+        .artifacts
+        .into_iter()
+        .map(|artifact| GenerateMediaArtifactResult {
+            artifact_id: artifact.artifact_id,
+            index: artifact.index,
+            path: artifact.path.display().to_string(),
+            mime_type: artifact.mime_type,
+            size: artifact.byte_count,
+        })
+        .collect();
     let result = GenerateMediaResult {
         job_id: generation.job_id,
-        artifact_id: Some(generation.artifact_id),
+        requested_count: generation.requested_count,
+        artifacts,
         kind: "image".to_string(),
         provider_id: generation.provider_id,
         model_id: generation.model_id,
         status: generation.status,
         prompt,
-        path: Some(generation.path.display().to_string()),
     };
     Ok(serde_json::to_value(result)?)
 }
@@ -5307,7 +5336,8 @@ mod tests {
         handle_set_lambda_skill_enabled, handle_update_config, model_descriptor_dto,
         permission_review_payload_json, realtime_session_config_from_params, report_cancelled_turn,
         requires_explicit_subscription, resolve_create_session_model_id, run_off_runtime,
-        start_connector_setup_turn, DaemonState, ServerEnvelope, TurnProgress, TurnRequestOptions,
+        start_connector_setup_turn, DaemonState, GenerateMediaArtifactResult,
+        GenerateMediaResult, ServerEnvelope, TurnProgress, TurnRequestOptions,
     };
     use indexmap::IndexMap;
     use puffer_config::{
@@ -5333,6 +5363,41 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn generate_media_result_serializes_artifacts_array() {
+        let result = GenerateMediaResult {
+            job_id: "job-1".to_string(),
+            requested_count: 2,
+            artifacts: vec![
+                GenerateMediaArtifactResult {
+                    artifact_id: "artifact-1".to_string(),
+                    index: 0,
+                    path: "/tmp/image-1.png".to_string(),
+                    mime_type: "image/png".to_string(),
+                    size: 10,
+                },
+                GenerateMediaArtifactResult {
+                    artifact_id: "artifact-2".to_string(),
+                    index: 1,
+                    path: "/tmp/image-2.png".to_string(),
+                    mime_type: "image/png".to_string(),
+                    size: 11,
+                },
+            ],
+            kind: "image".to_string(),
+            provider_id: "openai".to_string(),
+            model_id: "gpt-image-1".to_string(),
+            status: "succeeded".to_string(),
+            prompt: "draw".to_string(),
+        };
+        let value = serde_json::to_value(result).unwrap();
+
+        assert!(value.get("artifactId").is_none());
+        assert!(value.get("path").is_none());
+        assert_eq!(value["requestedCount"], 2);
+        assert_eq!(value["artifacts"].as_array().unwrap().len(), 2);
     }
 
     #[test]
@@ -5954,8 +6019,12 @@ models:
         assert_eq!(response["status"], "succeeded");
         assert_eq!(response["providerId"], "openai");
         assert_eq!(response["modelId"], "gpt-image-1");
-        assert!(response["artifactId"].as_str().is_some());
-        let path = response["path"].as_str().expect("artifact path");
+        assert!(response.get("artifactId").is_none());
+        assert!(response.get("path").is_none());
+        assert_eq!(response["requestedCount"], 1);
+        let artifact = &response["artifacts"][0];
+        assert!(artifact["artifactId"].as_str().is_some());
+        let path = artifact["path"].as_str().expect("artifact path");
         assert!(path.contains(".puffer/media/images"));
         assert_eq!(std::fs::read(path).expect("artifact bytes"), b"image-bytes");
         assert!(workspace_root.join(".puffer/media/jobs").is_dir());
@@ -6128,7 +6197,10 @@ models:
         assert_eq!(response["status"], "succeeded");
         assert_eq!(response["providerId"], "openrouter");
         assert_eq!(response["modelId"], "openrouter/image-chat");
-        let path = response["path"].as_str().expect("artifact path");
+        assert_eq!(response["requestedCount"], 1);
+        let path = response["artifacts"][0]["path"]
+            .as_str()
+            .expect("artifact path");
         assert!(path.contains(".puffer/media/images"));
         assert_eq!(std::fs::read(path).expect("artifact bytes"), b"image-bytes");
     }

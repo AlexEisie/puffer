@@ -589,6 +589,10 @@ fn timeline_items(store: &SessionStore, record: &SessionRecord) -> Vec<TimelineI
 
 fn generated_image_attachment(cwd: &Path, output: &str) -> Option<ChatAttachmentDto> {
     let value: serde_json::Value = serde_json::from_str(output).ok()?;
+    let job_id = value.get("jobId")?.as_str()?.trim();
+    if job_id.is_empty() {
+        return None;
+    }
     let artifact_id = value.get("artifactId")?.as_str()?.trim();
     if artifact_id.is_empty() {
         return None;
@@ -603,7 +607,9 @@ fn generated_image_attachment(cwd: &Path, output: &str) -> Option<ChatAttachment
         kind: "image".to_string(),
         state: metadata.state,
         source: ChatAttachmentSourceDto::GeneratedMedia {
+            job_id: job_id.to_string(),
             artifact_id: artifact_id.to_string(),
+            index: 0,
         },
     })
 }
@@ -852,6 +858,7 @@ mod tests {
                     tool_id: "ImageGeneration".to_string(),
                     input: "{}".to_string(),
                     output: serde_json::json!({
+                        "jobId": "job-1",
                         "artifactId": "artifact-1",
                         "status": "succeeded"
                     })
@@ -880,7 +887,8 @@ mod tests {
         assert_eq!(attachments.len(), 1);
         assert!(matches!(
             attachments[0].source,
-            ChatAttachmentSourceDto::GeneratedMedia { ref artifact_id } if artifact_id == "artifact-1"
+            ChatAttachmentSourceDto::GeneratedMedia { ref job_id, ref artifact_id, index }
+                if job_id == "job-1" && artifact_id == "artifact-1" && index == 0
         ));
     }
 }
