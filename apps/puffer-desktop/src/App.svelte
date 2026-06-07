@@ -58,6 +58,7 @@
     loadDesktopPins,
     setDesktopPin,
     type AgentTurnSubmitOptions,
+    type GeneratedMediaArtifactResult,
     type GenerateMediaResult
   } from "./lib/api/desktop";
   import {
@@ -3089,39 +3090,59 @@
     return `generated-image:${artifactId}`;
   }
 
-  function missingGeneratedImageAttachment(artifactId: string): MessageAttachment {
+  function revokeAttachmentPreviews(attachments: MessageAttachment[]): void {
+    attachments.forEach((attachment) => {
+      if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+    });
+  }
+
+  function missingGeneratedImageAttachment(
+    jobId: string,
+    artifact: GeneratedMediaArtifactResult
+  ): MessageAttachment {
     return {
-      id: generatedImageAttachmentId(artifactId),
+      id: generatedImageAttachmentId(artifact.artifactId),
       name: "Generated image",
-      mimeType: "image/*",
-      size: 0,
-      extension: "IMAGE",
+      mimeType: artifact.mimeType || "image/*",
+      size: artifact.size || 0,
+      extension: generatedImageExtension(artifact.mimeType || "image/*"),
       kind: "image",
       state: "missing",
-      source: { kind: "generated_media", artifactId },
+      source: {
+        kind: "generated_media",
+        jobId,
+        artifactId: artifact.artifactId,
+        index: artifact.index
+      },
       previewUrl: null
     };
   }
 
   async function generatedImageAttachment(
     sessionId: string,
-    artifactId: string
+    jobId: string,
+    artifact: GeneratedMediaArtifactResult
   ): Promise<MessageAttachment> {
-    const preview = await readGeneratedMediaPreview(sessionId, artifactId).catch(() => ({
+    const preview = await readGeneratedMediaPreview(sessionId, artifact.artifactId).catch(() => ({
       state: "missing" as const
     }));
-    if (preview.state !== "available") return missingGeneratedImageAttachment(artifactId);
+    if (preview.state !== "available") return missingGeneratedImageAttachment(jobId, artifact);
 
     const bytes = new Uint8Array(preview.bytes);
     return {
-      id: generatedImageAttachmentId(artifactId),
+      id: generatedImageAttachmentId(artifact.artifactId),
       name: "Generated image",
       mimeType: preview.mimeType,
       size: bytes.byteLength,
       extension: generatedImageExtension(preview.mimeType),
       kind: "image",
       state: "available",
-      source: { kind: "generated_media", artifactId },
+      source: {
+        kind: "generated_media",
+        jobId,
+        artifactId: artifact.artifactId,
+        index: artifact.index
+      },
       previewUrl: URL.createObjectURL(new Blob([bytes], { type: preview.mimeType }))
     };
   }
@@ -3130,22 +3151,24 @@
     sessionId: string,
     result: GenerateMediaResult
   ): Promise<void> {
-    const artifactId = result.artifactId;
-    if (!artifactId) return;
-    const attachment = await generatedImageAttachment(sessionId, artifactId);
+    const artifacts = result.artifacts ?? [];
+    if (artifacts.length === 0) return;
+    const attachments = await Promise.all(
+      artifacts.map((artifact) => generatedImageAttachment(sessionId, result.jobId, artifact))
+    );
     if (selectedSession?.id !== sessionId) {
-      if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+      revokeAttachmentPreviews(attachments);
       return;
     }
     appendLive({
-      id: `${GENERATED_IMAGE_PREVIEW_ID_PREFIX}${artifactId}`,
+      id: `${GENERATED_IMAGE_PREVIEW_ID_PREFIX}${result.jobId}`,
       kind: "assistant",
       title: "Assistant",
-      summary: "Generated image",
+      summary: artifacts.length === 1 ? "Generated image" : `Generated ${artifacts.length} images`,
       body: "",
       meta: [],
       status: result.status,
-      attachments: [attachment]
+      attachments
     });
   }
 
@@ -3169,7 +3192,6 @@
     setSubmitMessageInFlight(sessionId, true);
     try {
       const result = await generateMedia({
-        sessionId,
         kind: request.kind,
         prompt: request.prompt
       });

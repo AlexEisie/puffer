@@ -24,12 +24,17 @@ const turnOptions: AgentTurnOptions = {
 const generatedAttachment: MessageAttachment = {
   id: "generated-image:artifact-1",
   name: "Generated image",
-  mimeType: "image/jpeg",
-  size: 4,
-  extension: "JPEG",
+  mimeType: "image/png",
+  size: 8,
+  extension: "PNG",
   kind: "image",
   state: "available",
-  source: { kind: "generated_media", artifactId: "artifact-1" }
+  source: {
+    kind: "generated_media",
+    jobId: "job-1",
+    artifactId: "artifact-1",
+    index: 0
+  }
 };
 
 const legacyTurnOptions: AgentTurnOptions = {
@@ -49,4 +54,12 @@ void preview;
 
 test("message attachments support generated media preview sources", () => {
   expect(generatedAttachment.source.kind).toBe("generated_media");
+});
+
+test("keeps generated media grouping fields", () => {
+  expect(generatedAttachment.source.kind).toBe("generated_media");
+  if (generatedAttachment.source.kind === "generated_media") {
+    expect(generatedAttachment.source.jobId).toBe("job-1");
+    expect(generatedAttachment.source.index).toBe(0);
+  }
 });

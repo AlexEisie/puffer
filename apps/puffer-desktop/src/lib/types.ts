@@ -50,7 +50,7 @@ export type AgentTurnAttachment = {
 
 export type AttachmentPreviewSource =
   | { kind: "user_upload" }
-  | { kind: "generated_media"; artifactId: string };
+  | { kind: "generated_media"; jobId: string; artifactId: string; index: number };
 
 export type MessageAttachment = AgentTurnAttachment & {
   state?: AttachmentState;
@@ -338,6 +338,31 @@ export type VideoMediaSettings = {
 };
 
 export type MediaKind = "image" | "video";
+
+export type GenerateMediaInput = {
+  kind: MediaKind;
+  prompt: string;
+  count?: number;
+};
+
+export type GeneratedMediaArtifactResult = {
+  artifactId: string;
+  index: number;
+  path: string;
+  mimeType: string;
+  size: number;
+};
+
+export type GenerateMediaResult = {
+  jobId: string;
+  requestedCount: number;
+  artifacts: GeneratedMediaArtifactResult[];
+  kind: MediaKind;
+  providerId: string;
+  modelId: string;
+  status: string;
+  prompt: string;
+};
 
 export type MediaCapabilityInfo = {
   providerId: string;

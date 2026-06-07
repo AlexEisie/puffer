@@ -11,6 +11,8 @@ import type {
   DraftProxyEndpoint,
   ExternalCredential,
   FolderGroup,
+  GenerateMediaInput,
+  GenerateMediaResult,
   ProviderSummary,
   ProxyTestResult,
   PullRequest,
@@ -147,7 +149,7 @@ type BackendActorFields = {
 
 type BackendChatAttachmentSource =
   | { kind: "user_upload" }
-  | { kind: "generated_media"; artifactId: string };
+  | { kind: "generated_media"; jobId: string; artifactId: string; index: number };
 
 type BackendChatAttachment = {
   id: string;
@@ -2435,22 +2437,11 @@ type MediaCapabilitiesResponse = {
   capabilities: MediaCapabilityInfo[];
 };
 
-export type GenerateMediaInput = {
-  sessionId?: string;
-  kind: MediaKind;
-  prompt: string;
-};
-
-export type GenerateMediaResult = {
-  jobId: string;
-  artifactId: string | null;
-  kind: MediaKind;
-  providerId: string;
-  modelId: string;
-  status: string;
-  prompt: string;
-  path: string | null;
-};
+export type {
+  GenerateMediaInput,
+  GeneratedMediaArtifactResult,
+  GenerateMediaResult
+} from "../types";
 
 export async function listMediaCapabilities(kind?: MediaKind): Promise<MediaCapabilityInfo[]> {
   const client = await ensureLocalDaemonClient();

@@ -31,14 +31,22 @@ export type AttachmentPreviewFixture =
   | { state: "missing" }
   | { state: "unsupported" };
 
+type GeneratedMediaArtifactFixture = {
+  artifactId: string;
+  index: number;
+  path: string;
+  mimeType: string;
+  size: number;
+};
+
 type GeneratedMediaResultFixture = Partial<{
   jobId: string;
-  artifactId: string | null;
+  requestedCount: number;
+  artifacts: GeneratedMediaArtifactFixture[];
   providerId: string;
   modelId: string;
   status: string;
   prompt: string;
-  path: string | null;
 }>;
 
 type FakeFileValue =
@@ -1960,15 +1968,16 @@ export class FakeDaemon {
     }
     const jobId = `media-job-${Date.now().toString(36)}`;
     const fixture = this.generatedMediaResult;
+    const artifacts = fixture?.artifacts ?? [];
     return {
       jobId: fixture?.jobId ?? jobId,
-      artifactId: fixture?.artifactId ?? null,
+      requestedCount: fixture?.requestedCount ?? artifacts.length,
+      artifacts,
       kind,
       providerId: fixture?.providerId ?? settings.providerId,
       modelId: fixture?.modelId ?? settings.modelId,
       status: fixture?.status ?? "queued",
-      prompt: fixture?.prompt ?? prompt,
-      path: fixture?.path ?? null
+      prompt: fixture?.prompt ?? prompt
     };
   }
 
