@@ -6,223 +6,190 @@ Date: 2026-06-08
 
 Puffer Desktop currently shows `No video capabilities available` because the
 daemon returns zero available video capabilities when no connected provider has a
-usable `media.video` descriptor. The long-term fix is not a UI workaround. The
-daemon should expose accurate video capability metadata for every supported
-provider, and the desktop should distinguish "no provider supports video" from
-"video providers exist, but none are connected".
+usable `media.video` descriptor. The first durable fix is to make declared video
+capabilities visible even before authentication, while only allowing generation
+from connected providers.
 
-This design intentionally does not preserve old stored media settings or adapter
-IDs. The priority is stable runtime behavior, clear provider contracts, and no
-capability that appears selectable unless Puffer can execute it.
+This spec intentionally narrows the previous design. It does not add new vendor
+video adapters in this pass. A provider may advertise video in Puffer only when
+the current runtime can execute that provider's declared adapter.
 
-## Current State
+## Recheck Findings
 
-- `resources/providers/relaydance.yaml` already exists in this checkout and
-  declares one Seedance video model through the current `openai_video` adapter.
-- `resolve_video_capabilities` only returns providers that are authenticated.
-  A provider with a valid static descriptor is invisible until it has a stored
-  credential.
-- The current `openai_video` adapter is not OpenAI's official video API. It is a
-  Relaydance/NewAPI-style endpoint using `/v1/video/generations`, task polling by
-  appending `/{id}`, and completed video URLs at `metadata.url`.
-- The implemented video execution adapters are `openai_video` and
-  `replicate_video`; the provider catalog has no bundled `replicate` provider.
+- `resources/providers/relaydance.yaml` already exists and declares one video
+  model, `doubao-seedance-2-0-720p`.
+- `MediaExecutionKind::OpenAiVideo`, `resolve_video_execution_descriptor`, and
+  the `openai_video` runtime module already exist in this checkout.
+- The current `openai_video` adapter is an OpenAI-compatible/NewAPI-style async
+  video protocol used by Relaydance: create at `/v1/video/generations`, poll by
+  appending `/{task_id}`, and download `metadata.url`.
+- The user-facing bug is the resolver behavior: `resolve_video_capabilities`
+  skips unauthenticated providers before emitting any capability metadata.
+- `MediaCapabilityInfo` already has `status` and `reason`, so no TypeScript API
+  shape change is needed.
 
 ## Goals
 
-- Audit every bundled provider descriptor for video support.
-- Add or keep `media.video` declarations only for providers with a clear
-  execution path.
-- Add minimal provider-specific adapters where the provider has a documented
-  asynchronous REST contract.
-- Reserve the `openai_video` adapter name for OpenAI's official `/v1/videos`
-  API. Rename the existing Relaydance-shaped adapter because backward
-  compatibility is out of scope.
-- Return unavailable video descriptors with a clear reason, so the UI can show a
-  connect callout instead of a dead-end empty state.
-- Keep settings fast: no network discovery on modal open; all first-version
-  video capabilities are static descriptors.
+- Audit every bundled provider and record whether Puffer should declare video
+  capability now.
+- Keep Relaydance as the only first-pass declared video provider because it is
+  the only bundled provider with an implemented video execution path.
+- Make unauthenticated declared video providers visible as
+  `status = "unavailable"` with `reason = "missing_auth"`.
+- Keep generation validation strict: only `status = "available"` capabilities
+  can be saved or executed.
+- Update the desktop video settings empty state so users see a connection prompt
+  when video providers exist but are not connected.
+- Add resource and resolver tests so future provider descriptors cannot expose
+  non-executable video capabilities by accident.
 
 ## Non-Goals
 
-- No video editing, extension, first-frame, last-frame, or reference-image modes
-  in this pass.
-- No webhook callback support in this pass.
-- No dynamic video model discovery unless a provider requires it to avoid
-  hardcoding an unstable model list.
-- No compatibility shim for old `openai_video` stored settings.
-- No support for provider APIs that are only documented through a JS SDK
-  experimental wrapper without a stable REST contract.
+- No new OpenAI, BytePlus, MiniMax, xAI, OpenRouter, Vercel, Zhipu, or
+  WorldRouter video adapters in this pass.
+- No dynamic video discovery on settings modal open.
+- No new provider authentication flow inside the video settings modal.
+- No image-to-video, first/last-frame, reference image, video edit, video
+  extension, callbacks, or batch video jobs.
+- No adapter rename in this pass. The existing `openai_video` name is imperfect,
+  but renaming it does not fix the capability visibility bug and would add churn.
 
 ## Provider Audit
 
-| Provider | Video support decision | Reason |
+| Provider | First-pass video declaration | Reason |
 | --- | --- | --- |
-| `anthropic` | Do not declare | No provider descriptor or official REST video generation contract in scope. |
-| `byteplus` | Declare after exact model IDs are verified from official ModelArk docs | BytePlus ModelArk documents Seedance 2.0 video task APIs, but the model IDs must be sourced from first-party docs before YAML is changed. |
-| `cerebras` | Do not declare | Text inference provider only. |
-| `groq` | Do not declare | Text inference provider only. |
-| `kimi-coding` | Do not declare | Text/coding provider only. |
-| `kimi-openai` | Do not declare | Text/coding provider only. |
-| `llama-cpp` | Do not declare | Local text inference provider only. |
-| `lmstudio` | Do not declare | Local text inference provider only. |
-| `minicpm5` | Do not declare | Local text inference provider only. |
-| `minimax` | Declare | MiniMax documents text-to-video task creation, task query, and file retrieval. |
-| `minimax-cn` | Declare | Same adapter as `minimax`, with CN base URL. |
-| `ollama` | Do not declare | Local text inference provider only. |
-| `openai` | Declare | OpenAI documents `/v1/videos`, job polling, and content download for Sora. |
-| `openrouter` | Declare | OpenRouter documents `/api/v1/videos`, polling URL, and `unsigned_urls` download. |
-| `relaydance` | Declare | Already bundled; keep as a first-class video provider and rename the adapter to match its contract. |
-| `vercel-ai-gateway` | Defer | Vercel documents video through AI SDK v6 `experimental_generateVideo`; do not add a Rust REST adapter until the stable HTTP contract is explicit. |
-| `vllm` | Do not declare | Local text inference provider only. |
-| `worldrouter` | Do not declare | No verified first-party video generation contract in scope. |
-| `xai` | Declare | xAI documents `/v1/videos/generations`, request ID polling, and video URL output. |
-| `zhipu` | Declare | Zhipu/Z.AI documents `/paas/v4/videos/generations` and async result retrieval for CogVideoX/Vidu models. |
+| `anthropic` | No | No video generation provider descriptor or implemented Puffer adapter. |
+| `byteplus` | No | BytePlus has documented Seedance video APIs, but Puffer has no BytePlus video adapter yet. |
+| `cerebras` | No | Text inference provider only. |
+| `groq` | No | Text inference provider only. |
+| `kimi-coding` | No | Text/coding provider only. |
+| `kimi-openai` | No | Text/coding provider only. |
+| `llama-cpp` | No | Local text inference provider only. |
+| `lmstudio` | No | Local text inference provider only. |
+| `minicpm5` | No | Local text inference provider only. |
+| `minimax` | No | MiniMax has documented video APIs, but Puffer only implements MiniMax image generation. |
+| `minimax-cn` | No | Same as `minimax`; no Puffer video adapter yet. |
+| `ollama` | No | Local text inference provider only. |
+| `openai` | No | OpenAI's official `/v1/videos` protocol differs from the current `openai_video` adapter. |
+| `openrouter` | No | OpenRouter has documented video APIs, but Puffer has no OpenRouter video adapter yet. |
+| `relaydance` | Yes | Already bundled and executable through the current `openai_video` adapter. |
+| `vercel-ai-gateway` | No | Vercel documents video through AI SDK v6 `experimental_generateVideo`; no stable Rust REST adapter exists in Puffer. |
+| `vllm` | No | Local text inference provider only. |
+| `worldrouter` | No | No verified Puffer video execution path. |
+| `xai` | No | xAI has documented video APIs, but Puffer has no xAI video adapter yet. |
+| `zhipu` | No | Zhipu has documented async video APIs, but Puffer has no Zhipu video adapter yet. |
+
+Future video provider additions must land as one coherent change: adapter,
+descriptor, resolver tests, fake-transport runtime tests, and UI behavior.
 
 ## Capability Semantics
 
-`list_media_capabilities` should return declared capabilities for the requested
-kind, not only authenticated capabilities. Each capability should carry:
+For video capabilities, resolver output should include static descriptors even
+when the provider is not authenticated:
 
 - `status = "available"` when the provider is connected and the adapter is
-  implemented.
-- `status = "unavailable"` when the descriptor exists but the provider is not
-  connected.
-- `reason = "missing_auth"` for missing credentials.
-- `reason = "adapter_unavailable"` for descriptors whose adapter is not compiled
-  into this runtime.
+  executable for `MediaKind::Video`.
+- `status = "unavailable"` and `reason = "missing_auth"` when the provider has
+  video descriptors but no stored credential.
+- `status = "unavailable"` and `reason = "adapter_unavailable"` when the
+  descriptor uses an adapter that is not executable for video.
 
-Generation continues to validate only `status = "available"` selections. The UI
-can render a connect prompt from unavailable video capabilities while still
-preventing selection and generation until credentials exist.
+This first pass changes video capability resolution only. Image capabilities
+keep their existing connected-provider behavior to avoid surprising image
+settings changes.
 
-## Adapter Model
+`validate_media_generate_selection` must reject any matching capability whose
+status is not `available`. This preserves the existing safety contract for
+`generate_media`.
 
-Use one adapter per stable provider protocol family. Avoid a universal video
-adapter because the APIs differ in request shape, status values, poll URL
-construction, and download handoff.
+## Descriptor Governance
 
-Planned adapters:
+Add tests that assert:
 
-- `relaydance_video`: replaces the current Relaydance-shaped `openai_video`
-  adapter. It submits to `/v1/video/generations`, polls `/{task_id}`, maps
-  queued/running/completed/failed statuses, and downloads `metadata.url`.
-- `openai_video`: new official OpenAI adapter. It submits to `/v1/videos`, polls
-  `/v1/videos/{video_id}`, and downloads `/v1/videos/{video_id}/content`.
-- `byteplus_video`: submits content generation tasks, retrieves task status, and
-  downloads the completed video URL. YAML model declarations wait for verified
-  first-party model IDs.
-- `minimax_video`: submits `/v1/video_generation`, polls
-  `/v1/query/video_generation`, retrieves file metadata via `/v1/files/retrieve`,
-  then downloads the file URL.
-- `xai_video`: submits `/v1/videos/generations`, polls `/v1/videos/{request_id}`,
-  and downloads `video.url`.
-- `openrouter_video`: submits `/api/v1/videos`, polls the returned
-  `polling_url`, and downloads the first `unsigned_urls` entry.
-- `zhipu_video`: submits `/paas/v4/videos/generations`, polls the shared async
-  result endpoint, and downloads the returned video URL.
+- `relaydance.yaml` parses and validates.
+- Relaydance declares `media.video.execution.adapter = openai_video`.
+- Relaydance declares `/v1/video/generations`.
+- Relaydance declares the expected Seedance model and the bounded parameters
+  used by the UI: duration, resolution, and ratio.
+- No other bundled provider declares `media.video` in this first pass.
 
-Small shared helpers are acceptable for bounded polling, status normalization,
-secret redaction, HTTPS/loopback-safe downloads, and media job/artifact
-persistence. Provider request/response parsing should stay in provider-specific
-modules.
-
-## Descriptor Shape
-
-Provider YAML remains the source of truth for visible settings:
-
-- `media.video.discovery.adapter = static`
-- `media.video.execution.adapter = <provider_video_adapter>`
-- `media.video.execution.base_url` when media endpoints differ from chat base
-  URLs.
-- `media.video.execution.path` for task creation.
-- model descriptors include only text-to-video generation in this pass.
-- parameter descriptors include only stable scalar/select parameters exposed by
-  the UI: duration, resolution or size, aspect ratio, quality, fps, and audio
-  toggle where provider docs define bounded values.
-
-Do not expose free-form provider passthrough parameters in the settings modal.
-They are too easy to misuse and would make generated settings hard to validate.
+The last assertion is intentional. It prevents partially declared vendor video
+support from appearing before runtime execution exists.
 
 ## Desktop Behavior
 
-The video settings modal should split states:
+The video settings modal should distinguish three states after loading:
 
-- Loading: existing loading state.
-- Available capabilities exist: show provider/model/parameter controls.
-- Only unavailable video capabilities exist: show a concise connect-provider
-  state listing provider display names.
-- No declared video capabilities exist: show a true empty state.
-- Saved video model unavailable: keep the existing warning, but include the
-  provider reason when available.
+- Available video capabilities exist: render the existing provider/model form.
+- Only unavailable video capabilities exist: show a concise connection prompt,
+  such as "Connect Relaydance to enable video generation."
+- No declared video capabilities exist: show the true empty state,
+  `No video capabilities available.`
 
-The save path stores the same typed media settings shape. It should only allow
-available capabilities.
+The form should still derive provider and model options only from
+`status = "available"` capabilities. The save button remains unreachable when
+there is no available selection.
 
 ## Runtime Flow
 
-1. User saves a video selection from a provider with `status = "available"`.
-2. `generate_media` loads the saved selection and validates it against current
-   capabilities.
-3. The selected adapter creates a media job sidecar before polling.
-4. The adapter polls with bounded retry/backoff and no unbounded loops.
-5. On success, the adapter downloads the MP4 into `.puffer/media/artifacts`,
-   writes an artifact sidecar, and returns the same `GenerateMediaResult` shape
-   used by current video generation.
-6. On failure, the adapter stores the failed job state and returns a redacted
-   provider error.
+1. `list_media_capabilities({ kind: "video" })` loads provider descriptors and
+   auth state.
+2. The resolver emits the Relaydance video capability as unavailable when
+   Relaydance has no stored API key.
+3. The desktop modal shows the connect prompt instead of the old empty state.
+4. After a Relaydance credential is stored, the same capability becomes
+   available.
+5. The user can save the available Relaydance model.
+6. `generate_media` validates the saved selection against available video
+   capabilities and routes generation through the existing `openai_video`
+   adapter.
 
-## Performance and Stability
+## Stability and Performance
 
-- Capability listing is local and static. It should not call provider APIs.
-- Polling is bounded per adapter, with provider-specific intervals where docs
-  recommend them.
-- Video downloads use the existing safe downloader behavior or an equivalent
-  helper that only permits HTTPS and loopback URLs.
-- Provider secrets, headers, query parameters, and bearer tokens are redacted
-  from all returned errors.
-- Every adapter test uses fake transports; no live provider calls in unit tests.
+- Capability listing remains local and static; it must not call provider APIs.
+- The resolver does not allocate network clients or perform model discovery for
+  video.
+- The UI does not add a new authentication workflow; it points users to connect
+  an existing provider.
+- Existing video generation polling and download behavior remain unchanged.
+- Tests use local descriptors and fake resolver inputs only.
 
 ## Tests
 
-Add focused tests for:
+Add or update focused tests for:
 
-- Provider descriptors parse after new adapter enum variants are added.
-- Connected providers appear as `available`; unconnected providers appear as
-  `unavailable` with `missing_auth`.
-- Unimplemented or mismatched adapters never become available.
-- Each adapter maps provider submit/poll/download success into a persisted MP4
-  artifact.
-- Each adapter maps terminal failure/cancel/expired statuses into failed or
-  canceled jobs with redacted errors.
-- Desktop media settings renders unavailable video providers as a connect state,
-  not as `No video capabilities available`.
-- `generate_media` rejects unavailable saved selections.
-
-## Implementation Order
-
-1. Rename the current Relaydance-shaped adapter to `relaydance_video` and update
-   `relaydance.yaml`.
-2. Change capability resolution to return unavailable declared capabilities with
-   reasons while generation validation still requires availability.
-3. Update the desktop modal empty/connect states.
-4. Add official OpenAI, xAI, MiniMax, OpenRouter, and Zhipu adapters and YAML
-   declarations.
-5. Add BytePlus adapter and provider declaration only after exact first-party
-   model IDs are verified.
-6. Run targeted Rust tests, Svelte tests, and then the broader workspace check
-   that is practical for this repository.
+- Unauthenticated Relaydance-style video descriptors appear with
+  `status = "unavailable"` and `reason = "missing_auth"`.
+- Connected video descriptors appear with `status = "available"` and no reason.
+- Video descriptors with image-only adapters appear as unavailable with
+  `adapter_unavailable`, not as selectable.
+- `validate_media_generate_selection` rejects unavailable matching capabilities.
+- Relaydance provider YAML is the only first-pass bundled `media.video`
+  declaration.
+- The desktop modal renders the connection state when capabilities exist but no
+  available video capability exists.
 
 ## Source References
 
-- OpenAI Videos API: https://developers.openai.com/api/reference/resources/videos/
-- OpenAI Sora guide: https://developers.openai.com/api/docs/guides/video-generation
-- xAI video REST API: https://docs.x.ai/developers/rest-api-reference/inference/videos
-- OpenRouter video API: https://openrouter.ai/docs/api/api-reference/video-generation/create-videos
-- OpenRouter polling API: https://openrouter.ai/docs/api/api-reference/video-generation/get-videos
-- MiniMax video generation guide: https://platform.minimax.io/docs/guides/video-generation
-- MiniMax text-to-video API: https://platform.minimax.io/docs/api-reference/video-generation-t2v
-- BytePlus Seedance 2.0 API reference: https://docs.byteplus.com/en/docs/ModelArk/1520757
-- BytePlus retrieve video task API: https://docs.byteplus.com/en/docs/ModelArk/1521309
-- Zhipu video generation async API: https://docs.bigmodel.cn/api-reference/%E6%A8%A1%E5%9E%8B-api/%E8%A7%86%E9%A2%91%E7%94%9F%E6%88%90%E5%BC%82%E6%AD%A5
-- Vercel AI Gateway video generation: https://vercel.com/docs/ai-gateway/capabilities/video-generation
+- Current Relaydance provider descriptor:
+  `resources/providers/relaydance.yaml`
+- Current resolver:
+  `crates/puffer-core/runtime/media/resolver.rs`
+- Current video runtime adapter:
+  `crates/puffer-core/runtime/media/openai_video.rs`
+- Current desktop media settings modal:
+  `apps/puffer-desktop/src/lib/screens/agent/MediaSettingsModal.svelte`
+- OpenAI Videos API, future adapter only:
+  https://developers.openai.com/api/reference/resources/videos/
+- xAI video REST API, future adapter only:
+  https://docs.x.ai/developers/rest-api-reference/inference/videos
+- OpenRouter video API, future adapter only:
+  https://openrouter.ai/docs/api/api-reference/video-generation/create-videos
+- MiniMax video generation, future adapter only:
+  https://platform.minimax.io/docs/guides/video-generation
+- BytePlus Seedance 2.0, future adapter only:
+  https://docs.byteplus.com/en/docs/ModelArk/1520757
+- Zhipu async video API, future adapter only:
+  https://docs.bigmodel.cn/api-reference/%E6%A8%A1%E5%9E%8B-api/%E8%A7%86%E9%A2%91%E7%94%9F%E6%88%90%E5%BC%82%E6%AD%A5
+- Vercel AI Gateway video docs, future adapter only:
+  https://vercel.com/docs/ai-gateway/capabilities/video-generation
