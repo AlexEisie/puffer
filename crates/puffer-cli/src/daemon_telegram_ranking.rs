@@ -42,6 +42,7 @@ pub(crate) struct ModelBackend {
 }
 
 impl ModelBackend {
+    /// Returns the local qwen backend used for private relationship analysis.
     pub fn local() -> Self {
         Self {
             endpoint: "http://127.0.0.1:8088/v1/chat/completions".into(),
@@ -51,6 +52,7 @@ impl ModelBackend {
         }
     }
 
+    /// Returns the OpenAI cloud backend using the provided API key.
     pub fn cloud(api_key: String) -> Self {
         Self {
             endpoint: "https://api.openai.com/v1/chat/completions".into(),

@@ -1007,6 +1007,36 @@ async fn dispatch_request(
         "save_proxy_settings" => respond!(detached!(|s, p| handle_save_proxy_settings(&s, &p))),
         "save_secret" => respond!(detached!(|s, p| handle_save_secret(&s, &p))),
         "delete_secret" => respond!(detached!(|s, p| handle_delete_secret(&s, &p))),
+        "contacts_list" => {
+            respond!(detached!(|s, p| {
+                crate::daemon_contacts::handle_contacts_list(s.config_paths(), &p)
+            }))
+        }
+        "contacts_search" => {
+            respond!(detached!(|s, p| {
+                crate::daemon_contacts::handle_contacts_search(s.config_paths(), &p)
+            }))
+        }
+        "contacts_context" => {
+            respond!(detached!(|s, p| {
+                crate::daemon_contacts::handle_contacts_context(s.config_paths(), &p)
+            }))
+        }
+        "contacts_save" => {
+            respond!(detached!(|s, p| {
+                crate::daemon_contacts::handle_contacts_save(s.config_paths(), &p)
+            }))
+        }
+        "contacts_delete" => {
+            respond!(detached!(|s, p| {
+                crate::daemon_contacts::handle_contacts_delete(s.config_paths(), &p)
+            }))
+        }
+        "contacts_infer" => {
+            respond!(detached!(|s, p| {
+                crate::daemon_contacts::handle_contacts_infer(s.config_paths(), &p)
+            }))
+        }
         "telegram_rank_relationships" => {
             respond!(detached!(|s, p| handle_telegram_rank_relationships(&s, &p)))
         }
@@ -4137,6 +4167,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         "turnId": question_turn.clone(),
                         "requestId": request_id,
                         "questions": req.questions,
+                        "metadata": req.metadata,
                     }),
                     &question_actor,
                 ),
@@ -4403,6 +4434,7 @@ async fn start_slash_command_turn(state: Arc<DaemonState>, params: Value) -> Res
                         "turnId": question_turn.clone(),
                         "requestId": request_id,
                         "questions": req.questions,
+                        "metadata": req.metadata,
                     }),
                     &question_actor,
                 ),
@@ -4663,6 +4695,7 @@ async fn start_connector_setup_turn(state: Arc<DaemonState>, params: Value) -> R
                         "turnId": question_turn.clone(),
                         "requestId": request_id,
                         "questions": req.questions,
+                        "metadata": req.metadata,
                     }),
                     &question_actor,
                 ),
