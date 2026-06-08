@@ -8,10 +8,17 @@ description: |-
   one structured browser action and the exact arguments that the runtime will
   execute. This tool does not expose a shell command surface.
 
-  Prefer DOM-ready navigation followed by `snapshot` or an action-specific
-  assertion. Use `waitNetworkIdle` only when the task explicitly requires
-  meaningful page network traffic to become quiet; background telemetry and
-  beacon requests are not a useful readiness signal.
+  For sign-in and login flows, search `RequestSecret` for the relevant site,
+  domain, account, or username before using this browser tool for credential
+  fields. If no matching credential exists, use `RequestSecret` to collect a
+  reusable credential instead of asking the user to paste passwords, tokens, or
+  API keys into chat.
+
+  For page readiness, use `open` or `navigate` followed by `snapshot`,
+  `screenshot`, `domInspect`, or a targeted browser action. Do not wait for
+  network idle after navigation. Modern sites often keep telemetry, beacon,
+  streaming, or long-polling requests open, so network quiet is not a reliable
+  readiness signal for interactive browser work.
 handler: runtime:browser
 approval_policy: auto
 sandbox_policy: workspace-write
@@ -31,7 +38,6 @@ input_schema:
         - reload
         - back
         - forward
-        - waitNetworkIdle
         - snapshot
         - domInspect
         - consoleLogs
@@ -140,12 +146,12 @@ input_schema:
       type: integer
       minimum: 1
       maximum: 10000
-      description: Quiet meaningful-network window for explicit waitNetworkIdle calls. Defaults to 500.
+      description: Reserved for legacy internal waitNetworkIdle calls. Do not set for normal model-directed browser actions.
     timeoutMs:
       type: integer
       minimum: 1
       maximum: 120000
-      description: Maximum wait for explicit waitNetworkIdle calls. Defaults to 30000.
+      description: Reserved for legacy internal waitNetworkIdle calls. Do not set for normal model-directed browser actions.
   required:
     - action
   additionalProperties: false

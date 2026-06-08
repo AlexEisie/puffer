@@ -4,7 +4,7 @@ use super::cursor::parse_cursor_response;
 use super::params::{parse_input_event, required_string_array};
 use super::ref_resolution::{
     checkable_state_expression, fill_expression, focus_expression, scroll_into_view_expression,
-    select_expression, upload_input_handle_expression,
+    select_expression, target_point_expression, upload_input_handle_expression,
 };
 use super::screenshot::{
     parse_agent_screenshot_options, parse_capture_screenshot_response, BrowserElementRef,
@@ -698,6 +698,23 @@ fn scroll_helpers_cover_alias_behaviour() {
     .unwrap();
     assert!(expression.contains("findTarget(refTarget)"));
     assert!(expression.contains("scrollIntoView"));
+}
+
+#[test]
+fn target_point_expression_scrolls_and_clamps_to_viewport() {
+    let expression = target_point_expression(&BrowserElementRef {
+        ref_id: "@e1".to_string(),
+        role: "button".to_string(),
+        name: "Pay".to_string(),
+        tag: "button".to_string(),
+        href: None,
+        x: 10.0,
+        y: 20.0,
+    })
+    .unwrap();
+    assert!(expression.contains("scrollIntoView"));
+    assert!(expression.contains("Math.min(Math.max"));
+    assert!(expression.contains("Target has no stable viewport point"));
 }
 
 #[test]

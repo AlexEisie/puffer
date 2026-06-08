@@ -162,7 +162,8 @@ pub(super) fn wait_for_initial_page_targets(
 pub(super) fn read_remote_devtools_ws_url(port: u16, timeout: Duration) -> Result<String> {
     let endpoints = remote_devtools_version_endpoints(port);
     let client = Client::builder()
-        .timeout(Duration::from_millis(500))
+        .connect_timeout(Duration::from_millis(100))
+        .timeout(Duration::from_millis(250))
         .build()
         .context("build DevTools HTTP client")?;
     let start = Instant::now();
@@ -186,8 +187,8 @@ pub(super) fn read_remote_devtools_ws_url(port: u16, timeout: Duration) -> Resul
 
 fn remote_devtools_version_endpoints(port: u16) -> Vec<String> {
     vec![
-        format!("http://[::1]:{port}/json/version"),
         format!("http://127.0.0.1:{port}/json/version"),
+        format!("http://[::1]:{port}/json/version"),
     ]
 }
 
@@ -554,12 +555,12 @@ mod tests {
     }
 
     #[test]
-    fn remote_devtools_probe_prefers_ipv6_loopback() {
+    fn remote_devtools_probe_prefers_ipv4_loopback() {
         assert_eq!(
             remote_devtools_version_endpoints(9333),
             vec![
-                "http://[::1]:9333/json/version".to_string(),
-                "http://127.0.0.1:9333/json/version".to_string()
+                "http://127.0.0.1:9333/json/version".to_string(),
+                "http://[::1]:9333/json/version".to_string()
             ]
         );
     }

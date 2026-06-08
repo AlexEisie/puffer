@@ -38,3 +38,8 @@ fn dangerous_schemes_always_rejected() {
     assert!(!url_in_scope("javascript:alert(1)", scope));
     assert!(!url_in_scope("data:text/html,<script>", scope));
 }
+
+#[test]
+fn agent_stays_serial_to_preserve_secret_placeholders() {
+    assert!(!is_parallel_safe_tool("Agent"));
+}

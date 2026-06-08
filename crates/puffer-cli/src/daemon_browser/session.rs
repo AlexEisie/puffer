@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect, Message, WebSocket};
-const CEF_REMOTE_START_TIMEOUT: Duration = Duration::from_secs(10);
+const CEF_REMOTE_START_TIMEOUT: Duration = Duration::from_secs(30);
 const CEF_TARGET_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Clone)]
 pub(super) struct BrowserRootSession {
