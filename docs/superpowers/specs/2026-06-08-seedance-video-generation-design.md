@@ -66,7 +66,7 @@ performance, avoid over-engineering):
 |---|---|---|
 | Provider | byteplus, direct ModelArk | same byteplus, same base_url |
 | YAML | `media.image` + `adapter: images_json` | new `media.video` + `adapter: seedance_video` |
-| Adapter module | `images_json` | new `seedance_video.rs` (mirrors `replicate_video.rs`) |
+| Adapter module | `images_json` | new `seedance_video.rs` (reuses `http_support` plumbing like `images_json`; reuses `replicate_video` async job lifecycle) |
 | Protocol | sync `POST /images/generations` | async `POST /contents/generations/tasks` → poll `/tasks/{id}` |
 | Param mapping | structured → request fields | structured → prompt-inline `--ratio/--duration/--resolution` (in adapter) |
 
@@ -84,6 +84,10 @@ media:
       adapter: seedance_video
       path: /contents/generations/tasks
     models:
+      # Start with ONE verified model. Add the Fast / other variants as further
+      # list entries once confirmed against the account (see Verification
+      # prerequisites). Exact id/values below are research defaults, pending
+      # confirmation.
       - id: dreamina-seedance-2-0-260128
         display_name: Seedance 2.0
         operations: [generate]
@@ -91,10 +95,6 @@ media:
           - { name: resolution, label: Resolution,  values: [480p, 720p, 1080p], default: 1080p, request_field: resolution }
           - { name: ratio,      label: Aspect ratio, values: ["16:9","9:16","1:1"], default: "16:9", request_field: ratio }
           - { name: duration,   label: Duration,     values: ["5","10"],          default: "5",    request_field: duration }
-      - id: dreamina-seedance-2-0-fast-260128
-        display_name: Seedance 2.0 Fast
-        operations: [generate]
-        parameters: [ ... same as above ... ]
 ```
 
 `request_field` reuses the existing schema; for video its semantics =
@@ -104,34 +104,57 @@ through existing logic — no new frontend.
 
 ### 2. `crates/puffer-core/runtime/media/seedance_video.rs` (new)
 
-Mirrors `replicate_video.rs`:
+**Reuses the image path's HTTP plumbing (`http_support.rs`); reuses the
+`replicate_video` async job *lifecycle*.** This is the key refinement: the
+image adapter (`images_json`) does NOT hardcode its base URL/path — it builds
+the URL from `provider.base_url` + `execution.path` via
+`provider_execution_url()`, authenticates via `bearer_token()`, downloads via
+`download_image_url()`, and redacts via `provider_error_secrets()` /
+`redact_secrets()`. `replicate_video` is the odd one out (hardcoded
+`DEFAULT_REPLICATE_BASE_URL` + `/v1/predictions`) because Replicate has one
+fixed host. Seedance runs on byteplus's own `base_url`, so it MUST use the
+shared `http_support` helpers — which is also less code.
 
-- `SeedanceVideoTransport` trait: `submit_task(base_url, key, body) -> {id}`,
-  `poll_task(base_url, key, id) -> {status, content.video_url}`,
-  `download_bytes(url)`.
-- `ReqwestSeedanceVideoTransport`: `POST {base}/contents/generations/tasks`,
-  `GET {base}/contents/generations/tasks/{id}`, `Authorization: Bearer`.
-- `SeedanceVideoAdapter`: `submit()` (build queued job) → `poll_until_terminal()`
-  (status normalization: `succeeded` → done; `failed`/`expired` → error with
-  ModelArk code/message) → load artifacts.
+- `SeedanceVideoTransport` trait: `submit_task(url, key, body) -> {id}`,
+  `poll_task(url, key) -> Value`. URLs are passed in (built by the adapter via
+  `provider_execution_url`), not constructed inside the transport.
+- `ReqwestSeedanceVideoTransport`: blocking `reqwest` POST/GET with
+  `Authorization: Bearer`.
+- `SeedanceVideoAdapter`: built with `(provider, execution, api_token)`. Submit
+  URL = `provider_execution_url(provider, execution, "...")`; poll URL = that
+  URL joined with `/{task_id}`. Lifecycle mirrors `replicate_video`: `submit()`
+  creates a queued `MediaJob` (`MediaKind::Video`, task id stored in
+  `provider_job_id`), `poll_until_terminal()` loops with `SeedancePollingConfig`,
+  status normalization (`succeeded` → done; `failed`/`expired` → error with
+  ModelArk code/message), then `download_image_url()` fetches the MP4 and
+  `MediaGenerationService` persists it (same artifact path scheme as images).
 - `seedance_request_from_parameters()`: the only genuinely new logic — maps
   structured params into the prompt-inline `--` string and assembles the
   `content` array. Isolated and unit-testable.
 
-### 3. Four wiring points (all small)
+**Reuse, do not duplicate:** `download_image_url` already enforces
+https/loopback and is content-agnostic — reuse it as-is for the MP4 (do not
+rename; renaming churns the image path for no behavior change). `MediaJob` is
+reused unchanged (no model edits) — replicate already proves it carries video
+jobs.
+
+### 3. Wiring points (all small)
 
 1. `crates/puffer-provider-registry/src/model.rs` (`MediaExecutionKind` enum):
    add `SeedanceVideo` (serde snake_case → `"seedance_video"`).
-2. `crates/puffer-core/runtime/media/resolver.rs`
-   (`execution_adapter_is_available_for_kind`): add
-   `(MediaKind::Video, MediaExecutionKind::SeedanceVideo)`; add `adapter_id`
-   mapping.
+2. `crates/puffer-core/runtime/media/resolver.rs`:
+   (a) `execution_adapter_is_available_for_kind`: add
+   `(MediaKind::Video, MediaExecutionKind::SeedanceVideo)`; (b) `adapter_id`
+   mapping; (c) add `resolve_video_execution_descriptor` — a small sibling of
+   the existing `resolve_image_execution_descriptor` that reads `media.video`
+   (needed so the match arm can obtain `base_url` + `execution.path`).
 3. `crates/puffer-core/runtime/media/mod.rs`: add
    `pub(crate) mod seedance_video;`.
 4. `crates/puffer-core/media_runtime.rs`
    (`generate_exact_video_from_media_request`): add match arm
-   `"seedance_video" => { ... }`, symmetric with the existing `replicate_video`
-   arm (resolve provider, bearer token, submit, poll, load artifacts).
+   `"seedance_video" => { ... }` — resolve provider + video execution descriptor,
+   `bearer_token`, construct `SeedanceVideoAdapter`, submit, poll, load
+   artifacts. Symmetric with the existing `replicate_video` arm.
 
 ## Data flow
 
@@ -145,13 +168,32 @@ Mirrors `replicate_video.rs`:
 ## Error handling & stability
 
 - **Bounded polling:** `SeedancePollingConfig` (interval ~3s, generous
-  minute-scale total timeout, since video is slow), reusing the
-  `poll_until_terminal` pattern — no new mechanism.
+  minute-scale total timeout, since video is slow) — a tiny module-local config,
+  mirroring `replicate_video`'s `poll_until_terminal` pattern. No new mechanism.
 - **Status normalization:** `failed`/`expired` → clear error carrying ModelArk
   error code/message; never silent.
-- **Download validation:** enforce https on `video_url` (mirrors
-  `replicate_video` scheme check); persist via `MediaGenerationService`.
+- **Download validation:** reuse `download_image_url` (already enforces
+  https/loopback); persist via `MediaGenerationService`.
+- **Secret redaction:** reuse `provider_error_secrets` + `redact_secrets` so a
+  ModelArk error body never leaks the API key — same as the image path.
 - **Count:** `validate_video_count` already enforces count == 1.
+
+## Verification prerequisites (before/during implementation)
+
+These came from web research and MUST be confirmed against the actual ModelArk
+account before the YAML is considered final:
+
+- **Model id(s):** confirm the exact Seedance model id(s) available on the
+  account (e.g. `dreamina-seedance-2-0-260128`). Start with **one** verified
+  model; the Fast variant and any others are a trivial YAML list addition once
+  confirmed — do not declare unverified ids.
+- **Parameter names & values:** confirm whether resolution/ratio/duration are
+  expressed as prompt-inline `--` flags (Seedance 2.0) and the allowed value
+  sets, since the capability `values` drive UI options and pre-flight
+  validation.
+- **Submit/poll path & response shape:** confirm `execution.path`
+  (`/contents/generations/tasks`), the task-id field on submit, and the
+  terminal status string + `video_url` location on poll.
 
 ## Testing
 
