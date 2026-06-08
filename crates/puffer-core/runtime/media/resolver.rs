@@ -120,6 +120,16 @@ pub(crate) fn validate_media_generate_selection(
         );
     };
 
+    if capability.status != "available" {
+        bail!(
+            "selected {} model unavailable: {}/{} via {}",
+            media_kind_error_name(selection.kind),
+            selection.provider_id,
+            selection.model_id,
+            selection.adapter
+        );
+    }
+
     validate_parameter_values(selection.kind, &capability.parameters, selection.parameters)?;
 
     Ok(capability)
@@ -263,9 +273,6 @@ fn resolve_video_capabilities(
 ) -> Vec<MediaCapability> {
     let mut capabilities = Vec::new();
     for provider in registry.providers() {
-        if !provider_is_connected(provider, auth_store) {
-            continue;
-        }
         let Some(video) = provider
             .media
             .as_ref()
@@ -273,6 +280,7 @@ fn resolve_video_capabilities(
         else {
             continue;
         };
+        let provider_connected = provider_is_connected(provider, auth_store);
         for model in &video.models {
             if !media_model_is_available(model, operation) {
                 continue;
@@ -280,9 +288,15 @@ fn resolve_video_capabilities(
             let Some(execution) = image_execution(video.execution.as_ref(), model) else {
                 continue;
             };
-            if !execution_adapter_is_available_for_kind(MediaKind::Video, execution.adapter) {
-                continue;
-            }
+            let adapter_available =
+                execution_adapter_is_available_for_kind(MediaKind::Video, execution.adapter);
+            let (status, reason) = if !adapter_available {
+                ("unavailable", Some("adapter_unavailable".to_string()))
+            } else if !provider_connected {
+                ("unavailable", Some("missing_auth".to_string()))
+            } else {
+                ("available", None)
+            };
             let parameters = media_parameters(model);
             capabilities.push(MediaCapability {
                 provider_id: provider.id.clone(),
@@ -297,9 +311,9 @@ fn resolve_video_capabilities(
                 adapter: adapter_id(execution.adapter).to_string(),
                 defaults: media_defaults(&parameters),
                 parameters,
-                status: "available".to_string(),
+                status: status.to_string(),
                 source: "static".to_string(),
-                reason: None,
+                reason,
                 checked_at_ms,
             });
         }
@@ -629,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn video_descriptor_with_image_adapter_is_not_available() {
+    fn video_descriptor_with_image_adapter_is_unavailable_with_adapter_reason() {
         let registry = registry_with(vec![provider(
             "replicate",
             vec![AuthMode::ApiKey],
@@ -649,7 +663,104 @@ mod tests {
             &MediaDiscoveryCache::default(),
         );
 
-        assert!(capabilities.is_empty());
+        assert_eq!(capabilities.len(), 1);
+        assert_eq!(capabilities[0].provider_id, "replicate");
+        assert_eq!(capabilities[0].adapter, "images_json");
+        assert_eq!(capabilities[0].status, "unavailable");
+        assert_eq!(
+            capabilities[0].reason.as_deref(),
+            Some("adapter_unavailable")
+        );
+    }
+
+    #[test]
+    fn unauthenticated_video_descriptor_appears_unavailable_with_missing_auth() {
+        let registry = registry_with(vec![provider(
+            "relaydance",
+            vec![AuthMode::ApiKey],
+            Some(video_media_with_adapter(
+                MediaExecutionKind::OpenAiVideo,
+                "doubao-seedance-2-0-720p",
+            )),
+        )]);
+
+        let capabilities = resolve_media_capabilities(
+            &registry,
+            &AuthStore::default(),
+            MediaKind::Video,
+            MediaOperation::Generate,
+            42,
+            &MediaDiscoveryCache::default(),
+        );
+
+        assert_eq!(capabilities.len(), 1);
+        assert_eq!(capabilities[0].provider_id, "relaydance");
+        assert_eq!(capabilities[0].adapter, "openai_video");
+        assert_eq!(capabilities[0].status, "unavailable");
+        assert_eq!(capabilities[0].reason.as_deref(), Some("missing_auth"));
+        assert_eq!(capabilities[0].defaults["duration"], "5");
+    }
+
+    #[test]
+    fn connected_openai_video_descriptor_is_available() {
+        let registry = registry_with(vec![provider(
+            "relaydance",
+            vec![AuthMode::ApiKey],
+            Some(video_media_with_adapter(
+                MediaExecutionKind::OpenAiVideo,
+                "doubao-seedance-2-0-720p",
+            )),
+        )]);
+
+        let capabilities = resolve_media_capabilities(
+            &registry,
+            &auth_for("relaydance"),
+            MediaKind::Video,
+            MediaOperation::Generate,
+            42,
+            &MediaDiscoveryCache::default(),
+        );
+
+        assert_eq!(capabilities.len(), 1);
+        assert_eq!(capabilities[0].status, "available");
+        assert_eq!(capabilities[0].reason, None);
+    }
+
+    #[test]
+    fn unavailable_video_capability_cannot_validate_generation_selection() {
+        let registry = registry_with(vec![provider(
+            "relaydance",
+            vec![AuthMode::ApiKey],
+            Some(video_media_with_adapter(
+                MediaExecutionKind::OpenAiVideo,
+                "doubao-seedance-2-0-720p",
+            )),
+        )]);
+        let selected = BTreeMap::new();
+
+        let error = validate_media_generate_selection(
+            &registry,
+            &AuthStore::default(),
+            &MediaGenerationSelection {
+                kind: MediaKind::Video,
+                provider_id: "relaydance",
+                model_id: "doubao-seedance-2-0-720p",
+                operation: MediaOperation::Generate,
+                adapter: "openai_video",
+                parameters: &selected,
+            },
+            42,
+            &MediaDiscoveryCache::default(),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            error.contains(
+                "selected video model unavailable: relaydance/doubao-seedance-2-0-720p via openai_video"
+            ),
+            "{error}"
+        );
     }
 
     #[test]
