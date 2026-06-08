@@ -422,6 +422,46 @@ fn cancel_turn(
     backend_call(app, state, "cancel_turn", json!({ "turnId": turn_id })).map(|_| ())
 }
 
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+fn spawn_cef_native_warmup(app_handle: AppHandle, smoke_url: Option<String>, prewarm_targets: usize) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    use tauri::Manager;
+
+    std::thread::spawn(move || {
+        let done = Arc::new(AtomicBool::new(false));
+        let start = Instant::now();
+        while !done.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(250));
+            let app_for_main = app_handle.clone();
+            let done_for_main = Arc::clone(&done);
+            let smoke_url_for_main = smoke_url.clone();
+            if let Err(err) = app_handle.run_on_main_thread(move || {
+                let Some(window) = app_for_main.get_webview_window("main") else {
+                    return;
+                };
+                if let Some(url) = smoke_url_for_main {
+                    if let Err(err) = cef_host::browser_cef_native_smoke_open(window.clone(), url) {
+                        eprintln!("CEF smoke open failed: {err}");
+                    }
+                }
+                if let Err(err) =
+                    cef_host::browser_cef_native_prewarm_targets(window, prewarm_targets)
+                {
+                    eprintln!("CEF prewarm failed: {err}");
+                }
+                done_for_main.store(true, Ordering::SeqCst);
+            }) {
+                eprintln!("CEF warmup dispatch failed: {err}");
+                break;
+            }
+        }
+        if !done.load(Ordering::SeqCst) {
+            eprintln!("CEF warmup skipped: main window was not available");
+        }
+    });
+}
+
 pub fn run() {
     #[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
     if let Err(err) = cef_host::browser_cef_native_preinitialize() {
@@ -459,37 +499,13 @@ pub fn run() {
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
             #[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
             {
-                use tauri::Manager;
                 let smoke_url = std::env::var("PUFFER_CEF_SMOKE_URL").ok();
                 let prewarm_targets = std::env::var("PUFFER_CEF_PREWARM_TARGETS")
                     .ok()
                     .and_then(|value| value.parse::<usize>().ok())
                     .unwrap_or(8);
                 if smoke_url.is_some() || prewarm_targets > 0 {
-                    let app_handle = app.handle().clone();
-                    std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_secs(1));
-                        let app_for_main = app_handle.clone();
-                        if let Err(err) = app_handle.run_on_main_thread(move || {
-                            if let Some(window) = app_for_main.get_webview_window("main") {
-                                if let Some(url) = smoke_url {
-                                    if let Err(err) =
-                                        cef_host::browser_cef_native_smoke_open(window.clone(), url)
-                                    {
-                                        eprintln!("CEF smoke open failed: {err}");
-                                    }
-                                }
-                                if let Err(err) = cef_host::browser_cef_native_prewarm_targets(
-                                    window,
-                                    prewarm_targets,
-                                ) {
-                                    eprintln!("CEF prewarm failed: {err}");
-                                }
-                            }
-                        }) {
-                            eprintln!("CEF smoke dispatch failed: {err}");
-                        }
-                    });
+                    spawn_cef_native_warmup(app.handle().clone(), smoke_url, prewarm_targets);
                 }
             }
             if let Err(err) = app.global_shortcut().register(mini_shortcut) {

@@ -44,7 +44,9 @@ fn try_append(path: &Path, record: &Value) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     // Recover from a poisoned lock: the data it guards is just a file handle.
-    let _guard = WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     rotate_if_needed(path);
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(file, "{record}")

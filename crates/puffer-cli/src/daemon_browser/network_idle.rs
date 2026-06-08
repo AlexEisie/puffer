@@ -150,11 +150,7 @@ fn known_telemetry_host(host: &str) -> bool {
 
 fn known_telemetry_path(path: &str) -> bool {
     const MARKERS: &[&str] = &[
-        "/analytics",
         "/beacon",
-        "/collect",
-        "/metrics",
-        "/mp/collect",
         "/rum",
         "/session-replay",
         "/telemetry",
@@ -303,6 +299,40 @@ mod tests {
         );
 
         assert_eq!(network.active_count(), 1);
+    }
+
+    #[test]
+    fn keeps_first_party_analytics_api_requests_active() {
+        let mut network = BrowserNetworkState::default();
+
+        network.update_from_cdp(
+            "Network.requestWillBeSent",
+            &json!({
+                "params": {
+                    "requestId": "analytics",
+                    "type": "Fetch",
+                    "request": {
+                        "method": "POST",
+                        "url": "https://checkout.example.com/api/analytics/report"
+                    }
+                }
+            }),
+        );
+        network.update_from_cdp(
+            "Network.requestWillBeSent",
+            &json!({
+                "params": {
+                    "requestId": "metrics",
+                    "type": "Fetch",
+                    "request": {
+                        "method": "GET",
+                        "url": "https://checkout.example.com/internal/metrics"
+                    }
+                }
+            }),
+        );
+
+        assert_eq!(network.active_count(), 2);
     }
 
     #[test]

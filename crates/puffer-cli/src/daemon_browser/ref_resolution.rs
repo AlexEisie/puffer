@@ -161,8 +161,12 @@ pub(super) fn target_point_expression(target: &BrowserElementRef) -> Result<Stri
   const refTarget = {target};
   const refElement = findTarget(refTarget);
   if (!refElement) throw new Error(`No element matched browser ref ${{refTarget.ref}}`);
+  refElement.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
   const rect = refElement.getBoundingClientRect();
-  return {{ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }};
+  const x = Math.min(Math.max(rect.left + rect.width / 2, 0), Math.max(window.innerWidth - 1, 0));
+  const y = Math.min(Math.max(rect.top + rect.height / 2, 0), Math.max(window.innerHeight - 1, 0));
+  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('Target has no stable viewport point');
+  return {{ x, y }};
 }})()"#,
         helpers = HELPERS
     ))
@@ -175,47 +179,6 @@ pub(super) fn focus_expression(target: &BrowserElementRef) -> Result<String> {
         r#"  const targetEl = refElement;
   if (typeof targetEl.focus !== 'function') throw new Error('Target is not focusable');
   targetEl.focus({ preventScroll: false });
-  return true;
-"#,
-    )
-}
-
-/// Builds a script that clicks one resolved ref.
-pub(super) fn click_expression(target: &BrowserElementRef) -> Result<String> {
-    ref_script(
-        target,
-        r#"  refElement.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-  refElement.click();
-  return true;
-"#,
-    )
-}
-
-/// Builds a script that double-clicks one resolved ref.
-pub(super) fn double_click_expression(target: &BrowserElementRef) -> Result<String> {
-    ref_script(
-        target,
-        r#"  refElement.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-  refElement.click();
-  refElement.click();
-  refElement.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, detail: 2 }));
-  return true;
-"#,
-    )
-}
-
-/// Builds a script that hovers one resolved ref.
-pub(super) fn hover_expression(target: &BrowserElementRef) -> Result<String> {
-    ref_script(
-        target,
-        r#"  const rect = refElement.getBoundingClientRect();
-  refElement.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-  refElement.dispatchEvent(new MouseEvent('mousemove', {
-    bubbles: true,
-    clientX: rect.left + rect.width / 2,
-    clientY: rect.top + rect.height / 2,
-    buttons: 0
-  }));
   return true;
 "#,
     )

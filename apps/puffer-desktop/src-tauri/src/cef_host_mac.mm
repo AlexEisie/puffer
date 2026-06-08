@@ -32,6 +32,7 @@ namespace {
 
 constexpr int64_t kActivePumpDelayMs = 16;
 constexpr int64_t kActivePumpWindowMs = 5000;
+constexpr int64_t kIdlePumpDelayMs = 100;
 constexpr bool kUseExternalMessagePump = true;
 
 static BOOL g_handling_send_event = NO;
@@ -183,6 +184,7 @@ void RetireBrowserSlotLater(const std::string& session_id);
 void FocusBrowserSlot(BrowserSlot* slot);
 void PrepareBrowserInputEvent(NSEvent* event);
 bool HasInteractivePumpSlots();
+bool HasLivePumpSlots();
 bool IsBrowserInputEvent(NSEvent* event);
 void RequestInputPumpWindow();
 
@@ -228,10 +230,10 @@ bool TakeDeferredMessagePumpWork(int64_t* delay_ms) {
   return true;
 }
 
-bool HasActivePumpSlots() {
+bool HasLivePumpSlots() {
   for (const auto& entry : g_slots) {
     const BrowserSlot* slot = entry.second;
-    if (slot && !slot->closing && (slot->creating || slot->loading)) {
+    if (slot && !slot->closing && (slot->creating || slot->loading || slot->browser)) {
       return true;
     }
   }
@@ -261,15 +263,13 @@ void ScheduleActivePumpTimer(int64_t delay_ms);
 
 void RunActivePumpWork() {
   KillActivePumpTimer();
-  if (!g_initialized || (!HasActivePumpSlots() && !HasInteractivePumpSlots())) {
+  if (!g_initialized || !HasLivePumpSlots()) {
     return;
   }
   const int64_t now_ms = CurrentTimeMs();
-  if (now_ms > g_active_pump_until_ms) {
-    return;
-  }
   DoScheduledMessagePumpWork();
-  ScheduleActivePumpTimer(kActivePumpDelayMs);
+  ScheduleActivePumpTimer(
+      now_ms > g_active_pump_until_ms ? kIdlePumpDelayMs : kActivePumpDelayMs);
 }
 
 void ScheduleActivePumpTimer(int64_t delay_ms) {
@@ -289,7 +289,7 @@ void ScheduleActivePumpTimer(int64_t delay_ms) {
 }
 
 void RequestActivePumpWindow() {
-  if (!g_initialized || !HasActivePumpSlots()) {
+  if (!g_initialized || !HasLivePumpSlots()) {
     return;
   }
   g_active_pump_until_ms = std::max(g_active_pump_until_ms,
@@ -362,7 +362,7 @@ class PufferCefClient : public CefClient,
       slot->error.clear();
       slot->loading = false;
       TouchSlot(slot);
-      if (!HasActivePumpSlots()) {
+      if (!HasLivePumpSlots()) {
         KillActivePumpTimer();
       }
       if (slot->closing) {
@@ -449,7 +449,7 @@ class PufferCefClient : public CefClient,
       TouchSlot(slot);
       if (isLoading) {
         RequestActivePumpWindow();
-      } else if (!HasActivePumpSlots()) {
+      } else if (!HasLivePumpSlots()) {
         KillActivePumpTimer();
       }
     }

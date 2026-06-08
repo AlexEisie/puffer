@@ -740,10 +740,7 @@ mod tests {
         apply_task_agent_model_default(&mut state, &registry);
 
         assert_eq!(state.current_provider.as_deref(), Some("qwen35"));
-        assert_eq!(
-            state.current_model.as_deref(),
-            Some("qwen35/default_model")
-        );
+        assert_eq!(state.current_model.as_deref(), Some("qwen35/default_model"));
     }
 
     #[test]

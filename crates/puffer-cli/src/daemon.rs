@@ -1644,8 +1644,7 @@ fn handle_telegram_rank_relationships(state: &DaemonState, params: &Value) -> Re
         crate::daemon_telegram_ranking::ModelBackend::local()
     } else {
         let auth_path = state.config_paths().user_config_dir.join("auth.json");
-        let auth_store =
-            AuthStore::load(&auth_path).context("load auth store for cloud model")?;
+        let auth_store = AuthStore::load(&auth_path).context("load auth store for cloud model")?;
         let key = match auth_store.providers.get("openai") {
             Some(StoredCredential::ApiKey { key }) => key.clone(),
             _ => anyhow::bail!(
@@ -1655,7 +1654,13 @@ fn handle_telegram_rank_relationships(state: &DaemonState, params: &Value) -> Re
         crate::daemon_telegram_ranking::ModelBackend::cloud(key)
     };
 
-    crate::daemon_telegram_ranking::run(&diagnostics, &state.event_sender(), &slug, &backend, now_ms)
+    crate::daemon_telegram_ranking::run(
+        &diagnostics,
+        &state.event_sender(),
+        &slug,
+        &backend,
+        now_ms,
+    )
 }
 
 /// Picks a default Telegram account: the first sub-directory of

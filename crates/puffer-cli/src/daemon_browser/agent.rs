@@ -11,11 +11,11 @@ use crate::daemon::{DaemonState, ServerEnvelope};
 
 use super::params::{optional_u32, required_string, required_string_array};
 use super::ref_resolution::{
-    click_expression, double_click_expression, fill_expression, focus_expression, hover_expression,
-    scroll_into_view_expression, select_expression, set_checkable_state_expression,
-    upload_input_handle_expression,
+    fill_expression, focus_expression, scroll_into_view_expression, select_expression,
+    set_checkable_state_expression, target_point_expression, upload_input_handle_expression,
 };
 use super::screenshot::{parse_agent_screenshot_options, BrowserElementRef};
+use super::session::BrowserSession;
 use super::tabs::{backend_session_id, BrowserTabInfo, BrowserTabsState};
 use super::{
     browser_debug, BrowserHistoryDirection, BrowserInputEvent, BrowserRegistry, DEFAULT_URL,
@@ -443,25 +443,33 @@ fn resolve_open_target_tab_id(
 impl BrowserRegistry {
     /// Clicks an element ref from the last agent snapshot.
     pub(crate) fn agent_click(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
-        let target = self.lookup_ref(backend_session_id, ref_id)?;
-        self.get(backend_session_id)?
-            .evaluate(click_expression(&target)?)?;
+        let session = self.get(backend_session_id)?;
+        let (x, y) = self.agent_target_point(backend_session_id, ref_id)?;
+        dispatch_agent_mouse_click(&session, x, y, 1)?;
         Ok(())
     }
 
     /// Double-clicks an element ref from the last agent snapshot.
     pub(crate) fn agent_double_click(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
-        let target = self.lookup_ref(backend_session_id, ref_id)?;
-        self.get(backend_session_id)?
-            .evaluate(double_click_expression(&target)?)?;
+        let session = self.get(backend_session_id)?;
+        let (x, y) = self.agent_target_point(backend_session_id, ref_id)?;
+        dispatch_agent_mouse_click(&session, x, y, 1)?;
+        dispatch_agent_mouse_click(&session, x, y, 2)?;
         Ok(())
     }
 
     /// Moves the pointer over an element ref from the last agent snapshot.
     pub(crate) fn agent_hover(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
-        let target = self.lookup_ref(backend_session_id, ref_id)?;
-        self.get(backend_session_id)?
-            .evaluate(hover_expression(&target)?)?;
+        let session = self.get(backend_session_id)?;
+        let (x, y) = self.agent_target_point(backend_session_id, ref_id)?;
+        session.input(BrowserInputEvent::Mouse {
+            event_type: "mouseMoved".to_string(),
+            x,
+            y,
+            button: "none".to_string(),
+            buttons: Some(0),
+            click_count: 0,
+        })?;
         Ok(())
     }
 
@@ -596,6 +604,59 @@ impl BrowserRegistry {
             .and_then(|refs| refs.iter().find(|item| item.ref_id == ref_id).cloned())
             .with_context(|| format!("no browser ref `{ref_id}`; run snapshot again"))
     }
+
+    fn agent_target_point(&self, backend_session_id: &str, ref_id: &str) -> Result<(f64, f64)> {
+        let target = self.lookup_ref(backend_session_id, ref_id)?;
+        let evaluated = self
+            .get(backend_session_id)?
+            .evaluate(target_point_expression(&target)?)?;
+        let x = evaluated
+            .value
+            .get("x")
+            .and_then(Value::as_f64)
+            .context("browser ref target point missing x")?;
+        let y = evaluated
+            .value
+            .get("y")
+            .and_then(Value::as_f64)
+            .context("browser ref target point missing y")?;
+        if !x.is_finite() || !y.is_finite() {
+            bail!("browser ref target point is not finite");
+        }
+        Ok((x, y))
+    }
+}
+
+fn dispatch_agent_mouse_click(
+    session: &BrowserSession,
+    x: f64,
+    y: f64,
+    click_count: u32,
+) -> Result<()> {
+    session.input(BrowserInputEvent::Mouse {
+        event_type: "mouseMoved".to_string(),
+        x,
+        y,
+        button: "none".to_string(),
+        buttons: Some(0),
+        click_count: 0,
+    })?;
+    session.input(BrowserInputEvent::Mouse {
+        event_type: "mousePressed".to_string(),
+        x,
+        y,
+        button: "left".to_string(),
+        buttons: Some(1),
+        click_count,
+    })?;
+    session.input(BrowserInputEvent::Mouse {
+        event_type: "mouseReleased".to_string(),
+        x,
+        y,
+        button: "left".to_string(),
+        buttons: Some(0),
+        click_count,
+    })
 }
 
 fn ensure_target_tab(

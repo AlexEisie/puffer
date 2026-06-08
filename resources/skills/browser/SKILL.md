@@ -1,6 +1,6 @@
 ---
 name: browser
-description: Use the managed Chrome Browser tab through the internal CLI to inspect pages, open tabs, and interact with UI through snapshots and refs.
+description: Use the managed Puffer browser tab through the internal CLI to inspect pages, open tabs, and interact with UI through snapshots and refs.
 allowed-tools:
   - Bash
   - RequestSecret
@@ -11,9 +11,10 @@ disable-model-invocation: false
 ---
 
 Use Bash to run the Browser internal CLI when a task requires a real page in
-Puffer's managed Chrome Browser tab: opening a page, switching tabs, inspecting
-visible UI, clicking controls, filling fields, pressing keys, uploading files,
-capturing screenshots, evaluating page JavaScript, or checking page text.
+Puffer's managed CEF/Chromium browser tab: opening a page, switching tabs,
+inspecting visible UI, clicking controls, filling fields, pressing keys,
+uploading files, capturing screenshots, evaluating page JavaScript, or checking
+page text.
 Browser is not a model tool and must not be requested as a provider tool call.
 Run Browser commands as `browser ...` inside Bash.
 
@@ -39,7 +40,7 @@ Workflow:
 
 2. Open or find the tab.
    - `browser list` lists tabs for the current agent session.
-   - `browser open https://example.com --label docs --width 1280 --height 900` opens or reuses a managed Chrome tab.
+   - `browser open https://example.com --label docs --width 1280 --height 900` opens or reuses a managed browser tab.
    - `browser tab new https://example.com --label scratch` forces a fresh tab.
    - `browser tab focus t1` switches the active agent-facing tab handle.
    - Treat DOM readiness plus a fresh snapshot as the default page-ready signal.
@@ -123,8 +124,8 @@ Interaction commands:
 - `browser scroll right 400 --tab-id t1`
 - `browser scroll-into-view @e5 --tab-id t1` or `browser scrollinto @e5 --tab-id t1`
 
-The Browser CLI controls the same daemon-managed Chrome sessions used by the
-Browser tab. v1 tabs are stable Puffer handles over managed Chrome sessions;
-do not assume cookies or storage are shared between tabs unless verified. Use
-only commands documented here; if a command is missing, inspect the CLI help
-instead of inventing a command shape.
+The Browser CLI controls the same daemon-managed CEF/Chromium sessions used by
+the Browser tab. v1 tabs are stable Puffer handles over managed browser
+sessions; do not assume cookies or storage are shared between tabs unless
+verified. Use only commands documented here; if a command is missing, inspect
+the CLI help instead of inventing a command shape.

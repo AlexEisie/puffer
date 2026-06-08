@@ -164,33 +164,28 @@ impl SecretVault {
 
     /// Searches stored secret metadata without decrypting secret material.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SecretSummary>> {
-        let terms = query
-            .split_whitespace()
-            .map(str::trim)
-            .filter(|term| !term.is_empty())
-            .map(str::to_ascii_lowercase)
-            .collect::<Vec<_>>();
+        let terms = secret_search_terms(query);
         let limit = limit.max(1);
         let mut matches = self
             .load_store()?
             .secrets
             .into_iter()
-            .filter(|record| {
-                terms.is_empty()
-                    || terms.iter().all(|term| {
-                        secret_search_text(record)
-                            .to_ascii_lowercase()
-                            .contains(term)
-                    })
+            .filter_map(|record| {
+                let score = secret_search_score(&record, &terms);
+                (terms.is_empty() || score > 0).then(|| (score, secret_summary(&record)))
             })
-            .map(|record| secret_summary(&record))
             .collect::<Vec<_>>();
         matches.sort_by(|left, right| {
             right
-                .updated_at_ms
-                .cmp(&left.updated_at_ms)
-                .then_with(|| left.label.cmp(&right.label))
+                .0
+                .cmp(&left.0)
+                .then_with(|| right.1.updated_at_ms.cmp(&left.1.updated_at_ms))
+                .then_with(|| left.1.label.cmp(&right.1.label))
         });
+        let mut matches = matches
+            .into_iter()
+            .map(|(_, summary)| summary)
+            .collect::<Vec<_>>();
         matches.truncate(limit);
         Ok(matches)
     }
@@ -248,7 +243,6 @@ impl SecretVault {
         self.save_store(&store)?;
         Ok(summary)
     }
-
     /// Deletes one secret by id, returning whether a record was removed.
     pub fn delete(&self, id: &str) -> Result<bool> {
         let id = id.trim();
@@ -435,6 +429,81 @@ fn secret_search_text(record: &SecretRecord) -> String {
     .join(" ")
 }
 
+fn secret_search_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    for term in query
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(str::to_ascii_lowercase)
+    {
+        if !terms.contains(&term) {
+            terms.push(term);
+        }
+    }
+    terms
+}
+
+fn secret_search_score(record: &SecretRecord, terms: &[String]) -> usize {
+    if terms.is_empty() {
+        return 1;
+    }
+    let text = secret_search_text(record).to_ascii_lowercase();
+    let has_specific_terms = terms
+        .iter()
+        .any(|term| !is_generic_secret_search_term(term));
+    let mut specific_score = 0usize;
+    let mut generic_score = 0usize;
+    for term in terms {
+        if !text.contains(term) {
+            continue;
+        }
+        if is_generic_secret_search_term(term) {
+            generic_score += 1;
+        } else {
+            specific_score += 10;
+        }
+    }
+    if has_specific_terms && specific_score == 0 {
+        0
+    } else {
+        specific_score + generic_score
+    }
+}
+
+fn is_generic_secret_search_term(term: &str) -> bool {
+    matches!(
+        term,
+        "account"
+            | "accounts"
+            | "api"
+            | "auth"
+            | "authentication"
+            | "com"
+            | "credential"
+            | "credentials"
+            | "email"
+            | "http"
+            | "https"
+            | "key"
+            | "keys"
+            | "login"
+            | "logins"
+            | "password"
+            | "passwords"
+            | "secret"
+            | "secrets"
+            | "signin"
+            | "site"
+            | "token"
+            | "tokens"
+            | "user"
+            | "username"
+            | "website"
+            | "www"
+    )
+}
+
 fn chrome_secret_label(credential: &chrome::ChromeCredential) -> String {
     let host = chrome_site_description(&credential.origin_url);
     match credential.username.trim() {
@@ -562,6 +631,44 @@ mod tests {
         assert_eq!(
             results[0].description.as_deref(),
             Some("production deploys")
+        );
+    }
+
+    #[test]
+    fn searches_keyword_heavy_login_query_by_specific_terms() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = SecretVault::open_with_key(dir.path().join("secrets.json"), test_key());
+        vault
+            .put(SecretUpsert {
+                id: None,
+                label: "Generic account password".to_string(),
+                description: Some("saved login".to_string()),
+                value: "unrelated-secret".to_string(),
+                username: None,
+                origin: Some("https://example.com".to_string()),
+                source: "manual".to_string(),
+            })
+            .unwrap();
+        vault
+            .put(SecretUpsert {
+                id: None,
+                label: "Chrome user@example.com @ www.doordash.com".to_string(),
+                description: Some("saved Chrome credential".to_string()),
+                value: "doordash-secret".to_string(),
+                username: Some("user@example.com".to_string()),
+                origin: Some("https://www.doordash.com".to_string()),
+                source: "chrome".to_string(),
+            })
+            .unwrap();
+
+        let results = vault
+            .search("doordash DoorDash login account password", 10)
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].origin.as_deref(),
+            Some("https://www.doordash.com")
         );
     }
 
