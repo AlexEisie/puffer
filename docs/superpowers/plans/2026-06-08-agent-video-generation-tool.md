@@ -62,7 +62,7 @@ generated-media attachment UI cannot render video metadata.
 - Modify: `crates/puffer-core/runtime/system_prompt.rs`
 - Create: `resources/tools/video_generation.yaml`
 
-- [ ] **Step 1: Add the failing bundled tool resource test**
+- [x] **Step 1: Add the failing bundled tool resource test**
 
 Add a test near the existing bundled `ImageGeneration` tool resource test:
 
@@ -106,13 +106,13 @@ fn bundled_video_generation_tool_is_text_to_video_only() {
 }
 ```
 
-- [ ] **Step 2: Run the focused resource test and verify failure**
+- [x] **Step 2: Run the focused resource test and verify failure**
 
 ```bash
 cargo test -p puffer-resources bundled_video_generation_tool_is_text_to_video_only
 ```
 
-- [ ] **Step 3: Add `resources/tools/video_generation.yaml`**
+- [x] **Step 3: Add `resources/tools/video_generation.yaml`**
 
 Create the YAML tool resource with:
 
@@ -128,7 +128,7 @@ Create the YAML tool resource with:
 Keep the description explicit that this is text-to-video only. Do not include
 image/reference/frame fields.
 
-- [ ] **Step 4: Add failing system prompt tests**
+- [x] **Step 4: Add failing system prompt tests**
 
 In `crates/puffer-core/runtime/system_prompt.rs`, extend the prompt tests so
 they assert:
@@ -137,13 +137,13 @@ they assert:
 - prompt contains `text-to-video only`
 - prompt contains `existing image` or `reference image`
 
-- [ ] **Step 5: Run the focused prompt test and verify failure**
+- [x] **Step 5: Run the focused prompt test and verify failure**
 
 ```bash
 cargo test -p puffer-core system_prompt
 ```
 
-- [ ] **Step 6: Update the system prompt**
+- [x] **Step 6: Update the system prompt**
 
 Add one concise video-generation rule. It must say:
 
@@ -153,7 +153,7 @@ Add one concise video-generation rule. It must say:
   supported by the current agent tool
 - video failures or unavailable capability should be reported plainly
 
-- [ ] **Step 7: Re-run focused tests**
+- [x] **Step 7: Re-run focused tests**
 
 ```bash
 cargo test -p puffer-resources bundled_video_generation_tool_is_text_to_video_only
@@ -169,7 +169,7 @@ cargo test -p puffer-core system_prompt
 - Modify: `crates/puffer-core/runtime/claude_tools/workflow/mod.rs`
 - Modify: `crates/puffer-core/runtime/claude_tools/mod.rs`
 
-- [ ] **Step 1: Add failing workflow boundary tests**
+- [x] **Step 1: Add failing workflow boundary tests**
 
 In the new `video_generation.rs` test module, add tests for:
 
@@ -182,13 +182,13 @@ In the new `video_generation.rs` test module, add tests for:
 Use the existing `ImageGeneration` tests as style reference, but do not move
 shared helpers unless the compiler forces it.
 
-- [ ] **Step 2: Run focused workflow tests and verify failure**
+- [x] **Step 2: Run focused workflow tests and verify failure**
 
 ```bash
 cargo test -p puffer-core video_generation
 ```
 
-- [ ] **Step 3: Implement `VideoGenerationInput` and request building**
+- [x] **Step 3: Implement `VideoGenerationInput` and request building**
 
 Implement only the boundary layer:
 
@@ -204,7 +204,7 @@ Implement only the boundary layer:
 Do not add count, image path, URL, frame, seed, scheduler, or provider-specific
 fields.
 
-- [ ] **Step 4: Add failing success-path runtime test**
+- [x] **Step 4: Add failing success-path runtime test**
 
 Add a test that uses a fake OpenAI-video/Relaydance-style HTTP server and a
 temporary media workspace to prove:
@@ -216,12 +216,12 @@ temporary media workspace to prove:
 
 Use existing media runtime fake server patterns where possible.
 
-- [ ] **Step 5: Implement execution**
+- [x] **Step 5: Implement execution**
 
 Call `generate_exact_media_with_cache` with the context providers, auth store,
 cwd, request, and discovery cache. Convert artifacts to the tool output shape.
 
-- [ ] **Step 6: Wire module export and dispatcher**
+- [x] **Step 6: Wire module export and dispatcher**
 
 Implement:
 
@@ -236,13 +236,13 @@ Implement:
 Do not introduce a generic context trait, enum, or `MediaGeneration` workflow
 tool.
 
-- [ ] **Step 7: Add dispatcher regression test**
+- [x] **Step 7: Add dispatcher regression test**
 
 Add or extend the dispatcher test so a `ToolDefinition` with id
 `VideoGeneration` and handler `runtime:workflow:video_generation` reaches the
 new workflow and receives media context.
 
-- [ ] **Step 8: Re-run focused core tests**
+- [x] **Step 8: Re-run focused core tests**
 
 ```bash
 cargo test -p puffer-core video_generation
@@ -256,7 +256,7 @@ cargo test -p puffer-core dispatcher_passes_media_context
 **Files:**
 - Modify: `crates/puffer-cli/src/desktop_api.rs`
 
-- [ ] **Step 1: Add failing timeline test for `VideoGeneration`**
+- [x] **Step 1: Add failing timeline test for `VideoGeneration`**
 
 Add a test beside the existing persisted `ImageGeneration` attachment tests:
 
@@ -269,13 +269,13 @@ Add a test beside the existing persisted `ImageGeneration` attachment tests:
 - attachment extension is `MP4`
 - attachment source remains `GeneratedMedia`
 
-- [ ] **Step 2: Run the focused puffer-cli test and verify failure**
+- [x] **Step 2: Run the focused puffer-cli test and verify failure**
 
 ```bash
 cargo test -p puffer-cli video_generation
 ```
 
-- [ ] **Step 3: Generalize attachment synthesis minimally**
+- [x] **Step 3: Generalize attachment synthesis minimally**
 
 Replace image-only synthesis with a helper that handles only:
 
@@ -292,7 +292,7 @@ Rules:
 - Do not read video bytes into transcript memory.
 - Do not add a frontend video player in this task.
 
-- [ ] **Step 4: Re-run focused puffer-cli tests**
+- [x] **Step 4: Re-run focused puffer-cli tests**
 
 ```bash
 cargo test -p puffer-cli generated
@@ -308,7 +308,7 @@ cargo test -p puffer-cli video_generation
 - Create: `specs/puffer-resources/93.md`
 - Create: `specs/puffer-cli/165.md`
 
-- [ ] **Step 1: Write puffer-core update spec**
+- [x] **Step 1: Write puffer-core update spec**
 
 Document:
 
@@ -318,7 +318,7 @@ Document:
 - exact media runtime reuse
 - text-to-video boundary
 
-- [ ] **Step 2: Write puffer-resources update spec**
+- [x] **Step 2: Write puffer-resources update spec**
 
 Document:
 
@@ -326,7 +326,7 @@ Document:
 - schema constraints
 - no image/reference/frame inputs
 
-- [ ] **Step 3: Write puffer-cli update spec**
+- [x] **Step 3: Write puffer-cli update spec**
 
 Document:
 
@@ -342,7 +342,7 @@ Document:
 **Files:**
 - No production files unless earlier tasks reveal a direct issue.
 
-- [ ] **Step 1: Run focused tests**
+- [x] **Step 1: Run focused tests**
 
 ```bash
 cargo test -p puffer-resources bundled_video_generation_tool_is_text_to_video_only
@@ -351,7 +351,7 @@ cargo test -p puffer-core system_prompt
 cargo test -p puffer-cli video_generation
 ```
 
-- [ ] **Step 2: Run broader affected crate tests**
+- [x] **Step 2: Run broader affected crate tests**
 
 ```bash
 cargo test -p puffer-resources
@@ -359,7 +359,7 @@ cargo test -p puffer-core
 cargo test -p puffer-cli generated
 ```
 
-- [ ] **Step 3: Inspect code size and public docs**
+- [x] **Step 3: Inspect code size and public docs**
 
 Check:
 
@@ -369,7 +369,7 @@ Check:
   docs/tests
 - no image-to-video fields slipped into schemas or Rust structs
 
-- [ ] **Step 4: Final diff review**
+- [x] **Step 4: Final diff review**
 
 ```bash
 git diff --stat

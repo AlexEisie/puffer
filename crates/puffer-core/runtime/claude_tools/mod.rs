@@ -308,6 +308,11 @@ pub(crate) fn execute_tool(
                     auth_store,
                     discovery_cache: &workflow_media_discovery_cache,
                 }),
+                Some(workflow::video_generation::VideoGenerationMediaContext {
+                    providers,
+                    auth_store,
+                    discovery_cache: &workflow_media_discovery_cache,
+                }),
                 cwd,
                 definition.id.as_str(),
                 input,
@@ -747,6 +752,7 @@ pub fn execute_workflow_tool(
         state,
         resources,
         None,
+        None,
         cwd,
         tool_id,
         input,
@@ -757,7 +763,8 @@ pub fn execute_workflow_tool(
 fn execute_workflow_tool_with_media_context(
     state: &mut AppState,
     resources: &LoadedResources,
-    media_context: Option<workflow::image_generation::ImageGenerationMediaContext<'_>>,
+    image_media_context: Option<workflow::image_generation::ImageGenerationMediaContext<'_>>,
+    video_media_context: Option<workflow::video_generation::VideoGenerationMediaContext<'_>>,
     cwd: &Path,
     tool_id: &str,
     input: Value,
@@ -816,7 +823,20 @@ fn execute_workflow_tool_with_media_context(
         "update_goal" => workflow::goal::execute_update_goal(state, cwd, input),
         "HttpRequest" => workflow::http_request::execute_http_request(state, cwd, input),
         "ImageGeneration" => {
-            workflow::image_generation::execute_image_generation(state, cwd, input, media_context)
+            workflow::image_generation::execute_image_generation(
+                state,
+                cwd,
+                input,
+                image_media_context,
+            )
+        }
+        "VideoGeneration" => {
+            workflow::video_generation::execute_video_generation(
+                state,
+                cwd,
+                input,
+                video_media_context,
+            )
         }
         "DebugpyAction" => workflow::debugpy_action::execute_debugpy_action(state, cwd, input),
         "DiscordAction" => workflow::discord_action::execute_discord_action(state, cwd, input),

@@ -1360,6 +1360,44 @@ media:
     }
 
     #[test]
+    fn bundled_video_generation_tool_is_text_to_video_only() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        fs::create_dir_all(&root).unwrap();
+        let paths = ConfigPaths::discover(&root);
+
+        let loaded = load_tool_resources(&paths, &FsTestRunner).unwrap();
+        let tool = loaded
+            .tools
+            .iter()
+            .find(|tool| tool.value.id == "VideoGeneration")
+            .expect("VideoGeneration tool");
+
+        assert_eq!(tool.value.handler, "runtime:workflow:video_generation");
+        assert!(tool.value.description.contains("text-to-video"));
+        assert!(!tool.value.description.contains("image-to-video"));
+
+        let schema = tool.value.input_schema.as_ref().expect("input schema");
+        let required = schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .expect("required array");
+        assert!(required.iter().any(|value| value == "prompt"));
+        assert_eq!(
+            schema.get("additionalProperties"),
+            Some(&serde_json::Value::Bool(false))
+        );
+        let properties = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("properties object");
+        assert!(!properties.contains_key("image"));
+        assert!(!properties.contains_key("referenceImage"));
+        assert!(!properties.contains_key("firstFrame"));
+        assert!(!properties.contains_key("lastFrame"));
+    }
+
+    #[test]
     fn plugin_agents_are_loaded_into_agent_inventory() {
         let temp = tempdir().unwrap();
         let root = temp.path().join("workspace");
