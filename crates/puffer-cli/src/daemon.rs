@@ -21,10 +21,12 @@
 
 use anyhow::{Context, Result};
 use axum::{
+    body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        Path as AxumPath, Query, State,
     },
+    http::{header, HeaderMap, HeaderValue, Response, StatusCode},
     response::IntoResponse,
     routing::get,
     Router,
@@ -75,7 +77,9 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::auth_credentials::{
@@ -247,6 +251,7 @@ async fn run_async(options: DaemonOptions) -> Result<()> {
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        .route("/media/generated-video/:ticket", get(generated_video_handler))
         .with_state(state.clone());
 
     let addr: SocketAddr = bind.parse().context("bind address")?;
@@ -338,6 +343,54 @@ fn random_ticket() -> String {
     let mut buf = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut buf);
     hex(&buf)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeneratedVideoRangeError {
+    Invalid,
+    Unsatisfiable,
+}
+
+fn parse_single_byte_range(
+    header: &str,
+    size: u64,
+) -> std::result::Result<Option<(u64, u64)>, GeneratedVideoRangeError> {
+    let header = header.trim();
+    if header.is_empty() {
+        return Ok(None);
+    }
+    let Some(range) = header.strip_prefix("bytes=") else {
+        return Err(GeneratedVideoRangeError::Invalid);
+    };
+    if range.contains(',') || size == 0 {
+        return Err(GeneratedVideoRangeError::Unsatisfiable);
+    }
+    let Some((start, end)) = range.split_once('-') else {
+        return Err(GeneratedVideoRangeError::Invalid);
+    };
+    if start.is_empty() {
+        let suffix_len = end
+            .parse::<u64>()
+            .map_err(|_| GeneratedVideoRangeError::Invalid)?;
+        if suffix_len == 0 {
+            return Err(GeneratedVideoRangeError::Unsatisfiable);
+        }
+        let start = size.saturating_sub(suffix_len);
+        return Ok(Some((start, size - 1)));
+    }
+    let start = start
+        .parse::<u64>()
+        .map_err(|_| GeneratedVideoRangeError::Invalid)?;
+    let end = if end.is_empty() {
+        size - 1
+    } else {
+        end.parse::<u64>()
+            .map_err(|_| GeneratedVideoRangeError::Invalid)?
+    };
+    if start >= size || end < start {
+        return Err(GeneratedVideoRangeError::Unsatisfiable);
+    }
+    Ok(Some((start, end.min(size - 1))))
 }
 
 // ---------------------------------------------------------------------------
@@ -451,6 +504,17 @@ impl DaemonState {
             .unwrap()
             .insert(token.clone(), ticket.clone());
         (token, ticket)
+    }
+
+    fn generated_video_ticket(&self, token: &str) -> Option<GeneratedVideoTicket> {
+        let now_ms = daemon_now_ms();
+        self.prune_expired_generated_video_tickets(now_ms);
+        self.generated_video_tickets
+            .lock()
+            .unwrap()
+            .get(token)
+            .filter(|ticket| ticket.expires_at_ms > now_ms)
+            .cloned()
     }
 }
 
@@ -796,6 +860,57 @@ pub(crate) enum ServerEnvelope {
 pub(crate) struct RpcError {
     pub(crate) code: String,
     pub(crate) message: String,
+}
+
+async fn generated_video_handler(
+    State(state): State<Arc<DaemonState>>,
+    AxumPath(ticket): AxumPath<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(ticket) = state.generated_video_ticket(&ticket) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let file = match tokio::fs::File::open(&ticket.path).await {
+        Ok(file) => file,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let size = match file.metadata().await {
+        Ok(metadata) => metadata.len(),
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let range_header = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let range = match parse_single_byte_range(range_header, size) {
+        Ok(range) => range,
+        Err(GeneratedVideoRangeError::Unsatisfiable) => {
+            return StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+        }
+        Err(GeneratedVideoRangeError::Invalid) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let mut builder = Response::builder()
+        .header(header::CONTENT_TYPE, ticket.mime_type)
+        .header(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    let (body, content_length) = if let Some((start, end)) = range {
+        builder = builder
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"));
+        let mut file = file;
+        if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        let length = end - start + 1;
+        (Body::from_stream(ReaderStream::new(file.take(length))), length)
+    } else {
+        builder = builder.status(StatusCode::OK);
+        (Body::from_stream(ReaderStream::new(file)), size)
+    };
+    builder
+        .header(header::CONTENT_LENGTH, content_length.to_string())
+        .body(body)
+        .unwrap()
+        .into_response()
 }
 
 async fn ws_handler(
@@ -5398,18 +5513,24 @@ mod tests {
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
         browser_permission_payload_json, connector_setup_connect_args, connector_setup_id,
         daemon_now_ms, desktop_latency_ms, handle_create_generated_video_access,
-        handle_create_openai_realtime_client_secret, handle_create_session, handle_generate_media,
-        handle_import_external_credential,
+        generated_video_handler, handle_create_openai_realtime_client_secret,
+        handle_create_session, handle_generate_media, handle_import_external_credential,
         handle_list_lambda_skill_libraries, handle_list_media_capabilities,
         handle_list_permissions, handle_list_provider_models, handle_local_model_status,
         handle_login_with_api_key, handle_logout_provider, handle_read_generated_media_preview,
         handle_remove_lambda_skill_library, handle_save_lambda_skill_library,
         handle_save_permissions, handle_save_proxy_settings, handle_set_lambda_skill_approval,
         handle_set_lambda_skill_enabled, handle_update_config, model_descriptor_dto,
-        permission_review_payload_json, realtime_session_config_from_params, report_cancelled_turn,
-        requires_explicit_subscription, resolve_create_session_model_id, run_off_runtime,
-        start_connector_setup_turn, DaemonState, GenerateMediaArtifactResult, GenerateMediaResult,
-        ServerEnvelope, TurnProgress, TurnRequestOptions,
+        parse_single_byte_range, permission_review_payload_json,
+        realtime_session_config_from_params, report_cancelled_turn, requires_explicit_subscription,
+        resolve_create_session_model_id, run_off_runtime, start_connector_setup_turn, DaemonState,
+        GenerateMediaArtifactResult, GenerateMediaResult, GeneratedVideoRangeError,
+        GeneratedVideoTicket, ServerEnvelope, TurnProgress, TurnRequestOptions,
+    };
+    use axum::{
+        extract::{Path as AxumPath, State},
+        http::{header, HeaderMap, HeaderValue, StatusCode},
+        response::IntoResponse,
     };
     use indexmap::IndexMap;
     use puffer_config::{
@@ -6429,6 +6550,109 @@ models: []
         assert!(path.starts_with("/media/generated-video/"));
         assert!(response.get("url").is_none());
         assert!(!path.contains("token"));
+    }
+
+    #[test]
+    fn generated_video_range_parser_supports_closed_open_and_suffix_ranges() {
+        assert_eq!(parse_single_byte_range("bytes=2-5", 10).unwrap(), Some((2, 5)));
+        assert_eq!(parse_single_byte_range("bytes=4-", 10).unwrap(), Some((4, 9)));
+        assert_eq!(parse_single_byte_range("bytes=-3", 10).unwrap(), Some((7, 9)));
+        assert_eq!(parse_single_byte_range("", 10).unwrap(), None);
+    }
+
+    #[test]
+    fn generated_video_range_parser_rejects_unsatisfiable_ranges() {
+        assert!(matches!(
+            parse_single_byte_range("bytes=20-30", 10),
+            Err(GeneratedVideoRangeError::Unsatisfiable)
+        ));
+        assert!(matches!(
+            parse_single_byte_range("bytes=8-2", 10),
+            Err(GeneratedVideoRangeError::Unsatisfiable)
+        ));
+    }
+
+    #[test]
+    fn generated_video_ticket_lookup_prunes_expired_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state_with_paths(ConfigPaths::discover(temp.path()));
+        state.generated_video_tickets.lock().unwrap().insert(
+            "expired".to_string(),
+            GeneratedVideoTicket {
+                path: temp.path().join("missing.mp4"),
+                mime_type: "video/mp4".to_string(),
+                size: 0,
+                expires_at_ms: daemon_now_ms().saturating_sub(1),
+            },
+        );
+
+        assert!(state.generated_video_ticket("expired").is_none());
+        assert!(state.generated_video_tickets.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn generated_video_handler_serves_full_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = Arc::new(test_state_with_paths(ConfigPaths::discover(temp.path())));
+        let video_path = temp.path().join("generated.mp4");
+        std::fs::write(&video_path, b"0123456789").unwrap();
+        state.generated_video_tickets.lock().unwrap().insert(
+            "ticket-full".to_string(),
+            GeneratedVideoTicket {
+                path: video_path,
+                mime_type: "video/mp4".to_string(),
+                size: 10,
+                expires_at_ms: daemon_now_ms() + 60_000,
+            },
+        );
+
+        let response = generated_video_handler(
+            State(state),
+            AxumPath("ticket-full".to_string()),
+            HeaderMap::new(),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get(header::CONTENT_TYPE).unwrap(), "video/mp4");
+        let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], b"0123456789");
+    }
+
+    #[tokio::test]
+    async fn generated_video_handler_serves_single_range() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = Arc::new(test_state_with_paths(ConfigPaths::discover(temp.path())));
+        let video_path = temp.path().join("generated.mp4");
+        std::fs::write(&video_path, b"0123456789").unwrap();
+        state.generated_video_tickets.lock().unwrap().insert(
+            "ticket-1".to_string(),
+            GeneratedVideoTicket {
+                path: video_path,
+                mime_type: "video/mp4".to_string(),
+                size: 10,
+                expires_at_ms: daemon_now_ms() + 60_000,
+            },
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, HeaderValue::from_static("bytes=2-5"));
+
+        let response = generated_video_handler(
+            State(state),
+            AxumPath("ticket-1".to_string()),
+            headers,
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.headers().get(header::CONTENT_RANGE).unwrap(),
+            "bytes 2-5/10"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], b"2345");
     }
 
     #[test]
