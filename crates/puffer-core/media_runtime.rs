@@ -130,6 +130,22 @@ pub enum GeneratedMediaPreviewResult {
     Unsupported,
 }
 
+/// Describes a trusted generated video file that can be served through a ticket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedVideoAccessMetadata {
+    pub path: PathBuf,
+    pub mime_type: String,
+    pub byte_count: u64,
+}
+
+/// Describes generated video access metadata lookup state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeneratedVideoAccessMetadataResult {
+    Available(GeneratedVideoAccessMetadata),
+    Missing,
+    Unsupported,
+}
+
 /// Carries generated image attachment metadata without image bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -280,6 +296,44 @@ pub fn read_generated_media_preview_by_artifact(
     )
 }
 
+/// Resolves trusted generated video metadata by artifact id.
+pub fn generated_video_access_metadata_by_artifact(
+    workspace_root: impl AsRef<Path>,
+    artifact_id: &str,
+) -> GeneratedVideoAccessMetadataResult {
+    let workspace_root = workspace_root.as_ref();
+    let service = MediaGenerationService::new(workspace_root);
+    let artifact = match service.load_artifact(artifact_id) {
+        Ok(artifact) => artifact,
+        Err(_) => return GeneratedVideoAccessMetadataResult::Missing,
+    };
+    if artifact.kind != MediaKind::Video {
+        return GeneratedVideoAccessMetadataResult::Unsupported;
+    }
+    let Some(mime_type) = canonical_generated_video_mime_type(&artifact.mime_type) else {
+        return GeneratedVideoAccessMetadataResult::Unsupported;
+    };
+    let artifact_root = generated_media_artifact_root(workspace_root, &artifact.id);
+    let canonical_path =
+        match canonical_generated_media_artifact_path(&artifact_root, &artifact.path) {
+            Ok(path) => path,
+            Err(GeneratedMediaPathError::Missing) => {
+                return GeneratedVideoAccessMetadataResult::Missing;
+            }
+            Err(GeneratedMediaPathError::Unsupported) => {
+                return GeneratedVideoAccessMetadataResult::Unsupported;
+            }
+        };
+    let byte_count = std::fs::metadata(&canonical_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(artifact.byte_count);
+    GeneratedVideoAccessMetadataResult::Available(GeneratedVideoAccessMetadata {
+        path: canonical_path,
+        mime_type: mime_type.to_string(),
+        byte_count,
+    })
+}
+
 fn read_generated_media_preview_from_root_with_mime(
     image_root: &Path,
     path: &Path,
@@ -352,6 +406,29 @@ fn canonical_generated_media_image_path(
 
 fn generated_media_image_root(workspace_root: &Path) -> PathBuf {
     workspace_root.join(".puffer").join("media").join("images")
+}
+
+fn generated_media_artifact_root(workspace_root: &Path, artifact_id: &str) -> PathBuf {
+    workspace_root
+        .join(".puffer")
+        .join("media")
+        .join("artifacts")
+        .join(artifact_id)
+}
+
+fn canonical_generated_media_artifact_path(
+    artifact_root: &Path,
+    path: &Path,
+) -> std::result::Result<PathBuf, GeneratedMediaPathError> {
+    canonical_generated_media_image_path(artifact_root, path)
+}
+
+fn canonical_generated_video_mime_type(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "video/mp4" => Some("video/mp4"),
+        "video/webm" => Some("video/webm"),
+        _ => None,
+    }
 }
 
 fn missing_generated_media_path_is_under_root(image_root: &Path, path: &Path) -> bool {

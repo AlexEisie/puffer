@@ -58,12 +58,13 @@ pub use hooks::run_resource_hooks;
 pub use media_runtime::{
     discover_exact_media_capabilities, generate_exact_image_with_cache,
     generate_exact_media_with_cache, generated_media_attachment_metadata,
-    generated_media_attachment_metadata_with_fallback, list_exact_media_capabilities_with_cache,
-    read_generated_media_preview_by_artifact, resolved_exact_image_parameters_with_cache,
-    ExactGeneratedArtifact, ExactImageGenerationRequest, ExactImageGenerationResult,
-    ExactMediaDiscoveryCache, ExactMediaGenerationRequest, ExactMediaGenerationResult,
-    GeneratedMediaAttachmentMetadata, GeneratedMediaPreviewResult, MediaCapabilityView,
-    MEDIA_DISCOVERY_TTL_MS,
+    generated_media_attachment_metadata_with_fallback, generated_video_access_metadata_by_artifact,
+    list_exact_media_capabilities_with_cache, read_generated_media_preview_by_artifact,
+    resolved_exact_image_parameters_with_cache, ExactGeneratedArtifact,
+    ExactImageGenerationRequest, ExactImageGenerationResult, ExactMediaDiscoveryCache,
+    ExactMediaGenerationRequest, ExactMediaGenerationResult, GeneratedMediaAttachmentMetadata,
+    GeneratedMediaPreviewResult, GeneratedVideoAccessMetadata,
+    GeneratedVideoAccessMetadataResult, MediaCapabilityView, MEDIA_DISCOVERY_TTL_MS,
 };
 pub use memory::{
     activate_project_memory, flush_project_memory, project_memory_turn_completed,
