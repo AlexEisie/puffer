@@ -80,6 +80,124 @@ pub(crate) fn openai_video_request_from_parameters(
     Ok(request)
 }
 
+use super::MediaJobStatus;
+use anyhow::Context;
+use reqwest::blocking::Client;
+
+/// Abstracts OpenAI-compatible video HTTP operations for production and tests.
+pub(crate) trait OpenAiVideoTransport {
+    /// Submits a video task and returns its JSON response.
+    fn submit_task(&self, url: &str, api_token: &str, body: &Value) -> Result<Value>;
+
+    /// Polls a video task URL and returns its JSON response.
+    fn poll_task(&self, url: &str, api_token: &str) -> Result<Value>;
+
+    /// Downloads the rendered video bytes from a validated remote URL.
+    fn download_bytes(&self, url: &str) -> Result<Vec<u8>>;
+}
+
+/// Reqwest-backed transport used by the runtime adapter.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ReqwestOpenAiVideoTransport {
+    client: Client,
+}
+
+impl OpenAiVideoTransport for ReqwestOpenAiVideoTransport {
+    fn submit_task(&self, url: &str, api_token: &str, body: &Value) -> Result<Value> {
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(api_token)
+            .json(body)
+            .send()
+            .with_context(|| format!("submit video task {url}"))?;
+        openai_video_json_response(response, "submit video task")
+    }
+
+    fn poll_task(&self, url: &str, api_token: &str) -> Result<Value> {
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(api_token)
+            .send()
+            .with_context(|| format!("poll video task {url}"))?;
+        openai_video_json_response(response, "poll video task")
+    }
+
+    fn download_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        // Reuse the shared https/loopback-enforcing downloader (image-path parity).
+        super::http_support::download_image_url(&self.client, url, "video output")
+    }
+}
+
+fn openai_video_json_response(response: reqwest::blocking::Response, label: &str) -> Result<Value> {
+    let status = response.status();
+    let text = response
+        .text()
+        .with_context(|| format!("read {label} response body"))?;
+    if !status.is_success() {
+        bail!("{label} failed with status {}: {text}", status.as_u16());
+    }
+    serde_json::from_str(&text).with_context(|| format!("parse {label} response JSON"))
+}
+
+/// Normalized view of an OpenAI-compatible video task response.
+///
+/// Envelope confirmed from New API `dto/openai_video.go`: `id`, `status`
+/// (`queued|in_progress|completed|failed`), the video URL at `metadata.url`,
+/// and `error.{message,code}`.
+#[derive(Debug, Clone)]
+pub(crate) struct OpenAiVideoTask {
+    pub(crate) id: String,
+    pub(crate) status: String,
+    pub(crate) video_url: Option<String>,
+    pub(crate) error: Option<String>,
+}
+
+impl OpenAiVideoTask {
+    pub(crate) fn from_value(value: Value) -> Result<Self> {
+        let id = value
+            .get("id")
+            .and_then(Value::as_str)
+            .context("video task response missing `id`")?
+            .to_string();
+        let status = value
+            .get("status")
+            .and_then(Value::as_str)
+            .context("video task response missing `status`")?
+            .to_string();
+        let video_url = value
+            .get("metadata")
+            .and_then(|metadata| metadata.get("url"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let error = value.get("error").and_then(|error| {
+            error
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+        Ok(Self {
+            id,
+            status,
+            video_url,
+            error,
+        })
+    }
+
+    /// Maps the OpenAI-video status string onto a media job status.
+    pub(crate) fn media_status(&self) -> Result<MediaJobStatus> {
+        match self.status.trim().to_ascii_lowercase().as_str() {
+            "queued" | "pending" => Ok(MediaJobStatus::Queued),
+            "in_progress" | "running" | "processing" => Ok(MediaJobStatus::Running),
+            "completed" | "succeeded" | "success" => Ok(MediaJobStatus::Succeeded),
+            "failed" | "error" | "expired" => Ok(MediaJobStatus::Failed),
+            "cancelled" | "canceled" => Ok(MediaJobStatus::Canceled),
+            other => bail!("unknown video task status `{other}`"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,5 +264,41 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("prompt is required"));
+    }
+
+    #[test]
+    fn parses_completed_task_with_metadata_url() {
+        let value = json!({
+            "id": "vid-1",
+            "status": "completed",
+            "metadata": { "url": "https://cdn.example.com/v.mp4" }
+        });
+        let task = OpenAiVideoTask::from_value(value).expect("task");
+        assert_eq!(task.id, "vid-1");
+        assert_eq!(task.media_status().unwrap(), MediaJobStatus::Succeeded);
+        assert_eq!(task.video_url.as_deref(), Some("https://cdn.example.com/v.mp4"));
+    }
+
+    #[test]
+    fn parses_failed_task_error_message() {
+        let value = json!({
+            "id": "vid-2",
+            "status": "failed",
+            "error": { "code": "x", "message": "content blocked" }
+        });
+        let task = OpenAiVideoTask::from_value(value).expect("task");
+        assert_eq!(task.media_status().unwrap(), MediaJobStatus::Failed);
+        assert_eq!(task.error.as_deref(), Some("content blocked"));
+    }
+
+    #[test]
+    fn rejects_unknown_status() {
+        let value = json!({ "id": "v", "status": "weird" });
+        let task = OpenAiVideoTask::from_value(value).expect("task");
+        assert!(task
+            .media_status()
+            .unwrap_err()
+            .to_string()
+            .contains("unknown video task status"));
     }
 }
