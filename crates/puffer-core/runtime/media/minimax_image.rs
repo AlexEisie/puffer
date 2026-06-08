@@ -139,6 +139,8 @@ impl MinimaxImageAdapter {
             request.count,
             created_at_ms,
         );
+        job.adapter = Some(request.adapter.clone());
+        job.parameters = request.parameters.clone();
         service.save_job(&job)?;
         job.transition(MediaJobStatus::Running, now_ms())?;
         service.save_job(&job)?;

@@ -29,6 +29,17 @@ pub(crate) struct ImageGenerationSelection<'a> {
     pub(crate) parameters: &'a BTreeMap<String, String>,
 }
 
+/// Describes a saved exact media generation selection to validate.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MediaGenerationSelection<'a> {
+    pub(crate) kind: MediaKind,
+    pub(crate) provider_id: &'a str,
+    pub(crate) model_id: &'a str,
+    pub(crate) operation: MediaOperation,
+    pub(crate) adapter: &'a str,
+    pub(crate) parameters: &'a BTreeMap<String, String>,
+}
+
 /// Resolves selectable exact media capabilities from provider descriptors.
 pub(crate) fn resolve_media_capabilities(
     registry: &ProviderRegistry,
@@ -60,11 +71,35 @@ pub(crate) fn validate_image_generate_selection(
     checked_at_ms: u64,
     discovery_cache: &MediaDiscoveryCache,
 ) -> Result<MediaCapability> {
+    validate_media_generate_selection(
+        registry,
+        auth_store,
+        &MediaGenerationSelection {
+            kind: MediaKind::Image,
+            provider_id: selection.provider_id,
+            model_id: selection.model_id,
+            operation: MediaOperation::Generate,
+            adapter: selection.adapter,
+            parameters: selection.parameters,
+        },
+        checked_at_ms,
+        discovery_cache,
+    )
+}
+
+/// Validates a saved exact media generation selection against current capabilities.
+pub(crate) fn validate_media_generate_selection(
+    registry: &ProviderRegistry,
+    auth_store: &AuthStore,
+    selection: &MediaGenerationSelection<'_>,
+    checked_at_ms: u64,
+    discovery_cache: &MediaDiscoveryCache,
+) -> Result<MediaCapability> {
     let capability = resolve_media_capabilities(
         registry,
         auth_store,
-        MediaKind::Image,
-        MediaOperation::Generate,
+        selection.kind,
+        selection.operation,
         checked_at_ms,
         discovery_cache,
     )
@@ -77,14 +112,15 @@ pub(crate) fn validate_image_generate_selection(
 
     let Some(capability) = capability else {
         bail!(
-            "selected image model unavailable: {}/{} via {}",
+            "selected {} model unavailable: {}/{} via {}",
+            media_kind_error_name(selection.kind),
             selection.provider_id,
             selection.model_id,
             selection.adapter
         );
     };
 
-    validate_parameter_values(&capability.parameters, selection.parameters)?;
+    validate_parameter_values(selection.kind, &capability.parameters, selection.parameters)?;
 
     Ok(capability)
 }
@@ -306,15 +342,22 @@ fn media_defaults(parameters: &[MediaCapabilityParameter]) -> BTreeMap<String, S
 }
 
 fn validate_parameter_values(
+    kind: MediaKind,
     parameters: &[MediaCapabilityParameter],
     selected: &BTreeMap<String, String>,
 ) -> Result<()> {
     for (name, value) in selected {
         let Some(parameter) = parameters.iter().find(|parameter| parameter.name == *name) else {
-            bail!("image generation parameter unsupported: {name}={value}");
+            bail!(
+                "{} generation parameter unsupported: {name}={value}",
+                media_kind_error_name(kind)
+            );
         };
         if !parameter.values.iter().any(|candidate| candidate == value) {
-            bail!("image generation parameter unsupported: {name}={value}");
+            bail!(
+                "{} generation parameter unsupported: {name}={value}",
+                media_kind_error_name(kind)
+            );
         }
     }
     Ok(())
@@ -323,6 +366,13 @@ fn validate_parameter_values(
 fn operation_wire_name(operation: MediaOperation) -> &'static str {
     match operation {
         MediaOperation::Generate => "generate",
+    }
+}
+
+fn media_kind_error_name(kind: MediaKind) -> &'static str {
+    match kind {
+        MediaKind::Image => "image",
+        MediaKind::Video => "video",
     }
 }
 

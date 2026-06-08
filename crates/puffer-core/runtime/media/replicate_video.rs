@@ -2,6 +2,7 @@ use super::{MediaArtifact, MediaGenerationService, MediaJob, MediaJobStatus, Med
 use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -233,6 +234,11 @@ where
             1,
             now_ms,
         );
+        job.adapter = Some("replicate_video".to_string());
+        job.parameters = BTreeMap::from([
+            ("aspect_ratio".to_string(), request.aspect_ratio.clone()),
+            ("duration".to_string(), request.duration_seconds.to_string()),
+        ]);
         apply_remote_prediction_metadata(&mut job, &prediction);
         self.apply_prediction(service, job, prediction, now_ms)
     }

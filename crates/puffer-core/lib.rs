@@ -57,10 +57,11 @@ pub(crate) use command_summary::{render_buddy_summary, render_usage_summary};
 pub use hooks::run_resource_hooks;
 pub use media_runtime::{
     discover_exact_media_capabilities, generate_exact_image_with_cache,
-    generated_media_attachment_metadata, generated_media_attachment_metadata_with_fallback,
-    list_exact_media_capabilities_with_cache, read_generated_media_preview_by_artifact,
-    resolved_exact_image_parameters_with_cache, ExactGeneratedArtifact,
-    ExactImageGenerationRequest, ExactImageGenerationResult, ExactMediaDiscoveryCache,
+    generate_exact_media_with_cache, generated_media_attachment_metadata,
+    generated_media_attachment_metadata_with_fallback, list_exact_media_capabilities_with_cache,
+    read_generated_media_preview_by_artifact, resolved_exact_image_parameters_with_cache,
+    ExactGeneratedArtifact, ExactImageGenerationRequest, ExactImageGenerationResult,
+    ExactMediaDiscoveryCache, ExactMediaGenerationRequest, ExactMediaGenerationResult,
     GeneratedMediaAttachmentMetadata, GeneratedMediaPreviewResult, MediaCapabilityView,
     MEDIA_DISCOVERY_TTL_MS,
 };

@@ -2,13 +2,20 @@ use crate::runtime::media::chat_image_output::{
     ChatImageOutputAdapter, ChatImageOutputGenerationRequest,
 };
 use crate::runtime::media::discovery::TrustedImageDiscoveryClient;
+use crate::runtime::media::http_support::{bearer_token, CredentialAliasMode};
 use crate::runtime::media::images_json::{ImagesJsonAdapter, ImagesJsonGenerationRequest};
 use crate::runtime::media::minimax_image::{MinimaxImageAdapter, MinimaxImageGenerationRequest};
-use crate::runtime::media::resolver::{resolve_media_capabilities, MediaDiscoveryCache};
+use crate::runtime::media::replicate_video::{
+    ReplicatePollingConfig, ReplicateVideoAdapter, ReplicateVideoRequest,
+};
+use crate::runtime::media::resolver::{
+    resolve_media_capabilities, validate_media_generate_selection, MediaDiscoveryCache,
+    MediaGenerationSelection,
+};
 use crate::runtime::media::{
     MediaArtifact, MediaGenerationService, MediaJob, MediaJobStatus, MediaKind,
 };
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use puffer_provider_registry::{AuthStore, MediaOperation, ProviderRegistry};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -62,6 +69,20 @@ pub struct ExactImageGenerationRequest {
     pub count: u8,
 }
 
+/// Carries an exact media generation request from UI or tool configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExactMediaGenerationRequest {
+    pub kind: String,
+    pub provider_id: String,
+    pub model_id: String,
+    pub operation: String,
+    pub adapter: String,
+    pub prompt: String,
+    pub parameters: BTreeMap<String, String>,
+    pub count: u8,
+}
+
 /// Carries one persisted generated image artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +102,19 @@ pub struct ExactImageGenerationResult {
     pub job_id: String,
     pub requested_count: u8,
     pub artifacts: Vec<ExactGeneratedArtifact>,
+    pub provider_id: String,
+    pub model_id: String,
+    pub status: String,
+}
+
+/// Carries the persisted job and artifacts produced by exact media generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExactMediaGenerationResult {
+    pub job_id: String,
+    pub requested_count: u8,
+    pub artifacts: Vec<ExactGeneratedArtifact>,
+    pub kind: String,
     pub provider_id: String,
     pub model_id: String,
     pub status: String,
@@ -554,6 +588,174 @@ fn validate_image_count(count: u8) -> Result<u8> {
     }
 }
 
+/// Generates exact media using static descriptors plus trusted discovery cache entries.
+pub fn generate_exact_media_with_cache(
+    registry: &ProviderRegistry,
+    auth_store: &AuthStore,
+    workspace_root: &Path,
+    request: ExactMediaGenerationRequest,
+    discovery_cache: &ExactMediaDiscoveryCache,
+) -> Result<ExactMediaGenerationResult> {
+    match request.kind.trim() {
+        "image" => generate_exact_image_from_media_request(
+            registry,
+            auth_store,
+            workspace_root,
+            request,
+            discovery_cache,
+        ),
+        "video" => generate_exact_video_from_media_request(
+            registry,
+            auth_store,
+            workspace_root,
+            request,
+            discovery_cache,
+        ),
+        kind => bail!("unsupported media kind `{kind}`"),
+    }
+}
+
+fn generate_exact_image_from_media_request(
+    registry: &ProviderRegistry,
+    auth_store: &AuthStore,
+    workspace_root: &Path,
+    request: ExactMediaGenerationRequest,
+    discovery_cache: &ExactMediaDiscoveryCache,
+) -> Result<ExactMediaGenerationResult> {
+    parse_media_operation(&request.operation)?;
+    let result = generate_exact_image_with_cache(
+        registry,
+        auth_store,
+        workspace_root,
+        ExactImageGenerationRequest {
+            provider_id: request.provider_id,
+            model_id: request.model_id,
+            adapter: request.adapter,
+            prompt: request.prompt,
+            parameters: request.parameters,
+            count: request.count,
+        },
+        discovery_cache,
+    )?;
+    Ok(ExactMediaGenerationResult {
+        job_id: result.job_id,
+        requested_count: result.requested_count,
+        artifacts: result.artifacts,
+        kind: "image".to_string(),
+        provider_id: result.provider_id,
+        model_id: result.model_id,
+        status: result.status,
+    })
+}
+
+fn generate_exact_video_from_media_request(
+    registry: &ProviderRegistry,
+    auth_store: &AuthStore,
+    workspace_root: &Path,
+    request: ExactMediaGenerationRequest,
+    discovery_cache: &ExactMediaDiscoveryCache,
+) -> Result<ExactMediaGenerationResult> {
+    let operation = parse_media_operation(&request.operation)?;
+    let capability = validate_media_generate_selection(
+        registry,
+        auth_store,
+        &MediaGenerationSelection {
+            kind: MediaKind::Video,
+            provider_id: &request.provider_id,
+            model_id: &request.model_id,
+            operation,
+            adapter: &request.adapter,
+            parameters: &request.parameters,
+        },
+        now_ms(),
+        &discovery_cache.inner,
+    )?;
+    validate_video_count(request.count)?;
+    let parameters = selected_parameters_with_defaults(&capability, &request.parameters);
+    match request.adapter.as_str() {
+        "replicate_video" => {
+            let provider = registry.provider(&request.provider_id).with_context(|| {
+                format!(
+                    "selected video model unavailable: {}/{} via {}",
+                    request.provider_id, request.model_id, request.adapter
+                )
+            })?;
+            let api_key = bearer_token(provider, auth_store, CredentialAliasMode::Strict)?
+                .context("Replicate API token is required")?;
+            let service = MediaGenerationService::new(workspace_root);
+            let adapter = ReplicateVideoAdapter::new(api_key)?;
+            let job = adapter.submit(
+                &service,
+                replicate_video_request_from_parameters(
+                    request.model_id,
+                    request.prompt,
+                    parameters,
+                )?,
+                now_ms(),
+            )?;
+            let job =
+                adapter.poll_until_terminal(&service, job, ReplicatePollingConfig::default())?;
+            let artifacts = load_media_job_artifacts(&service, &job)?;
+            Ok(exact_media_generation_result(job, artifacts))
+        }
+        adapter => bail!("video media adapter unavailable for {adapter}"),
+    }
+}
+
+fn replicate_video_request_from_parameters(
+    model_id: String,
+    prompt: String,
+    parameters: BTreeMap<String, String>,
+) -> Result<ReplicateVideoRequest> {
+    let aspect_ratio = parameters
+        .get("aspect_ratio")
+        .cloned()
+        .context("video generation parameter unsupported: aspect_ratio=")?;
+    let duration_seconds = parameters
+        .get("duration")
+        .context("video generation parameter unsupported: duration=")?
+        .parse::<u32>()
+        .context("video generation parameter unsupported: duration")?;
+    Ok(ReplicateVideoRequest {
+        model: model_id,
+        prompt,
+        aspect_ratio,
+        duration_seconds,
+    })
+}
+
+fn selected_parameters_with_defaults(
+    capability: &crate::runtime::media::capabilities::MediaCapability,
+    selected: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    capability
+        .parameters
+        .iter()
+        .map(|parameter| {
+            let value = selected
+                .get(&parameter.name)
+                .cloned()
+                .unwrap_or_else(|| parameter.default.clone());
+            (parameter.name.clone(), value)
+        })
+        .collect()
+}
+
+fn validate_video_count(count: u8) -> Result<u8> {
+    if count == 1 {
+        Ok(count)
+    } else {
+        bail!("video generation count must be 1")
+    }
+}
+
+fn parse_media_operation(operation: &str) -> Result<MediaOperation> {
+    match operation.trim() {
+        "generate" => Ok(MediaOperation::Generate),
+        operation => bail!("unsupported media operation `{operation}`"),
+    }
+}
+
 /// Resolves exact image parameters against the current capability defaults.
 pub fn resolved_exact_image_parameters_with_cache(
     registry: &ProviderRegistry,
@@ -610,7 +812,35 @@ fn exact_generation_result(
     job: MediaJob,
     artifacts: Vec<MediaArtifact>,
 ) -> ExactImageGenerationResult {
-    let artifacts = artifacts
+    let artifacts = exact_generated_artifacts(artifacts);
+    ExactImageGenerationResult {
+        job_id: job.id,
+        requested_count: job.requested_count,
+        artifacts,
+        provider_id: job.provider_id,
+        model_id: job.model_id,
+        status: media_job_status_name(job.status).to_string(),
+    }
+}
+
+fn exact_media_generation_result(
+    job: MediaJob,
+    artifacts: Vec<MediaArtifact>,
+) -> ExactMediaGenerationResult {
+    let artifacts = exact_generated_artifacts(artifacts);
+    ExactMediaGenerationResult {
+        job_id: job.id,
+        requested_count: job.requested_count,
+        artifacts,
+        kind: media_kind_name(job.kind).to_string(),
+        provider_id: job.provider_id,
+        model_id: job.model_id,
+        status: media_job_status_name(job.status).to_string(),
+    }
+}
+
+fn exact_generated_artifacts(artifacts: Vec<MediaArtifact>) -> Vec<ExactGeneratedArtifact> {
+    artifacts
         .into_iter()
         .enumerate()
         .map(|(index, artifact)| {
@@ -624,15 +854,21 @@ fn exact_generation_result(
                 remote_source_url,
             }
         })
-        .collect();
-    ExactImageGenerationResult {
-        job_id: job.id,
-        requested_count: job.requested_count,
-        artifacts,
-        provider_id: job.provider_id,
-        model_id: job.model_id,
-        status: media_job_status_name(job.status).to_string(),
-    }
+        .collect()
+}
+
+fn load_media_job_artifacts(
+    service: &MediaGenerationService,
+    job: &MediaJob,
+) -> Result<Vec<MediaArtifact>> {
+    job.artifact_ids
+        .iter()
+        .map(|artifact_id| {
+            service
+                .load_artifact(artifact_id)
+                .with_context(|| format!("load generated media artifact {artifact_id}"))
+        })
+        .collect()
 }
 
 impl From<crate::runtime::media::capabilities::MediaCapability> for MediaCapabilityView {

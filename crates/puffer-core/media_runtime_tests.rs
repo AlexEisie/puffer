@@ -143,6 +143,57 @@ fn byteplus_seedream_registry(base_url: String) -> ProviderRegistry {
     registry
 }
 
+fn replicate_video_registry() -> ProviderRegistry {
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderDescriptor {
+        id: "replicate".to_string(),
+        display_name: "Replicate".to_string(),
+        base_url: "https://api.replicate.com".to_string(),
+        default_api: "openai-completions".to_string(),
+        auth_modes: vec![AuthMode::ApiKey],
+        headers: IndexMap::new(),
+        query_params: IndexMap::new(),
+        chat_completions_path: None,
+        discovery: None,
+        media: Some(ProviderMediaDescriptor {
+            image: None,
+            video: Some(MediaKindDescriptor {
+                discovery: None,
+                execution: Some(MediaExecutionDescriptor {
+                    adapter: MediaExecutionKind::ReplicateVideo,
+                    base_url: None,
+                    path: "/v1/predictions".to_string(),
+                    batch: puffer_provider_registry::MediaBatchDescriptor::default(),
+                }),
+                models: vec![MediaModelDescriptor {
+                    id: "owner/model-version".to_string(),
+                    display_name: Some("Video Model".to_string()),
+                    execution: None,
+                    operations: vec![MediaOperation::Generate],
+                    parameters: vec![
+                        MediaParameterSpec {
+                            name: "aspect_ratio".to_string(),
+                            label: "Aspect ratio".to_string(),
+                            values: vec!["16:9".to_string(), "9:16".to_string()],
+                            default: "16:9".to_string(),
+                            request_field: Some("aspect_ratio".to_string()),
+                        },
+                        MediaParameterSpec {
+                            name: "duration".to_string(),
+                            label: "Duration".to_string(),
+                            values: vec!["5".to_string(), "8".to_string()],
+                            default: "5".to_string(),
+                            request_field: Some("duration".to_string()),
+                        },
+                    ],
+                }],
+            }),
+        }),
+        models: Vec::<ModelDescriptor>::new(),
+    });
+    registry
+}
+
 fn discovered_chat_image_cache() -> ExactMediaDiscoveryCache {
     ExactMediaDiscoveryCache::from_inner_for_test(
         crate::runtime::media::resolver::MediaDiscoveryCache {
@@ -174,6 +225,20 @@ fn auth_store_for(provider_id: &str) -> AuthStore {
     auth
 }
 
+fn replicate_video_runtime_fixture() -> (
+    ProviderRegistry,
+    AuthStore,
+    ExactMediaDiscoveryCache,
+    tempfile::TempDir,
+) {
+    (
+        replicate_video_registry(),
+        auth_store_for("replicate"),
+        ExactMediaDiscoveryCache::empty(),
+        tempdir().expect("tempdir"),
+    )
+}
+
 fn read_http_request(stream: &mut std::net::TcpStream) -> String {
     let mut buffer = [0_u8; 8192];
     let size = stream.read(&mut buffer).expect("read request");
@@ -201,7 +266,9 @@ fn exact_generation_result_returns_artifacts_in_order() {
         kind: MediaKind::Image,
         provider_id: "openai".to_string(),
         model_id: "gpt-image-1".to_string(),
+        adapter: Some("images_json".to_string()),
         prompt: "draw".to_string(),
+        parameters: BTreeMap::from([("size".to_string(), "1024x1024".to_string())]),
         status: MediaJobStatus::Succeeded,
         provider_job_id: None,
         remote_status: None,
@@ -426,6 +493,54 @@ fn generate_exact_image_with_cache_rejects_discovered_model_missing_from_cache_b
         error.to_string(),
         "selected image model unavailable: openrouter/openrouter/image-chat via chat_image_output"
     );
+}
+
+#[test]
+fn exact_media_generation_rejects_unsupported_video_parameter() {
+    let (registry, auth, cache, workspace) = replicate_video_runtime_fixture();
+    let request = ExactMediaGenerationRequest {
+        kind: "video".to_string(),
+        provider_id: "replicate".to_string(),
+        model_id: "owner/model-version".to_string(),
+        operation: "generate".to_string(),
+        adapter: "replicate_video".to_string(),
+        prompt: "animate a logo".to_string(),
+        parameters: BTreeMap::from([
+            ("aspect_ratio".to_string(), "1:1".to_string()),
+            ("duration".to_string(), "5".to_string()),
+        ]),
+        count: 1,
+    };
+
+    let error =
+        generate_exact_media_with_cache(&registry, &auth, workspace.path(), request, &cache)
+            .unwrap_err()
+            .to_string();
+    assert!(error.contains("video generation parameter unsupported: aspect_ratio=1:1"));
+}
+
+#[test]
+fn exact_media_generation_rejects_unsupported_adapter_before_http() {
+    let (registry, auth, cache, workspace) = replicate_video_runtime_fixture();
+    let request = ExactMediaGenerationRequest {
+        kind: "video".to_string(),
+        provider_id: "replicate".to_string(),
+        model_id: "owner/model-version".to_string(),
+        operation: "generate".to_string(),
+        adapter: "images_json".to_string(),
+        prompt: "animate a logo".to_string(),
+        parameters: BTreeMap::from([
+            ("aspect_ratio".to_string(), "16:9".to_string()),
+            ("duration".to_string(), "5".to_string()),
+        ]),
+        count: 1,
+    };
+
+    let error =
+        generate_exact_media_with_cache(&registry, &auth, workspace.path(), request, &cache)
+            .unwrap_err()
+            .to_string();
+    assert!(error.contains("selected video model unavailable"));
 }
 
 #[test]

@@ -1,6 +1,7 @@
 use super::capabilities::MediaKind;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Tracks normalized media generation job states across providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,7 +29,9 @@ pub(crate) struct MediaJob {
     pub(crate) kind: MediaKind,
     pub(crate) provider_id: String,
     pub(crate) model_id: String,
+    pub(crate) adapter: Option<String>,
     pub(crate) prompt: String,
+    pub(crate) parameters: BTreeMap<String, String>,
     pub(crate) status: MediaJobStatus,
     pub(crate) provider_job_id: Option<String>,
     pub(crate) remote_status: Option<String>,
@@ -57,7 +60,9 @@ impl MediaJob {
             kind,
             provider_id: provider_id.into(),
             model_id: model_id.into(),
+            adapter: None,
             prompt: prompt.into(),
+            parameters: BTreeMap::new(),
             status: MediaJobStatus::Queued,
             provider_job_id: None,
             remote_status: None,
