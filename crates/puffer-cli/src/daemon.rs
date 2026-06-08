@@ -38,13 +38,15 @@ use puffer_config::{
 use puffer_core::{
     command_surface, default_effort_level, discover_exact_media_capabilities, dispatch_command,
     enter_plan_mode, execute_connect_flow, execute_user_turn_streaming_with_permissions_and_cancel,
-    generate_exact_media_with_cache, list_exact_media_capabilities_with_cache,
-    provider_preference_family, read_generated_media_preview_by_artifact, supported_effort_levels,
+    generate_exact_media_with_cache, generated_video_access_metadata_by_artifact,
+    list_exact_media_capabilities_with_cache, provider_preference_family,
+    read_generated_media_preview_by_artifact, supported_effort_levels,
     with_user_question_prompt_handler, AppState, BrowserPermissionPromptActionSet,
     BrowserPermissionPromptSource, BrowserPermissionPromptTargetClass, CancelToken,
-    ExactMediaDiscoveryCache, ExactMediaGenerationRequest, MediaCapabilityView, MessageRole,
-    ModelPreferenceFamily, PermissionPromptAction, PermissionPromptRequest, ToolCallRequest,
-    ToolInvocation, TurnStreamEvent, UserQuestionPromptRequest, UserQuestionPromptResponse,
+    ExactMediaDiscoveryCache, ExactMediaGenerationRequest, GeneratedVideoAccessMetadataResult,
+    MediaCapabilityView, MessageRole, ModelPreferenceFamily, PermissionPromptAction,
+    PermissionPromptRequest, ToolCallRequest, ToolInvocation, TurnStreamEvent,
+    UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 use puffer_provider_openai::{
     build_realtime_client_secret_request,
@@ -165,6 +167,21 @@ struct GenerateMediaResult {
 struct GeneratedMediaPreviewParams {
     session_id: String,
     artifact_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedVideoAccessParams {
+    session_id: String,
+    artifact_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct GeneratedVideoTicket {
+    path: std::path::PathBuf,
+    mime_type: String,
+    size: u64,
+    expires_at_ms: u64,
 }
 
 pub(crate) struct DaemonOptions {
@@ -311,6 +328,18 @@ fn daemon_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+const GENERATED_VIDEO_TICKET_TTL_MS: u64 = 10 * 60 * 1000;
+
+fn generated_video_ticket_path(ticket: &str) -> String {
+    format!("/media/generated-video/{ticket}")
+}
+
+fn random_ticket() -> String {
+    let mut buf = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut buf);
+    hex(&buf)
+}
+
 // ---------------------------------------------------------------------------
 // DaemonState — the shared runtime inputs + in-flight turn registry.
 // ---------------------------------------------------------------------------
@@ -344,6 +373,7 @@ pub(crate) struct DaemonState {
     disable_auto_title: bool,
     yolo: bool,
     media_discovery_cache: Arc<Mutex<Option<ExactMediaDiscoveryCache>>>,
+    generated_video_tickets: Arc<Mutex<HashMap<String, GeneratedVideoTicket>>>,
     /// Transcript replay buffer — a bounded ring of recent session / clone /
     /// workspace events. On a fresh WebSocket connection we replay these
     /// so UIs that disconnected mid-turn don't miss deltas. Size capped at
@@ -394,6 +424,33 @@ impl DaemonState {
             &inputs.session_store,
         )?;
         Ok(serde_json::to_value(snapshot)?)
+    }
+
+    fn prune_expired_generated_video_tickets(&self, now_ms: u64) {
+        self.generated_video_tickets
+            .lock()
+            .unwrap()
+            .retain(|_, ticket| ticket.expires_at_ms > now_ms);
+    }
+
+    fn insert_generated_video_ticket(
+        &self,
+        metadata: puffer_core::GeneratedVideoAccessMetadata,
+    ) -> (String, GeneratedVideoTicket) {
+        let now_ms = daemon_now_ms();
+        self.prune_expired_generated_video_tickets(now_ms);
+        let token = random_ticket();
+        let ticket = GeneratedVideoTicket {
+            path: metadata.path,
+            mime_type: metadata.mime_type,
+            size: metadata.byte_count,
+            expires_at_ms: now_ms + GENERATED_VIDEO_TICKET_TTL_MS,
+        };
+        self.generated_video_tickets
+            .lock()
+            .unwrap()
+            .insert(token.clone(), ticket.clone());
+        (token, ticket)
     }
 }
 
@@ -457,6 +514,7 @@ impl DaemonState {
             disable_auto_title,
             yolo,
             media_discovery_cache: Arc::new(Mutex::new(None)),
+            generated_video_tickets: Arc::new(Mutex::new(HashMap::new())),
             recent_events: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_EVENT_CAPACITY))),
         })
     }
@@ -1087,6 +1145,11 @@ async fn dispatch_request(
         "generate_media" => respond!(detached!(|s, p| handle_generate_media(&s, &p))),
         "read_generated_media_preview" => {
             respond!(detached!(|s, p| handle_read_generated_media_preview(
+                &s, &p
+            )))
+        }
+        "create_generated_video_access" => {
+            respond!(detached!(|s, p| handle_create_generated_video_access(
                 &s, &p
             )))
         }
@@ -2325,6 +2388,29 @@ fn handle_read_generated_media_preview(state: &DaemonState, params: &Value) -> R
     let cwd = desktop_api::load_session_cwd(&session_store, &input.session_id)?;
     let result = read_generated_media_preview_by_artifact(&cwd, &input.artifact_id);
     Ok(serde_json::to_value(result)?)
+}
+
+fn handle_create_generated_video_access(state: &DaemonState, params: &Value) -> Result<Value> {
+    let input: GeneratedVideoAccessParams =
+        serde_json::from_value(params.clone()).context("invalid generated video access params")?;
+    let session_store = SessionStore::from_paths(&state.paths)?;
+    let cwd = desktop_api::load_session_cwd(&session_store, &input.session_id)?;
+    let result = generated_video_access_metadata_by_artifact(&cwd, &input.artifact_id);
+    let GeneratedVideoAccessMetadataResult::Available(metadata) = result else {
+        return Ok(match result {
+            GeneratedVideoAccessMetadataResult::Missing => json!({ "state": "missing" }),
+            GeneratedVideoAccessMetadataResult::Unsupported => json!({ "state": "unsupported" }),
+            GeneratedVideoAccessMetadataResult::Available(_) => unreachable!(),
+        });
+    };
+    let (token, ticket) = state.insert_generated_video_ticket(metadata);
+    Ok(json!({
+        "state": "available",
+        "path": generated_video_ticket_path(&token),
+        "mimeType": ticket.mime_type,
+        "size": ticket.size,
+        "expiresAtMs": ticket.expires_at_ms
+    }))
 }
 
 const DEFAULT_REALTIME_MODEL: &str = "gpt-realtime-2";
@@ -5311,8 +5397,9 @@ mod tests {
     use super::{
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
         browser_permission_payload_json, connector_setup_connect_args, connector_setup_id,
-        desktop_latency_ms, handle_create_openai_realtime_client_secret, handle_create_session,
-        handle_generate_media, handle_import_external_credential,
+        daemon_now_ms, desktop_latency_ms, handle_create_generated_video_access,
+        handle_create_openai_realtime_client_secret, handle_create_session, handle_generate_media,
+        handle_import_external_credential,
         handle_list_lambda_skill_libraries, handle_list_media_capabilities,
         handle_list_permissions, handle_list_provider_models, handle_local_model_status,
         handle_login_with_api_key, handle_logout_provider, handle_read_generated_media_preview,
@@ -6255,6 +6342,36 @@ models: []
         .unwrap();
     }
 
+    fn write_generated_video_artifact(
+        workspace: &std::path::Path,
+        artifact_id: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) -> std::path::PathBuf {
+        let video_dir = workspace.join(".puffer/media/artifacts").join(artifact_id);
+        std::fs::create_dir_all(&video_dir).unwrap();
+        let video_path = video_dir.join(filename);
+        std::fs::write(&video_path, bytes).unwrap();
+        let sidecar_dir = workspace.join(".puffer/media/artifact-sidecars");
+        std::fs::create_dir_all(&sidecar_dir).unwrap();
+        std::fs::write(
+            sidecar_dir.join(format!("{artifact_id}.json")),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": artifact_id,
+                "jobId": "job-video-1",
+                "kind": "video",
+                "path": video_path,
+                "mimeType": "video/mp4",
+                "byteCount": bytes.len(),
+                "metadata": {},
+                "createdAtMs": 1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        video_path
+    }
+
     #[test]
     fn read_generated_media_preview_resolves_session_cwd() {
         let temp = tempfile::tempdir().unwrap();
@@ -6277,6 +6394,41 @@ models: []
 
         assert_eq!(response["state"], "available");
         assert_eq!(response["mimeType"], "image/jpeg");
+    }
+
+    #[test]
+    fn create_generated_video_access_returns_ticket_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        let session_store = SessionStore::from_paths(&paths).unwrap();
+        let workspace = temp.path().join("other-workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let session = session_store.create_session(workspace.clone()).unwrap();
+        write_generated_video_artifact(
+            &workspace,
+            "artifact-video-1",
+            "generated.mp4",
+            b"mp4-bytes",
+        );
+        let state = test_state_with_paths(paths);
+
+        let response = handle_create_generated_video_access(
+            &state,
+            &serde_json::json!({
+                "sessionId": session.id.to_string(),
+                "artifactId": "artifact-video-1"
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(response["state"], "available");
+        assert_eq!(response["mimeType"], "video/mp4");
+        assert_eq!(response["size"], 9);
+        assert!(response["expiresAtMs"].as_u64().unwrap() > daemon_now_ms());
+        let path = response["path"].as_str().expect("ticket path");
+        assert!(path.starts_with("/media/generated-video/"));
+        assert!(response.get("url").is_none());
+        assert!(!path.contains("token"));
     }
 
     #[test]
