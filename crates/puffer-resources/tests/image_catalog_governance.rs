@@ -2,7 +2,10 @@ use puffer_provider_registry::{
     MediaBatchMode, MediaExecutionKind, MediaModelDescriptor, MediaOperation, ProviderDescriptor,
 };
 use puffer_resources::ProviderPack;
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+};
 
 const IMAGE_PROVIDER_YAMLS: &[(&str, &str)] = &[
     (
@@ -49,7 +52,10 @@ const ALL_PROVIDER_YAMLS: &[(&str, &str)] = &[
         "cerebras",
         include_str!("../../../resources/providers/cerebras.yaml"),
     ),
-    ("groq", include_str!("../../../resources/providers/groq.yaml")),
+    (
+        "groq",
+        include_str!("../../../resources/providers/groq.yaml"),
+    ),
     (
         "kimi-coding",
         include_str!("../../../resources/providers/kimi-coding.yaml"),
@@ -78,7 +84,10 @@ const ALL_PROVIDER_YAMLS: &[(&str, &str)] = &[
         "minimax-cn",
         include_str!("../../../resources/providers/minimax-cn.yaml"),
     ),
-    ("ollama", include_str!("../../../resources/providers/ollama.yaml")),
+    (
+        "ollama",
+        include_str!("../../../resources/providers/ollama.yaml"),
+    ),
     (
         "openai",
         include_str!("../../../resources/providers/openai.yaml"),
@@ -95,13 +104,19 @@ const ALL_PROVIDER_YAMLS: &[(&str, &str)] = &[
         "vercel-ai-gateway",
         include_str!("../../../resources/providers/vercel-ai-gateway.yaml"),
     ),
-    ("vllm", include_str!("../../../resources/providers/vllm.yaml")),
+    (
+        "vllm",
+        include_str!("../../../resources/providers/vllm.yaml"),
+    ),
     (
         "worldrouter",
         include_str!("../../../resources/providers/worldrouter.yaml"),
     ),
     ("xai", include_str!("../../../resources/providers/xai.yaml")),
-    ("zhipu", include_str!("../../../resources/providers/zhipu.yaml")),
+    (
+        "zhipu",
+        include_str!("../../../resources/providers/zhipu.yaml"),
+    ),
 ];
 
 fn provider_descriptor(provider_id: &str, yaml: &str) -> ProviderDescriptor {
@@ -177,11 +192,46 @@ fn assert_select_parameter(
 }
 
 #[test]
+fn all_provider_yamls_covers_bundled_provider_files() {
+    let provider_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/providers");
+    let actual = fs::read_dir(&provider_dir)
+        .unwrap_or_else(|err| panic!("read {}: {err}", provider_dir.display()))
+        .filter_map(|entry| {
+            let path = entry.expect("provider dir entry").path();
+            (path.extension().and_then(|extension| extension.to_str()) == Some("yaml"))
+                .then_some(path)
+        })
+        .map(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or_else(|| panic!("provider yaml path must have a UTF-8 stem: {path:?}"))
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    let listed = ALL_PROVIDER_YAMLS
+        .iter()
+        .map(|(provider_id, _yaml)| (*provider_id).to_string())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        listed, actual,
+        "ALL_PROVIDER_YAMLS must include every bundled provider YAML"
+    );
+}
+
+#[test]
 fn bundled_image_executions_declare_explicit_batch_mode() {
     for (provider_id, yaml) in [
-        ("openai", include_str!("../../../resources/providers/openai.yaml")),
+        (
+            "openai",
+            include_str!("../../../resources/providers/openai.yaml"),
+        ),
         ("xai", include_str!("../../../resources/providers/xai.yaml")),
-        ("zhipu", include_str!("../../../resources/providers/zhipu.yaml")),
+        (
+            "zhipu",
+            include_str!("../../../resources/providers/zhipu.yaml"),
+        ),
         (
             "byteplus",
             include_str!("../../../resources/providers/byteplus.yaml"),

@@ -9,14 +9,14 @@ export function availableMediaCapabilities(
   );
 }
 
-export function unavailableMediaProviderLabels(
+function unavailableMediaProviderLabels(
   capabilities: MediaCapabilityInfo[],
   kind: MediaKind
 ): string[] {
   const labels: string[] = [];
   const seen = new Set<string>();
   for (const capability of capabilities) {
-    if (capability.kind !== kind || capability.status === "available") continue;
+    if (capability.kind !== kind || capability.status !== "unavailable") continue;
     if (capability.reason !== "missing_auth") continue;
     if (seen.has(capability.providerId)) continue;
     seen.add(capability.providerId);

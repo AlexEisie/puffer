@@ -6,6 +6,12 @@ use puffer_provider_registry::{
 };
 use std::collections::{BTreeMap, HashSet};
 
+const CAPABILITY_STATUS_AVAILABLE: &str = "available";
+const CAPABILITY_STATUS_UNAVAILABLE: &str = "unavailable";
+const CAPABILITY_REASON_ADAPTER_UNAVAILABLE: &str = "adapter_unavailable";
+const CAPABILITY_REASON_MISSING_AUTH: &str = "missing_auth";
+const CAPABILITY_SOURCE_STATIC: &str = "static";
+
 /// Carries cached dynamic media discovery records into capability resolution.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct MediaDiscoveryCache {
@@ -111,23 +117,11 @@ pub(crate) fn validate_media_generate_selection(
     });
 
     let Some(capability) = capability else {
-        bail!(
-            "selected {} model unavailable: {}/{} via {}",
-            media_kind_error_name(selection.kind),
-            selection.provider_id,
-            selection.model_id,
-            selection.adapter
-        );
+        bail!("{}", unavailable_selection_message(selection));
     };
 
-    if capability.status != "available" {
-        bail!(
-            "selected {} model unavailable: {}/{} via {}",
-            media_kind_error_name(selection.kind),
-            selection.provider_id,
-            selection.model_id,
-            selection.adapter
-        );
+    if capability.status != CAPABILITY_STATUS_AVAILABLE {
+        bail!("{}", unavailable_selection_message(selection));
     }
 
     validate_parameter_values(selection.kind, &capability.parameters, selection.parameters)?;
@@ -224,7 +218,10 @@ fn resolve_image_capabilities(
             continue;
         };
         let mut emitted_model_ids = HashSet::new();
-        let static_models = image.models.iter().map(|model| (model, "static"));
+        let static_models = image
+            .models
+            .iter()
+            .map(|model| (model, CAPABILITY_SOURCE_STATIC));
         let discovered_models = discovery_cache.image_models.iter().filter_map(|cached| {
             (cached.provider_id == provider.id).then_some((&cached.model, cached.source.as_str()))
         });
@@ -255,7 +252,7 @@ fn resolve_image_capabilities(
                 adapter: adapter_id(execution.adapter).to_string(),
                 defaults: media_defaults(&parameters),
                 parameters,
-                status: "available".to_string(),
+                status: CAPABILITY_STATUS_AVAILABLE.to_string(),
                 source: source.to_string(),
                 reason: None,
                 checked_at_ms,
@@ -290,13 +287,7 @@ fn resolve_video_capabilities(
             };
             let adapter_available =
                 execution_adapter_is_available_for_kind(MediaKind::Video, execution.adapter);
-            let (status, reason) = if !adapter_available {
-                ("unavailable", Some("adapter_unavailable".to_string()))
-            } else if !provider_connected {
-                ("unavailable", Some("missing_auth".to_string()))
-            } else {
-                ("available", None)
-            };
+            let (status, reason) = video_capability_state(provider_connected, adapter_available);
             let parameters = media_parameters(model);
             capabilities.push(MediaCapability {
                 provider_id: provider.id.clone(),
@@ -312,13 +303,42 @@ fn resolve_video_capabilities(
                 defaults: media_defaults(&parameters),
                 parameters,
                 status: status.to_string(),
-                source: "static".to_string(),
-                reason,
+                source: CAPABILITY_SOURCE_STATIC.to_string(),
+                reason: reason.map(str::to_string),
                 checked_at_ms,
             });
         }
     }
     capabilities
+}
+
+fn unavailable_selection_message(selection: &MediaGenerationSelection<'_>) -> String {
+    format!(
+        "selected {} model unavailable: {}/{} via {}",
+        media_kind_error_name(selection.kind),
+        selection.provider_id,
+        selection.model_id,
+        selection.adapter
+    )
+}
+
+fn video_capability_state(
+    provider_connected: bool,
+    adapter_available: bool,
+) -> (&'static str, Option<&'static str>) {
+    if !adapter_available {
+        (
+            CAPABILITY_STATUS_UNAVAILABLE,
+            Some(CAPABILITY_REASON_ADAPTER_UNAVAILABLE),
+        )
+    } else if !provider_connected {
+        (
+            CAPABILITY_STATUS_UNAVAILABLE,
+            Some(CAPABILITY_REASON_MISSING_AUTH),
+        )
+    } else {
+        (CAPABILITY_STATUS_AVAILABLE, None)
+    }
 }
 
 fn image_execution<'a>(
