@@ -37,11 +37,12 @@ untyped protocol engine.
 - Fix the current Relaydance video polling failure with a verified parser.
 - Make future video model onboarding model-driven when the protocol is already
   implemented.
-- Add existing-provider video support where Puffer can verify and execute the
-  provider protocol, starting with BytePlus text-to-video models.
+- Add existing-provider video support only after Puffer verifies the provider
+  protocol. BytePlus text-to-video is the first candidate, not an unconditional
+  deliverable.
 - Keep protocol behavior typed, tested, and adapter-owned.
-- Reuse one stable video task lifecycle for submit, poll, download, and job
-  persistence.
+- Keep lifecycle reuse incremental: extract shared helpers only when a second
+  verified adapter would otherwise duplicate the same job/artifact code.
 - Improve error observability so provider shape mismatches identify the phase,
   provider, task id, and safe response summary.
 - Avoid over-design: no generic response mapping DSL, no recovery scheduler,
@@ -77,19 +78,28 @@ status mapping, provider error envelopes, and output URL extraction must be
 typed and unit-tested. This keeps runtime failures close to the adapter that
 understands the provider protocol.
 
+## Scope Review Outcome
+
+The first draft overreached by treating a full shared video lifecycle as a
+required foundation before the second executable provider is verified. That is
+not necessary to fix the current bug and risks creating an abstraction around
+one real protocol plus one unknown protocol.
+
+The tightened design is:
+
+1. Verify the Relaydance poll response shape.
+2. Fix and rename the current adapter around that verified shape.
+3. Improve phase-specific diagnostics and failed-job persistence in the current
+   adapter.
+4. Probe BytePlus separately.
+5. Add `byteplus_video` only if BytePlus produces a stable text-to-video
+   contract.
+6. Extract shared helpers only at the point where Relaydance and BytePlus have
+   concrete duplicated lifecycle code.
+
 ## Chosen Approach
 
-Introduce a shared video task lifecycle and move provider-specific protocol
-details behind small adapters.
-
-The shared lifecycle handles:
-
-1. Build a local `MediaJob` after submit returns a remote task id.
-2. Save queued/running/failed/canceled/succeeded job states.
-3. Poll with bounded backoff.
-4. Download the terminal video URL through the existing safe downloader.
-5. Persist `video/mp4` artifacts.
-6. Save a redacted error on deterministic provider failures.
+Use small, typed protocol adapters with opportunistic helper extraction.
 
 Each protocol adapter handles:
 
@@ -98,35 +108,38 @@ Each protocol adapter handles:
 3. Poll response parsing.
 4. Provider error envelope parsing.
 5. Terminal output URL extraction.
-6. Status normalization into the shared lifecycle status model.
+6. Status normalization into `MediaJobStatus`.
 
-This avoids duplicating the job/artifact machinery for every provider while
-keeping response parsing explicit and testable.
+The current Relaydance path can stay in one focused adapter file while it is the
+only implemented gateway-style video provider. If BytePlus lands in this pass,
+extract only the duplicated pieces that are obvious after both adapters exist:
+remote JSON transport, safe response-shape summaries, status transition helper,
+or artifact download/persistence. Do not create a generic trait or framework
+just to prepare for future providers.
 
 Rejected alternatives:
 
-- Add fallback checks for `data.id`, `task_id`, `result.id`, and similar paths
-  to the current parser. This is fast but guessy, and it can turn provider error
-  envelopes into misleading task states.
+- Add broad fallback checks for every plausible task field, such as `result.id`,
+  camelCase variants, or unverified nested paths. This is fast but guessy, and
+  it can turn provider error envelopes into misleading task states. A parser may
+  support only fields verified by a captured fixture or provider protocol
+  documentation cited in the implementation notes.
 - Add YAML response mappings such as `id_path`, `status_path`, and `url_path`.
   This moves protocol logic into strings, delays validation to runtime, and
   makes every provider descriptor a partial parser.
-- Build a fully generic video provider engine. Puffer does not yet have enough
-  verified video protocols to justify that abstraction.
+- Build a fully generic video provider engine or shared lifecycle framework
+  before BytePlus is verified. Puffer does not yet have enough real video
+  protocols to justify that abstraction.
 
 ## Adapter Naming
 
-Do not keep `openai_video` as the execution id.
+Use `relaydance_video` as the execution id in this pass.
 
-The implementation must first probe the existing Relaydance task
-`task_TA20QV69xGqQXapyyM3ynyB1elNki8pg` and record the safe response shape. Then
-choose the adapter name from evidence:
-
-- Use `newapi_video` only if Relaydance submit and poll responses match a
-  documented NewAPI-style envelope with top-level task identity, status, and a
-  stable output URL location.
-- Use `relaydance_video` if Relaydance wraps task state in a provider-specific
-  envelope or has provider-specific error semantics.
+Do not keep `openai_video`, and do not introduce `newapi_video` yet. The current
+evidence is one Relaydance integration, so a provider-specific adapter name is
+more honest and avoids overclaiming a cross-provider protocol. If a second
+provider later proves it uses the same verified envelope, introduce a separate
+rename/refactor spec for a shared protocol adapter.
 
 The old `openai_video` enum variant, adapter id, tests, and bundled provider
 resource should be replaced rather than aliased.
@@ -139,7 +152,7 @@ video protocol.
 | Provider | This pass | Reason |
 | --- | --- | --- |
 | `relaydance` | Yes | Current configured provider fails at poll parsing; fix and verify this path first. |
-| `byteplus` | Yes, after live probe | The local discovery cache contains Seedance/Dreamina video model ids. BytePlus is an existing provider and should be the first non-Relaydance video adapter if its protocol is verified. |
+| `byteplus` | Conditional | The local discovery cache contains Seedance/Dreamina video model ids. BytePlus is the first non-Relaydance candidate, but it stays audit-only if probe, credentials, cost, or protocol evidence is insufficient. |
 | `minimax` / `minimax-cn` | Audit only | Existing image adapter does not prove video task semantics. Add a video adapter in a later pass after protocol verification. |
 | `openai` | Audit only | Official OpenAI video semantics must not be assumed to match the current `/v1/video/generations` path. |
 | `openrouter` | Audit only | Video routing is a separate API surface from current chat-image output. |
@@ -183,9 +196,19 @@ media:
 `metadata.resolution`, because that is construction logic and already has local
 tests. Response paths must not be configurable in YAML.
 
-If BytePlus requires a different body layout, create a `byteplus_video` adapter
-that maps the same scalar descriptor parameters into that body. Do not encode
-BytePlus request structure through a general-purpose YAML template.
+If BytePlus requires a different body layout and the probe succeeds, create a
+`byteplus_video` adapter that maps the same scalar descriptor parameters into
+that body. Do not encode BytePlus request structure through a general-purpose
+YAML template.
+
+For BytePlus, the candidate endpoint family is the ModelArk contents generation
+task API:
+
+- Submit: `POST /api/v3/contents/generations/tasks`
+- Poll: `GET /api/v3/contents/generations/tasks/{id}`
+
+The implementation must still capture redacted submit and poll fixtures before
+declaring any BytePlus model in bundled resources.
 
 ## Runtime Data Flow
 
@@ -197,10 +220,10 @@ VideoGeneration
   -> validate_media_generate_selection
   -> video adapter match
   -> protocol adapter builds submit request
-  -> shared lifecycle saves queued job
-  -> shared lifecycle polls until terminal
+  -> adapter saves queued job
+  -> adapter polls until terminal
   -> protocol adapter extracts terminal output URL
-  -> shared lifecycle downloads and persists artifact
+  -> adapter downloads and persists artifact
 ```
 
 The tool contract does not change. Provider and model selection still comes
@@ -235,11 +258,15 @@ If submit succeeds and a later parse/download error is deterministic, update
 the local job to `failed` with the redacted error. Do not leave it indefinitely
 queued.
 
+Pure JSON parser helpers do not need provider context. Add provider, adapter,
+and task id at the adapter boundary, where the local job and provider id are
+available.
+
 ## Tests
 
 Add tests before implementation.
 
-Shared lifecycle tests:
+Adapter lifecycle tests:
 
 - Submit saves a queued job with `providerJobId`.
 - Poll running updates the existing job.
@@ -247,6 +274,8 @@ Shared lifecycle tests:
 - Poll failed saves a failed job with provider error text.
 - Poll parser failure after submit marks the job failed.
 - Bounded polling still stops after the configured attempt count.
+- Shared helper tests are required only for helpers actually extracted during
+  the BytePlus step.
 
 Relaydance adapter tests:
 
@@ -258,7 +287,7 @@ Relaydance adapter tests:
 - `resources/providers/relaydance.yaml` uses the new adapter id.
 - Old `openai_video` descriptors are rejected.
 
-BytePlus adapter tests:
+BytePlus adapter tests, only if the BytePlus probe passes:
 
 - Request body maps scalar descriptor parameters into the verified BytePlus
   text-to-video request shape.
@@ -277,27 +306,33 @@ Resolver/resource tests:
 
 ## Verification Workflow
 
-Before coding parser changes, run read-only provider probes with stored
-credentials:
+Before coding parser changes that depend on provider behavior, capture redacted
+provider evidence with stored credentials:
 
 1. Poll the existing Relaydance task id and save a redacted fixture.
 2. Submit a minimal Relaydance text-to-video request only if the existing task
-   no longer provides enough evidence.
+   no longer provides enough evidence and the user approves the network/cost
+   tradeoff.
 3. Query BytePlus model discovery and identify the exact text-to-video model ids
    to declare.
 4. Submit and poll one minimal BytePlus text-to-video task, saving redacted
-   submit and poll fixtures.
+   submit and poll fixtures, only if credentials are available and the user
+   approves the network/cost tradeoff.
 
 Do not print API keys. Fixtures must not include bearer tokens or signed output
 URLs unless the URL is already temporary and safe to store; otherwise replace
 the URL with a stable redacted stand-in while preserving its field location.
+
+If any probe cannot run, the implementation must still fix Relaydance using the
+best available evidence and keep the unverified provider in audit-only status.
 
 ## Stability And Performance
 
 - Capability listing remains local and descriptor-driven.
 - Video generation remains one remote task per tool call.
 - Polling stays bounded and synchronous in this pass.
-- Shared lifecycle code reduces duplicate job/artifact logic across providers.
+- Helper extraction is limited to duplication observed across implemented
+  adapters.
 - Typed adapters keep parsing failures deterministic and cheap.
 - No new background worker, scheduler, database migration, or desktop state
   model is needed.
@@ -314,6 +349,9 @@ the URL with a stable redacted stand-in while preserving its field location.
   `crates/puffer-provider-registry/src/model.rs`
 - Current Relaydance descriptor:
   `resources/providers/relaydance.yaml`
+- BytePlus ModelArk contents generation task docs:
+  `https://docs.byteplus.com/en/docs/modelark/1520757` and
+  `https://docs.byteplus.com/en/docs/modelark/1521309`
 - Local failed job:
   `/Users/zhangxiao/.puffer/media/jobs/296201e7-47a2-473b-bfb4-6af80f671ba5.json`
 - Local failing session:
