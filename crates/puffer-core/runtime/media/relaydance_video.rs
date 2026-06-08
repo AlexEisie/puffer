@@ -514,7 +514,7 @@ where
         let artifact_id = Uuid::new_v4().to_string();
         let path = service.write_artifact_bytes(
             &artifact_id,
-            &format!("openai-video-{artifact_id}.mp4"),
+            &format!("relaydance-video-{artifact_id}.mp4"),
             &bytes,
         )?;
         let artifact = MediaArtifact {

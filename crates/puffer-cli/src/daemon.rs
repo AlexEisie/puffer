@@ -5758,7 +5758,7 @@ media:
     discovery:
       adapter: static
     execution:
-      adapter: openai_video
+      adapter: relaydance_video
       path: /v1/video/generations
     models:
       - id: doubao-seedance-2-0-720p
@@ -6078,7 +6078,7 @@ models: []
         let capabilities = response["capabilities"].as_array().expect("capabilities");
 
         assert_eq!(capabilities.len(), 1);
-        assert_eq!(capabilities[0]["adapter"], "openai_video");
+        assert_eq!(capabilities[0]["adapter"], "relaydance_video");
         assert_eq!(capabilities[0]["providerId"], "relaydance");
     }
 

@@ -304,7 +304,7 @@ fn relaydance_declares_executable_video_descriptor() {
         .as_ref()
         .expect("relaydance video execution descriptor");
 
-    assert_eq!(execution.adapter, MediaExecutionKind::OpenAiVideo);
+    assert_eq!(execution.adapter, MediaExecutionKind::RelaydanceVideo);
     assert_eq!(execution.path, "/v1/video/generations");
 
     let model = video
