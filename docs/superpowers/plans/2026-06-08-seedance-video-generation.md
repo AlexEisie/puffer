@@ -213,7 +213,7 @@ pub(crate) mod seedance_video;
 Create `crates/puffer-core/runtime/media/seedance_video.rs` with the request type and its tests:
 
 ```rust
-use super::MediaCapabilityParameter;
+use super::capabilities::MediaCapabilityParameter;
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -273,11 +273,15 @@ pub(crate) fn seedance_request_from_parameters(
 ) -> Result<SeedanceVideoRequest> {
     let mut flags = Vec::new();
     for parameter in capability_parameters {
+        // request_field is Option<String>; only mapped params become ModelArk flags.
+        let Some(flag) = parameter.request_field.clone() else {
+            continue;
+        };
         let value = selected
             .get(&parameter.name)
             .cloned()
             .unwrap_or_else(|| parameter.default.clone());
-        flags.push((parameter.request_field.clone(), value));
+        flags.push((flag, value));
     }
     let request = SeedanceVideoRequest {
         model: model_id,
@@ -298,7 +302,7 @@ mod tests {
             label: name.to_string(),
             values: vec![default.to_string()],
             default: default.to_string(),
-            request_field: request_field.to_string(),
+            request_field: Some(request_field.to_string()),
         }
     }
 
@@ -339,7 +343,7 @@ mod tests {
 }
 ```
 
-> `MediaCapabilityParameter` is defined in the media runtime (search `pub struct MediaCapabilityParameter`). Adjust the `use super::...` import path to wherever it is re-exported within `runtime/media`. If it is not reachable via `super`, import it by its crate path (e.g. `crate::runtime::media::MediaCapabilityParameter` or from `resolver`).
+> `MediaCapabilityParameter` lives in `runtime/media/capabilities.rs` (`pub(crate)`), with `request_field: Option<String>`. The import `use super::capabilities::MediaCapabilityParameter;` is correct from `seedance_video.rs`.
 
 - [ ] **Step 3: Run tests to verify they fail, then pass**
 
@@ -378,6 +382,9 @@ pub(crate) trait SeedanceVideoTransport {
 
     /// Polls a Seedance task URL and returns its JSON response.
     fn poll_task(&self, url: &str, api_token: &str) -> Result<Value>;
+
+    /// Downloads the rendered video bytes from a validated remote URL.
+    fn download_bytes(&self, url: &str) -> Result<Vec<u8>>;
 }
 
 /// Reqwest-backed Seedance transport used by the runtime adapter.
@@ -406,6 +413,11 @@ impl SeedanceVideoTransport for ReqwestSeedanceVideoTransport {
             .send()
             .with_context(|| format!("poll Seedance video task {url}"))?;
         seedance_json_response(response, "poll Seedance video task")
+    }
+
+    fn download_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        // Reuse the shared https/loopback-enforcing downloader (image-path parity).
+        super::http_support::download_image_url(&self.client, url, "Seedance video output")
     }
 }
 
@@ -540,7 +552,6 @@ Add production code:
 
 ```rust
 use super::{MediaArtifact, MediaGenerationService, MediaJob, MediaKind};
-use crate::runtime::media::http_support::download_image_url;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -565,7 +576,6 @@ pub(crate) struct SeedanceVideoAdapter<T = ReqwestSeedanceVideoTransport> {
     api_token: String,
     submit_url: String,
     transport: T,
-    client: Client,
 }
 
 impl SeedanceVideoAdapter<ReqwestSeedanceVideoTransport> {
@@ -580,7 +590,6 @@ impl SeedanceVideoAdapter<ReqwestSeedanceVideoTransport> {
             api_token,
             submit_url: submit_url.into().trim_end_matches('/').to_string(),
             transport: ReqwestSeedanceVideoTransport::default(),
-            client: Client::new(),
         })
     }
 }
@@ -599,7 +608,6 @@ where
             api_token: api_token.into().trim().to_string(),
             submit_url: submit_url.into().trim_end_matches('/').to_string(),
             transport,
-            client: Client::new(),
         }
     }
 
@@ -721,7 +729,7 @@ where
             .video_url
             .clone()
             .context("Seedance succeeded task is missing `content.video_url`")?;
-        let bytes = match download_image_url(&self.client, &url, "Seedance video output") {
+        let bytes = match self.transport.download_bytes(&url) {
             Ok(bytes) => bytes,
             Err(error) => {
                 job.error = Some(format!("{error:#}"));
@@ -780,34 +788,38 @@ Test (a fake transport returning queued-then-succeeded; verify artifact written)
         fn poll_task(&self, _url: &str, _token: &str) -> Result<Value> {
             Ok(self.polls.borrow_mut().remove(0))
         }
+        fn download_bytes(&self, _url: &str) -> Result<Vec<u8>> {
+            Ok(b"MP4BYTES".to_vec())
+        }
     }
 
     #[test]
     fn submit_then_poll_downloads_video_artifact() {
-        // download_image_url permits http loopback; serve bytes from a local server.
-        let server = tiny_http::Server::http("127.0.0.1:0").expect("server");
-        let url = format!("http://{}/v.mp4", server.server_addr());
-        std::thread::spawn(move || {
-            if let Ok(request) = server.recv() {
-                let _ = request.respond(tiny_http::Response::from_data(b"MP4BYTES".to_vec()));
-            }
-        });
-
         let dir = tempfile::tempdir().unwrap();
         let service = MediaGenerationService::new(dir.path());
         let transport = ScriptedTransport {
             submit: json!({ "id": "task-9", "status": "queued" }),
             polls: RefCell::new(vec![
                 json!({ "id": "task-9", "status": "running" }),
-                json!({ "id": "task-9", "status": "succeeded", "content": { "video_url": url } }),
+                json!({ "id": "task-9", "status": "succeeded", "content": { "video_url": "https://cdn.example.com/v.mp4" } }),
             ]),
         };
-        let adapter = SeedanceVideoAdapter::with_transport("token", "https://ark/api/v3/contents/generations/tasks", transport);
+        let adapter = SeedanceVideoAdapter::with_transport(
+            "token",
+            "https://ark/api/v3/contents/generations/tasks",
+            transport,
+        );
 
         let request = SeedanceVideoRequest { model: "m".into(), prompt: "a cat".into(), flags: vec![] };
         let job = adapter.submit(&service, request, 1).expect("submit");
         let job = adapter
-            .poll_until_terminal(&service, job, SeedancePollingConfig { max_attempts: 5, delay: Duration::from_millis(0) }, |_| {}, || 2)
+            .poll_until_terminal(
+                &service,
+                job,
+                SeedancePollingConfig { max_attempts: 5, delay: Duration::from_millis(0) },
+                |_| {},
+                || 2,
+            )
             .expect("poll");
 
         assert_eq!(job.status, MediaJobStatus::Succeeded);
@@ -815,7 +827,7 @@ Test (a fake transport returning queued-then-succeeded; verify artifact written)
     }
 ```
 
-> If `tiny_http` / `tempfile` are not already dev-dependencies of `puffer-core`, check how `replicate_video.rs`/`images_json_tests.rs` spin up their local servers (they already download bytes in tests) and reuse that exact harness instead. Do not add new dev-deps if an existing one covers it.
+> Download is faked via the transport (no real HTTP server). `tempfile` is already a `puffer-core` dev-dependency. Verify `MediaArtifact`/`MediaJob` field and method names against `replicate_video.rs` before running.
 
 - [ ] **Step 2: Run tests**
 

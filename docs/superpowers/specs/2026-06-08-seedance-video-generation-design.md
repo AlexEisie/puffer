@@ -116,27 +116,33 @@ fixed host. Seedance runs on byteplus's own `base_url`, so it MUST use the
 shared `http_support` helpers — which is also less code.
 
 - `SeedanceVideoTransport` trait: `submit_task(url, key, body) -> {id}`,
-  `poll_task(url, key) -> Value`. URLs are passed in (built by the adapter via
-  `provider_execution_url`), not constructed inside the transport.
+  `poll_task(url, key) -> Value`, **`download_bytes(url) -> Vec<u8>`**. URLs are
+  passed in (built by the adapter via `provider_execution_url`), not constructed
+  inside the transport. Download goes through the trait (mirroring
+  `replicate_video`) so unit tests use a fake transport with canned bytes — no
+  real HTTP server / extra dev-dependency.
 - `ReqwestSeedanceVideoTransport`: blocking `reqwest` POST/GET with
-  `Authorization: Bearer`.
-- `SeedanceVideoAdapter`: built with `(provider, execution, api_token)`. Submit
-  URL = `provider_execution_url(provider, execution, "...")`; poll URL = that
-  URL joined with `/{task_id}`. Lifecycle mirrors `replicate_video`: `submit()`
-  creates a queued `MediaJob` (`MediaKind::Video`, task id stored in
+  `Authorization: Bearer`; its `download_bytes` delegates to the shared
+  `http_support::download_image_url` (https/loopback enforcement reused).
+- `SeedanceVideoAdapter`: built with `(api_token, submit_url)` where
+  `submit_url = provider_execution_url(provider, execution, "...")`; poll URL =
+  that URL joined with `/{task_id}`. Lifecycle mirrors `replicate_video`:
+  `submit()` creates a queued `MediaJob` (`MediaKind::Video`, task id stored in
   `provider_job_id`), `poll_until_terminal()` loops with `SeedancePollingConfig`,
   status normalization (`succeeded` → done; `failed`/`expired` → error with
-  ModelArk code/message), then `download_image_url()` fetches the MP4 and
+  ModelArk code/message), then `transport.download_bytes()` fetches the MP4 and
   `MediaGenerationService` persists it (same artifact path scheme as images).
 - `seedance_request_from_parameters()`: the only genuinely new logic — maps
   structured params into the prompt-inline `--` string and assembles the
   `content` array. Isolated and unit-testable.
 
-**Reuse, do not duplicate:** `download_image_url` already enforces
-https/loopback and is content-agnostic — reuse it as-is for the MP4 (do not
-rename; renaming churns the image path for no behavior change). `MediaJob` is
-reused unchanged (no model edits) — replicate already proves it carries video
-jobs.
+**Reuse, do not duplicate:** the production transport's `download_bytes`
+delegates to `download_image_url` (already enforces https/loopback, is
+content-agnostic) — do not rename it (renaming churns the image path for no
+behavior change). `MediaJob` is reused unchanged (no model edits) — replicate
+already proves it carries video jobs. `MediaCapabilityParameter.request_field`
+is `Option<String>`: only parameters with a `request_field` become ModelArk
+flags.
 
 ### 3. Wiring points (all small)
 
