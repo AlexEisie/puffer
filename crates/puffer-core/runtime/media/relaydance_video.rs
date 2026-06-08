@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 /// One OpenAI-compatible video generation request (`POST /v1/video/generations`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OpenAiVideoRequest {
+pub(crate) struct RelaydanceVideoRequest {
     pub(crate) model: String,
     pub(crate) prompt: String,
     /// Ordered (request_field, value) pairs. A `request_field` of `metadata.<k>`
@@ -15,7 +15,7 @@ pub(crate) struct OpenAiVideoRequest {
 
 const METADATA_PREFIX: &str = "metadata.";
 
-impl OpenAiVideoRequest {
+impl RelaydanceVideoRequest {
     fn validate(&self) -> Result<()> {
         if self.model.trim().is_empty() {
             bail!("video model is required");
@@ -54,12 +54,12 @@ impl OpenAiVideoRequest {
 /// Emits params in capability order using each parameter's `request_field`
 /// (only parameters that declare one). The selected value (already defaulted
 /// by the caller) is used, falling back to the parameter default.
-pub(crate) fn openai_video_request_from_parameters(
+pub(crate) fn relaydance_video_request_from_parameters(
     model_id: String,
     prompt: String,
     capability_parameters: &[MediaCapabilityParameter],
     selected: &BTreeMap<String, String>,
-) -> Result<OpenAiVideoRequest> {
+) -> Result<RelaydanceVideoRequest> {
     let mut params = Vec::new();
     for parameter in capability_parameters {
         let Some(field) = parameter.request_field.clone() else {
@@ -71,7 +71,7 @@ pub(crate) fn openai_video_request_from_parameters(
             .unwrap_or_else(|| parameter.default.clone());
         params.push((field, value));
     }
-    let request = OpenAiVideoRequest {
+    let request = RelaydanceVideoRequest {
         model: model_id,
         prompt,
         params,
@@ -85,7 +85,7 @@ use anyhow::Context;
 use reqwest::blocking::Client;
 
 /// Abstracts OpenAI-compatible video HTTP operations for production and tests.
-pub(crate) trait OpenAiVideoTransport {
+pub(crate) trait RelaydanceVideoTransport {
     /// Submits a video task and returns its JSON response.
     fn submit_task(&self, url: &str, api_token: &str, body: &Value) -> Result<Value>;
 
@@ -98,11 +98,11 @@ pub(crate) trait OpenAiVideoTransport {
 
 /// Reqwest-backed transport used by the runtime adapter.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ReqwestOpenAiVideoTransport {
+pub(crate) struct ReqwestRelaydanceVideoTransport {
     client: Client,
 }
 
-impl OpenAiVideoTransport for ReqwestOpenAiVideoTransport {
+impl RelaydanceVideoTransport for ReqwestRelaydanceVideoTransport {
     fn submit_task(&self, url: &str, api_token: &str, body: &Value) -> Result<Value> {
         let response = self
             .client
@@ -111,7 +111,7 @@ impl OpenAiVideoTransport for ReqwestOpenAiVideoTransport {
             .json(body)
             .send()
             .with_context(|| format!("submit video task {url}"))?;
-        openai_video_json_response(response, "submit video task")
+        relaydance_video_json_response(response, "submit video task")
     }
 
     fn poll_task(&self, url: &str, api_token: &str) -> Result<Value> {
@@ -121,7 +121,7 @@ impl OpenAiVideoTransport for ReqwestOpenAiVideoTransport {
             .bearer_auth(api_token)
             .send()
             .with_context(|| format!("poll video task {url}"))?;
-        openai_video_json_response(response, "poll video task")
+        relaydance_video_json_response(response, "poll video task")
     }
 
     fn download_bytes(&self, url: &str) -> Result<Vec<u8>> {
@@ -130,7 +130,10 @@ impl OpenAiVideoTransport for ReqwestOpenAiVideoTransport {
     }
 }
 
-fn openai_video_json_response(response: reqwest::blocking::Response, label: &str) -> Result<Value> {
+fn relaydance_video_json_response(
+    response: reqwest::blocking::Response,
+    label: &str,
+) -> Result<Value> {
     let status = response.status();
     let text = response
         .text()
@@ -143,18 +146,18 @@ fn openai_video_json_response(response: reqwest::blocking::Response, label: &str
 
 /// Normalized view of an OpenAI-compatible video task response.
 ///
-/// Envelope confirmed from New API `dto/openai_video.go`: `id`, `status`
+/// Envelope confirmed from New API `dto/relaydance_video.go`: `id`, `status`
 /// (`queued|in_progress|completed|failed`), the video URL at `metadata.url`,
 /// and `error.{message,code}`.
 #[derive(Debug, Clone)]
-pub(crate) struct OpenAiVideoTask {
+pub(crate) struct RelaydanceVideoTask {
     pub(crate) id: String,
     pub(crate) status: String,
     pub(crate) video_url: Option<String>,
     pub(crate) error: Option<String>,
 }
 
-impl OpenAiVideoTask {
+impl RelaydanceVideoTask {
     pub(crate) fn from_value(value: Value) -> Result<Self> {
         let id = value
             .get("id")
@@ -207,16 +210,16 @@ use std::time::Duration;
 use uuid::Uuid;
 
 const VIDEO_MIME_TYPE: &str = "video/mp4";
-const OPENAI_VIDEO_ADAPTER: &str = "openai_video";
+const RELAYDANCE_VIDEO_ADAPTER: &str = "relaydance_video";
 
 /// Bounded backoff while polling video tasks.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct OpenAiVideoPollingConfig {
+pub(crate) struct RelaydanceVideoPollingConfig {
     pub(crate) max_attempts: usize,
     pub(crate) delay: Duration,
 }
 
-impl Default for OpenAiVideoPollingConfig {
+impl Default for RelaydanceVideoPollingConfig {
     fn default() -> Self {
         // Video renders take minutes; poll every 3s up to ~10 minutes.
         Self {
@@ -227,14 +230,14 @@ impl Default for OpenAiVideoPollingConfig {
 }
 
 /// Submits and polls OpenAI-compatible video tasks into media jobs.
-pub(crate) struct OpenAiVideoAdapter<T = ReqwestOpenAiVideoTransport> {
+pub(crate) struct RelaydanceVideoAdapter<T = ReqwestRelaydanceVideoTransport> {
     api_token: String,
     submit_url: String,
     provider_id: String,
     transport: T,
 }
 
-impl OpenAiVideoAdapter<ReqwestOpenAiVideoTransport> {
+impl RelaydanceVideoAdapter<ReqwestRelaydanceVideoTransport> {
     /// Creates a production adapter. `submit_url` is the absolute task-creation
     /// URL built by the caller via `provider_execution_url`.
     pub(crate) fn new(
@@ -250,14 +253,14 @@ impl OpenAiVideoAdapter<ReqwestOpenAiVideoTransport> {
             api_token,
             submit_url: submit_url.into().trim_end_matches('/').to_string(),
             provider_id: provider_id.into(),
-            transport: ReqwestOpenAiVideoTransport::default(),
+            transport: ReqwestRelaydanceVideoTransport::default(),
         })
     }
 }
 
-impl<T> OpenAiVideoAdapter<T>
+impl<T> RelaydanceVideoAdapter<T>
 where
-    T: OpenAiVideoTransport,
+    T: RelaydanceVideoTransport,
 {
     #[cfg(test)]
     pub(crate) fn with_transport(
@@ -281,14 +284,16 @@ where
     pub(crate) fn submit(
         &self,
         service: &MediaGenerationService,
-        request: OpenAiVideoRequest,
+        request: RelaydanceVideoRequest,
         selected_parameters: BTreeMap<String, String>,
         now_ms: u64,
     ) -> Result<MediaJob> {
-        let response =
-            self.transport
-                .submit_task(&self.submit_url, &self.api_token, &request.request_body())?;
-        let task = OpenAiVideoTask::from_value(response)?;
+        let response = self.transport.submit_task(
+            &self.submit_url,
+            &self.api_token,
+            &request.request_body(),
+        )?;
+        let task = RelaydanceVideoTask::from_value(response)?;
         let mut job = MediaJob::new(
             Uuid::new_v4().to_string(),
             MediaKind::Video,
@@ -298,7 +303,7 @@ where
             1,
             now_ms,
         );
-        job.adapter = Some(OPENAI_VIDEO_ADAPTER.to_string());
+        job.adapter = Some(RELAYDANCE_VIDEO_ADAPTER.to_string());
         job.parameters = selected_parameters;
         job.provider_job_id = Some(task.id.clone());
         self.apply_task(service, job, task, now_ms)
@@ -334,7 +339,7 @@ where
         }
         let url = self.poll_url(&job)?;
         let response = self.transport.poll_task(&url, &self.api_token)?;
-        let task = OpenAiVideoTask::from_value(response)?;
+        let task = RelaydanceVideoTask::from_value(response)?;
         self.apply_task(service, job, task, now_ms)
     }
 
@@ -343,7 +348,7 @@ where
         &self,
         service: &MediaGenerationService,
         mut job: MediaJob,
-        config: OpenAiVideoPollingConfig,
+        config: RelaydanceVideoPollingConfig,
         mut sleep: impl FnMut(Duration),
         mut now_ms: impl FnMut() -> u64,
     ) -> Result<MediaJob> {
@@ -367,7 +372,7 @@ where
         &self,
         service: &MediaGenerationService,
         mut job: MediaJob,
-        task: OpenAiVideoTask,
+        task: RelaydanceVideoTask,
         now_ms: u64,
     ) -> Result<MediaJob> {
         let status = task.media_status()?;
@@ -396,7 +401,7 @@ where
         &self,
         service: &MediaGenerationService,
         mut job: MediaJob,
-        task: &OpenAiVideoTask,
+        task: &RelaydanceVideoTask,
         now_ms: u64,
     ) -> Result<MediaJob> {
         if !job.artifact_ids.is_empty() {
@@ -470,7 +475,7 @@ mod tests {
         let mut selected = BTreeMap::new();
         selected.insert("resolution".to_string(), "1080p".to_string());
 
-        let request = openai_video_request_from_parameters(
+        let request = relaydance_video_request_from_parameters(
             "m".to_string(),
             "a cat".to_string(),
             &params,
@@ -490,7 +495,7 @@ mod tests {
     #[test]
     fn omits_metadata_when_no_metadata_params() {
         let params = vec![parameter("duration", "seconds", "5")];
-        let request = openai_video_request_from_parameters(
+        let request = relaydance_video_request_from_parameters(
             "m".to_string(),
             "a cat".to_string(),
             &params,
@@ -503,7 +508,7 @@ mod tests {
 
     #[test]
     fn rejects_empty_prompt() {
-        let error = openai_video_request_from_parameters(
+        let error = relaydance_video_request_from_parameters(
             "m".to_string(),
             "   ".to_string(),
             &[],
@@ -521,10 +526,13 @@ mod tests {
             "status": "completed",
             "metadata": { "url": "https://cdn.example.com/v.mp4" }
         });
-        let task = OpenAiVideoTask::from_value(value).expect("task");
+        let task = RelaydanceVideoTask::from_value(value).expect("task");
         assert_eq!(task.id, "vid-1");
         assert_eq!(task.media_status().unwrap(), MediaJobStatus::Succeeded);
-        assert_eq!(task.video_url.as_deref(), Some("https://cdn.example.com/v.mp4"));
+        assert_eq!(
+            task.video_url.as_deref(),
+            Some("https://cdn.example.com/v.mp4")
+        );
     }
 
     #[test]
@@ -534,7 +542,7 @@ mod tests {
             "status": "failed",
             "error": { "code": "x", "message": "content blocked" }
         });
-        let task = OpenAiVideoTask::from_value(value).expect("task");
+        let task = RelaydanceVideoTask::from_value(value).expect("task");
         assert_eq!(task.media_status().unwrap(), MediaJobStatus::Failed);
         assert_eq!(task.error.as_deref(), Some("content blocked"));
     }
@@ -542,7 +550,7 @@ mod tests {
     #[test]
     fn rejects_unknown_status() {
         let value = json!({ "id": "v", "status": "weird" });
-        let task = OpenAiVideoTask::from_value(value).expect("task");
+        let task = RelaydanceVideoTask::from_value(value).expect("task");
         assert!(task
             .media_status()
             .unwrap_err()
@@ -558,7 +566,7 @@ mod tests {
         polls: RefCell<Vec<Value>>,
     }
 
-    impl OpenAiVideoTransport for ScriptedTransport {
+    impl RelaydanceVideoTransport for ScriptedTransport {
         fn submit_task(&self, _url: &str, _token: &str, _body: &Value) -> Result<Value> {
             Ok(self.submit.clone())
         }
@@ -581,14 +589,14 @@ mod tests {
                 json!({ "id": "vid-9", "status": "completed", "metadata": { "url": "https://cdn.example.com/v.mp4" } }),
             ]),
         };
-        let adapter = OpenAiVideoAdapter::with_transport(
+        let adapter = RelaydanceVideoAdapter::with_transport(
             "token",
             "https://relaydance.com/v1/video/generations",
             "relaydance",
             transport,
         );
 
-        let request = OpenAiVideoRequest {
+        let request = RelaydanceVideoRequest {
             model: "m".into(),
             prompt: "a cat".into(),
             params: vec![],
@@ -600,7 +608,7 @@ mod tests {
             .poll_until_terminal(
                 &service,
                 job,
-                OpenAiVideoPollingConfig {
+                RelaydanceVideoPollingConfig {
                     max_attempts: 5,
                     delay: Duration::from_millis(0),
                 },
@@ -615,7 +623,7 @@ mod tests {
 
     #[test]
     fn poll_url_preserves_submit_url_query() {
-        let adapter = OpenAiVideoAdapter::with_transport(
+        let adapter = RelaydanceVideoAdapter::with_transport(
             "token",
             "https://relaydance.com/v1/video/generations?token=x",
             "relaydance",
@@ -644,7 +652,7 @@ mod tests {
     fn submit_persists_selected_parameters() {
         let dir = tempfile::tempdir().unwrap();
         let service = MediaGenerationService::new(dir.path());
-        let adapter = OpenAiVideoAdapter::with_transport(
+        let adapter = RelaydanceVideoAdapter::with_transport(
             "token",
             "https://relaydance.com/v1/video/generations",
             "relaydance",
@@ -653,7 +661,7 @@ mod tests {
                 polls: RefCell::new(vec![]),
             },
         );
-        let request = OpenAiVideoRequest {
+        let request = RelaydanceVideoRequest {
             model: "m".into(),
             prompt: "a cat".into(),
             params: vec![],

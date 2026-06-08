@@ -448,9 +448,15 @@ media:
 }
 
 #[test]
-fn media_execution_kind_parses_openai_video() {
-    let kind: MediaExecutionKind = serde_yaml::from_str("openai_video").expect("parse");
-    assert_eq!(kind, MediaExecutionKind::OpenAiVideo);
+fn media_execution_kind_parses_relaydance_video() {
+    let kind: MediaExecutionKind = serde_yaml::from_str("relaydance_video").expect("parse");
+    assert_eq!(kind, MediaExecutionKind::RelaydanceVideo);
+}
+
+#[test]
+fn media_execution_kind_rejects_openai_video() {
+    let error = serde_yaml::from_str::<MediaExecutionKind>("openai_video").unwrap_err();
+    assert!(error.to_string().contains("unknown variant"));
 }
 
 #[test]

@@ -223,7 +223,7 @@ mod tests {
             provider_id: "relaydance".to_string(),
             model_id: "doubao-seedance-2-0-720p".to_string(),
             operation: "generate".to_string(),
-            adapter: "openai_video".to_string(),
+            adapter: "relaydance_video".to_string(),
             parameters: BTreeMap::from([
                 ("duration".to_string(), "5".to_string()),
                 ("ratio".to_string(), "16:9".to_string()),
@@ -270,7 +270,7 @@ mod tests {
                 video: Some(MediaKindDescriptor {
                     discovery: None,
                     execution: Some(MediaExecutionDescriptor {
-                        adapter: MediaExecutionKind::OpenAiVideo,
+                        adapter: MediaExecutionKind::RelaydanceVideo,
                         base_url: None,
                         path: "/v1/video/generations".to_string(),
                         batch: puffer_provider_registry::MediaBatchDescriptor::default(),
@@ -380,7 +380,7 @@ mod tests {
         )
     }
 
-    fn spawn_openai_video_server() -> (String, thread::JoinHandle<Vec<String>>) {
+    fn spawn_relaydance_video_server() -> (String, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
         let base_url = format!("http://{address}");
@@ -512,7 +512,7 @@ mod tests {
 
         assert_eq!(request.provider, "relaydance");
         assert_eq!(request.model, "doubao-seedance-2-0-720p");
-        assert_eq!(request.adapter, "openai_video");
+        assert_eq!(request.adapter, "relaydance_video");
         assert_eq!(request.parameters["duration"], "5");
         assert_eq!(request.parameters["ratio"], "9:16");
         assert_eq!(request.parameters["resolution"], "1080p");
@@ -521,7 +521,7 @@ mod tests {
 
     #[test]
     fn execute_uses_exact_video_generation_and_returns_artifacts() {
-        let (base_url, server) = spawn_openai_video_server();
+        let (base_url, server) = spawn_relaydance_video_server();
         let dir = tempdir().unwrap();
         let registry = video_registry(base_url);
         let auth_store = auth_store();
@@ -574,7 +574,7 @@ mod tests {
 
     #[test]
     fn dispatcher_passes_media_context_to_video_generation_tool() {
-        let (base_url, server) = spawn_openai_video_server();
+        let (base_url, server) = spawn_relaydance_video_server();
         let dir = tempdir().unwrap();
         let registry = video_registry(base_url);
         let auth_store = auth_store();

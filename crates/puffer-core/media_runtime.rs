@@ -8,8 +8,8 @@ use crate::runtime::media::http_support::{
 };
 use crate::runtime::media::images_json::{ImagesJsonAdapter, ImagesJsonGenerationRequest};
 use crate::runtime::media::minimax_image::{MinimaxImageAdapter, MinimaxImageGenerationRequest};
-use crate::runtime::media::openai_video::{
-    openai_video_request_from_parameters, OpenAiVideoAdapter, OpenAiVideoPollingConfig,
+use crate::runtime::media::relaydance_video::{
+    relaydance_video_request_from_parameters, RelaydanceVideoAdapter, RelaydanceVideoPollingConfig,
 };
 use crate::runtime::media::replicate_video::{
     ReplicatePollingConfig, ReplicateVideoAdapter, ReplicateVideoRequest,
@@ -704,7 +704,7 @@ fn generate_exact_video_from_media_request(
             let artifacts = load_media_job_artifacts(&service, &job)?;
             Ok(exact_media_generation_result(job, artifacts))
         }
-        "openai_video" => {
+        "relaydance_video" => {
             let (provider, execution) = resolve_video_execution_descriptor(
                 registry,
                 &request.provider_id,
@@ -716,7 +716,7 @@ fn generate_exact_video_from_media_request(
             let secrets = provider_error_secrets(provider, auth_store, CredentialAliasMode::Strict);
             let submit_url = provider_execution_url(provider, &execution, "video task")?;
             let service = MediaGenerationService::new(workspace_root);
-            let adapter = OpenAiVideoAdapter::new(
+            let adapter = RelaydanceVideoAdapter::new(
                 api_key,
                 submit_url.to_string(),
                 request.provider_id.clone(),
@@ -724,7 +724,7 @@ fn generate_exact_video_from_media_request(
             let job = adapter
                 .submit(
                     &service,
-                    openai_video_request_from_parameters(
+                    relaydance_video_request_from_parameters(
                         request.model_id.clone(),
                         request.prompt.clone(),
                         &capability.parameters,
@@ -738,7 +738,7 @@ fn generate_exact_video_from_media_request(
                 .poll_until_terminal(
                     &service,
                     job,
-                    OpenAiVideoPollingConfig::default(),
+                    RelaydanceVideoPollingConfig::default(),
                     std::thread::sleep,
                     now_ms,
                 )

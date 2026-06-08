@@ -420,8 +420,7 @@ pub enum MediaExecutionKind {
     ChatImageOutput,
     MinimaxImage,
     ReplicateVideo,
-    #[serde(rename = "openai_video")]
-    OpenAiVideo,
+    RelaydanceVideo,
 }
 
 /// Describes image media operations.

@@ -369,7 +369,7 @@ fn execution_adapter_is_available_for_kind(kind: MediaKind, adapter: MediaExecut
             | (MediaKind::Image, MediaExecutionKind::ChatImageOutput)
             | (MediaKind::Image, MediaExecutionKind::MinimaxImage)
             | (MediaKind::Video, MediaExecutionKind::ReplicateVideo)
-            | (MediaKind::Video, MediaExecutionKind::OpenAiVideo)
+            | (MediaKind::Video, MediaExecutionKind::RelaydanceVideo)
     )
 }
 
@@ -447,7 +447,7 @@ pub(crate) fn adapter_id(adapter: MediaExecutionKind) -> &'static str {
         MediaExecutionKind::ChatImageOutput => "chat_image_output",
         MediaExecutionKind::MinimaxImage => "minimax_image",
         MediaExecutionKind::ReplicateVideo => "replicate_video",
-        MediaExecutionKind::OpenAiVideo => "openai_video",
+        MediaExecutionKind::RelaydanceVideo => "relaydance_video",
     }
 }
 
@@ -655,10 +655,10 @@ mod tests {
     }
 
     #[test]
-    fn openai_video_execution_adapter_is_available() {
+    fn relaydance_video_execution_adapter_is_available() {
         assert!(execution_adapter_is_available_for_kind(
             MediaKind::Video,
-            MediaExecutionKind::OpenAiVideo
+            MediaExecutionKind::RelaydanceVideo
         ));
     }
 
@@ -699,7 +699,7 @@ mod tests {
             "relaydance",
             vec![AuthMode::ApiKey],
             Some(video_media_with_adapter(
-                MediaExecutionKind::OpenAiVideo,
+                MediaExecutionKind::RelaydanceVideo,
                 "doubao-seedance-2-0-720p",
             )),
         )]);
@@ -715,19 +715,19 @@ mod tests {
 
         assert_eq!(capabilities.len(), 1);
         assert_eq!(capabilities[0].provider_id, "relaydance");
-        assert_eq!(capabilities[0].adapter, "openai_video");
+        assert_eq!(capabilities[0].adapter, "relaydance_video");
         assert_eq!(capabilities[0].status, "unavailable");
         assert_eq!(capabilities[0].reason.as_deref(), Some("missing_auth"));
         assert_eq!(capabilities[0].defaults["duration"], "5");
     }
 
     #[test]
-    fn connected_openai_video_descriptor_is_available() {
+    fn connected_relaydance_video_descriptor_is_available() {
         let registry = registry_with(vec![provider(
             "relaydance",
             vec![AuthMode::ApiKey],
             Some(video_media_with_adapter(
-                MediaExecutionKind::OpenAiVideo,
+                MediaExecutionKind::RelaydanceVideo,
                 "doubao-seedance-2-0-720p",
             )),
         )]);
@@ -752,7 +752,7 @@ mod tests {
             "relaydance",
             vec![AuthMode::ApiKey],
             Some(video_media_with_adapter(
-                MediaExecutionKind::OpenAiVideo,
+                MediaExecutionKind::RelaydanceVideo,
                 "doubao-seedance-2-0-720p",
             )),
         )]);
@@ -766,7 +766,7 @@ mod tests {
                 provider_id: "relaydance",
                 model_id: "doubao-seedance-2-0-720p",
                 operation: MediaOperation::Generate,
-                adapter: "openai_video",
+                adapter: "relaydance_video",
                 parameters: &selected,
             },
             42,
@@ -777,7 +777,7 @@ mod tests {
 
         assert!(
             error.contains(
-                "selected video model unavailable: relaydance/doubao-seedance-2-0-720p via openai_video"
+                "selected video model unavailable: relaydance/doubao-seedance-2-0-720p via relaydance_video"
             ),
             "{error}"
         );
