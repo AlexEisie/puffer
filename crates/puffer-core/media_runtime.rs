@@ -3,7 +3,8 @@ use crate::runtime::media::chat_image_output::{
 };
 use crate::runtime::media::discovery::TrustedImageDiscoveryClient;
 use crate::runtime::media::http_support::{
-    bearer_token, provider_execution_url, CredentialAliasMode,
+    bearer_token, provider_error_secrets, provider_execution_url, redact_secrets,
+    CredentialAliasMode,
 };
 use crate::runtime::media::images_json::{ImagesJsonAdapter, ImagesJsonGenerationRequest};
 use crate::runtime::media::minimax_image::{MinimaxImageAdapter, MinimaxImageGenerationRequest};
@@ -20,7 +21,7 @@ use crate::runtime::media::resolver::{
 use crate::runtime::media::{
     MediaArtifact, MediaGenerationService, MediaJob, MediaJobStatus, MediaKind,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use puffer_provider_registry::{AuthStore, MediaOperation, ProviderRegistry};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -712,6 +713,7 @@ fn generate_exact_video_from_media_request(
             )?;
             let api_key = bearer_token(provider, auth_store, CredentialAliasMode::Strict)?
                 .context("Relaydance API key is required")?;
+            let secrets = provider_error_secrets(provider, auth_store, CredentialAliasMode::Strict);
             let submit_url = provider_execution_url(provider, &execution, "video task")?;
             let service = MediaGenerationService::new(workspace_root);
             let adapter = OpenAiVideoAdapter::new(
@@ -719,23 +721,28 @@ fn generate_exact_video_from_media_request(
                 submit_url.to_string(),
                 request.provider_id.clone(),
             )?;
-            let job = adapter.submit(
-                &service,
-                openai_video_request_from_parameters(
-                    request.model_id.clone(),
-                    request.prompt.clone(),
-                    &capability.parameters,
-                    &parameters,
-                )?,
-                now_ms(),
-            )?;
-            let job = adapter.poll_until_terminal(
-                &service,
-                job,
-                OpenAiVideoPollingConfig::default(),
-                std::thread::sleep,
-                now_ms,
-            )?;
+            let job = adapter
+                .submit(
+                    &service,
+                    openai_video_request_from_parameters(
+                        request.model_id.clone(),
+                        request.prompt.clone(),
+                        &capability.parameters,
+                        &parameters,
+                    )?,
+                    parameters.clone(),
+                    now_ms(),
+                )
+                .map_err(|error| anyhow!("{}", redact_secrets(&error.to_string(), &secrets)))?;
+            let job = adapter
+                .poll_until_terminal(
+                    &service,
+                    job,
+                    OpenAiVideoPollingConfig::default(),
+                    std::thread::sleep,
+                    now_ms,
+                )
+                .map_err(|error| anyhow!("{}", redact_secrets(&error.to_string(), &secrets)))?;
             let artifacts = load_media_job_artifacts(&service, &job)?;
             Ok(exact_media_generation_result(job, artifacts))
         }

@@ -1,5 +1,5 @@
 use super::capabilities::MediaCapabilityParameter;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
@@ -159,11 +159,15 @@ impl OpenAiVideoTask {
         let id = value
             .get("id")
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
             .context("video task response missing `id`")?
             .to_string();
         let status = value
             .get("status")
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
             .context("video task response missing `status`")?
             .to_string();
         let video_url = value
@@ -271,10 +275,14 @@ where
     }
 
     /// Submits a task and persists the queued job (task id in `provider_job_id`).
+    ///
+    /// `selected_parameters` are the user-facing name->value pairs (display
+    /// parity with `replicate_video`, so duration/resolution/ratio show in UI).
     pub(crate) fn submit(
         &self,
         service: &MediaGenerationService,
         request: OpenAiVideoRequest,
+        selected_parameters: BTreeMap<String, String>,
         now_ms: u64,
     ) -> Result<MediaJob> {
         let response =
@@ -291,6 +299,7 @@ where
             now_ms,
         );
         job.adapter = Some(OPENAI_VIDEO_ADAPTER.to_string());
+        job.parameters = selected_parameters;
         job.provider_job_id = Some(task.id.clone());
         self.apply_task(service, job, task, now_ms)
     }
@@ -300,7 +309,17 @@ where
             .provider_job_id
             .as_ref()
             .context("video job is missing a task id")?;
-        Ok(format!("{}/{id}", self.submit_url))
+        // Append `/{id}` to the URL PATH, preserving any query string the
+        // submit URL carries (e.g. `provider_execution_url` query_params).
+        let mut url =
+            reqwest::Url::parse(&self.submit_url).context("video submit URL must be absolute")?;
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|_| anyhow!("video submit URL cannot be a base"))?;
+            segments.push(id);
+        }
+        Ok(url.to_string())
     }
 
     /// Polls a non-terminal job once and persists the resulting state.
@@ -351,9 +370,10 @@ where
         task: OpenAiVideoTask,
         now_ms: u64,
     ) -> Result<MediaJob> {
-        match task.media_status()? {
+        let status = task.media_status()?;
+        match status {
             MediaJobStatus::Queued | MediaJobStatus::Running => {
-                job.transition(task.media_status()?, now_ms)?;
+                job.transition(status, now_ms)?;
                 service.save_job(&job)?;
                 Ok(job)
             }
@@ -573,7 +593,9 @@ mod tests {
             prompt: "a cat".into(),
             params: vec![],
         };
-        let job = adapter.submit(&service, request, 1).expect("submit");
+        let job = adapter
+            .submit(&service, request, BTreeMap::new(), 1)
+            .expect("submit");
         let job = adapter
             .poll_until_terminal(
                 &service,
@@ -589,5 +611,60 @@ mod tests {
 
         assert_eq!(job.status, MediaJobStatus::Succeeded);
         assert_eq!(job.artifact_ids.len(), 1);
+    }
+
+    #[test]
+    fn poll_url_preserves_submit_url_query() {
+        let adapter = OpenAiVideoAdapter::with_transport(
+            "token",
+            "https://relaydance.com/v1/video/generations?token=x",
+            "relaydance",
+            ScriptedTransport {
+                submit: json!({}),
+                polls: RefCell::new(vec![]),
+            },
+        );
+        let mut job = MediaJob::new(
+            "job-1".to_string(),
+            MediaKind::Video,
+            "relaydance",
+            "m",
+            "a cat",
+            1,
+            1,
+        );
+        job.provider_job_id = Some("vid-9".to_string());
+        assert_eq!(
+            adapter.poll_url(&job).expect("poll url"),
+            "https://relaydance.com/v1/video/generations/vid-9?token=x"
+        );
+    }
+
+    #[test]
+    fn submit_persists_selected_parameters() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = MediaGenerationService::new(dir.path());
+        let adapter = OpenAiVideoAdapter::with_transport(
+            "token",
+            "https://relaydance.com/v1/video/generations",
+            "relaydance",
+            ScriptedTransport {
+                submit: json!({ "id": "vid-9", "status": "queued" }),
+                polls: RefCell::new(vec![]),
+            },
+        );
+        let request = OpenAiVideoRequest {
+            model: "m".into(),
+            prompt: "a cat".into(),
+            params: vec![],
+        };
+        let selected = BTreeMap::from([
+            ("duration".to_string(), "5".to_string()),
+            ("resolution".to_string(), "1080p".to_string()),
+        ]);
+        let job = adapter
+            .submit(&service, request, selected.clone(), 1)
+            .expect("submit");
+        assert_eq!(job.parameters, selected);
     }
 }
