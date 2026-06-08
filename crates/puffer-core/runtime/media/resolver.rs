@@ -164,6 +164,36 @@ pub(crate) fn resolve_image_execution_descriptor<'a>(
     Ok((provider, execution.clone()))
 }
 
+/// Resolves the provider and execution descriptor for a validated exact video selection.
+pub(crate) fn resolve_video_execution_descriptor<'a>(
+    registry: &'a ProviderRegistry,
+    provider_id: &str,
+    model_id: &str,
+    adapter: &str,
+) -> Result<(&'a ProviderDescriptor, MediaExecutionDescriptor)> {
+    let unavailable =
+        || format!("selected video model unavailable: {provider_id}/{model_id} via {adapter}");
+    let provider = registry.provider(provider_id).with_context(unavailable)?;
+    let video = provider
+        .media
+        .as_ref()
+        .and_then(|media| media.video.as_ref())
+        .with_context(unavailable)?;
+    let model = video
+        .models
+        .iter()
+        .find(|model| model.id == model_id)
+        .with_context(unavailable)?;
+    let execution = image_execution(video.execution.as_ref(), model).with_context(unavailable)?;
+    if !execution_adapter_is_available_for_kind(MediaKind::Video, execution.adapter)
+        || adapter_id(execution.adapter) != adapter
+    {
+        bail!("video media adapter unavailable for {adapter}");
+    }
+
+    Ok((provider, execution.clone()))
+}
+
 fn resolve_image_capabilities(
     registry: &ProviderRegistry,
     auth_store: &AuthStore,
@@ -305,6 +335,7 @@ fn execution_adapter_is_available_for_kind(kind: MediaKind, adapter: MediaExecut
             | (MediaKind::Image, MediaExecutionKind::ChatImageOutput)
             | (MediaKind::Image, MediaExecutionKind::MinimaxImage)
             | (MediaKind::Video, MediaExecutionKind::ReplicateVideo)
+            | (MediaKind::Video, MediaExecutionKind::OpenAiVideo)
     )
 }
 
@@ -382,6 +413,7 @@ pub(crate) fn adapter_id(adapter: MediaExecutionKind) -> &'static str {
         MediaExecutionKind::ChatImageOutput => "chat_image_output",
         MediaExecutionKind::MinimaxImage => "minimax_image",
         MediaExecutionKind::ReplicateVideo => "replicate_video",
+        MediaExecutionKind::OpenAiVideo => "openai_video",
     }
 }
 
@@ -586,6 +618,14 @@ mod tests {
             capabilities[0].defaults.get("duration"),
             Some(&"5".to_string())
         );
+    }
+
+    #[test]
+    fn openai_video_execution_adapter_is_available() {
+        assert!(execution_adapter_is_available_for_kind(
+            MediaKind::Video,
+            MediaExecutionKind::OpenAiVideo
+        ));
     }
 
     #[test]
