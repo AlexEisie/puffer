@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import type { MessageAttachment } from "../../types";
-import { imageOverlayAction } from "./imageOverlayAction";
+import { attachmentOverlayAction } from "./attachmentOverlayAction";
 
 function attachment(overrides: Partial<MessageAttachment>): MessageAttachment {
   return {
@@ -17,7 +17,7 @@ function attachment(overrides: Partial<MessageAttachment>): MessageAttachment {
 }
 
 test("returns open folder for local image files", () => {
-  expect(imageOverlayAction(attachment({}))).toEqual({
+  expect(attachmentOverlayAction(attachment({}))).toEqual({
     kind: "open_folder",
     path: "/tmp/puffer/pixel.png"
   });
@@ -25,7 +25,7 @@ test("returns open folder for local image files", () => {
 
 test("returns download for remote URL image files", () => {
   expect(
-    imageOverlayAction(
+    attachmentOverlayAction(
       attachment({
         source: { kind: "remote_url", url: "https://example.test/pixel.png" },
         previewUrl: "https://example.test/preview.png"
@@ -40,7 +40,7 @@ test("returns download for remote URL image files", () => {
 
 test("returns open folder for generated media with a local path", () => {
   expect(
-    imageOverlayAction(
+    attachmentOverlayAction(
       attachment({
         source: {
           kind: "generated_media",
@@ -59,7 +59,7 @@ test("returns open folder for generated media with a local path", () => {
 
 test("returns open folder for generated video with a local path", () => {
   expect(
-    imageOverlayAction({
+    attachmentOverlayAction({
       id: "generated-video:artifact-1",
       name: "Generated video",
       mimeType: "video/mp4",
@@ -83,7 +83,7 @@ test("returns open folder for generated video with a local path", () => {
 
 test("returns null for generated media without a local path even when it has a preview URL", () => {
   expect(
-    imageOverlayAction(
+    attachmentOverlayAction(
       attachment({
         source: {
           kind: "generated_media",
@@ -97,10 +97,25 @@ test("returns null for generated media without a local path even when it has a p
   ).toBeNull();
 });
 
-test("returns null for non-image attachments", () => {
+test("returns open folder for local non-image files", () => {
   expect(
-    imageOverlayAction(
+    attachmentOverlayAction(
       attachment({
+        name: "report.pdf",
+        kind: "file",
+        mimeType: "application/pdf",
+        extension: "PDF",
+        source: { kind: "local_file", path: "/tmp/puffer/report.pdf" }
+      })
+    )
+  ).toEqual({ kind: "open_folder", path: "/tmp/puffer/report.pdf" });
+});
+
+test("returns null for remote-only files with no local path", () => {
+  expect(
+    attachmentOverlayAction(
+      attachment({
+        name: "report.pdf",
         kind: "file",
         mimeType: "application/pdf",
         extension: "PDF",
