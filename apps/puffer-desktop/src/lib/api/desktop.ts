@@ -2488,15 +2488,15 @@ export async function readGeneratedMediaPreview(
   });
 }
 
-export async function createGeneratedVideoAccess(
-  sessionId: string,
-  artifactId: string
+/** Issue a media-access RPC and rewrite the daemon's ticket path into an HTTP
+ *  URL. Shared by every media-access endpoint: they return the same shape and
+ *  differ only by method name and params. */
+async function requestMediaAccess(
+  method: string,
+  params: Record<string, unknown>
 ): Promise<GeneratedVideoAccessResult> {
   const client = await ensureLocalDaemonClient();
-  const result = await client.request<BackendGeneratedVideoAccessResult>(
-    "create_generated_video_access",
-    { sessionId, artifactId }
-  );
+  const result = await client.request<BackendGeneratedVideoAccessResult>(method, params);
   if (result.state !== "available") return result;
   return {
     state: "available",
@@ -2507,29 +2507,21 @@ export async function createGeneratedVideoAccess(
   };
 }
 
-export type FileMediaAccessResult =
-  | { state: "available"; url: string; mimeType: string; size: number; expiresAtMs: number }
-  | { state: "missing" }
-  | { state: "unsupported" };
+export async function createGeneratedVideoAccess(
+  sessionId: string,
+  artifactId: string
+): Promise<GeneratedVideoAccessResult> {
+  return requestMediaAccess("create_generated_video_access", { sessionId, artifactId });
+}
+
+export type FileMediaAccessResult = GeneratedVideoAccessResult;
 
 /** Mint a streaming access URL for an in-workspace media file (e.g. video).
  *  The daemon validates the path against its allowed roots and serves the file
  *  with HTTP Range support, so the <video> element can seek without loading the
  *  whole file. */
 export async function createFileMediaAccess(path: string): Promise<FileMediaAccessResult> {
-  const client = await ensureLocalDaemonClient();
-  const result = await client.request<BackendGeneratedVideoAccessResult>(
-    "create_file_media_access",
-    { path }
-  );
-  if (result.state !== "available") return result;
-  return {
-    state: "available",
-    url: client.httpUrl(result.path),
-    mimeType: result.mimeType,
-    size: result.size,
-    expiresAtMs: result.expiresAtMs
-  };
+  return requestMediaAccess("create_file_media_access", { path });
 }
 
 export async function readMessageAttachmentPreview(

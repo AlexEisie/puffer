@@ -2533,6 +2533,23 @@ fn handle_read_generated_media_preview(state: &DaemonState, params: &Value) -> R
     Ok(serde_json::to_value(result)?)
 }
 
+/// Insert a streaming ticket for `metadata` and render the `available` JSON
+/// response shared by `create_generated_video_access` and
+/// `create_file_media_access` (both mint tickets for the same range handler).
+fn generated_video_ticket_response(
+    state: &DaemonState,
+    metadata: puffer_core::GeneratedVideoAccessMetadata,
+) -> Value {
+    let (token, ticket) = state.insert_generated_video_ticket(metadata);
+    json!({
+        "state": "available",
+        "path": generated_video_ticket_path(&token),
+        "mimeType": ticket.mime_type,
+        "size": ticket.size,
+        "expiresAtMs": ticket.expires_at_ms
+    })
+}
+
 fn handle_create_generated_video_access(state: &DaemonState, params: &Value) -> Result<Value> {
     let input: GeneratedVideoAccessParams =
         serde_json::from_value(params.clone()).context("invalid generated video access params")?;
@@ -2546,14 +2563,7 @@ fn handle_create_generated_video_access(state: &DaemonState, params: &Value) -> 
             GeneratedVideoAccessMetadataResult::Available(_) => unreachable!(),
         });
     };
-    let (token, ticket) = state.insert_generated_video_ticket(metadata);
-    Ok(json!({
-        "state": "available",
-        "path": generated_video_ticket_path(&token),
-        "mimeType": ticket.mime_type,
-        "size": ticket.size,
-        "expiresAtMs": ticket.expires_at_ms
-    }))
+    Ok(generated_video_ticket_response(state, metadata))
 }
 
 fn handle_create_file_media_access(state: &DaemonState, params: &Value) -> Result<Value> {
@@ -2575,20 +2585,14 @@ fn handle_create_file_media_access(state: &DaemonState, params: &Value) -> Resul
     let Some(mime_type) = file_media_mime_type(&canonical) else {
         return Ok(json!({ "state": "unsupported" }));
     };
-    let (token, ticket) = state.insert_generated_video_ticket(
+    Ok(generated_video_ticket_response(
+        state,
         puffer_core::GeneratedVideoAccessMetadata {
             path: canonical,
             mime_type: mime_type.to_string(),
             byte_count: metadata.len(),
         },
-    );
-    Ok(json!({
-        "state": "available",
-        "path": generated_video_ticket_path(&token),
-        "mimeType": ticket.mime_type,
-        "size": ticket.size,
-        "expiresAtMs": ticket.expires_at_ms
-    }))
+    ))
 }
 
 const DEFAULT_REALTIME_MODEL: &str = "gpt-realtime-2";

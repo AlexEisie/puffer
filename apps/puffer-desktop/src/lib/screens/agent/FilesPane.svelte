@@ -1548,6 +1548,8 @@
           </div>
         {:else if activePreview && activePreview.kind === "video"}
           <div class="file-preview video-preview" aria-label="Video preview">
+            <!-- svelte-ignore a11y_media_has_caption -->
+            <!-- Arbitrary workspace videos have no caption track to attach. -->
             <video
               src={activePreview.src}
               controls
