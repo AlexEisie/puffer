@@ -2507,6 +2507,31 @@ export async function createGeneratedVideoAccess(
   };
 }
 
+export type FileMediaAccessResult =
+  | { state: "available"; url: string; mimeType: string; size: number; expiresAtMs: number }
+  | { state: "missing" }
+  | { state: "unsupported" };
+
+/** Mint a streaming access URL for an in-workspace media file (e.g. video).
+ *  The daemon validates the path against its allowed roots and serves the file
+ *  with HTTP Range support, so the <video> element can seek without loading the
+ *  whole file. */
+export async function createFileMediaAccess(path: string): Promise<FileMediaAccessResult> {
+  const client = await ensureLocalDaemonClient();
+  const result = await client.request<BackendGeneratedVideoAccessResult>(
+    "create_file_media_access",
+    { path }
+  );
+  if (result.state !== "available") return result;
+  return {
+    state: "available",
+    url: client.httpUrl(result.path),
+    mimeType: result.mimeType,
+    size: result.size,
+    expiresAtMs: result.expiresAtMs
+  };
+}
+
 export async function readMessageAttachmentPreview(
   sessionId: string,
   attachment: MessageAttachment
