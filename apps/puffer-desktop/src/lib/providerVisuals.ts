@@ -30,7 +30,9 @@ const PROVIDER_ACCENTS: Record<string, string> = {
   vllm: "#16a34a",
   worldrouter: "#2563eb",
   xai: "#0f172a",
-  zhipu: "#2563eb"
+  zhipu: "#2563eb",
+  byteplus: "#1664ff",
+  relaydance: "#7c3aed"
 };
 
 const PROVIDER_ICONS: Record<string, string> = {
@@ -56,7 +58,9 @@ const PROVIDER_ICONS: Record<string, string> = {
   vllm: "vllm",
   worldrouter: "worldrouter",
   xai: "xai",
-  zhipu: "zhipu"
+  zhipu: "zhipu",
+  byteplus: "byteplus",
+  relaydance: "relaydance"
 };
 
 /** Returns the visual treatment for one provider card. */
