@@ -54,6 +54,17 @@ impl MediaGenerationService {
         Ok(self.images_dir().join(artifact_id).join(filename))
     }
 
+    /// Resolves a safe generated-video file path below the service video directory.
+    pub(crate) fn video_artifact_file_path(
+        &self,
+        artifact_id: &str,
+        filename: &str,
+    ) -> Result<PathBuf> {
+        validate_simple_id(artifact_id, "artifact id")?;
+        validate_artifact_filename(filename)?;
+        Ok(self.videos_dir().join(artifact_id).join(filename))
+    }
+
     /// Writes generated artifact bytes to a safe artifact path.
     pub(crate) fn write_artifact_bytes(
         &self,
@@ -74,6 +85,18 @@ impl MediaGenerationService {
         bytes: &[u8],
     ) -> Result<PathBuf> {
         let path = self.image_artifact_file_path(artifact_id, filename)?;
+        write_media_bytes(&path, bytes)?;
+        Ok(path)
+    }
+
+    /// Writes generated video bytes to a safe video artifact path.
+    pub(crate) fn write_video_artifact_bytes(
+        &self,
+        artifact_id: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) -> Result<PathBuf> {
+        let path = self.video_artifact_file_path(artifact_id, filename)?;
         write_media_bytes(&path, bytes)?;
         Ok(path)
     }
@@ -114,6 +137,10 @@ impl MediaGenerationService {
 
     fn images_dir(&self) -> PathBuf {
         self.media_dir().join("images")
+    }
+
+    fn videos_dir(&self) -> PathBuf {
+        self.media_dir().join("videos")
     }
 
     fn artifact_sidecars_dir(&self) -> PathBuf {
@@ -248,6 +275,22 @@ mod tests {
 
         let error = service
             .image_artifact_file_path("artifact-1", "../escape.png")
+            .unwrap_err();
+        assert!(error.to_string().contains("artifact filename"));
+    }
+
+    #[test]
+    fn media_video_paths_must_stay_under_video_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = MediaGenerationService::new(temp.path());
+
+        let path = service
+            .video_artifact_file_path("artifact-1", "video.mp4")
+            .unwrap();
+        assert!(path.starts_with(temp.path().join(".puffer/media/videos")));
+
+        let error = service
+            .video_artifact_file_path("artifact-1", "../escape.mp4")
             .unwrap_err();
         assert!(error.to_string().contains("artifact filename"));
     }

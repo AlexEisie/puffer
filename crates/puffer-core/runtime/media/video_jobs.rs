@@ -107,7 +107,7 @@ pub(crate) fn complete_video_job(
         }
     };
     let artifact_id = Uuid::new_v4().to_string();
-    let path = service.write_artifact_bytes(
+    let path = service.write_video_artifact_bytes(
         &artifact_id,
         &format!("{}-{artifact_id}.mp4", task.filename_prefix),
         &bytes,

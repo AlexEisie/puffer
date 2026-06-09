@@ -695,6 +695,8 @@ mod tests {
 
         assert_eq!(job.status, MediaJobStatus::Succeeded);
         assert_eq!(job.artifact_ids.len(), 1);
+        let artifact = service.load_artifact(&job.artifact_ids[0]).unwrap();
+        assert!(artifact.path.starts_with(dir.path().join(".puffer/media/videos")));
     }
 
     #[test]

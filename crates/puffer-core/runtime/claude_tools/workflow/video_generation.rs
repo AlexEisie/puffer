@@ -569,7 +569,8 @@ mod tests {
         assert_eq!(artifacts[0]["mimeType"], "video/mp4");
         assert_eq!(artifacts[0]["size"], 9);
         let artifact_path = std::path::PathBuf::from(artifacts[0]["path"].as_str().unwrap());
-        assert_eq!(std::fs::read(artifact_path).unwrap(), b"mp4-bytes");
+        assert_eq!(std::fs::read(&artifact_path).unwrap(), b"mp4-bytes");
+        assert!(artifact_path.starts_with(dir.path().join(".puffer/media/videos")));
     }
 
     #[test]

@@ -385,7 +385,7 @@ where
             }
         };
         let artifact_id = Uuid::new_v4().to_string();
-        let path = service.write_artifact_bytes(
+        let path = service.write_video_artifact_bytes(
             &artifact_id,
             &format!("replicate-video-{artifact_id}.mp4"),
             &bytes,
@@ -691,7 +691,8 @@ mod tests {
         assert_eq!(completed.artifact_ids.len(), 1);
         let artifact = service.load_artifact(&completed.artifact_ids[0]).unwrap();
         assert_eq!(artifact.mime_type, "video/mp4");
-        assert_eq!(std::fs::read(artifact.path).unwrap(), b"mp4-bytes");
+        assert!(artifact.path.starts_with(temp.path().join(".puffer/media/videos")));
+        assert_eq!(std::fs::read(&artifact.path).unwrap(), b"mp4-bytes");
     }
 
     #[test]
@@ -723,7 +724,8 @@ mod tests {
         assert_eq!(completed.artifact_ids.len(), 1);
         let artifact = service.load_artifact(&completed.artifact_ids[0]).unwrap();
         assert_eq!(artifact.mime_type, "video/mp4");
-        assert_eq!(std::fs::read(artifact.path).unwrap(), b"mp4-bytes");
+        assert!(artifact.path.starts_with(temp.path().join(".puffer/media/videos")));
+        assert_eq!(std::fs::read(&artifact.path).unwrap(), b"mp4-bytes");
     }
 
     #[test]

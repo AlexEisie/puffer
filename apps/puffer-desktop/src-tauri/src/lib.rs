@@ -60,6 +60,7 @@ const REGISTERED_TAURI_COMMANDS: &[&str] = &[
     "resolve_user_question",
     "cancel_turn",
     "open_image_dir",
+    "open_video_dir",
     "summon_mini_window",
     "minicpm5_recommend",
     "minicpm5_install",
@@ -444,6 +445,24 @@ fn image_dir_for_cwd(cwd: &Path) -> Result<PathBuf, String> {
     Ok(cwd.join(".puffer").join("media").join("images"))
 }
 
+#[tauri::command]
+fn open_video_dir(app: AppHandle, cwd: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let dir = video_dir_for_cwd(Path::new(&cwd))?;
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    app.opener()
+        .open_path(dir.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|error| error.to_string())
+}
+
+fn video_dir_for_cwd(cwd: &Path) -> Result<PathBuf, String> {
+    if !cwd.is_absolute() {
+        return Err("cwd must be absolute".to_string());
+    }
+    Ok(cwd.join(".puffer").join("media").join("videos"))
+}
+
 pub fn run() {
     let backend = Arc::new(BackendState::new());
     let launcher = Arc::new(DaemonLauncher::new());
@@ -510,6 +529,7 @@ pub fn run() {
             resolve_user_question,
             cancel_turn,
             open_image_dir,
+            open_video_dir,
             mini_window::summon_mini_window,
             minicpm5::minicpm5_recommend,
             minicpm5::minicpm5_install,
@@ -607,6 +627,16 @@ mod tests {
         assert_eq!(
             dir,
             std::path::PathBuf::from("/tmp/puffer/.puffer/media/images")
+        );
+    }
+
+    #[test]
+    fn video_dir_for_cwd_uses_media_videos_directory() {
+        let dir = super::video_dir_for_cwd(std::path::Path::new("/tmp/puffer")).unwrap();
+
+        assert_eq!(
+            dir,
+            std::path::PathBuf::from("/tmp/puffer/.puffer/media/videos")
         );
     }
 

@@ -204,7 +204,38 @@ fn generated_media_preview_by_artifact_sniffs_mime_when_extension_lies() {
 }
 
 #[test]
-fn generated_video_access_metadata_accepts_video_under_artifact_root() {
+fn generated_video_access_metadata_accepts_video_under_video_root() {
+    let workspace = tempdir().unwrap();
+    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let video_path = service
+        .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
+        .unwrap();
+    service
+        .save_artifact(&crate::runtime::media::MediaArtifact {
+            id: "artifact-video-1".to_string(),
+            job_id: "job-video-1".to_string(),
+            kind: crate::runtime::media::MediaKind::Video,
+            path: video_path.clone(),
+            mime_type: "video/mp4".to_string(),
+            byte_count: 9,
+            metadata: serde_json::json!({}),
+            created_at_ms: 1,
+        })
+        .unwrap();
+
+    let result =
+        generated_video_access_metadata_by_artifact(workspace.path(), "artifact-video-1");
+
+    let GeneratedVideoAccessMetadataResult::Available(metadata) = result else {
+        panic!("expected available video metadata");
+    };
+    assert_eq!(metadata.mime_type, "video/mp4");
+    assert_eq!(metadata.byte_count, 9);
+    assert_eq!(metadata.path, video_path.canonicalize().unwrap());
+}
+
+#[test]
+fn generated_video_access_metadata_accepts_legacy_video_under_artifact_root() {
     let workspace = tempdir().unwrap();
     let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
     let video_path = service
@@ -266,9 +297,7 @@ fn generated_video_access_metadata_rejects_symlink_escape() {
     let outside = tempdir().unwrap();
     let outside_video = outside.path().join("generated.mp4");
     std::fs::write(&outside_video, b"mp4-bytes").unwrap();
-    let link_dir = workspace
-        .path()
-        .join(".puffer/media/artifacts/artifact-video-1");
+    let link_dir = workspace.path().join(".puffer/media/videos/artifact-video-1");
     std::fs::create_dir_all(&link_dir).unwrap();
     let link = link_dir.join("generated.mp4");
     #[cfg(unix)]

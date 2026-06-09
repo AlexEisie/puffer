@@ -2321,7 +2321,7 @@ mod tests {
         let (temp, store) = test_store();
         let workspace = temp.path().join("workspace");
         let video_path = workspace
-            .join(".puffer/media/artifacts/artifact-video-1")
+            .join(".puffer/media/videos/artifact-video-1")
             .join("generated.mp4");
         std::fs::create_dir_all(video_path.parent().unwrap()).unwrap();
         std::fs::write(&video_path, b"mp4-bytes").unwrap();

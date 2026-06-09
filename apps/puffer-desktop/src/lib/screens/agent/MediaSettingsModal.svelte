@@ -28,6 +28,7 @@
 
   let { kind, sessionCwd, settings, settingsReady = true, onSaved, onClose }: Props = $props();
   const IMAGE_OUTPUT_DIR_RELATIVE = ".puffer/media/images";
+  const VIDEO_OUTPUT_DIR_RELATIVE = ".puffer/media/videos";
   const VIDEO_ASPECT_RATIO_PARAMETER_NAMES = ["aspect_ratio"];
   const VIDEO_DURATION_PARAMETER_NAMES = ["duration"];
   const initialSaved = untrack(() => mediaSettingsForKind(kind, settings));
@@ -38,6 +39,7 @@
   const closeLabel = $derived(`Close ${title.toLowerCase()}`);
   const saved = $derived(mediaSettingsForKind(kind, settings));
   const imageDir = $derived(imageDirForSessionCwd(sessionCwd));
+  const videoDir = $derived(videoDirForSessionCwd(sessionCwd));
 
   let capabilities = $state<MediaCapabilityInfo[]>([]);
   let loading = $state(true);
@@ -402,6 +404,12 @@
     return base ? `${base}/${IMAGE_OUTPUT_DIR_RELATIVE}` : `/${IMAGE_OUTPUT_DIR_RELATIVE}`;
   }
 
+  function videoDirForSessionCwd(cwd: string): string {
+    if (!cwd) return "";
+    const base = cwd.replace(/[\\/]+$/, "");
+    return base ? `${base}/${VIDEO_OUTPUT_DIR_RELATIVE}` : `/${VIDEO_OUTPUT_DIR_RELATIVE}`;
+  }
+
   function savedSelectionIsConfigured(mediaKind: MediaKind, mediaSettings: MediaSettings): boolean {
     if (mediaKind === "image") {
       const image = mediaSettings.image;
@@ -498,6 +506,15 @@
     openError = null;
     try {
       await invoke("open_image_dir", { cwd: sessionCwd });
+    } catch (openDirError) {
+      openError = String(openDirError);
+    }
+  }
+
+  async function openVideoDir() {
+    openError = null;
+    try {
+      await invoke("open_video_dir", { cwd: sessionCwd });
     } catch (openDirError) {
       openError = String(openDirError);
     }
@@ -750,6 +767,31 @@
               </label>
             {:else}
               {@render readOnlyField(durationFieldLabel, formatDurationLabel(durationSeconds))}
+            {/if}
+            {#if videoDir}
+              <div class="pf-media-field">
+                <span id="pf-video-folder-label" class="pf-field-label">Video folder</span>
+                <div class="pf-media-path-row">
+                  <input
+                    class="sc-input"
+                    type="text"
+                    aria-labelledby="pf-video-folder-label"
+                    readonly
+                    value={videoDir}
+                  />
+                  <button
+                    type="button"
+                    class="sc-btn"
+                    data-variant="outline"
+                    onclick={openVideoDir}
+                  >
+                    Open folder
+                  </button>
+                </div>
+              </div>
+              {#if openError}
+                <p class="pf-media-open-error" role="alert">{openError}</p>
+              {/if}
             {/if}
           {/if}
         </div>

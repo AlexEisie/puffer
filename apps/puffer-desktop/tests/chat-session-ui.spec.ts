@@ -1053,6 +1053,17 @@ test("composer video generation settings saves configurable video defaults", asy
     (request) => request.params.kind === "video"
   );
   await expect(dialog.getByRole("combobox")).toHaveCount(2);
+  const videoFolder = dialog.getByLabel("Video folder");
+  await expect(videoFolder).toHaveValue("/tmp/puffer/.puffer/media/videos");
+  await expect(videoFolder).toHaveJSProperty("readOnly", true);
+  const openFolderButton = dialog.getByRole("button", { name: "Open folder" });
+  await expect(openFolderButton).toBeVisible();
+  await expect(openFolderButton).toHaveAttribute("data-variant", "outline");
+  const videoFolderBox = await videoFolder.boundingBox();
+  const openFolderButtonBox = await openFolderButton.boundingBox();
+  expect(videoFolderBox).not.toBeNull();
+  expect(openFolderButtonBox).not.toBeNull();
+  expect(openFolderButtonBox!.height).toBe(videoFolderBox!.height);
   await dialog.getByLabel("Aspect ratio").selectOption("9:16");
   await dialog.getByLabel("Duration").selectOption("12");
 
@@ -1287,7 +1298,7 @@ test("generated video attachment renders a playable card", async ({ page }) => {
                   jobId: "job-video-card",
                   artifactId: "artifact-video-card",
                   index: 0,
-                  localPath: "/tmp/puffer/.puffer/media/artifacts/artifact-video-card/generated.mp4"
+                  localPath: "/tmp/puffer/.puffer/media/videos/artifact-video-card/generated.mp4"
                 }
               }
             ]
@@ -1325,7 +1336,7 @@ test("generated video attachment renders a playable card", async ({ page }) => {
 
 test("missing generated video access falls back without exposing local paths", async ({ page }) => {
   const sessionId = "session-generated-video-missing-access";
-  const localPath = "/tmp/puffer/.puffer/media/artifacts/artifact-video-missing/generated.mp4";
+  const localPath = "/tmp/puffer/.puffer/media/videos/artifact-video-missing/generated.mp4";
   const daemon = new FakeDaemon({
     sessions: [
       {
@@ -1941,7 +1952,7 @@ test("video slash success appends a generated video attachment", async ({ page }
       {
         artifactId: "artifact-video-live",
         index: 0,
-        path: "/tmp/puffer/.puffer/media/artifacts/artifact-video-live/generated.mp4",
+        path: "/tmp/puffer/.puffer/media/videos/artifact-video-live/generated.mp4",
         mimeType: "video/mp4",
         size: 9
       }

@@ -313,17 +313,15 @@ pub fn generated_video_access_metadata_by_artifact(
     let Some(mime_type) = canonical_generated_video_mime_type(&artifact.mime_type) else {
         return GeneratedVideoAccessMetadataResult::Unsupported;
     };
-    let artifact_root = generated_media_artifact_root(workspace_root, &artifact.id);
-    let canonical_path =
-        match canonical_generated_media_artifact_path(&artifact_root, &artifact.path) {
-            Ok(path) => path,
-            Err(GeneratedMediaPathError::Missing) => {
-                return GeneratedVideoAccessMetadataResult::Missing;
-            }
-            Err(GeneratedMediaPathError::Unsupported) => {
-                return GeneratedVideoAccessMetadataResult::Unsupported;
-            }
-        };
+    let canonical_path = match canonical_generated_video_artifact_path(workspace_root, &artifact) {
+        Ok(path) => path,
+        Err(GeneratedMediaPathError::Missing) => {
+            return GeneratedVideoAccessMetadataResult::Missing;
+        }
+        Err(GeneratedMediaPathError::Unsupported) => {
+            return GeneratedVideoAccessMetadataResult::Unsupported;
+        }
+    };
     let byte_count = std::fs::metadata(&canonical_path)
         .map(|metadata| metadata.len())
         .unwrap_or(artifact.byte_count);
@@ -408,12 +406,43 @@ fn generated_media_image_root(workspace_root: &Path) -> PathBuf {
     workspace_root.join(".puffer").join("media").join("images")
 }
 
+fn generated_media_video_root(workspace_root: &Path, artifact_id: &str) -> PathBuf {
+    workspace_root
+        .join(".puffer")
+        .join("media")
+        .join("videos")
+        .join(artifact_id)
+}
+
 fn generated_media_artifact_root(workspace_root: &Path, artifact_id: &str) -> PathBuf {
     workspace_root
         .join(".puffer")
         .join("media")
         .join("artifacts")
         .join(artifact_id)
+}
+
+fn canonical_generated_video_artifact_path(
+    workspace_root: &Path,
+    artifact: &MediaArtifact,
+) -> std::result::Result<PathBuf, GeneratedMediaPathError> {
+    let roots = [
+        generated_media_video_root(workspace_root, &artifact.id),
+        generated_media_artifact_root(workspace_root, &artifact.id),
+    ];
+    let mut missing = false;
+    for root in roots {
+        match canonical_generated_media_artifact_path(&root, &artifact.path) {
+            Ok(path) => return Ok(path),
+            Err(GeneratedMediaPathError::Missing) => missing = true,
+            Err(GeneratedMediaPathError::Unsupported) => {}
+        }
+    }
+    if missing {
+        Err(GeneratedMediaPathError::Missing)
+    } else {
+        Err(GeneratedMediaPathError::Unsupported)
+    }
 }
 
 fn canonical_generated_media_artifact_path(

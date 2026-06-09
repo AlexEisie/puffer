@@ -6469,7 +6469,7 @@ models: []
         filename: &str,
         bytes: &[u8],
     ) -> std::path::PathBuf {
-        let video_dir = workspace.join(".puffer/media/artifacts").join(artifact_id);
+        let video_dir = workspace.join(".puffer/media/videos").join(artifact_id);
         std::fs::create_dir_all(&video_dir).unwrap();
         let video_path = video_dir.join(filename);
         std::fs::write(&video_path, bytes).unwrap();
