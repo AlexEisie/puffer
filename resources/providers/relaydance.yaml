@@ -24,7 +24,7 @@ media:
         operations:
           - generate
         parameters:
-          - name: duration
+          - name: duration_seconds
             label: Duration
             values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
             default: "5"
@@ -34,7 +34,7 @@ media:
             values: ["720p"]
             default: "720p"
             request_field: metadata.resolution
-          - name: ratio
+          - name: aspect_ratio
             label: Aspect ratio
             values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
             default: "16:9"
@@ -44,7 +44,7 @@ media:
         operations:
           - generate
         parameters:
-          - name: duration
+          - name: duration_seconds
             label: Duration
             values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
             default: "5"
@@ -54,7 +54,7 @@ media:
             values: ["1080p"]
             default: "1080p"
             request_field: metadata.resolution
-          - name: ratio
+          - name: aspect_ratio
             label: Aspect ratio
             values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
             default: "16:9"
@@ -64,7 +64,7 @@ media:
         operations:
           - generate
         parameters:
-          - name: duration
+          - name: duration_seconds
             label: Duration
             values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
             default: "5"
@@ -74,7 +74,7 @@ media:
             values: ["480p", "720p"]
             default: "720p"
             request_field: metadata.resolution
-          - name: ratio
+          - name: aspect_ratio
             label: Aspect ratio
             values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
             default: "16:9"
@@ -84,7 +84,7 @@ media:
         operations:
           - generate
         parameters:
-          - name: duration
+          - name: duration_seconds
             label: Duration
             values: ["4", "5", "6", "7", "8", "9", "10", "11", "12"]
             default: "5"
@@ -94,7 +94,7 @@ media:
             values: ["480p", "720p", "1080p"]
             default: "1080p"
             request_field: metadata.resolution
-          - name: ratio
+          - name: aspect_ratio
             label: Aspect ratio
             values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
             default: "16:9"
@@ -104,7 +104,7 @@ media:
         operations:
           - generate
         parameters:
-          - name: duration
+          - name: duration_seconds
             label: Duration
             values: ["4", "5", "6", "7", "8", "9", "10", "11", "12"]
             default: "5"
@@ -114,7 +114,7 @@ media:
             values: ["480p", "720p", "1080p"]
             default: "1080p"
             request_field: metadata.resolution
-          - name: ratio
+          - name: aspect_ratio
             label: Aspect ratio
             values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
             default: "16:9"
@@ -124,7 +124,7 @@ media:
         operations:
           - generate
         parameters:
-          - name: duration
+          - name: duration_seconds
             label: Duration
             values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
             default: "5"
@@ -134,7 +134,7 @@ media:
             values: ["720p"]
             default: "720p"
             request_field: metadata.resolution
-          - name: ratio
+          - name: aspect_ratio
             label: Aspect ratio
             values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
             default: "16:9"
@@ -144,7 +144,7 @@ media:
         operations:
           - generate
         parameters:
-          - name: duration
+          - name: duration_seconds
             label: Duration
             values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
             default: "5"
@@ -154,7 +154,7 @@ media:
             values: ["720p"]
             default: "720p"
             request_field: metadata.resolution
-          - name: ratio
+          - name: aspect_ratio
             label: Aspect ratio
             values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
             default: "16:9"
@@ -164,7 +164,7 @@ media:
         operations:
           - generate
         parameters:
-          - name: duration
+          - name: duration_seconds
             label: Duration
             values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
             default: "5"
@@ -174,7 +174,7 @@ media:
             values: ["1080p"]
             default: "1080p"
             request_field: metadata.resolution
-          - name: ratio
+          - name: aspect_ratio
             label: Aspect ratio
             values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
             default: "16:9"
@@ -184,7 +184,7 @@ media:
         operations:
           - generate
         parameters:
-          - name: duration
+          - name: duration_seconds
             label: Duration
             values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
             default: "5"
@@ -194,7 +194,7 @@ media:
             values: ["480p", "720p"]
             default: "720p"
             request_field: metadata.resolution
-          - name: ratio
+          - name: aspect_ratio
             label: Aspect ratio
             values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
             default: "16:9"

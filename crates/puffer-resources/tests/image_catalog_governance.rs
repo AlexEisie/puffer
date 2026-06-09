@@ -1,6 +1,6 @@
 use puffer_provider_registry::{
     MediaBatchMode, MediaDiscoveryKind, MediaExecutionKind, MediaModelDescriptor, MediaOperation,
-    ProviderDescriptor,
+    MediaParameterWireType, ProviderDescriptor,
 };
 use puffer_resources::ProviderPack;
 use std::{
@@ -181,23 +181,43 @@ fn assert_select_parameter(
     default: &str,
     request_field: &str,
 ) {
+    assert_select_parameter_with_wire_type(
+        model,
+        name,
+        label,
+        values,
+        default,
+        request_field,
+        MediaParameterWireType::String,
+    );
+}
+
+fn assert_select_parameter_with_wire_type(
+    model: &MediaModelDescriptor,
+    name: &str,
+    label: &str,
+    values: &[&str],
+    default: &str,
+    request_field: &str,
+    wire_type: MediaParameterWireType,
+) {
     let parameter = model
         .parameters
         .iter()
         .find(|parameter| parameter.name == name)
-        .unwrap_or_else(|| panic!("{} should declare {name}", model.id));
+        .unwrap_or_else(|| panic!("{} should declare parameter {name}", model.id));
 
     assert_eq!(parameter.label, label);
     assert_eq!(
-        parameter
-            .values
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
+        parameter.values,
         values
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
     );
     assert_eq!(parameter.default, default);
     assert_eq!(parameter.request_field.as_deref(), Some(request_field));
+    assert_eq!(parameter.wire_type, wire_type);
 }
 
 #[test]
@@ -405,7 +425,15 @@ fn relaydance_declares_executable_video_descriptor() {
             .unwrap_or_else(|| panic!("relaydance should include {model_id}"));
         assert_eq!(model.display_name.as_deref(), Some(display_name));
         assert_eq!(model.operations, vec![MediaOperation::Generate]);
-        assert_select_parameter(model, "duration", "Duration", durations, "5", "seconds");
+        assert_select_parameter_with_wire_type(
+            model,
+            "duration_seconds",
+            "Duration",
+            durations,
+            "5",
+            "seconds",
+            MediaParameterWireType::String,
+        );
         assert_select_parameter(
             model,
             "resolution",
@@ -416,7 +444,7 @@ fn relaydance_declares_executable_video_descriptor() {
         );
         assert_select_parameter(
             model,
-            "ratio",
+            "aspect_ratio",
             "Aspect ratio",
             SEEDANCE_VIDEO_RATIOS,
             "16:9",
@@ -502,21 +530,23 @@ fn byteplus_declares_executable_video_descriptor() {
             .unwrap_or_else(|| panic!("byteplus should include {model_id}"));
         assert_eq!(model.display_name.as_deref(), Some(display_name));
         assert_eq!(model.operations, vec![MediaOperation::Generate]);
-        assert_select_parameter(
+        assert_select_parameter_with_wire_type(
             model,
-            "duration",
+            "duration_seconds",
             "Duration",
             SEEDANCE_VIDEO_DURATIONS,
             "5",
             "duration",
+            MediaParameterWireType::Number,
         );
-        assert_select_parameter(
+        assert_select_parameter_with_wire_type(
             model,
-            "ratio",
+            "aspect_ratio",
             "Aspect ratio",
             SEEDANCE_VIDEO_RATIOS,
             "adaptive",
             "ratio",
+            MediaParameterWireType::String,
         );
         assert_select_parameter(
             model,

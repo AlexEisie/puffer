@@ -568,6 +568,21 @@ fn list_video_capabilities_exposes_multiple_static_seedance_models() {
         .iter()
         .find(|capability| capability.model_id == "dreamina-seedance-2-0-fast-260128")
         .expect("byteplus fast model");
+    assert_eq!(byteplus_fast.defaults["duration_seconds"], "5");
+    let fast_duration = byteplus_fast
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == "duration_seconds")
+        .expect("fast duration");
+    assert_eq!(fast_duration.request_field.as_deref(), Some("duration"));
+    assert_eq!(fast_duration.wire_type, MediaParameterWireType::Number);
+    let fast_aspect_ratio = byteplus_fast
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == "aspect_ratio")
+        .expect("fast aspect ratio");
+    assert_eq!(fast_aspect_ratio.request_field.as_deref(), Some("ratio"));
+    assert_eq!(fast_aspect_ratio.wire_type, MediaParameterWireType::String);
     let fast_resolution = byteplus_fast
         .parameters
         .iter()
@@ -582,6 +597,29 @@ fn list_video_capabilities_exposes_multiple_static_seedance_models() {
         .iter()
         .find(|capability| capability.model_id == "doubao-seedance-2-0-1080p")
         .expect("relaydance 1080p model");
+    assert_eq!(relaydance_1080.defaults["duration_seconds"], "5");
+    let relaydance_duration = relaydance_1080
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == "duration_seconds")
+        .expect("relaydance duration");
+    assert_eq!(
+        relaydance_duration.request_field.as_deref(),
+        Some("seconds")
+    );
+    assert_eq!(
+        relaydance_duration.wire_type,
+        MediaParameterWireType::String
+    );
+    let relaydance_aspect_ratio = relaydance_1080
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == "aspect_ratio")
+        .expect("relaydance aspect ratio");
+    assert_eq!(
+        relaydance_aspect_ratio.request_field.as_deref(),
+        Some("metadata.ratio")
+    );
     let relaydance_resolution = relaydance_1080
         .parameters
         .iter()

@@ -10,7 +10,9 @@ use crate::runtime::media::{
     MediaJobStatus, MediaKind,
 };
 use anyhow::{bail, Context, Result};
-use puffer_provider_registry::{AuthStore, MediaOperation, ProviderRegistry};
+use puffer_provider_registry::{
+    AuthStore, MediaOperation, MediaParameterWireType, ProviderRegistry,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{ErrorKind, Read};
@@ -53,6 +55,7 @@ pub struct MediaCapabilityParameterView {
     pub values: Vec<String>,
     pub default: String,
     pub request_field: Option<String>,
+    pub wire_type: MediaParameterWireType,
 }
 
 /// Carries an exact image generation request from UI or tool configuration.
@@ -962,6 +965,7 @@ impl From<crate::runtime::media::capabilities::MediaCapabilityParameter>
             values: parameter.values,
             default: parameter.default,
             request_field: parameter.request_field,
+            wire_type: parameter.wire_type,
         }
     }
 }
