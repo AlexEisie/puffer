@@ -342,6 +342,20 @@ fn generated_video_ticket_path(ticket: &str) -> String {
     format!("/media/generated-video/{ticket}")
 }
 
+/// Map a workspace file path to a `<video>`-playable MIME type by extension,
+/// or `None` for anything we don't preview. `.ogg` is excluded on purpose: it
+/// is commonly an audio container and audio is out of scope.
+fn file_media_mime_type(path: &std::path::Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "ogv" => "video/ogg",
+        "mov" => "video/quicktime",
+        _ => return None,
+    })
+}
+
 fn random_ticket() -> String {
     let mut buf = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut buf);
@@ -5518,7 +5532,7 @@ mod tests {
     use super::{
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
         browser_permission_payload_json, connector_setup_connect_args, connector_setup_id,
-        daemon_now_ms, desktop_latency_ms, generated_video_handler,
+        daemon_now_ms, desktop_latency_ms, file_media_mime_type, generated_video_handler,
         handle_create_generated_video_access, handle_create_openai_realtime_client_secret,
         handle_create_session, handle_generate_media, handle_import_external_credential,
         handle_list_lambda_skill_libraries, handle_list_media_capabilities,
@@ -6593,6 +6607,19 @@ models: []
         assert_eq!(response["state"], "available");
         assert_eq!(response["mimeType"], "image/jpeg");
         assert_eq!(bytes, b"\xff\xd8\xff\xd9");
+    }
+
+    #[test]
+    fn file_media_mime_type_maps_video_extensions() {
+        use std::path::Path;
+        assert_eq!(file_media_mime_type(Path::new("/a/clip.mp4")), Some("video/mp4"));
+        assert_eq!(file_media_mime_type(Path::new("/a/clip.m4v")), Some("video/mp4"));
+        assert_eq!(file_media_mime_type(Path::new("/a/clip.webm")), Some("video/webm"));
+        assert_eq!(file_media_mime_type(Path::new("/a/clip.ogv")), Some("video/ogg"));
+        assert_eq!(file_media_mime_type(Path::new("/a/clip.MOV")), Some("video/quicktime"));
+        assert_eq!(file_media_mime_type(Path::new("/a/song.ogg")), None);
+        assert_eq!(file_media_mime_type(Path::new("/a/notes.txt")), None);
+        assert_eq!(file_media_mime_type(Path::new("/a/noext")), None);
     }
 
     #[test]
