@@ -420,23 +420,16 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use puffer_provider_registry::MediaParameterWireType;
-    use serde_json::json;
+pub(crate) mod tests_support {
+    use super::BytePlusVideoTransport;
+    use anyhow::Result;
+    use serde_json::Value;
     use std::cell::RefCell;
 
-    fn submit_fixture() -> serde_json::Value {
-        serde_json::from_str(include_str!("fixtures/byteplus_submit_task.json")).expect("fixture")
-    }
-
-    fn poll_fixture() -> serde_json::Value {
-        serde_json::from_str(include_str!("fixtures/byteplus_poll_task.json")).expect("fixture")
-    }
-
-    struct ScriptedTransport {
-        submit: Value,
-        polls: RefCell<Vec<Value>>,
+    /// Scripted transport returning canned submit/poll responses in tests.
+    pub(crate) struct ScriptedTransport {
+        pub(crate) submit: Value,
+        pub(crate) polls: RefCell<Vec<Value>>,
     }
 
     impl BytePlusVideoTransport for ScriptedTransport {
@@ -451,6 +444,31 @@ mod tests {
         fn download_bytes(&self, _url: &str) -> Result<Vec<u8>> {
             Ok(b"MP4BYTES".to_vec())
         }
+    }
+
+    /// Builds a scripted transport from a submit response and ordered polls.
+    pub(crate) fn scripted(submit: Value, polls: Vec<Value>) -> ScriptedTransport {
+        ScriptedTransport {
+            submit,
+            polls: RefCell::new(polls),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tests_support::ScriptedTransport;
+    use super::*;
+    use puffer_provider_registry::MediaParameterWireType;
+    use serde_json::json;
+    use std::cell::RefCell;
+
+    fn submit_fixture() -> serde_json::Value {
+        serde_json::from_str(include_str!("fixtures/byteplus_submit_task.json")).expect("fixture")
+    }
+
+    fn poll_fixture() -> serde_json::Value {
+        serde_json::from_str(include_str!("fixtures/byteplus_poll_task.json")).expect("fixture")
     }
 
     #[test]

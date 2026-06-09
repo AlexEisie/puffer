@@ -4,6 +4,7 @@ use super::{
 };
 use crate::runtime::media::byteplus_video::{
     byteplus_video_request_from_parameters, BytePlusVideoAdapter, BytePlusVideoPollingConfig,
+    BYTEPLUS_VIDEO_ADAPTER,
 };
 use crate::runtime::media::capabilities::MediaCapability;
 use crate::runtime::media::http_support::{
@@ -34,7 +35,7 @@ pub(super) fn generate_exact_video_from_media_request(
     request: ExactMediaGenerationRequest,
     discovery_cache: &ExactMediaDiscoveryCache,
 ) -> Result<ExactMediaGenerationResult> {
-    reclaim_relaydance_video_jobs(registry, auth_store, workspace_root);
+    reclaim_orphaned_video_jobs(registry, auth_store, workspace_root);
     let operation = parse_media_operation(&request.operation)?;
     let selection = MediaGenerationSelection {
         kind: MediaKind::Video,
@@ -125,11 +126,33 @@ fn build_relaydance_adapter(
     Ok((built, secrets))
 }
 
-/// Best-effort: poll each non-terminal relaydance video job once so orphaned
-/// tasks (e.g. the app died mid-render) get reclaimed on the next generation.
-/// Never propagates errors — a missing token or offline provider must not block
-/// the user's new request.
-fn reclaim_relaydance_video_jobs(
+/// Resolves provider + execution + token and constructs a BytePlus video
+/// adapter, returning it alongside the secrets to redact from error strings.
+/// Shared by generation and orphan reclaim.
+fn build_byteplus_adapter(
+    registry: &ProviderRegistry,
+    auth_store: &AuthStore,
+    provider_id: &str,
+    model_id: &str,
+    adapter: &str,
+) -> Result<(BytePlusVideoAdapter, Vec<String>)> {
+    let (provider, execution) =
+        resolve_video_execution_descriptor(registry, provider_id, model_id, adapter)?;
+    let api_key = bearer_token(provider, auth_store, CredentialAliasMode::Strict)?
+        .context("BytePlus API key is required")?;
+    let secrets = provider_error_secrets(provider, auth_store, CredentialAliasMode::Strict);
+    let submit_url = provider_execution_url(provider, &execution, "video task")?;
+    let built =
+        BytePlusVideoAdapter::new(api_key, submit_url.to_string(), provider_id.to_string())?;
+    Ok((built, secrets))
+}
+
+/// Best-effort: poll each non-terminal async video job once so orphaned tasks
+/// (e.g. the app died mid-render) get reclaimed on the next generation. Never
+/// propagates errors — a missing token or offline provider must not block the
+/// user's new request. Replicate jobs are excluded: they finish synchronously
+/// and leave no orphan to reclaim.
+fn reclaim_orphaned_video_jobs(
     registry: &ProviderRegistry,
     auth_store: &AuthStore,
     workspace_root: &Path,
@@ -139,22 +162,34 @@ fn reclaim_relaydance_video_jobs(
         return;
     };
     for job in jobs {
-        if job.status.is_terminal()
-            || job.adapter.as_deref() != Some(RELAYDANCE_VIDEO_ADAPTER)
-            || job.provider_job_id.is_none()
-        {
+        if job.status.is_terminal() || job.provider_job_id.is_none() {
             continue;
         }
-        let Ok((adapter, _secrets)) = build_relaydance_adapter(
-            registry,
-            auth_store,
-            &job.provider_id,
-            &job.model_id,
-            RELAYDANCE_VIDEO_ADAPTER,
-        ) else {
-            continue;
-        };
-        let _ = adapter.poll(&service, job, now_ms());
+        match job.adapter.as_deref() {
+            Some(RELAYDANCE_VIDEO_ADAPTER) => {
+                if let Ok((adapter, _secrets)) = build_relaydance_adapter(
+                    registry,
+                    auth_store,
+                    &job.provider_id,
+                    &job.model_id,
+                    RELAYDANCE_VIDEO_ADAPTER,
+                ) {
+                    let _ = adapter.poll(&service, job, now_ms());
+                }
+            }
+            Some(BYTEPLUS_VIDEO_ADAPTER) => {
+                if let Ok((adapter, _secrets)) = build_byteplus_adapter(
+                    registry,
+                    auth_store,
+                    &job.provider_id,
+                    &job.model_id,
+                    BYTEPLUS_VIDEO_ADAPTER,
+                ) {
+                    let _ = adapter.poll(&service, job, now_ms());
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -203,19 +238,14 @@ fn generate_byteplus_video(
     capability: &MediaCapability,
     parameters: BTreeMap<String, String>,
 ) -> Result<ExactMediaGenerationResult> {
-    let (provider, execution) = resolve_video_execution_descriptor(
+    let service = MediaGenerationService::new(workspace_root);
+    let (adapter, secrets) = build_byteplus_adapter(
         registry,
+        auth_store,
         &request.provider_id,
         &request.model_id,
         &request.adapter,
     )?;
-    let api_key = bearer_token(provider, auth_store, CredentialAliasMode::Strict)?
-        .context("BytePlus API key is required")?;
-    let secrets = provider_error_secrets(provider, auth_store, CredentialAliasMode::Strict);
-    let service = MediaGenerationService::new(workspace_root);
-    let submit_url = provider_execution_url(provider, &execution, "video task")?;
-    let adapter =
-        BytePlusVideoAdapter::new(api_key, submit_url.to_string(), request.provider_id.clone())?;
     let video_request = byteplus_video_request_from_parameters(
         request.model_id.clone(),
         request.prompt.clone(),
@@ -295,7 +325,8 @@ fn validate_video_count(count: u8) -> Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::media::relaydance_video::tests_support::scripted;
+    use crate::runtime::media::byteplus_video::tests_support::scripted as byteplus_scripted;
+    use crate::runtime::media::relaydance_video::tests_support::scripted as relaydance_scripted;
     use crate::runtime::media::MediaJobStatus;
     use serde_json::json;
 
@@ -314,7 +345,7 @@ mod tests {
             1,
             1,
         );
-        job.adapter = Some("relaydance_video".to_string());
+        job.adapter = Some(RELAYDANCE_VIDEO_ADAPTER.to_string());
         job.provider_job_id = Some("task_done".to_string());
         service.save_job(&job).unwrap();
 
@@ -323,13 +354,49 @@ mod tests {
             "token",
             "https://relaydance.com/v1/video/generations",
             "relaydance",
-            scripted(
+            relaydance_scripted(
                 json!({}),
                 vec![json!({ "data": { "id": "task_done", "status": "SUCCESS",
                     "result_url": "https://cdn.example.com/v.mp4" } })],
             ),
         );
         let loaded = service.load_job("frozen-1").unwrap();
+        let reclaimed = adapter.poll(&service, loaded, 2).expect("reclaim poll");
+        assert_eq!(reclaimed.status, MediaJobStatus::Succeeded);
+        assert_eq!(reclaimed.artifact_ids.len(), 1);
+    }
+
+    #[test]
+    fn poll_once_reclaims_completed_byteplus_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = MediaGenerationService::new(dir.path());
+
+        // Pre-seed a byteplus video job frozen in queued, carrying a task id.
+        let mut job = MediaJob::new(
+            "frozen-bp",
+            MediaKind::Video,
+            "byteplus",
+            "dreamina-seedance-2-0-260128",
+            "p",
+            1,
+            1,
+        );
+        job.adapter = Some(BYTEPLUS_VIDEO_ADAPTER.to_string());
+        job.provider_job_id = Some("task_done".to_string());
+        service.save_job(&job).unwrap();
+
+        // Inject a ModelArk response that already reports success.
+        let adapter = BytePlusVideoAdapter::with_transport(
+            "token",
+            "https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks",
+            "byteplus",
+            byteplus_scripted(
+                json!({}),
+                vec![json!({ "id": "task_done", "status": "succeeded",
+                    "content": { "video_url": "https://cdn.example.com/v.mp4" } })],
+            ),
+        );
+        let loaded = service.load_job("frozen-bp").unwrap();
         let reclaimed = adapter.poll(&service, loaded, 2).expect("reclaim poll");
         assert_eq!(reclaimed.status, MediaJobStatus::Succeeded);
         assert_eq!(reclaimed.artifact_ids.len(), 1);
