@@ -16,12 +16,12 @@ pub(crate) struct DownloadImageResult {
     path: String,
 }
 
-/// Opens the folder containing an absolute, existing image file path.
+/// Opens the folder containing an absolute, existing file path.
 #[tauri::command]
-pub(crate) fn open_image_containing_folder(app: AppHandle, path: String) -> Result<(), String> {
+pub(crate) fn open_containing_folder(app: AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
 
-    let dir = resolve_image_containing_folder(Path::new(&path))?;
+    let dir = resolve_containing_folder(Path::new(&path))?;
     app.opener()
         .open_path(dir.to_string_lossy().to_string(), None::<&str>)
         .map_err(|error| error.to_string())
@@ -40,18 +40,18 @@ pub(crate) async fn download_image_from_url(
     .map_err(|error| error.to_string())?
 }
 
-fn resolve_image_containing_folder(path: &Path) -> Result<PathBuf, String> {
+fn resolve_containing_folder(path: &Path) -> Result<PathBuf, String> {
     if !path.is_absolute() {
-        return Err("image path must be absolute".to_string());
+        return Err("path must be absolute".to_string());
     }
     let canonical = path.canonicalize().map_err(|error| error.to_string())?;
     if !canonical.is_file() {
-        return Err("image path must be an existing file".to_string());
+        return Err("path must be an existing file".to_string());
     }
     canonical
         .parent()
         .map(Path::to_path_buf)
-        .ok_or_else(|| "image path has no containing folder".to_string())
+        .ok_or_else(|| "path has no containing folder".to_string())
 }
 
 fn validate_image_download_url(input: &str) -> Result<Url, String> {
@@ -262,18 +262,30 @@ fn known_image_extension_for_name(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn image_containing_folder_requires_absolute_existing_file() {
+    fn containing_folder_resolves_for_non_image_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let doc = temp.path().join("report.pdf");
+        std::fs::write(&doc, b"%PDF-1.4").unwrap();
+
+        assert_eq!(
+            super::resolve_containing_folder(&doc).unwrap(),
+            temp.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn containing_folder_requires_absolute_existing_file() {
         let temp = tempfile::tempdir().unwrap();
         let image = temp.path().join("pixel.png");
         std::fs::write(&image, b"png").unwrap();
 
         assert_eq!(
-            super::resolve_image_containing_folder(&image).unwrap(),
+            super::resolve_containing_folder(&image).unwrap(),
             temp.path().canonicalize().unwrap()
         );
-        assert!(super::resolve_image_containing_folder(std::path::Path::new("pixel.png")).is_err());
-        assert!(super::resolve_image_containing_folder(temp.path()).is_err());
-        assert!(super::resolve_image_containing_folder(&temp.path().join("missing.png")).is_err());
+        assert!(super::resolve_containing_folder(std::path::Path::new("pixel.png")).is_err());
+        assert!(super::resolve_containing_folder(temp.path()).is_err());
+        assert!(super::resolve_containing_folder(&temp.path().join("missing.png")).is_err());
     }
 
     #[test]
