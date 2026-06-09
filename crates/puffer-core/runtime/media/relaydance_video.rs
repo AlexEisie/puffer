@@ -232,17 +232,6 @@ fn relaydance_error_message(value: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn relaydance_task_error_context(
-    provider_id: &str,
-    task_id: Option<&str>,
-    error: &anyhow::Error,
-) -> String {
-    format!(
-        "{error:#}: provider={provider_id} adapter={RELAYDANCE_VIDEO_ADAPTER} task={}",
-        task_id.unwrap_or("unknown")
-    )
-}
-
 fn string_field(value: &Value, names: &[&str]) -> Option<String> {
     names.iter().find_map(|name| {
         value
@@ -377,21 +366,45 @@ where
         if job.status.is_terminal() {
             return Ok(job);
         }
-        let url = self.poll_url(&job)?;
-        let response = self.transport.poll_task(&url, &self.api_token)?;
+        let task_id = job.provider_job_id.clone();
+        let diagnose = |error: anyhow::Error| {
+            error.context(format!(
+                "provider={} adapter={RELAYDANCE_VIDEO_ADAPTER} task={}",
+                self.provider_id,
+                task_id.as_deref().unwrap_or("unknown")
+            ))
+        };
+        let url = match self.poll_url(&job) {
+            Ok(url) => url,
+            Err(error) => {
+                return super::video_jobs::record_transient_poll_error(
+                    service,
+                    job,
+                    diagnose(error),
+                    now_ms,
+                )
+            }
+        };
+        let response = match self.transport.poll_task(&url, &self.api_token) {
+            Ok(response) => response,
+            Err(error) => {
+                return super::video_jobs::record_transient_poll_error(
+                    service,
+                    job,
+                    diagnose(error),
+                    now_ms,
+                )
+            }
+        };
         let task = match RelaydanceVideoTask::from_value(response, "poll video task") {
             Ok(task) => task,
             Err(error) => {
-                let mut failed = job;
-                let diagnostic = relaydance_task_error_context(
-                    &self.provider_id,
-                    failed.provider_job_id.as_deref(),
-                    &error,
-                );
-                failed.error = Some(diagnostic.clone());
-                failed.transition(MediaJobStatus::Failed, now_ms)?;
-                service.save_job(&failed)?;
-                return Err(anyhow!(diagnostic));
+                return super::video_jobs::record_transient_poll_error(
+                    service,
+                    job,
+                    diagnose(error),
+                    now_ms,
+                )
             }
         };
         self.apply_task(service, job, task, now_ms)
@@ -780,7 +793,51 @@ mod tests {
     }
 
     #[test]
-    fn poll_parser_failure_marks_job_failed() {
+    fn submit_then_poll_drives_new_api_lifecycle_to_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = MediaGenerationService::new(dir.path());
+        let transport = ScriptedTransport {
+            submit: json!({ "data": { "id": "vid-9", "status": "NOT_START" } }),
+            polls: RefCell::new(vec![
+                json!({ "data": { "id": "vid-9", "status": "SUBMITTED" } }),
+                json!({ "data": { "id": "vid-9", "status": "IN_PROGRESS" } }),
+                json!({ "data": { "id": "vid-9", "status": "SUCCESS",
+                    "result_url": "https://cdn.example.com/v.mp4" } }),
+            ]),
+        };
+        let adapter = RelaydanceVideoAdapter::with_transport(
+            "token",
+            "https://relaydance.com/v1/video/generations",
+            "relaydance",
+            transport,
+        );
+        let request = RelaydanceVideoRequest {
+            model: "seedance-nsfw".into(),
+            prompt: "a fleet battle".into(),
+            params: vec![],
+        };
+        let job = adapter
+            .submit(&service, request, BTreeMap::new(), 1)
+            .expect("submit");
+        assert_eq!(job.status, MediaJobStatus::Queued); // NOT_START no longer errors
+        let job = adapter
+            .poll_until_terminal(
+                &service,
+                job,
+                RelaydanceVideoPollingConfig {
+                    max_attempts: 5,
+                    delay: Duration::from_millis(0),
+                },
+                |_| {},
+                || 2,
+            )
+            .expect("poll");
+        assert_eq!(job.status, MediaJobStatus::Succeeded);
+        assert_eq!(job.artifact_ids.len(), 1);
+    }
+
+    #[test]
+    fn poll_parser_failure_is_transient_and_keeps_polling() {
         let dir = tempfile::tempdir().unwrap();
         let service = MediaGenerationService::new(dir.path());
         let adapter = RelaydanceVideoAdapter::with_transport(
@@ -788,7 +845,9 @@ mod tests {
             "https://relaydance.com/v1/video/generations",
             "relaydance",
             ScriptedTransport {
-                submit: json!({ "id": "task-1", "status": "queued" }),
+                submit: json!({ "data": { "id": "task-1", "status": "queued" } }),
+                // Malformed response missing the task id = transient error; must
+                // not terminate or mark the job failed.
                 polls: RefCell::new(vec![json!({ "data": { "status": "running" } })]),
             },
         );
@@ -800,30 +859,14 @@ mod tests {
         let job = adapter
             .submit(&service, request, BTreeMap::new(), 1)
             .expect("submit");
-
-        let error = adapter
+        let polled = adapter
             .poll(&service, job.clone(), 2)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("poll video task response missing task id"));
+            .expect("poll returns Ok (transient)");
 
+        assert_eq!(polled.status, MediaJobStatus::Queued); // still non-terminal
         let saved = service.load_job(&job.id).expect("saved job");
-        assert_eq!(saved.status, MediaJobStatus::Failed);
-        assert!(saved
-            .error
-            .as_deref()
-            .is_some_and(|value| { value.contains("poll video task response missing task id") }));
-        assert!(saved
-            .error
-            .as_deref()
-            .is_some_and(|value| value.contains("provider=relaydance")));
-        assert!(saved
-            .error
-            .as_deref()
-            .is_some_and(|value| value.contains("adapter=relaydance_video")));
-        assert!(saved
-            .error
-            .as_deref()
-            .is_some_and(|value| value.contains("task=task-1")));
+        assert_eq!(saved.status, MediaJobStatus::Queued); // not marked Failed
+        assert!(saved.error.as_deref().is_some_and(|e| e.contains("missing task id")));
+        assert!(saved.updated_at_ms >= saved.created_at_ms); // persisted refresh, not frozen
     }
 }
