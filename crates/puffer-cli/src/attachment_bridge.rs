@@ -7,7 +7,7 @@
 //! path the agent's `Read` / `VisionAnalyze` tools can access, and builds
 //! the model-facing message text that references those paths.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use puffer_session_store::{SessionStore, StoredAttachment, StoredAttachmentKind};
@@ -25,18 +25,19 @@ pub(crate) struct MaterializedAttachment {
 fn safe_filename(name: &str, extension: &str) -> String {
     // Take the last path component only — defends against names like
     // "../../etc/passwd" or "a/b.png".
-    let base = name
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or("")
-        .trim();
-    let base = if base.is_empty() || base == "." || base == ".." {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("").trim();
+    // Reject any all-dots basename (``, `.`, `..`, `...`) — none is a usable
+    // filename and `.`/`..` are traversal components.
+    let base = if base.is_empty() || base.bytes().all(|b| b == b'.') {
         ""
     } else {
         base
     };
 
-    let ext = extension.trim().trim_start_matches('.').to_ascii_lowercase();
+    let ext = extension
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
 
     if base.is_empty() {
         return if ext.is_empty() {
@@ -53,14 +54,20 @@ fn safe_filename(name: &str, extension: &str) -> String {
     }
 }
 
-/// Base temp directory for an attachment, scoped by session and attachment id.
-/// `/tmp` is always in the agent's readable workspace roots (see
-/// `puffer-core/workspace_paths.rs`), so files here are readable in any sandbox
-/// mode without polluting the user's workspace.
+/// Root for all materialized attachments. `/tmp` is always in the agent's
+/// readable workspace roots (see `puffer-core/workspace_paths.rs`), so files
+/// here are readable in any sandbox mode without polluting the user's workspace.
+const ATTACHMENTS_ROOT: &str = "/tmp/puffer-attachments";
+
+/// Per-session directory holding every materialized attachment for that session.
+fn session_temp_dir(session_id: Uuid) -> PathBuf {
+    PathBuf::from(ATTACHMENTS_ROOT).join(session_id.to_string())
+}
+
+/// Per-attachment directory, scoped by session and attachment id so re-runs are
+/// idempotent and one attachment never collides with another.
 fn attachment_temp_dir(session_id: Uuid, attachment_id: &str) -> PathBuf {
-    PathBuf::from("/tmp/puffer-attachments")
-        .join(session_id.to_string())
-        .join(attachment_id)
+    session_temp_dir(session_id).join(attachment_id)
 }
 
 /// Materializes every attachment to a temp path. Best-effort: an attachment
@@ -73,9 +80,24 @@ pub(crate) fn materialize_attachments(
 ) -> Vec<MaterializedAttachment> {
     attachments
         .iter()
-        .map(|attachment| MaterializedAttachment {
-            attachment: attachment.clone(),
-            path: materialize_one(store, session_id, attachment).ok(),
+        .map(|attachment| {
+            let path = match materialize_one(store, session_id, attachment) {
+                Ok(path) => Some(path),
+                Err(err) => {
+                    // Best-effort: a degraded single attachment beats failing
+                    // the turn. Surface why so an `(unavailable)` line below is
+                    // diagnosable instead of a silent drop.
+                    eprintln!(
+                        "attachment_bridge: skipping attachment {} ({}): {err:#}",
+                        attachment.name, attachment.id
+                    );
+                    None
+                }
+            };
+            MaterializedAttachment {
+                attachment: attachment.clone(),
+                path,
+            }
         })
         .collect()
 }
@@ -100,25 +122,20 @@ fn materialize_one(
             return Ok(dest);
         }
     }
-    std::fs::copy(&src, &dest)
-        .with_context(|| format!("copy attachment to {}", dest.display()))?;
+    std::fs::copy(&src, &dest).with_context(|| format!("copy attachment to {}", dest.display()))?;
     Ok(dest)
 }
 
 /// Removes the temp directory tree for a session's materialized attachments.
 /// Best-effort; errors are ignored. Call when a session is deleted.
 pub(crate) fn cleanup_session_attachments(session_id: Uuid) {
-    let dir = PathBuf::from("/tmp/puffer-attachments").join(session_id.to_string());
-    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(session_temp_dir(session_id));
 }
 
 /// Builds the text the model receives: the original message plus a labeled
 /// block listing each attachment's local path. Returns the original
 /// unchanged when there are no attachments.
-pub(crate) fn build_model_input(
-    original: &str,
-    materialized: &[MaterializedAttachment],
-) -> String {
+pub(crate) fn build_model_input(original: &str, materialized: &[MaterializedAttachment]) -> String {
     if materialized.is_empty() {
         return original.to_string();
     }
@@ -133,9 +150,7 @@ pub(crate) fn build_model_input(
             match &m.path {
                 Some(path) => {
                     let hint = match m.attachment.kind {
-                        StoredAttachmentKind::Image => {
-                            "read this path with VisionAnalyze or Read"
-                        }
+                        StoredAttachmentKind::Image => "read this path with VisionAnalyze or Read",
                         StoredAttachmentKind::File => "read this path with Read",
                     };
                     format!(
@@ -162,6 +177,7 @@ pub(crate) fn build_model_input(
 mod tests {
     use super::*;
     use puffer_session_store::StageAttachmentInput;
+    use std::path::Path;
 
     fn test_store(temp: &Path) -> (SessionStore, Uuid) {
         let user_config = temp.join(".puffer");
@@ -292,8 +308,9 @@ mod tests {
     }
 
     #[test]
-    fn safe_filename_falls_back_when_empty_or_dotdot() {
+    fn safe_filename_falls_back_when_empty_or_dots() {
         assert_eq!(safe_filename("..", "PNG"), "attachment.png");
+        assert_eq!(safe_filename("...", "PNG"), "attachment.png");
         assert_eq!(safe_filename("", ""), "attachment");
         assert_eq!(safe_filename("   ", "TXT"), "attachment.txt");
     }

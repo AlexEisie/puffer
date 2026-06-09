@@ -4374,6 +4374,11 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         // transcript event below keeps the original text so the UI is
         // unchanged; `model_input` must be used at BOTH push_message and the
         // turn call so `transcript_to_items` dedups to a single user message.
+        // `push_message` stores `model_input` in the in-memory `app_state`, so
+        // the path-annotated text (not the UI text) is what later continuation
+        // turns re-send as history — intentional and benign: the `/tmp` paths
+        // are deterministic and never rendered in the UI, which always replays
+        // the original `UserMessage` event.
         let materialized = crate::attachment_bridge::materialize_attachments(
             &inputs.session_store,
             session_uuid,
