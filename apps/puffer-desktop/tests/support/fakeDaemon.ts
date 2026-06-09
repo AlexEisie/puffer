@@ -62,6 +62,8 @@ type WorkflowSnapshotFixture = {
   workflow_binding_error?: string | null;
   monitor_tasks?: JsonRecord[];
   monitor_task_error?: string | null;
+  monitor_memories?: JsonRecord[];
+  monitor_memory_error?: string | null;
 };
 
 type MonitorHistoryFixture = {
@@ -895,7 +897,9 @@ export class FakeDaemon {
       workflow_bindings: snapshot.workflow_bindings?.map((binding) => ({ ...binding })),
       workflow_binding_error: snapshot.workflow_binding_error ?? null,
       monitor_tasks: snapshot.monitor_tasks?.map((task) => ({ ...task })),
-      monitor_task_error: snapshot.monitor_task_error ?? null
+      monitor_task_error: snapshot.monitor_task_error ?? null,
+      monitor_memories: snapshot.monitor_memories?.map((memory) => ({ ...memory })),
+      monitor_memory_error: snapshot.monitor_memory_error ?? null
     };
   }
 
@@ -1315,6 +1319,8 @@ export class FakeDaemon {
         return this.deleteWorkflowBinding(request.params);
       case "task_monitor_create":
         return this.createMonitor(request.params);
+      case "task_monitor_memory_save":
+        return this.saveMonitorMemory(request.params);
       case "workflow_toggle":
         return this.toggleWorkflow(request.params);
       case "contacts_list":
@@ -1448,7 +1454,9 @@ export class FakeDaemon {
       workflow_bindings: this.workflowSnapshot.workflow_bindings?.map((binding) => ({ ...binding })) ?? [],
       workflow_binding_error: this.workflowSnapshot.workflow_binding_error ?? null,
       monitor_tasks: this.workflowSnapshot.monitor_tasks?.map((task) => ({ ...task })) ?? [],
-      monitor_task_error: this.workflowSnapshot.monitor_task_error ?? null
+      monitor_task_error: this.workflowSnapshot.monitor_task_error ?? null,
+      monitor_memories: this.workflowSnapshot.monitor_memories?.map((memory) => ({ ...memory })) ?? [],
+      monitor_memory_error: this.workflowSnapshot.monitor_memory_error ?? null
     };
   }
 
@@ -1547,6 +1555,27 @@ export class FakeDaemon {
           state: item.state === "authenticated" ? "active" : item.state
         };
       })
+    };
+    return this.workflowListResponse();
+  }
+
+  private saveMonitorMemory(params: JsonRecord): JsonRecord {
+    const connectionSlug = String(params.connection_slug ?? "").trim();
+    const content = String(params.content ?? "");
+    if (!connectionSlug) throw new Error("missing monitor memory connection slug");
+    const path = `/tmp/${connectionSlug}.md`;
+    const existing = this.workflowSnapshot.monitor_memories ?? [];
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      monitor_memories: [
+        ...existing.filter((memory) => String(memory.connection_slug ?? "") !== connectionSlug),
+        {
+          connection_slug: connectionSlug,
+          path,
+          content,
+          truncated: false
+        }
+      ].sort((a, b) => String(a.connection_slug ?? "").localeCompare(String(b.connection_slug ?? "")))
     };
     return this.workflowListResponse();
   }
