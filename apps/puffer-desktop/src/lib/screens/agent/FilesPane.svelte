@@ -74,6 +74,9 @@
   // not reactive — the `loading` set above remains the UI spinner source.
   const dirLoads = new Map<string, Promise<void>>();
 
+  // The scrollable tree container; used to center the revealed row.
+  let treeBodyEl = $state<HTMLDivElement | null>(null);
+
   // Active right-pane state. Open tabs mirror VS Code's preview behavior:
   // an unpinned preview tab is replaceable until edited, saved, or pinned.
   let openTabs = $state<OpenFileTab[]>([]);
@@ -673,6 +676,26 @@
       if (!cache.has(path)) void loadDir(path);
     }
     expanded = next;
+  }
+
+  /** Scroll the tree so the row for `path` is vertically centered. Instant
+   *  jump (no smooth animation). No-op when the container or row is absent —
+   *  the browser clamps scrollTop, so top/bottom rows center as far as they can. */
+  function scrollTreeRowIntoCenter(path: string) {
+    const container = treeBodyEl;
+    if (!container) return;
+    let row: HTMLElement | null = null;
+    for (const el of container.querySelectorAll<HTMLElement>(".row")) {
+      if (el.dataset.path === path) {
+        row = el;
+        break;
+      }
+    }
+    if (!row) return;
+    const containerRect = container.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    container.scrollTop +=
+      (rowRect.top - containerRect.top) - (container.clientHeight - row.clientHeight) / 2;
   }
 
   async function revealAndOpenFile(path: string, line: number | null = null) {
@@ -1329,7 +1352,7 @@
         {root ? (root.split("/").pop() || root) : "workspace"}
       </span>
     </div>
-    <div class="tree-body">
+    <div class="tree-body" bind:this={treeBodyEl}>
       {#if previewMode}
         <div class="tree-empty">
           <div class="msg">Files view is live in the desktop app</div>
@@ -1358,6 +1381,7 @@
               openFileSafely(row.path, row.size, { pinned: true });
             }}
             aria-expanded={row.kind === "directory" || row.kind === "symlink" ? expanded.has(row.path) : undefined}
+            data-path={row.path}
             title={row.path}
           >
             {#if row.kind === "directory"}
