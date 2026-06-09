@@ -68,6 +68,12 @@
   let loading = $state<Set<string>>(new Set());
   let errors = $state<Map<string, string>>(new Map());
 
+  // In-flight directory loads, keyed by path. Lets callers await a load even
+  // when another caller already kicked it off (e.g. root is loaded by the cwd
+  // effect while revealAndOpenFile needs to await it). Plain control-flow state,
+  // not reactive — the `loading` set above remains the UI spinner source.
+  const dirLoads = new Map<string, Promise<void>>();
+
   // Active right-pane state. Open tabs mirror VS Code's preview behavior:
   // an unpinned preview tab is replaceable until edited, saved, or pinned.
   let openTabs = $state<OpenFileTab[]>([]);
@@ -600,28 +606,35 @@
     if (isTabDirty(activePath)) pinTab(activePath);
   }
 
-  async function loadDir(path: string) {
-    if (cache.has(path) || loading.has(path)) return;
-    const nextLoading = new Set(loading);
-    nextLoading.add(path);
-    loading = nextLoading;
-    try {
-      const entries = normalizeDirEntries(await listDir(path));
-      const nextCache = new Map(cache);
-      nextCache.set(path, entries);
-      cache = nextCache;
-      const nextErrors = new Map(errors);
-      nextErrors.delete(path);
-      errors = nextErrors;
-    } catch (err) {
-      const nextErrors = new Map(errors);
-      nextErrors.set(path, err instanceof Error ? err.message : String(err));
-      errors = nextErrors;
-    } finally {
-      const next = new Set(loading);
-      next.delete(path);
-      loading = next;
-    }
+  function loadDir(path: string): Promise<void> {
+    if (cache.has(path)) return Promise.resolve();
+    const existing = dirLoads.get(path);
+    if (existing) return existing;
+    const run = (async () => {
+      const nextLoading = new Set(loading);
+      nextLoading.add(path);
+      loading = nextLoading;
+      try {
+        const entries = normalizeDirEntries(await listDir(path));
+        const nextCache = new Map(cache);
+        nextCache.set(path, entries);
+        cache = nextCache;
+        const nextErrors = new Map(errors);
+        nextErrors.delete(path);
+        errors = nextErrors;
+      } catch (err) {
+        const nextErrors = new Map(errors);
+        nextErrors.set(path, err instanceof Error ? err.message : String(err));
+        errors = nextErrors;
+      } finally {
+        const next = new Set(loading);
+        next.delete(path);
+        loading = next;
+        dirLoads.delete(path);
+      }
+    })();
+    dirLoads.set(path, run);
+    return run;
   }
 
   function normalizeDirEntries(entries: unknown): DirEntry[] {
