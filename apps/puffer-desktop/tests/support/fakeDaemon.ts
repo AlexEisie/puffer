@@ -62,10 +62,17 @@ type WorkflowSnapshotFixture = {
   workflow_binding_error?: string | null;
   monitor_tasks?: JsonRecord[];
   monitor_task_error?: string | null;
+  monitor_memories?: JsonRecord[];
+  monitor_memory_error?: string | null;
 };
 
 type MonitorHistoryFixture = {
   messages: JsonRecord[];
+};
+
+type ContactsSnapshotFixture = {
+  contacts: JsonRecord[];
+  candidates: JsonRecord[];
 };
 
 type ConnectorSetupQuestionFixture = {
@@ -226,9 +233,16 @@ function browserTabInfo(tabId: string, url = "about:blank", active = true): Json
     connected: true,
     active,
     backendSessionId: `${session.sessionId}:browser:${tabId}`,
+    nativeCefSessionId: nativeCefSessionId(tabId),
     createdAtMs: now,
     updatedAtMs: Date.now()
   };
+}
+
+function nativeCefSessionId(tabId: string): string {
+  const match = /(\d+)$/.exec(tabId);
+  const index = match ? Math.max(0, Number(match[1]) - 1) : 0;
+  return `__cef_prewarm_${index}__`;
 }
 
 function browserState(url = "about:blank"): JsonRecord {
@@ -294,9 +308,14 @@ export class FakeDaemon {
   private workspaceRoot = "/tmp/puffer";
   private authStatuses: JsonRecord[];
   private externalCredentials: JsonRecord[];
-  private settingsConfig: { defaultProvider: string | null; defaultModel: string | null } = {
+  private settingsConfig: {
+    defaultProvider: string | null;
+    defaultModel: string | null;
+    openaiBaseUrl: string | null;
+  } = {
     defaultProvider: "codex",
-    defaultModel: "test-model"
+    defaultModel: "test-model",
+    openaiBaseUrl: null
   };
   private secrets: JsonRecord[] = [];
   private permissions: JsonRecord = {
@@ -304,9 +323,9 @@ export class FakeDaemon {
     tools: { bash: "ask" }
   };
   private localModelStatus: JsonRecord = {
-    id: "minicpm5",
-    modelId: "minicpm5-1b",
-    displayName: "MiniCPM5-1B (local)",
+    id: "qwen35",
+    modelId: "qwen3.5-0.8b",
+    displayName: "Qwen3.5-0.8B (local)",
     checkedAtMs: Date.now(),
     supported: true,
     recommended: true,
@@ -316,12 +335,12 @@ export class FakeDaemon {
     installing: false,
     reason: "macOS Apple Silicon, model not yet installed",
     endpoint: "http://127.0.0.1:8088/v1",
-    size: "~589MB",
-    installPath: "/tmp/puffer-home/models/minicpm5-1b",
-    providerPath: "/tmp/puffer-home/resources/providers/minicpm5.yaml",
-    logPath: "/tmp/puffer-home/minicpm5-serve.log",
-    installLogPath: "/tmp/puffer-home/minicpm5-install.log",
-    serveLogPath: "/tmp/puffer-home/minicpm5-serve.log",
+    size: "~992MB",
+    installPath: "/tmp/puffer-home/models/qwen3.5-0.8b",
+    providerPath: "/tmp/puffer-home/resources/providers/qwen35.yaml",
+    logPath: "/tmp/puffer-home/qwen35-serve.log",
+    installLogPath: "/tmp/puffer-home/qwen35-install.log",
+    serveLogPath: "/tmp/puffer-home/qwen35-serve.log",
     checks: []
   };
   private desktopPins: JsonRecord = {
@@ -593,6 +612,7 @@ export class FakeDaemon {
         action_type: "triage_agent",
         monitor: true,
         monitor_memory_path: "/tmp/telegram-user.md",
+        contact_ids: [],
         created_at_ms: now - 45_000
       }
     ],
@@ -670,6 +690,47 @@ export class FakeDaemon {
       }
     ]
   };
+  private contactsSnapshot: ContactsSnapshotFixture = {
+    contacts: [
+      {
+        id: "contact-alice",
+        name: "Alice",
+        description: "Alice sends actionable deployment and support questions.",
+        avatar: null,
+        contact_ids: ["telegram@alice", "google@alice@example.com"]
+      }
+    ],
+    candidates: [
+      {
+        id: "telegram@alice",
+        name: "Alice",
+        avatar: null,
+        score: 42.5,
+        context: [
+          {
+            kind: "telegram_message",
+            text: "Alice asked whether the deployment is finished.",
+            timestamp_ms: now - 15_000,
+            payload: { sender_username: "alice" }
+          }
+        ]
+      },
+      {
+        id: "google@bob@example.com",
+        name: "bob@example.com",
+        avatar: null,
+        score: 12.1,
+        context: [
+          {
+            kind: "email",
+            text: "Can we review the launch checklist?",
+            timestamp_ms: now - 120_000,
+            payload: { from: "bob@example.com" }
+          }
+        ]
+      }
+    ]
+  };
   private nextTab = 2;
   private nextPty = 1;
   private rejectConnections = false;
@@ -725,7 +786,13 @@ export class FakeDaemon {
     };
   }
 
-  setSettingsConfig(config: Partial<{ defaultProvider: string | null; defaultModel: string | null }>): void {
+  setSettingsConfig(
+    config: Partial<{
+      defaultProvider: string | null;
+      defaultModel: string | null;
+      openaiBaseUrl: string | null;
+    }>
+  ): void {
     this.settingsConfig = {
       ...this.settingsConfig,
       ...config
@@ -830,13 +897,22 @@ export class FakeDaemon {
       workflow_bindings: snapshot.workflow_bindings?.map((binding) => ({ ...binding })),
       workflow_binding_error: snapshot.workflow_binding_error ?? null,
       monitor_tasks: snapshot.monitor_tasks?.map((task) => ({ ...task })),
-      monitor_task_error: snapshot.monitor_task_error ?? null
+      monitor_task_error: snapshot.monitor_task_error ?? null,
+      monitor_memories: snapshot.monitor_memories?.map((memory) => ({ ...memory })),
+      monitor_memory_error: snapshot.monitor_memory_error ?? null
     };
   }
 
   setMonitorHistory(history: MonitorHistoryFixture): void {
     this.monitorHistory = {
       messages: history.messages.map((message) => ({ ...message }))
+    };
+  }
+
+  setContactsSnapshot(snapshot: ContactsSnapshotFixture): void {
+    this.contactsSnapshot = {
+      contacts: snapshot.contacts.map((contact) => ({ ...contact })),
+      candidates: snapshot.candidates.map((candidate) => ({ ...candidate }))
     };
   }
 
@@ -1189,6 +1265,27 @@ export class FakeDaemon {
         return {};
       case "pty_close":
         return this.closePty(String(request.params.ptyId ?? ""));
+      case "browser_backend_status":
+        return {
+          preferredRenderer: String(request.params.preferredRenderer ?? "screencast"),
+          activeRenderer: String(request.params.preferredRenderer ?? "screencast"),
+          fallbackReason: null,
+          cef: {
+            available: false,
+            root: null,
+            frameworkPath: null,
+            missing: [],
+            tintinChromium: {
+              executable: null,
+              appBundle: null,
+              isCefRuntime: false
+            },
+            buildHint: ""
+          },
+          screencast: {
+            chromiumExecutable: null
+          }
+        };
       case "browser_agent":
         return this.browserAgent(request.params);
       case "browser_open":
@@ -1220,8 +1317,23 @@ export class FakeDaemon {
         return this.createWorkflowBinding(request.params);
       case "workflow_binding_delete":
         return this.deleteWorkflowBinding(request.params);
+      case "task_monitor_create":
+        return this.createMonitor(request.params);
+      case "task_monitor_memory_save":
+        return this.saveMonitorMemory(request.params);
       case "workflow_toggle":
         return this.toggleWorkflow(request.params);
+      case "contacts_list":
+      case "contacts_search":
+        return this.contactsList(request.params);
+      case "contacts_save":
+        return this.saveContact(request.params);
+      case "contacts_delete":
+        return this.deleteContact(request.params);
+      case "contacts_infer":
+        return this.inferContacts(request.params);
+      case "contacts_context":
+        return this.contactContext(request.params);
       case "list_dir":
         return this.listDir(request.params);
       case "load_file_tabs":
@@ -1250,8 +1362,8 @@ export class FakeDaemon {
       reason: "installing"
     };
     setTimeout(() => {
-      this.emit("local-model:minicpm5:event", {
-        modelId: "minicpm5-1b",
+      this.emit("local-model:qwen35:event", {
+        modelId: "qwen3.5-0.8b",
         jobId: "fixture-job",
         phase: "configure",
         message: "Installing shim and registering the Puffer provider",
@@ -1268,11 +1380,11 @@ export class FakeDaemon {
         recommended: false,
         reason: "ready"
       };
-      this.emit("local-model:minicpm5:event", {
-        modelId: "minicpm5-1b",
+      this.emit("local-model:qwen35:event", {
+        modelId: "qwen3.5-0.8b",
         jobId: "fixture-job",
         phase: "done",
-        message: "MiniCPM5 is installed, registered, and running",
+        message: "Qwen3.5 is installed, registered, and running",
         status: this.localModelSnapshot()
       });
     }, 60);
@@ -1293,13 +1405,13 @@ export class FakeDaemon {
     const configured = this.localModelStatus.configured === true;
     const running = this.localModelStatus.running === true;
     return [
-      { label: "Platform", state: "ok", detail: "macos arm64 supports MiniCPM5 MLX" },
+      { label: "Platform", state: "ok", detail: "macos arm64 supports Qwen3.5 MLX" },
       {
         label: "Python venv",
         state: installed ? "ok" : "missing",
         detail: installed
-          ? "found /tmp/puffer-home/venvs/minicpm5/bin/python"
-          : "missing /tmp/puffer-home/venvs/minicpm5/bin/python"
+          ? "found /tmp/puffer-home/venvs/qwen35/bin/python"
+          : "missing /tmp/puffer-home/venvs/qwen35/bin/python"
       },
       {
         label: "Python deps",
@@ -1312,21 +1424,21 @@ export class FakeDaemon {
         label: "Model weights",
         state: installed ? "ok" : "missing",
         detail: installed
-          ? "config.json present in /tmp/puffer-home/models/minicpm5-1b"
-          : "missing /tmp/puffer-home/models/minicpm5-1b/config.json"
+          ? "config.json present in /tmp/puffer-home/models/qwen3.5-0.8b"
+          : "missing /tmp/puffer-home/models/qwen3.5-0.8b/config.json"
       },
       {
         label: "Provider YAML",
         state: configured ? "ok" : "missing",
         detail: configured
-          ? "provider registration present at /tmp/puffer-home/resources/providers/minicpm5.yaml"
-          : "provider registration missing at /tmp/puffer-home/resources/providers/minicpm5.yaml"
+          ? "provider registration present at /tmp/puffer-home/resources/providers/qwen35.yaml"
+          : "provider registration missing at /tmp/puffer-home/resources/providers/qwen35.yaml"
       },
       {
         label: "Server health",
         state: running ? "ok" : "warning",
         detail: running
-          ? "http://127.0.0.1:8088/v1/models advertises minicpm5-1b"
+          ? "http://127.0.0.1:8088/v1/models advertises qwen3.5-0.8b"
           : "http://127.0.0.1:8088/v1/models is not reachable"
       }
     ];
@@ -1342,7 +1454,9 @@ export class FakeDaemon {
       workflow_bindings: this.workflowSnapshot.workflow_bindings?.map((binding) => ({ ...binding })) ?? [],
       workflow_binding_error: this.workflowSnapshot.workflow_binding_error ?? null,
       monitor_tasks: this.workflowSnapshot.monitor_tasks?.map((task) => ({ ...task })) ?? [],
-      monitor_task_error: this.workflowSnapshot.monitor_task_error ?? null
+      monitor_task_error: this.workflowSnapshot.monitor_task_error ?? null,
+      monitor_memories: this.workflowSnapshot.monitor_memories?.map((memory) => ({ ...memory })) ?? [],
+      monitor_memory_error: this.workflowSnapshot.monitor_memory_error ?? null
     };
   }
 
@@ -1379,6 +1493,7 @@ export class FakeDaemon {
       action_path: path,
       action_format: "text",
       filter_pattern: pattern,
+      contact_ids: [],
       monitor: false,
       monitor_memory_path: null,
       created_at_ms: Date.now()
@@ -1399,6 +1514,138 @@ export class FakeDaemon {
       })
     };
     return this.workflowListResponse();
+  }
+
+  private createMonitor(params: JsonRecord): JsonRecord {
+    const connectionSlug = String(params.connection_slug ?? "");
+    if (!connectionSlug) throw new Error("missing monitor connection slug");
+    const connection = this.workflowSnapshot.connections?.find((item) => item.slug === connectionSlug);
+    const connectorSlug = String(connection?.connector_slug ?? "connector");
+    const slug = `monitor-${connectionSlug}`;
+    const model = typeof params.model === "string" && params.model.trim() ? params.model.trim() : null;
+    const contactIds = Array.isArray(params.contact_ids)
+      ? params.contact_ids.map((id) => String(id).trim()).filter(Boolean)
+      : [];
+    const binding = {
+      slug,
+      description: `Monitor ${connectionSlug} for actionable tasks`,
+      connection_slug: connectionSlug,
+      connector_slug: connectorSlug,
+      status: "enabled",
+      enabled: true,
+      action_type: "triage_agent",
+      action_format: "json",
+      model,
+      contact_ids: Array.from(new Set(contactIds)).sort(),
+      monitor: true,
+      monitor_memory_path: `/tmp/${connectionSlug}.md`,
+      created_at_ms: Date.now()
+    };
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      workflow_bindings: [
+        ...(this.workflowSnapshot.workflow_bindings ?? []).filter((candidate) => candidate.slug !== slug),
+        binding
+      ].sort((a, b) => String(a.slug ?? "").localeCompare(String(b.slug ?? ""))),
+      connections: this.workflowSnapshot.connections?.map((item) => {
+        if (item.slug !== connectionSlug) return item;
+        return {
+          ...item,
+          has_consumer: true,
+          state: item.state === "authenticated" ? "active" : item.state
+        };
+      })
+    };
+    return this.workflowListResponse();
+  }
+
+  private saveMonitorMemory(params: JsonRecord): JsonRecord {
+    const connectionSlug = String(params.connection_slug ?? "").trim();
+    const content = String(params.content ?? "");
+    if (!connectionSlug) throw new Error("missing monitor memory connection slug");
+    const path = `/tmp/${connectionSlug}.md`;
+    const existing = this.workflowSnapshot.monitor_memories ?? [];
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      monitor_memories: [
+        ...existing.filter((memory) => String(memory.connection_slug ?? "") !== connectionSlug),
+        {
+          connection_slug: connectionSlug,
+          path,
+          content,
+          truncated: false
+        }
+      ].sort((a, b) => String(a.connection_slug ?? "").localeCompare(String(b.connection_slug ?? "")))
+    };
+    return this.workflowListResponse();
+  }
+
+  private contactsList(params: JsonRecord): JsonRecord {
+    const query = String(params.query ?? "").trim().toLowerCase();
+    const limit = Math.max(1, Number(params.limit ?? 60) || 60);
+    const matches = (record: JsonRecord) => !query || JSON.stringify(record).toLowerCase().includes(query);
+    return {
+      contacts: this.contactsSnapshot.contacts.filter(matches).slice(0, limit).map((contact) => ({ ...contact })),
+      candidates: this.contactsSnapshot.candidates.filter(matches).slice(0, limit).map((candidate) => ({ ...candidate }))
+    };
+  }
+
+  private saveContact(params: JsonRecord): JsonRecord {
+    const name = String(params.name ?? "").trim();
+    if (!name) throw new Error("missing contact name");
+    const id = String(params.id ?? `contact-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "custom"}`);
+    const contactIds = Array.isArray(params.contact_ids)
+      ? Array.from(new Set(params.contact_ids.map((item) => String(item).trim()).filter(Boolean))).sort()
+      : [];
+    if (contactIds.length === 0) throw new Error("missing contact ids");
+    const contact = {
+      id,
+      name,
+      description: String(params.description ?? ""),
+      avatar: params.avatar ?? null,
+      contact_ids: contactIds
+    };
+    this.contactsSnapshot = {
+      ...this.contactsSnapshot,
+      contacts: [
+        ...this.contactsSnapshot.contacts.filter((candidate) => candidate.id !== id),
+        contact
+      ].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")))
+    };
+    return this.contactsList({});
+  }
+
+  private deleteContact(params: JsonRecord): JsonRecord {
+    const id = String(params.id ?? "");
+    this.contactsSnapshot = {
+      ...this.contactsSnapshot,
+      contacts: this.contactsSnapshot.contacts.filter((contact) => contact.id !== id)
+    };
+    return this.contactsList({});
+  }
+
+  private inferContacts(params: JsonRecord): JsonRecord {
+    const limit = Math.max(1, Number(params.limit ?? 30) || 30);
+    return {
+      proposals: this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({
+        name: String(candidate.name ?? candidate.id ?? "Contact"),
+        description: `Messages from ${String(candidate.id ?? "this contact")} are frequent and have task-like context. They are retained because the candidate has recent conversation content rather than isolated bulk traffic.`,
+        avatar: candidate.avatar ?? null,
+        contact_ids: [String(candidate.id ?? "")]
+      })).filter((proposal) => proposal.contact_ids[0]),
+      candidates: this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({ ...candidate }))
+    };
+  }
+
+  private contactContext(params: JsonRecord): JsonRecord {
+    const ids = Array.isArray(params.contact_ids)
+      ? params.contact_ids.map((item) => String(item).trim()).filter(Boolean)
+      : [];
+    const context = this.contactsSnapshot.candidates
+      .filter((candidate) => ids.includes(String(candidate.id ?? "")))
+      .flatMap((candidate) => Array.isArray(candidate.context) ? candidate.context : [])
+      .map((item) => ({ ...(item as JsonRecord) }));
+    return { contact_ids: ids, context };
   }
 
   private deleteWorkflowBinding(params: JsonRecord): JsonRecord {
@@ -1703,6 +1950,10 @@ export class FakeDaemon {
       this.settingsConfig.defaultModel =
         typeof params.defaultModel === "string" ? params.defaultModel : null;
     }
+    if ("openaiBaseUrl" in params) {
+      this.settingsConfig.openaiBaseUrl =
+        typeof params.openaiBaseUrl === "string" ? params.openaiBaseUrl : null;
+    }
     return this.settingsSnapshot();
   }
 
@@ -1802,7 +2053,7 @@ export class FakeDaemon {
     const providerId = String(params.providerId ?? "");
     if (!providerId) return this.settingsSnapshot();
     this.authStatuses = [
-      ...this.authStatuses.filter((item) => item.providerId !== providerId),
+      ...this.authStatuses,
       {
         providerId,
         kind,
@@ -1830,7 +2081,7 @@ export class FakeDaemon {
     );
     if (credential) {
       this.authStatuses = [
-        ...this.authStatuses.filter((item) => item.providerId !== providerId),
+        ...this.authStatuses,
         {
           providerId,
           kind: credential.kind ?? "api_key",
@@ -1909,7 +2160,7 @@ export class FakeDaemon {
         appName: "Puffer Code",
         defaultProvider: this.settingsConfig.defaultProvider,
         defaultModel: this.settingsConfig.defaultModel,
-        openaiBaseUrl: null,
+        openaiBaseUrl: this.settingsConfig.openaiBaseUrl,
         theme: "system",
         mascotId: "puffer",
         mascotDisplayName: "Puffer",

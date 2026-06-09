@@ -72,6 +72,45 @@ fn ask_user_question_accepts_input_question_without_options() {
 }
 
 #[test]
+fn ask_user_question_masks_secret_input_answers() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let output = crate::runtime::with_user_question_prompt_handler(
+        |_request| crate::runtime::UserQuestionPromptResponse {
+            answers: serde_json::Map::from_iter([(
+                "What temporary password should the browser use?".to_string(),
+                json!("raw-temporary-password"),
+            )]),
+            annotations: serde_json::Map::new(),
+        },
+        || {
+            crate::runtime::claude_tools::workflow::ask_user_question::execute_ask_user_question(
+                &mut state,
+                &cwd,
+                json!({
+                    "questions": [
+                        {
+                            "type": "input",
+                            "secret": true,
+                            "question": "What temporary password should the browser use?",
+                            "header": "Password"
+                        }
+                    ]
+                }),
+            )
+        },
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&output).unwrap();
+    let answer = parsed["answers"]["What temporary password should the browser use?"]
+        .as_str()
+        .unwrap();
+    assert!(answer.starts_with("PUFFER_SECRET_"));
+    assert!(!output.contains("raw-temporary-password"));
+    assert_eq!(parsed["questions"][0]["secret"], true);
+}
+
+#[test]
 fn ask_user_question_rejects_input_question_options() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
@@ -94,6 +133,32 @@ fn ask_user_question_rejects_input_question_options() {
         )
         .unwrap_err();
     assert!(error.to_string().contains("must not provide options"));
+}
+
+#[test]
+fn ask_user_question_rejects_secret_choice_question() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let error =
+        crate::runtime::claude_tools::workflow::ask_user_question::execute_ask_user_question(
+            &mut state,
+            &cwd,
+            json!({
+                "questions": [
+                    {
+                        "secret": true,
+                        "question": "Pick one",
+                        "header": "Secret choice",
+                        "options": [
+                            {"label": "A", "description": "A"},
+                            {"label": "B", "description": "B"}
+                        ]
+                    }
+                ]
+            }),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("cannot use secret"));
 }
 
 #[test]

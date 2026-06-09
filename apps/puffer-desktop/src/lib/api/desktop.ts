@@ -7,6 +7,9 @@ import type {
   AskUserQuestionItem,
   BrowserRenderer,
   DesktopPinState,
+  ContactContextItem,
+  ContactProposal,
+  ContactsSnapshot,
   DiffSnapshot,
   DraftProxyEndpoint,
   ExternalCredential,
@@ -402,6 +405,7 @@ function normalizeAskUserQuestions(raw: unknown): AskUserQuestionItem[] {
       type: item.type === "input" ? "input" as const : "choice" as const,
       multiSelect: item.multiSelect === true,
       searchable: item.searchable === true,
+      secret: item.secret === true,
       options: Array.isArray(item.options)
         ? item.options
             .map(asRecord)
@@ -924,6 +928,57 @@ export async function deleteSecret(id: string): Promise<SettingsSnapshot> {
   });
 }
 
+export async function loadContacts(limit = 60, query?: string): Promise<ContactsSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<ContactsSnapshot>("contacts_list", {
+    limit,
+    query: query?.trim() || undefined
+  });
+}
+
+export async function searchContacts(query: string, limit = 30): Promise<ContactsSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<ContactsSnapshot>("contacts_search", {
+    query,
+    limit
+  });
+}
+
+export async function saveContact(input: {
+  id?: string;
+  name: string;
+  description: string;
+  avatar?: string | null;
+  contact_ids: string[];
+}): Promise<ContactsSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<ContactsSnapshot>("contacts_save", input);
+}
+
+export async function deleteContact(id: string): Promise<ContactsSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<ContactsSnapshot>("contacts_delete", { id });
+}
+
+export async function inferContacts(limit = 30): Promise<{
+  proposals: ContactProposal[];
+  candidates: ContactsSnapshot["candidates"];
+}> {
+  const client = await ensureLocalDaemonClient();
+  return client.request("contacts_infer", { limit });
+}
+
+export async function loadContactContext(contactIds: string[], limit = 100): Promise<{
+  contact_ids: string[];
+  context: ContactContextItem[];
+}> {
+  const client = await ensureLocalDaemonClient();
+  return client.request("contacts_context", {
+    contact_ids: contactIds,
+    limit
+  });
+}
+
 export async function importChromeSecrets(): Promise<ChromeSecretsImportResult> {
   if (canReachDaemon()) {
     const client = await ensureLocalDaemonClient();
@@ -938,6 +993,54 @@ export async function importChromeSecrets(): Promise<ChromeSecretsImportResult> 
   return invoke<BackendChromeSecretsImportResult>("backend_request", {
     method: "import_chrome_secrets",
     params: {}
+  });
+}
+
+export interface TelegramRelationshipReport {
+  chatId: number;
+  name: string;
+  messageCount: number;
+  relationship: string | null;
+  closeness: number | null;
+  tone: string | null;
+  evidence: string | null;
+}
+
+export interface TelegramRelationshipsResult {
+  connectionSlug: string;
+  windowDays: number;
+  reports: TelegramRelationshipReport[];
+}
+
+/** Subscribe to live progress for the Telegram relationship ranking.
+ *  Phases: `ranking` | `ranked` | `analyzing` | `analyzed` | `done`.
+ *  Returns an unsubscribe function. */
+export async function subscribeTelegramRelationships(
+  handler: (event: { connectionSlug: string; phase: string; data: unknown }) => void
+): Promise<() => void> {
+  const client = await ensureLocalDaemonClient();
+  return client.on("telegram:relationships", handler);
+}
+
+/** Rank the top-5 Telegram contacts by recent chat frequency and analyze each
+ *  relationship. Progress streams over the `telegram:relationships` event channel
+ *  (see subscribeTelegramRelationships).
+ *  - `connectionSlug` optional — the first connected account is used if omitted.
+ *  - `useLocal` picks the model: cloud gpt-5.4-mini (default, ~$0.002/run) or the
+ *    local qwen35 (privacy; needs the local model running). */
+export async function rankTelegramRelationships(
+  opts: { connectionSlug?: string; useLocal?: boolean } = {}
+): Promise<TelegramRelationshipsResult> {
+  const params: Record<string, unknown> = {};
+  if (opts.connectionSlug) params.connectionSlug = opts.connectionSlug;
+  if (opts.useLocal) params.useLocal = true;
+  if (canReachDaemon()) {
+    const client = await ensureLocalDaemonClient();
+    return client.request<TelegramRelationshipsResult>("telegram_rank_relationships", params);
+  }
+  return invoke<TelegramRelationshipsResult>("backend_request", {
+    method: "telegram_rank_relationships",
+    params
   });
 }
 
@@ -1344,14 +1447,18 @@ export async function createWorkflowBinding(binding: WorkflowBindingCreateReques
 /** Create or resume a connector monitor and return the refreshed workflow snapshot. */
 export async function createMonitor(
   connectionSlug: string,
-  model?: string | null
+  model?: string | null,
+  contactIds?: string[]
 ): Promise<WorkflowSnapshot> {
   const client = await ensureLocalDaemonClient();
-  const params: { connection_slug: string; model?: string | null } = {
+  const params: { connection_slug: string; model?: string | null; contact_ids?: string[] } = {
     connection_slug: connectionSlug
   };
   if (model !== undefined) {
     params.model = model?.trim() || null;
+  }
+  if (contactIds !== undefined) {
+    params.contact_ids = contactIds;
   }
   return client.request<WorkflowSnapshot>("task_monitor_create", params);
 }
@@ -1984,6 +2091,7 @@ export type BrowserTabInfo = {
   connected: boolean;
   active: boolean;
   backendSessionId: string;
+  nativeCefSessionId?: string | null;
   createdAtMs: number;
   updatedAtMs: number;
 };
@@ -2417,12 +2525,12 @@ export type ConfigPatch = {
   openaiBaseUrl?: string | null;
 };
 
-export async function localModelStatus(modelId = "minicpm5"): Promise<LocalModelStatus> {
+export async function localModelStatus(modelId = "qwen35"): Promise<LocalModelStatus> {
   const client = await ensureLocalDaemonClient();
   return client.request<LocalModelStatus>("local_model_status", { modelId });
 }
 
-export async function installLocalModel(modelId = "minicpm5"): Promise<LocalModelInstallJob> {
+export async function installLocalModel(modelId = "qwen35"): Promise<LocalModelInstallJob> {
   const client = await ensureLocalDaemonClient();
   return client.request<LocalModelInstallJob>("install_local_model", { modelId });
 }
@@ -2511,7 +2619,7 @@ export async function updateConfig(patch: ConfigPatch): Promise<SettingsSnapshot
   return client.request<SettingsSnapshot>("update_config", patch);
 }
 
-export type Minicpm5Recommendation = {
+export type Qwen35Recommendation = {
   recommend: boolean;
   reason?: string;
   display_name?: string;
@@ -2520,14 +2628,14 @@ export type Minicpm5Recommendation = {
   install_cmd?: string;
 };
 
-/** Ask the desktop backend whether to recommend the local MiniCPM5 model on
+/** Ask the desktop backend whether to recommend the local Qwen3.5 model on
  *  this machine (macOS + Apple Silicon + not yet installed). */
-export async function minicpm5Recommend(): Promise<Minicpm5Recommendation> {
-  return await invoke<Minicpm5Recommendation>("minicpm5_recommend");
+export async function qwen35Recommend(): Promise<Qwen35Recommendation> {
+  return await invoke<Qwen35Recommendation>("qwen35_recommend");
 }
 
-/** Kick off the local-model install. Progress streams as `minicpm5://install-log`
- *  events; completion arrives as `minicpm5://install-done` ({ success }). */
-export async function minicpm5Install(): Promise<void> {
-  await invoke("minicpm5_install");
+/** Kick off the local-model install. Progress streams as `qwen35://install-log`
+ *  events; completion arrives as `qwen35://install-done` ({ success }). */
+export async function qwen35Install(): Promise<void> {
+  await invoke("qwen35_install");
 }

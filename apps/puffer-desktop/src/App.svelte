@@ -20,6 +20,8 @@
   import AgentDetail from "./lib/screens/agent/AgentDetail.svelte";
   import Workflows from "./lib/screens/Workflows.svelte";
   import Tasks from "./lib/screens/Tasks.svelte";
+  import Contacts from "./lib/screens/Contacts.svelte";
+  import BuildBadge from "./lib/components/BuildBadge.svelte";
   import Settings from "./lib/screens/Settings.svelte";
   import Onboarding from "./lib/screens/Onboarding.svelte";
 
@@ -55,6 +57,7 @@
     loadDefaultWorkspace,
     loadDesktopPins,
     setDesktopPin,
+    updateConfig,
     type AgentTurnSubmitOptions
   } from "./lib/api/desktop";
   import {
@@ -74,7 +77,12 @@
     stripAttachmentPreviewUrls,
     summarizeAgentTurnAttachments
   } from "./lib/agentTurnAttachments";
-  import { providerIdCanRunAgent, providerIdInSet, providerIsAvailableForAgent } from "./lib/providerIds";
+  import {
+    canonicalDaemonProviderId,
+    providerIdCanRunAgent,
+    providerIdInSet,
+    providerIsAvailableForAgent
+  } from "./lib/providerIds";
   import { providerCatalogForSetup } from "./lib/providerFallbacks";
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import { listen } from "@tauri-apps/api/event";
@@ -255,6 +263,7 @@
   const GROUPS_PAGE_SIZE = 30;
   let authBusyProviderId = $state<string | null>(null);
   let authError = $state<string | null>(null);
+  let apiKeyConnectionFingerprints = $state<string[]>([]);
   let externalCredentials = $state<ExternalCredential[]>([]);
   let importBusyKey = $state<string | null>(null);
   let actionBusy = $state(false);
@@ -1248,6 +1257,10 @@
 
   async function handleImportExternal(providerId: string, source: "claude" | "codex") {
     if (importBusyKey || authBusyProviderId) return;
+    if (hasConnectedProvider(providerId)) {
+      notifyDuplicateProviderConnection();
+      return;
+    }
     importBusyKey = `${providerId}::${source}`;
     authError = null;
     const wasOnboarding = onboarding;
@@ -1287,6 +1300,10 @@
 
   async function handleOauthLogin(providerId: string) {
     if (authBusyProviderId || importBusyKey) return;
+    if (hasConnectedProvider(providerId)) {
+      notifyDuplicateProviderConnection();
+      return;
+    }
     authBusyProviderId = providerId;
     authError = null;
     const wasOnboarding = onboarding;
@@ -1307,27 +1324,88 @@
     }
   }
 
-  async function handleApiKeyLogin(providerId: string, apiKey: string) {
+  function normalizedProviderConnectionId(providerId: string): string {
+    return canonicalDaemonProviderId(providerId).trim().toLowerCase();
+  }
+
+  function hasConnectedProvider(providerId: string): boolean {
+    return providerIdInSet(
+      normalizedProviderConnectionId(providerId),
+      (settingsSnapshot?.auth ?? []).map((auth) => auth.providerId)
+    );
+  }
+
+  async function sha256Hex(input: string): Promise<string> {
+    const bytes = new TextEncoder().encode(input);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(digest))
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+  }
+
+  async function apiKeyConnectionFingerprint(
+    providerId: string,
+    apiKey: string,
+    baseUrl: string
+  ): Promise<string> {
+    const provider = normalizedProviderConnectionId(providerId);
+    const keyHash = await sha256Hex(apiKey.trim());
+    return `api_key:${provider}:${baseUrl.trim()}:${keyHash}`;
+  }
+
+  function notifyDuplicateProviderConnection() {
+    const message = "Provider connection already exists.";
+    authError = message;
+    statusMessage = message;
+  }
+
+  async function handleApiKeyLogin(
+    providerId: string,
+    apiKey: string,
+    options: { baseUrl?: string | null } = {}
+  ) {
     if (authBusyProviderId || importBusyKey) return;
+    const loginProviderId = providerId === "custom" ? "openai" : providerId;
+    const trimmedBaseUrl = options.baseUrl?.trim() ?? "";
+    const customProvider = providerId === "custom";
+    const fingerprint = await apiKeyConnectionFingerprint(
+      customProvider ? "custom" : loginProviderId,
+      apiKey,
+      trimmedBaseUrl
+    );
+    if (
+      (!customProvider && hasConnectedProvider(loginProviderId)) ||
+      (customProvider && apiKeyConnectionFingerprints.includes(fingerprint))
+    ) {
+      notifyDuplicateProviderConnection();
+      return;
+    }
     authBusyProviderId = providerId;
     authError = null;
     const wasOnboarding = onboarding;
     try {
+      if (providerId === "custom") {
+        settingsSnapshot = await updateConfig({
+          defaultProvider: "openai",
+          openaiBaseUrl: trimmedBaseUrl || null
+        });
+      }
       // Prefer the daemon path; it reuses the workspace auth store and
       // lets remote daemons (SSH) pick up credentials server-side. Falls
       // back to the Tauri-invoke path inside the wrapper when no daemon
       // is reachable. For genuinely remote connections we stay on the
       // Tauri path so `remoteConnection` (SSH command) is honored.
       if (remoteConnection.enabled) {
-        settingsSnapshot = await loginWithApiKey(providerId, apiKey, remoteConnection);
+        settingsSnapshot = await loginWithApiKey(loginProviderId, apiKey, remoteConnection);
       } else {
-        settingsSnapshot = await loginWithApiKeyViaDaemon(providerId, apiKey);
+        settingsSnapshot = await loginWithApiKeyViaDaemon(loginProviderId, apiKey);
       }
       onboardingCompleted = hasAvailableAgentProvider(settingsSnapshot);
       onboarding = shouldShowOnboarding(settingsSnapshot);
       if (wasOnboarding && !onboarding) {
         tweaks = { ...tweaks, screen: "workspace" };
       }
+      apiKeyConnectionFingerprints = [...apiKeyConnectionFingerprints, fingerprint];
       statusMessage = `Stored API key for ${providerId}.`;
       await refreshGroups();
     } catch (error) {
@@ -1356,6 +1434,12 @@
       } else {
         onboarding = true;
       }
+      const providerKey = normalizedProviderConnectionId(providerId);
+      apiKeyConnectionFingerprints = apiKeyConnectionFingerprints.filter(
+        (fingerprint) =>
+          !fingerprint.startsWith(`api_key:${providerKey}:`) &&
+          !(providerKey === "openai" && fingerprint.startsWith("api_key:custom:"))
+      );
     } catch (error) {
       authError = String(error);
       statusMessage = authError;
@@ -3991,6 +4075,8 @@
         turnStatusHint = "Waiting for answer";
         const id = liveQuestionId(ev.turnId, ev.requestId);
         const questions = normalizeUserQuestions(ev.questions);
+        const questionMeta =
+          ev.metadata && typeof ev.metadata === "object" ? ev.metadata : undefined;
         appendLive({
           id,
           kind: "question",
@@ -3999,7 +4085,8 @@
           body: "",
           meta: [],
           status: "pending",
-          questions
+          questions,
+          metadata: questionMeta
         });
         turnQuestionLookup = {
           ...turnQuestionLookup,
@@ -4084,6 +4171,7 @@
         type: item.type === "input" ? "input" as const : "choice" as const,
         multiSelect: item.multiSelect === true,
         searchable: item.searchable === true,
+        secret: item.secret === true,
         options: Array.isArray(item.options)
           ? item.options
               .map((option) =>
@@ -4156,7 +4244,9 @@
             externals={externalCredentials}
             busyImportKey={importBusyKey}
             onLoginOauth={(providerId) => void handleOauthLogin(providerId)}
-            onLoginApiKey={(providerId, apiKey) => void handleApiKeyLogin(providerId, apiKey)}
+            onLoginApiKey={(providerId, apiKey, options) =>
+              void handleApiKeyLogin(providerId, apiKey, options)}
+            onLogout={(providerId) => void handleLogout(providerId)}
             onImportExternal={(providerId, source) =>
               void handleImportExternal(providerId, source)}
             onRefresh={() => void refreshSettings()}
@@ -4251,6 +4341,8 @@
             <Workflows onRunWorkflowCommand={runWorkflowCommand} />
           {:else if tweaks.screen === "tasks"}
             <Tasks onRunTaskCommand={runWorkflowCommand} />
+          {:else if tweaks.screen === "contacts"}
+            <Contacts />
           {:else if tweaks.screen === "settings"}
             <Settings
               snapshot={settingsSnapshot}
@@ -4271,7 +4363,8 @@
               onRefresh={() => void refreshSettings()}
               onLogout={(providerId) => void handleLogout(providerId)}
               onLoginOauth={(providerId) => void handleOauthLogin(providerId)}
-              onApiKeyLogin={(providerId, apiKey) => void handleApiKeyLogin(providerId, apiKey)}
+              onApiKeyLogin={(providerId, apiKey, options) =>
+                void handleApiKeyLogin(providerId, apiKey, options)}
               onImportExternal={(providerId, source) =>
                 void handleImportExternal(providerId, source)}
               busyProviderId={authBusyProviderId}
@@ -4351,6 +4444,8 @@
     {/if}
   </div>
 {/if}
+
+<BuildBadge />
 
 <style>
   .status-strip {

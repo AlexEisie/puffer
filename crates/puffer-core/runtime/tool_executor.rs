@@ -197,11 +197,12 @@ pub(super) fn execute_tool_call(
     };
     let hook_input = input.clone();
     run_tool_start_hooks(resources, cwd, tool_id, &hook_input);
-    let execution_input = if definition.handler == "runtime:agent" {
-        input.clone()
-    } else {
-        super::secrets::expand_secret_placeholders(state, &input)?
-    };
+    let execution_input =
+        if definition.handler == "runtime:agent" || preserves_secret_placeholders(tool_id) {
+            input.clone()
+        } else {
+            super::secrets::expand_secret_placeholders(state, &input)?
+        };
     let lambda_skill_target_snapshot = if tool_id == "Skill"
         && state
             .pending_lambda_host_call
@@ -288,6 +289,10 @@ pub(super) fn execute_tool_call(
     Ok(result)
 }
 
+fn preserves_secret_placeholders(tool_id: &str) -> bool {
+    tool_id == "RequestSecret"
+}
+
 fn active_tool_filter(
     state: &AppState,
     tool_filter: Option<&RequestToolFilter>,
@@ -337,7 +342,7 @@ fn successful_runtime_tool_with_metadata(
 pub(super) fn is_parallel_safe_tool(tool_id: &str) -> bool {
     matches!(
         tool_id,
-        "Glob" | "Grep" | "WebFetch" | "WebSearch" | "ToolSearch" | "Skill" | "Bash" | "Agent"
+        "Glob" | "Grep" | "WebFetch" | "WebSearch" | "ToolSearch" | "Skill" | "Bash"
     )
 }
 

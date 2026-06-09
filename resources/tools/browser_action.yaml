@@ -7,6 +7,27 @@ description: |-
   DOM snapshots, element refs, screenshots, or browser input. Each call carries
   one structured browser action and the exact arguments that the runtime will
   execute. This tool does not expose a shell command surface.
+
+  For sign-in and login flows, search `RequestSecret` for the relevant site,
+  domain, account, or username before using this browser tool for credential
+  fields. Use non-secret `username` metadata from RequestSecret search/request
+  results for email, phone, username, or account fields. Use
+  `PUFFER_SECRET_...` placeholders only for password, token, API key, or other
+  secret-value fields. If no matching credential exists, use `RequestSecret` to
+  collect a reusable credential instead of asking the user to paste passwords,
+  tokens, or API keys into chat.
+
+  For editable controls, use `fill` when the desired final value is known.
+  `fill` replaces the control value and is the normal action for email,
+  username, password, search, and address fields. `type` and `insertText`
+  append text at the current cursor/selection and can duplicate existing field
+  contents when retried.
+
+  For page readiness, use `open` or `navigate` followed by `snapshot`,
+  `screenshot`, `domInspect`, or a targeted browser action. Do not wait for
+  network idle after navigation. Modern sites often keep telemetry, beacon,
+  streaming, or long-polling requests open, so network quiet is not a reliable
+  readiness signal for interactive browser work.
 handler: runtime:browser
 approval_policy: auto
 sandbox_policy: workspace-write
@@ -26,7 +47,6 @@ input_schema:
         - reload
         - back
         - forward
-        - waitNetworkIdle
         - snapshot
         - domInspect
         - consoleLogs
@@ -50,7 +70,7 @@ input_schema:
         - scroll
         - scrollIntoView
         - evaluate
-      description: Browser action to perform. Use open for creating or reusing a tab at a URL.
+      description: Browser action to perform. Use open for creating or reusing a tab at a URL; openScreenshot and openConsoleLogs wait for DOM readiness, not full network idle.
     sessionId:
       type: string
       description: Puffer session id. Defaults to the current agent session.
@@ -79,7 +99,7 @@ input_schema:
       description: Exact option value or label text for select actions.
     text:
       type: string
-      description: Text for type, insertText, or fill actions.
+      description: Text for fill, type, or insertText. For form fields, prefer fill because it replaces the value; type and insertText append at the current cursor or selection.
     question:
       type: string
       description: Optional caller question preserved for screenshot-style verified skill contracts.
@@ -135,12 +155,12 @@ input_schema:
       type: integer
       minimum: 1
       maximum: 10000
-      description: Quiet network window for waitNetworkIdle. Defaults to 500.
+      description: Reserved for legacy internal waitNetworkIdle calls. Do not set for normal model-directed browser actions.
     timeoutMs:
       type: integer
       minimum: 1
       maximum: 120000
-      description: Maximum wait for waitNetworkIdle. Defaults to 30000.
+      description: Reserved for legacy internal waitNetworkIdle calls. Do not set for normal model-directed browser actions.
   required:
     - action
   additionalProperties: false

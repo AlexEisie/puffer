@@ -1,17 +1,19 @@
 use super::agent::{key_text, scroll_delta};
+use super::command::BrowserCommand;
 use super::cursor::parse_cursor_response;
+use super::dom_inspect::dom_inspect_expression;
 use super::params::{parse_input_event, required_string_array};
 use super::ref_resolution::{
     checkable_state_expression, fill_expression, focus_expression, scroll_into_view_expression,
-    select_expression, upload_input_handle_expression,
+    select_expression, target_point_expression, upload_input_handle_expression,
 };
 use super::screenshot::{
     parse_agent_screenshot_options, parse_capture_screenshot_response, BrowserElementRef,
     BrowserScreenshotFormat,
 };
 use super::selection::parse_copy_selection_response;
-use super::session::BrowserCommand;
 use super::upload::parse_upload_handle_response;
+use super::test_support::{cef_env_lock, FakeCefDevtools};
 use super::*;
 use crate::daemon_browser::tabs::BrowserCurrentTabStatus;
 
@@ -106,6 +108,7 @@ fn open_tab_skips_navigation_when_live_tab_already_has_requested_url() {
         Some("main".to_string()),
         Some("Gmail monitor".to_string()),
         backend_id,
+        None,
         state.lock().unwrap().clone(),
         false,
     );
@@ -131,6 +134,274 @@ fn open_tab_skips_navigation_when_live_tab_already_has_requested_url() {
             .iter()
             .any(|command| matches!(command, BrowserCommand::Navigate(_))),
         "same-url live open should not refresh the browser page"
+    );
+}
+
+#[test]
+fn cef_remote_root_does_not_create_devtools_targets() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    let _guard = cef_env_lock().lock().unwrap();
+    let previous_port = std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT");
+    let previous_profile = std::env::var_os("PUFFER_CEF_PROFILE_DIR");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let requested_paths = Arc::new(Mutex::new(Vec::<String>::new()));
+    let finished = Arc::new(AtomicBool::new(false));
+    let server_paths = Arc::clone(&requested_paths);
+    let server_finished = Arc::clone(&finished);
+    let server = std::thread::spawn(move || {
+        while !server_finished.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut buffer = [0; 2048];
+                    let count = stream.read(&mut buffer).unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buffer[..count]);
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/")
+                        .to_string();
+                    let list_count = {
+                        let mut paths = server_paths.lock().unwrap();
+                        paths.push(path.clone());
+                        paths
+                            .iter()
+                            .filter(|item| item.starts_with("/json/list"))
+                            .count()
+                    };
+                    let body = if path.starts_with("/json/version") {
+                        format!(
+                            r#"{{"webSocketDebuggerUrl":"ws://127.0.0.1:{port}/devtools/browser/root"}}"#
+                        )
+                    } else if path.starts_with("/json/list") && list_count == 1 {
+                        format!(
+                            r#"[{{"id":"target-1","type":"page","url":"about:blank","webSocketDebuggerUrl":"ws://127.0.0.1:{port}/devtools/page/target-1"}}]"#
+                        )
+                    } else {
+                        "[]".to_string()
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let profile = tempfile::tempdir().unwrap();
+    std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", port.to_string());
+    std::env::set_var("PUFFER_CEF_PROFILE_DIR", profile.path());
+
+    let root = BrowserRootSession::spawn(
+        profile.path().to_path_buf(),
+        960,
+        720,
+        BrowserLaunchSettings::default(),
+    )
+    .unwrap();
+    assert_eq!(root.allocate_target().unwrap().target_id, "target-1");
+    assert!(root.allocate_target().is_err());
+
+    match previous_port {
+        Some(value) => std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", value),
+        None => std::env::remove_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT"),
+    }
+    match previous_profile {
+        Some(value) => std::env::set_var("PUFFER_CEF_PROFILE_DIR", value),
+        None => std::env::remove_var("PUFFER_CEF_PROFILE_DIR"),
+    }
+    finished.store(true, Ordering::SeqCst);
+    let _ = server.join();
+    let paths = requested_paths.lock().unwrap().clone();
+    assert!(
+        paths.iter().all(|path| !path.starts_with("/json/new")),
+        "remote CEF allocation unexpectedly requested /json/new: {paths:?}"
+    );
+}
+
+/// Reproduces issue #603: the native-CEF browser uses a FIXED pool of prewarmed
+/// page targets shared across every agent session. When prior/abandoned page
+/// workers keep holding their slots, opening a new tab used to hard-fail with
+/// "no available prewarmed page targets". The registry must instead reclaim the
+/// least-recently-active slot and reuse it, so a new open keeps working.
+#[test]
+fn native_cef_pool_reclaims_idle_session_when_slots_exhausted() {
+    let _guard = cef_env_lock().lock().unwrap();
+    let previous_port = std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT");
+    let previous_profile = std::env::var_os("PUFFER_CEF_PROFILE_DIR");
+
+    // Fake CEF with exactly two prewarmed page slots.
+    let cef = FakeCefDevtools::spawn(2);
+    let profile = tempfile::tempdir().unwrap();
+    std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", cef.port.to_string());
+    std::env::set_var("PUFFER_CEF_PROFILE_DIR", profile.path());
+
+    let registry = BrowserRegistry::new(
+        profile.path().to_path_buf(),
+        true,
+        BrowserLaunchSettings::default(),
+    );
+    let (events, _events_rx) = tokio::sync::broadcast::channel::<ServerEnvelope>(256);
+
+    let session_a = "sess-a:browser:t1";
+    let session_b = "sess-b:browser:t1";
+    let session_c = "sess-c:browser:t1";
+
+    registry
+        .open(events.clone(), session_a.to_string(), None, 800, 600, false)
+        .expect("open A should allocate the first prewarmed slot");
+    std::thread::sleep(Duration::from_millis(40));
+    registry
+        .open(events.clone(), session_b.to_string(), None, 800, 600, false)
+        .expect("open B should allocate the second prewarmed slot");
+    std::thread::sleep(Duration::from_millis(40));
+
+    // Both prewarmed slots are now in use. Opening a third tab must NOT hard-fail
+    // with "no available prewarmed page targets": the registry should reclaim the
+    // least-recently-active slot (session A) and reuse it for session C.
+    let third = registry.open(events.clone(), session_c.to_string(), None, 800, 600, false);
+
+    match previous_port {
+        Some(value) => std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", value),
+        None => std::env::remove_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT"),
+    }
+    match previous_profile {
+        Some(value) => std::env::set_var("PUFFER_CEF_PROFILE_DIR", value),
+        None => std::env::remove_var("PUFFER_CEF_PROFILE_DIR"),
+    }
+
+    assert!(
+        third.is_ok(),
+        "third open should self-heal by reclaiming the most-idle CEF slot, got {:?}",
+        third.err()
+    );
+    assert!(
+        registry.live_session(session_a).is_none(),
+        "most-idle session A should have been reclaimed to free its prewarm slot"
+    );
+    assert!(
+        registry.live_session(session_b).is_some(),
+        "session B should remain live"
+    );
+    assert!(
+        registry.live_session(session_c).is_some(),
+        "session C should be live on the reclaimed slot"
+    );
+}
+
+/// Reproduces the slot-leak half of issue #585: a wedged page that never answers
+/// the CDP reset must NOT permanently leak its native-CEF prewarm slot. Closing
+/// such a page has to return its slot to the shared pool (best-effort reset) so a
+/// single unresponsive page can't poison the whole browser tree.
+#[test]
+fn native_cef_slot_returns_to_pool_when_hung_page_reset_fails() {
+    let _guard = cef_env_lock().lock().unwrap();
+    let previous_port = std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT");
+    let previous_profile = std::env::var_os("PUFFER_CEF_PROFILE_DIR");
+
+    // A single prewarmed slot whose page is wedged (accepts the CDP socket but
+    // never answers), so the reset-on-release will time out.
+    let cef = FakeCefDevtools::spawn_with_hung_slots(1, vec![0]);
+    let profile = tempfile::tempdir().unwrap();
+    std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", cef.port.to_string());
+    std::env::set_var("PUFFER_CEF_PROFILE_DIR", profile.path());
+
+    let registry = BrowserRegistry::new(
+        profile.path().to_path_buf(),
+        true,
+        BrowserLaunchSettings::default(),
+    );
+    let (events, _events_rx) = tokio::sync::broadcast::channel::<ServerEnvelope>(256);
+
+    let session_a = "sess-a:browser:t1";
+    let session_b = "sess-b:browser:t1";
+
+    registry
+        .open(events.clone(), session_a.to_string(), None, 800, 600, false)
+        .expect("open A should allocate the only prewarmed slot");
+    // Closing the wedged page runs a CDP reset that times out; its slot must still
+    // come back to the pool instead of being permanently leaked.
+    registry.close(session_a).expect("close A");
+
+    let reopened = registry.open(events.clone(), session_b.to_string(), None, 800, 600, false);
+
+    match previous_port {
+        Some(value) => std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", value),
+        None => std::env::remove_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT"),
+    }
+    match previous_profile {
+        Some(value) => std::env::set_var("PUFFER_CEF_PROFILE_DIR", value),
+        None => std::env::remove_var("PUFFER_CEF_PROFILE_DIR"),
+    }
+
+    assert!(
+        reopened.is_ok(),
+        "a wedged page's slot must return to the pool after close, got {:?}",
+        reopened.err()
+    );
+}
+
+/// Full issue #585 cascade: when every prewarm slot is held by a WEDGED page
+/// (worker alive, page won't answer CDP), opening a new tab must still recover.
+/// The registry reclaims the least-recently-active wedged slot (issue #603) and
+/// that slot returns to the pool despite the failed reset (the #585 slot-leak
+/// fix), so one frozen checkout page no longer poisons the whole browser tree.
+#[test]
+fn native_cef_recovers_when_all_slots_held_by_wedged_pages() {
+    let _guard = cef_env_lock().lock().unwrap();
+    let previous_port = std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT");
+    let previous_profile = std::env::var_os("PUFFER_CEF_PROFILE_DIR");
+
+    // Two prewarm slots, both wedged.
+    let cef = FakeCefDevtools::spawn_with_hung_slots(2, vec![0, 1]);
+    let profile = tempfile::tempdir().unwrap();
+    std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", cef.port.to_string());
+    std::env::set_var("PUFFER_CEF_PROFILE_DIR", profile.path());
+
+    let registry = BrowserRegistry::new(
+        profile.path().to_path_buf(),
+        true,
+        BrowserLaunchSettings::default(),
+    );
+    let (events, _events_rx) = tokio::sync::broadcast::channel::<ServerEnvelope>(256);
+
+    registry
+        .open(events.clone(), "sess-a:browser:t1".to_string(), None, 800, 600, false)
+        .expect("open A");
+    std::thread::sleep(Duration::from_millis(40));
+    registry
+        .open(events.clone(), "sess-b:browser:t1".to_string(), None, 800, 600, false)
+        .expect("open B");
+    std::thread::sleep(Duration::from_millis(40));
+
+    // Both wedged slots are in use; the new tab must recover by reclaiming one.
+    let third = registry.open(events.clone(), "sess-c:browser:t1".to_string(), None, 800, 600, false);
+
+    match previous_port {
+        Some(value) => std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", value),
+        None => std::env::remove_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT"),
+    }
+    match previous_profile {
+        Some(value) => std::env::set_var("PUFFER_CEF_PROFILE_DIR", value),
+        None => std::env::remove_var("PUFFER_CEF_PROFILE_DIR"),
+    }
+
+    assert!(
+        third.is_ok(),
+        "a new tab must recover even when all slots are held by wedged pages, got {:?}",
+        third.err()
     );
 }
 
@@ -212,6 +483,7 @@ fn cleanup_root_metadata_preserves_disconnected_tab_handles() {
         Some("t1".to_string()),
         None,
         "root-session:browser:t1".to_string(),
+        None,
         browser_state,
         true,
     );
@@ -254,6 +526,7 @@ fn cleanup_root_metadata_drops_tab_set_on_root_close() {
         Some("t1".to_string()),
         None,
         "root-session:browser:t1".to_string(),
+        None,
         browser_state,
         true,
     );
@@ -296,6 +569,7 @@ fn current_tab_context_reports_empty_url() {
         Some("t1".to_string()),
         None,
         "root-session:browser:t1".to_string(),
+        None,
         BrowserState {
             url: String::new(),
             title: "Blank".to_string(),
@@ -324,6 +598,7 @@ fn current_tab_context_reports_about_blank() {
         Some("t1".to_string()),
         None,
         "root-session:browser:t1".to_string(),
+        None,
         BrowserState {
             url: "about:blank".to_string(),
             title: String::new(),
@@ -351,6 +626,7 @@ fn current_tab_context_extracts_origin_host_port_and_title() {
         Some("t1".to_string()),
         None,
         "root-session:browser:t1".to_string(),
+        None,
         BrowserState {
             url: "https://docs.example.com:8443/path?q=1".to_string(),
             title: "Docs".to_string(),
@@ -576,6 +852,15 @@ fn focus_expression_targets_focusable_elements() {
 }
 
 #[test]
+fn dom_inspect_expression_returns_bounded_selector_metadata() {
+    let expression = dom_inspect_expression("input[type=email]").unwrap();
+    assert!(expression.contains("document.querySelectorAll(selector)"));
+    assert!(expression.contains("all.slice(0, 25)"));
+    assert!(expression.contains("attributes: attrsOf(el)"));
+    assert!(dom_inspect_expression(" ").is_err());
+}
+
+#[test]
 fn scroll_helpers_cover_alias_behaviour() {
     assert_eq!(scroll_delta("down", 480).unwrap(), (0.0, 480.0));
     assert!(scroll_delta("diagonal", 480).is_err());
@@ -593,6 +878,23 @@ fn scroll_helpers_cover_alias_behaviour() {
     .unwrap();
     assert!(expression.contains("findTarget(refTarget)"));
     assert!(expression.contains("scrollIntoView"));
+}
+
+#[test]
+fn target_point_expression_scrolls_and_clamps_to_viewport() {
+    let expression = target_point_expression(&BrowserElementRef {
+        ref_id: "@e1".to_string(),
+        role: "button".to_string(),
+        name: "Pay".to_string(),
+        tag: "button".to_string(),
+        href: None,
+        x: 10.0,
+        y: 20.0,
+    })
+    .unwrap();
+    assert!(expression.contains("scrollIntoView"));
+    assert!(expression.contains("Math.min(Math.max"));
+    assert!(expression.contains("Target has no stable viewport point"));
 }
 
 #[test]
