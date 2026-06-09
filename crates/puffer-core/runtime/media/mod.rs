@@ -118,6 +118,31 @@ impl MediaGenerationService {
         read_json_sidecar(&self.job_sidecar_path(job_id)?)
     }
 
+    /// Lists all video media jobs, skipping unreadable or corrupt sidecars.
+    pub(crate) fn list_video_jobs(&self) -> Result<Vec<MediaJob>> {
+        let dir = self.jobs_dir();
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => {
+                return Err(err).with_context(|| format!("read media jobs dir {}", dir.display()))
+            }
+        };
+        let mut jobs = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(job) = read_json_sidecar::<MediaJob>(&path) {
+                if job.kind == MediaKind::Video {
+                    jobs.push(job);
+                }
+            }
+        }
+        Ok(jobs)
+    }
+
     /// Persists a media artifact JSON sidecar.
     pub(crate) fn save_artifact(&self, artifact: &MediaArtifact) -> Result<()> {
         validate_simple_id(&artifact.id, "artifact id")?;
@@ -224,6 +249,34 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn list_video_jobs_returns_video_jobs_and_skips_others() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = MediaGenerationService::new(temp.path());
+
+        let mut video = MediaJob::new(
+            "v1",
+            MediaKind::Video,
+            "relaydance",
+            "seedance-nsfw",
+            "p",
+            1,
+            1,
+        );
+        video.provider_job_id = Some("task_x".to_string());
+        service.save_job(&video).unwrap();
+
+        let image = MediaJob::new("i1", MediaKind::Image, "zhipu", "glm-image", "p", 1, 1);
+        service.save_job(&image).unwrap();
+
+        // A corrupt sidecar must be skipped.
+        std::fs::write(service.jobs_dir().join("broken.json"), b"{ not json").unwrap();
+
+        let jobs = service.list_video_jobs().expect("list");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, "v1");
+    }
 
     #[test]
     fn media_job_status_terminal_states_are_explicit() {
