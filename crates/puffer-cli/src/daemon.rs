@@ -879,6 +879,11 @@ pub(crate) struct RpcError {
     pub(crate) message: String,
 }
 
+// Streams a ticketed media file with HTTP Range support. Tickets are minted by
+// `create_generated_video_access` (chat-generated videos) AND
+// `create_file_media_access` (arbitrary in-workspace video files for the Files
+// pane); both validate the path before inserting, so a ticket never escapes the
+// workspace. The route name is historical — kept to avoid churning a tested path.
 async fn generated_video_handler(
     State(state): State<Arc<DaemonState>>,
     AxumPath(ticket): AxumPath<String>,
@@ -1287,6 +1292,9 @@ async fn dispatch_request(
             respond!(detached!(|s, p| handle_create_generated_video_access(
                 &s, &p
             )))
+        }
+        "create_file_media_access" => {
+            respond!(detached!(|s, p| handle_create_file_media_access(&s, &p)))
         }
         "save_proxy_settings" => respond!(detached!(|s, p| handle_save_proxy_settings(&s, &p))),
         "save_secret" => respond!(detached!(|s, p| handle_save_secret(&s, &p))),
@@ -2539,6 +2547,41 @@ fn handle_create_generated_video_access(state: &DaemonState, params: &Value) -> 
         });
     };
     let (token, ticket) = state.insert_generated_video_ticket(metadata);
+    Ok(json!({
+        "state": "available",
+        "path": generated_video_ticket_path(&token),
+        "mimeType": ticket.mime_type,
+        "size": ticket.size,
+        "expiresAtMs": ticket.expires_at_ms
+    }))
+}
+
+fn handle_create_file_media_access(state: &DaemonState, params: &Value) -> Result<Value> {
+    let raw_path = params
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("missing path"))?;
+    // Reuse the same allowed-roots + canonicalization check read_file uses, so
+    // a ticket can never point outside the workspace. Any failure (escape,
+    // nonexistent, not absolute) collapses to "missing".
+    let canonical = match crate::daemon_files::validate_path(state, raw_path) {
+        Ok(path) => path,
+        Err(_) => return Ok(json!({ "state": "missing" })),
+    };
+    let metadata = match std::fs::metadata(&canonical) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        _ => return Ok(json!({ "state": "missing" })),
+    };
+    let Some(mime_type) = file_media_mime_type(&canonical) else {
+        return Ok(json!({ "state": "unsupported" }));
+    };
+    let (token, ticket) = state.insert_generated_video_ticket(
+        puffer_core::GeneratedVideoAccessMetadata {
+            path: canonical,
+            mime_type: mime_type.to_string(),
+            byte_count: metadata.len(),
+        },
+    );
     Ok(json!({
         "state": "available",
         "path": generated_video_ticket_path(&token),
@@ -5533,7 +5576,8 @@ mod tests {
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
         browser_permission_payload_json, connector_setup_connect_args, connector_setup_id,
         daemon_now_ms, desktop_latency_ms, file_media_mime_type, generated_video_handler,
-        handle_create_generated_video_access, handle_create_openai_realtime_client_secret,
+        handle_create_file_media_access, handle_create_generated_video_access,
+        handle_create_openai_realtime_client_secret,
         handle_create_session, handle_generate_media, handle_import_external_credential,
         handle_list_lambda_skill_libraries, handle_list_media_capabilities,
         handle_list_permissions, handle_list_provider_models, handle_local_model_status,
@@ -6620,6 +6664,79 @@ models: []
         assert_eq!(file_media_mime_type(Path::new("/a/song.ogg")), None);
         assert_eq!(file_media_mime_type(Path::new("/a/notes.txt")), None);
         assert_eq!(file_media_mime_type(Path::new("/a/noext")), None);
+    }
+
+    #[test]
+    fn create_file_media_access_returns_ticket_for_video() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        let workspace_root = paths.workspace_root.clone();
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let clip = workspace_root.join("clip.mp4");
+        std::fs::write(&clip, b"mp4-bytes").unwrap();
+        let state = test_state_with_paths(paths);
+
+        let response = handle_create_file_media_access(
+            &state,
+            &serde_json::json!({ "path": clip.display().to_string() }),
+        )
+        .unwrap();
+
+        assert_eq!(response["state"], "available");
+        assert_eq!(response["mimeType"], "video/mp4");
+        assert_eq!(response["size"], 9);
+        assert!(response["expiresAtMs"].as_u64().unwrap() > daemon_now_ms());
+        let path = response["path"].as_str().expect("ticket path");
+        assert!(path.starts_with("/media/generated-video/"));
+    }
+
+    #[test]
+    fn create_file_media_access_rejects_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        let dir = paths.workspace_root.join("clip.mp4");
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = test_state_with_paths(paths);
+
+        let response = handle_create_file_media_access(
+            &state,
+            &serde_json::json!({ "path": dir.display().to_string() }),
+        )
+        .unwrap();
+        assert_eq!(response["state"], "missing");
+    }
+
+    #[test]
+    fn create_file_media_access_rejects_non_video() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        let workspace_root = paths.workspace_root.clone();
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let doc = workspace_root.join("notes.txt");
+        std::fs::write(&doc, b"hello").unwrap();
+        let state = test_state_with_paths(paths);
+
+        let response = handle_create_file_media_access(
+            &state,
+            &serde_json::json!({ "path": doc.display().to_string() }),
+        )
+        .unwrap();
+        assert_eq!(response["state"], "unsupported");
+    }
+
+    #[test]
+    fn create_file_media_access_rejects_missing_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        let missing = paths.workspace_root.join("nope.mp4");
+        let state = test_state_with_paths(paths);
+
+        let response = handle_create_file_media_access(
+            &state,
+            &serde_json::json!({ "path": missing.display().to_string() }),
+        )
+        .unwrap();
+        assert_eq!(response["state"], "missing");
     }
 
     #[test]
