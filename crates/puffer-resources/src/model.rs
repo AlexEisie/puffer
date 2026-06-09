@@ -765,6 +765,46 @@ mod tests {
         }
     }
 
+    /// Guards the BytePlus video duration contract end-to-end: the bundled
+    /// descriptor must encode `duration` as a JSON number for both Seedance 2.0
+    /// models. The fast model rejects a string `duration` with `InvalidParameter`,
+    /// so a dropped `wire_type` (defaulting to `String`) silently breaks
+    /// submission. See resources/providers/byteplus.yaml.
+    #[test]
+    fn bundled_byteplus_video_duration_is_numeric() {
+        let pack: ProviderPack =
+            serde_yaml::from_str(include_str!("../../../resources/providers/byteplus.yaml"))
+                .expect("byteplus.yaml parses");
+        let descriptor = pack.into_descriptor();
+        let video = descriptor
+            .media
+            .as_ref()
+            .and_then(|media| media.video.as_ref())
+            .expect("byteplus video media descriptor");
+
+        for model_id in [
+            "dreamina-seedance-2-0-260128",
+            "dreamina-seedance-2-0-fast-260128",
+        ] {
+            let model = video
+                .models
+                .iter()
+                .find(|model| model.id == model_id)
+                .unwrap_or_else(|| panic!("byteplus video should include {model_id}"));
+            let duration = model
+                .parameters
+                .iter()
+                .find(|parameter| parameter.name == "duration_seconds")
+                .unwrap_or_else(|| panic!("{model_id} should declare duration_seconds"));
+            assert_eq!(duration.request_field.as_deref(), Some("duration"));
+            assert_eq!(
+                duration.wire_type,
+                puffer_provider_registry::MediaParameterWireType::Number,
+                "{model_id} duration must serialize as a JSON number, not a string",
+            );
+        }
+    }
+
     /// Confirms trusted router/gateway media discovery is only declared with
     /// executable chat image-output adapters.
     #[test]

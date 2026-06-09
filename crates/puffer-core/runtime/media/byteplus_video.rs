@@ -35,6 +35,12 @@ impl BytePlusVideoRequest {
                 }
             ]),
         );
+        // Default to silent video. BytePlus Seedance models default
+        // `generate_audio` to true, and their auto-generated audio reliably
+        // trips content moderation ("output audio may contain sensitive
+        // information"), failing every job — even benign prompts. Inserted
+        // before params so a future `generate_audio` parameter can override.
+        body.insert("generate_audio".to_string(), Value::Bool(false));
         for (field, value) in &self.params {
             body.insert(field.trim().to_string(), value.clone());
         }
@@ -494,6 +500,31 @@ mod tests {
 
         assert_eq!(body["duration"], json!(5));
         assert_eq!(body["ratio"], json!("16:9"));
+    }
+
+    #[test]
+    fn byteplus_request_body_defaults_to_silent_video() {
+        let request = BytePlusVideoRequest {
+            model: "dreamina-seedance-2-0-fast-260128".to_string(),
+            prompt: "a cat".to_string(),
+            params: vec![],
+        };
+        let body = request.request_body();
+
+        // Silent by default; BytePlus audio moderation otherwise fails the job.
+        assert_eq!(body["generate_audio"], json!(false));
+    }
+
+    #[test]
+    fn byteplus_request_body_allows_generate_audio_override() {
+        let request = BytePlusVideoRequest {
+            model: "dreamina-seedance-2-0-fast-260128".to_string(),
+            prompt: "a cat".to_string(),
+            params: vec![("generate_audio".to_string(), json!(true))],
+        };
+        let body = request.request_body();
+
+        assert_eq!(body["generate_audio"], json!(true));
     }
 
     #[test]
