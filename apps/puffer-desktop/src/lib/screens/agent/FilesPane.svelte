@@ -699,18 +699,33 @@
   }
 
   async function revealAndOpenFile(path: string, line: number | null = null) {
-    const nextExpanded = new Set(expanded);
+    const expectedRoot = root;
     const relative = path.startsWith(`${root}/`) ? path.slice(root.length + 1) : "";
+    // Open in the viewer immediately — activateFile sets activePath synchronously,
+    // so the staleness guard below sees the right path. Don't block the viewer on
+    // tree expansion.
+    const opened = openFile(path, 0, { pinned: true, line });
     if (relative) {
+      const nextExpanded = new Set(expanded);
+      // Cold-mount: the tab is conditionally rendered, so on first reveal the root
+      // dir is still loading (owned by the cwd effect). Await it too, or buildRows
+      // can't render even the first level.
+      const loads: Promise<void>[] = [loadDir(root)];
       let current = root;
       for (const segment of relative.split("/").slice(0, -1)) {
         current = joinPath(current, segment);
         nextExpanded.add(current);
-        if (!cache.has(current)) void loadDir(current);
+        loads.push(loadDir(current));
       }
       expanded = nextExpanded;
+      await Promise.allSettled(loads);
+      await tick();
+      // Bail if a newer reveal or a session switch superseded us mid-await.
+      if (root === expectedRoot && activePath === path) {
+        scrollTreeRowIntoCenter(path);
+      }
     }
-    await openFile(path, 0, { pinned: true, line });
+    await opened;
   }
 
   async function openFile(path: string, size: number, options: OpenFileOptions = {}) {
