@@ -73,6 +73,7 @@ type MonitorHistoryFixture = {
 type ContactsSnapshotFixture = {
   contacts: JsonRecord[];
   candidates: JsonRecord[];
+  proposals?: JsonRecord[];
 };
 
 type ConnectorSetupQuestionFixture = {
@@ -729,7 +730,8 @@ export class FakeDaemon {
           }
         ]
       }
-    ]
+    ],
+    proposals: []
   };
   private nextTab = 2;
   private nextPty = 1;
@@ -912,7 +914,8 @@ export class FakeDaemon {
   setContactsSnapshot(snapshot: ContactsSnapshotFixture): void {
     this.contactsSnapshot = {
       contacts: snapshot.contacts.map((contact) => ({ ...contact })),
-      candidates: snapshot.candidates.map((candidate) => ({ ...candidate }))
+      candidates: snapshot.candidates.map((candidate) => ({ ...candidate })),
+      proposals: snapshot.proposals?.map((proposal) => ({ ...proposal })) ?? []
     };
   }
 
@@ -1586,7 +1589,8 @@ export class FakeDaemon {
     const matches = (record: JsonRecord) => !query || JSON.stringify(record).toLowerCase().includes(query);
     return {
       contacts: this.contactsSnapshot.contacts.filter(matches).slice(0, limit).map((contact) => ({ ...contact })),
-      candidates: this.contactsSnapshot.candidates.filter(matches).slice(0, limit).map((candidate) => ({ ...candidate }))
+      candidates: this.contactsSnapshot.candidates.filter(matches).slice(0, limit).map((candidate) => ({ ...candidate })),
+      proposals: this.contactsSnapshot.proposals.map((proposal) => ({ ...proposal }))
     };
   }
 
@@ -1626,13 +1630,18 @@ export class FakeDaemon {
 
   private inferContacts(params: JsonRecord): JsonRecord {
     const limit = Math.max(1, Number(params.limit ?? 30) || 30);
+    const proposals = this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({
+      name: String(candidate.name ?? candidate.id ?? "Contact"),
+      description: `Messages from ${String(candidate.id ?? "this contact")} are frequent and have task-like context. They are retained because the candidate has recent conversation content rather than isolated bulk traffic.`,
+      avatar: candidate.avatar ?? null,
+      contact_ids: [String(candidate.id ?? "")]
+    })).filter((proposal) => proposal.contact_ids[0]);
+    this.contactsSnapshot = {
+      ...this.contactsSnapshot,
+      proposals
+    };
     return {
-      proposals: this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({
-        name: String(candidate.name ?? candidate.id ?? "Contact"),
-        description: `Messages from ${String(candidate.id ?? "this contact")} are frequent and have task-like context. They are retained because the candidate has recent conversation content rather than isolated bulk traffic.`,
-        avatar: candidate.avatar ?? null,
-        contact_ids: [String(candidate.id ?? "")]
-      })).filter((proposal) => proposal.contact_ids[0]),
+      proposals: proposals.map((proposal) => ({ ...proposal })),
       candidates: this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({ ...candidate }))
     };
   }
