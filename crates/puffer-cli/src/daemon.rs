@@ -1768,6 +1768,7 @@ fn handle_delete_session(state: &DaemonState, params: &Value) -> Result<Value> {
     let session_uuid = Uuid::parse_str(session_id).context("invalid sessionId")?;
     let session_store = SessionStore::from_paths(&state.paths)?;
     session_store.delete_session(session_uuid)?;
+    crate::attachment_bridge::cleanup_session_attachments(session_uuid);
     state.publish_event(ServerEnvelope::Event {
         event: "workspace:sessions:changed".to_string(),
         payload: json!({
@@ -1823,6 +1824,7 @@ fn handle_delete_project(state: &DaemonState, params: &Value) -> Result<Value> {
     for session in sessions {
         if desktop_api::session_group_root(&session.cwd) == target {
             session_store.delete_session(session.id)?;
+            crate::attachment_bridge::cleanup_session_attachments(session.id);
             removed += 1;
         }
     }
