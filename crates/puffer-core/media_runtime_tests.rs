@@ -540,6 +540,15 @@ fn list_video_capabilities_exposes_multiple_static_seedance_models() {
             "doubao-seedance-2-0-720p",
             "doubao-seedance-2-0-1080p",
             "doubao-seedance-2-0-fast-260128",
+            "grok-imagine-video",
+            "grok-imagine-video-1.5-preview",
+            "happyhorse-1.0-t2v",
+            "seedance-1-5-pro-no-audio",
+            "seedance-1-5-pro-with-audio",
+            "seedance-fast-nsfw",
+            "seedance-nsfw",
+            "seedance-nsfw-720p",
+            "seedance-nsfw-1080p",
         ])
     );
     assert!(capabilities.iter().all(|capability| {
@@ -573,6 +582,15 @@ fn list_video_capabilities_exposes_multiple_static_seedance_models() {
         .find(|parameter| parameter.name == "resolution")
         .expect("relaydance resolution");
     assert_eq!(relaydance_resolution.values, vec!["1080p".to_string()]);
+
+    let grok_video = capabilities
+        .iter()
+        .find(|capability| capability.model_id == "grok-imagine-video")
+        .expect("grok imagine video model");
+    assert!(
+        grok_video.parameters.is_empty(),
+        "grok imagine video stays prompt-only until RelayDance publishes parameter metadata"
+    );
 }
 
 #[test]

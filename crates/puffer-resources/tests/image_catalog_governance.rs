@@ -123,10 +123,10 @@ const ALL_PROVIDER_YAMLS: &[(&str, &str)] = &[
 const SEEDANCE_VIDEO_DURATIONS: &[&str] = &[
     "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
 ];
-const SEEDANCE_VIDEO_RATIOS: &[&str] =
-    &["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"];
+const SEEDANCE_VIDEO_RATIOS: &[&str] = &["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"];
 const SEEDANCE_VIDEO_RESOLUTIONS: &[&str] = &["480p", "720p", "1080p"];
 const SEEDANCE_FAST_VIDEO_RESOLUTIONS: &[&str] = &["480p", "720p"];
+const SEEDANCE_15_VIDEO_DURATIONS: &[&str] = &["4", "5", "6", "7", "8", "9", "10", "11", "12"];
 
 fn provider_descriptor(provider_id: &str, yaml: &str) -> ProviderDescriptor {
     let pack: ProviderPack = serde_yaml::from_str(yaml)
@@ -331,6 +331,15 @@ fn relaydance_declares_executable_video_descriptor() {
             "doubao-seedance-2-0-720p",
             "doubao-seedance-2-0-1080p",
             "doubao-seedance-2-0-fast-260128",
+            "grok-imagine-video",
+            "grok-imagine-video-1.5-preview",
+            "happyhorse-1.0-t2v",
+            "seedance-1-5-pro-no-audio",
+            "seedance-1-5-pro-with-audio",
+            "seedance-fast-nsfw",
+            "seedance-nsfw",
+            "seedance-nsfw-720p",
+            "seedance-nsfw-1080p",
         ])
     );
 
@@ -338,33 +347,65 @@ fn relaydance_declares_executable_video_descriptor() {
         (
             "doubao-seedance-2-0-720p",
             "Seedance 2.0 720p",
+            SEEDANCE_VIDEO_DURATIONS,
             &["720p"][..],
         ),
         (
             "doubao-seedance-2-0-1080p",
             "Seedance 2.0 1080p",
+            SEEDANCE_VIDEO_DURATIONS,
             &["1080p"][..],
         ),
         (
             "doubao-seedance-2-0-fast-260128",
             "Seedance 2.0 Fast",
+            SEEDANCE_VIDEO_DURATIONS,
+            SEEDANCE_FAST_VIDEO_RESOLUTIONS,
+        ),
+        (
+            "seedance-1-5-pro-no-audio",
+            "Seedance 1.5 Pro No Audio",
+            SEEDANCE_15_VIDEO_DURATIONS,
+            SEEDANCE_VIDEO_RESOLUTIONS,
+        ),
+        (
+            "seedance-1-5-pro-with-audio",
+            "Seedance 1.5 Pro With Audio",
+            SEEDANCE_15_VIDEO_DURATIONS,
+            SEEDANCE_VIDEO_RESOLUTIONS,
+        ),
+        (
+            "seedance-nsfw",
+            "Seedance NSFW",
+            SEEDANCE_VIDEO_DURATIONS,
+            &["720p"][..],
+        ),
+        (
+            "seedance-nsfw-720p",
+            "Seedance NSFW 720p",
+            SEEDANCE_VIDEO_DURATIONS,
+            &["720p"][..],
+        ),
+        (
+            "seedance-nsfw-1080p",
+            "Seedance NSFW 1080p",
+            SEEDANCE_VIDEO_DURATIONS,
+            &["1080p"][..],
+        ),
+        (
+            "seedance-fast-nsfw",
+            "Seedance Fast NSFW",
+            SEEDANCE_VIDEO_DURATIONS,
             SEEDANCE_FAST_VIDEO_RESOLUTIONS,
         ),
     ];
-    for (model_id, display_name, resolutions) in expected {
+    for (model_id, display_name, durations, resolutions) in expected {
         let model = models_by_id
             .get(model_id)
             .unwrap_or_else(|| panic!("relaydance should include {model_id}"));
         assert_eq!(model.display_name.as_deref(), Some(display_name));
         assert_eq!(model.operations, vec![MediaOperation::Generate]);
-        assert_select_parameter(
-            model,
-            "duration",
-            "Duration",
-            SEEDANCE_VIDEO_DURATIONS,
-            "5",
-            "seconds",
-        );
+        assert_select_parameter(model, "duration", "Duration", durations, "5", "seconds");
         assert_select_parameter(
             model,
             "resolution",
@@ -380,6 +421,26 @@ fn relaydance_declares_executable_video_descriptor() {
             SEEDANCE_VIDEO_RATIOS,
             "16:9",
             "metadata.ratio",
+        );
+    }
+
+    let prompt_only_expected = [
+        ("grok-imagine-video", "Grok Imagine Video"),
+        (
+            "grok-imagine-video-1.5-preview",
+            "Grok Imagine Video 1.5 Preview",
+        ),
+        ("happyhorse-1.0-t2v", "HappyHorse 1.0 Text to Video"),
+    ];
+    for (model_id, display_name) in prompt_only_expected {
+        let model = models_by_id
+            .get(model_id)
+            .unwrap_or_else(|| panic!("relaydance should include {model_id}"));
+        assert_eq!(model.display_name.as_deref(), Some(display_name));
+        assert_eq!(model.operations, vec![MediaOperation::Generate]);
+        assert!(
+            model.parameters.is_empty(),
+            "{model_id} should stay prompt-only until RelayDance exposes parameter metadata"
         );
     }
 }

@@ -528,6 +528,24 @@ mod tests {
     }
 
     #[test]
+    fn builds_prompt_only_request_without_optional_params() {
+        let request = relaydance_video_request_from_parameters(
+            "grok-imagine-video".to_string(),
+            "a city skyline".to_string(),
+            &[],
+            &BTreeMap::new(),
+        )
+        .expect("request");
+
+        let body = request.request_body();
+        assert_eq!(body["model"], json!("grok-imagine-video"));
+        assert_eq!(body["prompt"], json!("a city skyline"));
+        assert_eq!(body["n"], json!(1));
+        assert!(body.get("metadata").is_none());
+        assert!(body.get("seconds").is_none());
+    }
+
+    #[test]
     fn rejects_empty_prompt() {
         let error = relaydance_video_request_from_parameters(
             "m".to_string(),
@@ -696,7 +714,9 @@ mod tests {
         assert_eq!(job.status, MediaJobStatus::Succeeded);
         assert_eq!(job.artifact_ids.len(), 1);
         let artifact = service.load_artifact(&job.artifact_ids[0]).unwrap();
-        assert!(artifact.path.starts_with(dir.path().join(".puffer/media/videos")));
+        assert!(artifact
+            .path
+            .starts_with(dir.path().join(".puffer/media/videos")));
     }
 
     #[test]
