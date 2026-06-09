@@ -243,6 +243,16 @@
     return `${value}s`;
   }
 
+  function mediaCapabilitiesLoadingPrimary(mediaKind: MediaKind): string {
+    return `Loading ${mediaKind} capabilities...`;
+  }
+
+  function mediaCapabilitiesLoadingSecondary(mediaKind: MediaKind): string {
+    return mediaKind === "image"
+      ? "Checking available image generation models."
+      : "Checking available video generation models.";
+  }
+
   function modelLabel(capability: MediaCapabilityInfo): string {
     const label = capability.modelDisplayName || capability.modelId;
     return modelOptions.filter((candidate) => candidate.modelId === capability.modelId).length > 1
@@ -552,6 +562,16 @@
   });
 </script>
 
+{#snippet loadingBlock(primary: string, secondary: string)}
+  <div class="pf-media-loading" role="status" aria-live="polite">
+    <span class="pf-media-loading-spinner" aria-hidden="true"></span>
+    <div>
+      <strong>{primary}</strong>
+      <span>{secondary}</span>
+    </div>
+  </div>
+{/snippet}
+
 {#snippet readOnlyField(label: string, value: string)}
   <div class="pf-media-field">
     <span class="pf-field-label">{label}</span>
@@ -593,13 +613,15 @@
     </header>
 
     <div class="pf-modal-body pf-media-modal-body">
-      {#if mediaContentReady && error}
+      {#if !mediaContentReady}
+        {@render loadingBlock(mediaCapabilitiesLoadingPrimary(kind), mediaCapabilitiesLoadingSecondary(kind))}
+      {:else if error}
         <p class="pf-media-state" data-warning="true" role="alert">{error}</p>
-      {:else if mediaContentReady && !hasAvailableCapabilities && connectStateMessage}
+      {:else if !hasAvailableCapabilities && connectStateMessage}
         <p class="pf-media-empty-state" data-warning="true">{connectStateMessage}</p>
-      {:else if mediaContentReady && !hasAvailableCapabilities}
+      {:else if !hasAvailableCapabilities}
         <p class="pf-media-empty-state">No {kind} capabilities available.</p>
-      {:else if mediaContentReady}
+      {:else}
         {#if savedSelectionMissing}
           <p class="pf-media-state" data-warning="true" role="alert">Saved model is no longer available.</p>
         {/if}
@@ -848,6 +870,51 @@
 
   .pf-media-modal-body {
     font-size: 12px;
+  }
+
+  .pf-media-loading {
+    min-height: 180px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    border-radius: 8px;
+    padding: 24px;
+    color: var(--muted-foreground);
+    background: color-mix(in oklab, var(--muted) 20%, var(--background));
+  }
+
+  .pf-media-loading strong,
+  .pf-media-loading span {
+    display: block;
+  }
+
+  .pf-media-loading strong {
+    color: var(--foreground);
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .pf-media-loading span {
+    margin-top: 2px;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .pf-media-loading-spinner {
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+    border: 2px solid color-mix(in oklab, var(--muted-foreground) 22%, transparent);
+    border-top-color: var(--muted-foreground);
+    border-radius: 50%;
+    animation: pf-media-spin 0.8s linear infinite;
+  }
+
+  @keyframes pf-media-spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .pf-media-form-grid {

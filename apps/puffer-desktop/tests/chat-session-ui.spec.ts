@@ -656,7 +656,7 @@ test("composer image generation settings modal saves media config from daemon ca
   expect(daemon.requests.filter((request) => request.method === "update_config")).toHaveLength(1);
 });
 
-test("composer image generation settings does not show capability loading status", async ({
+test("composer image generation settings shows capability loading status", async ({
   page
 }) => {
   const daemon = new FakeDaemon({
@@ -696,9 +696,10 @@ test("composer image generation settings does not show capability loading status
   const dialog = page.getByRole("dialog", { name: "Image generation settings" });
   await expect(dialog).toBeVisible();
   await page.waitForTimeout(100);
-  await expect(dialog.getByText("Loading image capabilities...")).toHaveCount(0);
-  await expect(dialog.getByText("Checking available image generation models.")).toHaveCount(0);
-  await expect(dialog.locator(".pf-media-loading-spinner")).toHaveCount(0);
+  await expect(dialog.getByRole("status")).toContainText("Loading image capabilities...");
+  await expect(dialog.getByText("Checking available image generation models.")).toBeVisible();
+  await expect(dialog.locator(".pf-media-loading-spinner")).toBeVisible();
+  await expect(dialog.locator(".pf-media-loading")).toHaveCSS("border-top-width", "0px");
 
   await daemon.waitForRequest(
     "list_media_capabilities",
@@ -877,7 +878,7 @@ test("composer video generation settings modal remains reachable without capabil
   await expect(dialog).toHaveCount(0);
 });
 
-test("composer video generation settings does not show capability loading status", async ({
+test("composer video generation settings shows capability loading status", async ({
   page
 }) => {
   const daemon = new FakeDaemon({
@@ -918,9 +919,10 @@ test("composer video generation settings does not show capability loading status
   const dialog = page.getByRole("dialog", { name: "Video generation settings" });
   await expect(dialog).toBeVisible();
   await page.waitForTimeout(100);
-  await expect(dialog.getByText("Loading video capabilities...")).toHaveCount(0);
-  await expect(dialog.getByText("Checking available video generation models.")).toHaveCount(0);
-  await expect(dialog.locator(".pf-media-loading-spinner")).toHaveCount(0);
+  await expect(dialog.getByRole("status")).toContainText("Loading video capabilities...");
+  await expect(dialog.getByText("Checking available video generation models.")).toBeVisible();
+  await expect(dialog.locator(".pf-media-loading-spinner")).toBeVisible();
+  await expect(dialog.locator(".pf-media-loading")).toHaveCSS("border-top-width", "0px");
 
   await daemon.waitForRequest(
     "list_media_capabilities",
