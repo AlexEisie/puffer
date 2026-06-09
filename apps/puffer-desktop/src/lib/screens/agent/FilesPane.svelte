@@ -673,7 +673,7 @@
       next.delete(path);
     } else {
       next.add(path);
-      if (!cache.has(path)) void loadDir(path);
+      void loadDir(path); // self-guards on cache; no-op if already loaded
     }
     expanded = next;
   }
@@ -699,13 +699,13 @@
   }
 
   async function revealAndOpenFile(path: string, line: number | null = null) {
-    const expectedRoot = root;
     const relative = path.startsWith(`${root}/`) ? path.slice(root.length + 1) : "";
     // Open in the viewer immediately — activateFile sets activePath synchronously,
     // so the staleness guard below sees the right path. Don't block the viewer on
     // tree expansion.
     const opened = openFile(path, 0, { pinned: true, line });
     if (relative) {
+      const expectedRoot = root;
       const nextExpanded = new Set(expanded);
       // Cold-mount: the tab is conditionally rendered, so on first reveal the root
       // dir is still loading (owned by the cwd effect). Await it too, or buildRows
