@@ -14,6 +14,7 @@ const onePixelPngBytes = Array.from(
     "base64"
   )
 );
+const onePixelJpegBytes = Array.from(Buffer.from(ONE_PIXEL_JPEG_BASE64, "base64"));
 
 const configuredImageMedia: MediaSettings = {
   image: {
@@ -1505,17 +1506,37 @@ test("generated video attachment renders a playable card", async ({ page }) => {
     expiresAtMs: baseTime + 60_000,
     bytes: Buffer.from("mp4-bytes")
   });
+  daemon.seedGeneratedMediaPreview(sessionId, "artifact-video-card", {
+    state: "available",
+    mimeType: "image/jpeg",
+    bytes: onePixelJpegBytes
+  });
   await daemon.install(page);
   await daemon.open(page);
   await openSession(page, /Generated video card/);
 
+  await daemon.waitForRequest(
+    "read_generated_media_preview",
+    (request) =>
+      request.params.sessionId === sessionId &&
+      request.params.artifactId === "artifact-video-card"
+  );
+  expect(daemon.requests.filter((request) => request.method === "create_generated_video_access"))
+    .toHaveLength(0);
   const card = page.getByRole("button", { name: "Open video attachment Generated video" });
   await expect(card).toBeVisible();
-  await expect(card.locator("video")).toHaveAttribute("preload", "metadata");
+  await expect(card.getByRole("img", { name: "Generated video" })).toBeVisible();
+  await expect(card.locator("video")).toHaveCount(0);
   await expect(card.locator('[data-testid="video-play-indicator"]')).toBeVisible();
   await expect(page.locator(".pf-msg").filter({ has: card })).not.toContainText("/tmp/puffer");
 
   await card.click();
+  await daemon.waitForRequest(
+    "create_generated_video_access",
+    (request) =>
+      request.params.sessionId === sessionId &&
+      request.params.artifactId === "artifact-video-card"
+  );
   const dialog = page.getByRole("dialog", { name: "Generated video" });
   await expect(dialog).toBeVisible();
   const video = dialog.locator("video");
@@ -1573,19 +1594,28 @@ test("missing generated video access falls back without exposing local paths", a
   await openSession(page, /Missing generated video access/);
 
   await daemon.waitForRequest(
-    "create_generated_video_access",
+    "read_generated_media_preview",
     (request) =>
       request.params.sessionId === sessionId &&
       request.params.artifactId === "artifact-video-missing"
   );
+  expect(daemon.requests.filter((request) => request.method === "create_generated_video_access"))
+    .toHaveLength(0);
   const card = page.getByRole("button", { name: "Open video attachment Missing video" });
   await expect(card).toBeVisible();
+  await expect(card.getByRole("img")).toHaveCount(0);
   await expect(card.locator("video")).toHaveCount(0);
   await expect(card.locator('[data-testid="video-play-indicator"]')).toHaveCount(0);
   const messageRow = page.locator(".pf-msg").filter({ has: card });
   await expect(messageRow).not.toContainText(localPath);
 
   await card.click();
+  await daemon.waitForRequest(
+    "create_generated_video_access",
+    (request) =>
+      request.params.sessionId === sessionId &&
+      request.params.artifactId === "artifact-video-missing"
+  );
   const dialog = page.getByRole("dialog", { name: "Missing video" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText("Preview unavailable for this attachment.")).toBeVisible();
@@ -2157,6 +2187,11 @@ test("video slash success appends a generated video attachment", async ({ page }
     expiresAtMs: baseTime + 60_000,
     bytes: Buffer.from("mp4-bytes")
   });
+  daemon.seedGeneratedMediaPreview(sessionId, "artifact-video-live", {
+    state: "available",
+    mimeType: "image/jpeg",
+    bytes: onePixelJpegBytes
+  });
   await daemon.install(page);
   await daemon.open(page);
   await openSession(page, /Video preview success/);
@@ -2166,7 +2201,28 @@ test("video slash success appends a generated video attachment", async ({ page }
 
   const card = page.getByRole("button", { name: "Open video attachment Generated video" });
   await expect(card).toBeVisible();
+  await daemon.waitForRequest(
+    "read_generated_media_preview",
+    (request) =>
+      request.params.sessionId === sessionId &&
+      request.params.artifactId === "artifact-video-live"
+  );
+  await expect(card.getByRole("img", { name: "Generated video" })).toBeVisible();
+  await expect(card.locator("video")).toHaveCount(0);
+  await expect(card.locator('[data-testid="video-play-indicator"]')).toBeVisible();
+  expect(daemon.requests.filter((request) => request.method === "create_generated_video_access"))
+    .toHaveLength(0);
   await expect(page.locator(".pf-msg").filter({ has: card })).not.toContainText("media-job-video-success");
+
+  await card.click();
+  await daemon.waitForRequest(
+    "create_generated_video_access",
+    (request) =>
+      request.params.sessionId === sessionId &&
+      request.params.artifactId === "artifact-video-live"
+  );
+  const dialog = page.getByRole("dialog", { name: "Generated video" });
+  await expect(dialog.locator("video")).toBeVisible();
 });
 
 test("explicit video slash trigger fails clearly without capability", async ({ page }) => {

@@ -62,13 +62,7 @@
     </div>
   {:else if attachment.previewUrl && attachment.kind === "video"}
     <div class="pf-attachment-video-thumb">
-      <video
-        src={attachment.previewUrl}
-        preload="metadata"
-        muted
-        playsinline
-        aria-label={attachment.name}
-      ></video>
+      <img src={attachment.previewUrl} alt={attachment.name} draggable="false" />
       <span class="pf-attachment-video-play" data-testid="video-play-indicator" aria-hidden="true">
         <Icon name="play" size={18} />
       </span>
@@ -191,7 +185,7 @@
     border-radius: 8px;
     background: var(--muted);
   }
-  .pf-attachment-video-thumb video {
+  .pf-attachment-video-thumb img {
     width: 100%;
     height: 100%;
     display: block;

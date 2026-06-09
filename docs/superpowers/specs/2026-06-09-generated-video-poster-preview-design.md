@@ -6,9 +6,9 @@ Date: 2026-06-09
 
 Generated video cards should display a deterministic first-frame poster image.
 The poster is extracted once when a video artifact is completed, stored beside
-the video artifact, and served through the generated media preview API. Chat
-cards render the poster as an image with a play affordance. Video bytes are
-requested only when the user opens playback.
+the video artifact, and served through the existing generated media preview
+API. Chat cards render the poster as an image with a play affordance. Video
+bytes are requested only when the user opens playback.
 
 This intentionally replaces the previous thumbnail approach that embedded a
 small `<video preload="metadata">` in the attachment strip. Browser-native
@@ -32,6 +32,23 @@ The earlier generated video playback design deliberately excluded a persisted
 poster sidecar. This design supersedes that decision for long-term stability
 and performance.
 
+## Recheck Outcome
+
+The first pass was directionally correct but had a few over-designed or
+underspecified edges. The tightened design is:
+
+- Reuse `read_generated_media_preview` and expand its semantics to "artifact
+  preview" instead of adding a new RPC name.
+- Keep `create_generated_video_access` unchanged for playback.
+- Add one typed poster metadata field to `MediaArtifact`; do not introduce a
+  thumbnail registry or media processing pipeline.
+- Keep poster generation synchronous at artifact completion, but bound the
+  extractor with a timeout so video jobs cannot hang indefinitely.
+- Make poster extraction injectable in tests so unit tests do not depend on a
+  local `ffmpeg` binary.
+- Do not migrate old video artifacts. Missing `preview` means the UI shows the
+  fallback card.
+
 ## Goals
 
 - Show a stable first-frame image for generated video cards.
@@ -43,7 +60,7 @@ and performance.
 
 ## Non-Goals
 
-- No backward-compatible DTO or RPC preservation.
+- No backward-compatible DTO shape or old preview semantics shim.
 - No multi-size thumbnail set.
 - No animated thumbnails, sprite sheets, waveform previews, or timeline hover
   previews.
@@ -53,6 +70,8 @@ and performance.
 - No provider-specific poster APIs in the first version.
 - No frontend canvas extraction fallback.
 - No attempt to skip black frames or choose a "best" frame.
+- No new preview RPC name.
+- No migration for old generated video artifacts.
 
 ## Chosen Approach
 
@@ -74,7 +93,8 @@ state.
 
 ## Artifact Sidecar
 
-Generated video artifact sidecars gain a `preview` object:
+`MediaArtifact` gains one optional typed `preview` field. Generated video
+artifact sidecars write it as a `preview` object:
 
 ```json
 {
@@ -108,9 +128,8 @@ Failure shape:
 
 The `reason` is for diagnostics only. UI copy should not expose it.
 
-Because backward compatibility is not a requirement, generated video previews
-should require this sidecar shape after the change. Old video artifacts without
-`preview` can appear as fallback file cards.
+Images may leave `preview` unset. Videos with no available poster preview
+appear as fallback file cards.
 
 ## Poster Extraction
 
@@ -128,21 +147,29 @@ Rules:
 - Write atomically: create a temporary poster file, then rename it into place.
 - Treat extraction failure as poster missing, not video generation failure.
 
-The decoder implementation can use a single resolved `ffmpeg` executable. The
-resolver should stay simple: bundled binary first if available, then `PATH`.
-No plugin architecture, provider hook, or user-facing poster settings are
-needed.
+The decoder implementation uses one resolved `ffmpeg` executable. Keep the
+resolver as a single internal function with one fallback path: use `ffmpeg`
+from `PATH` unless an existing packaged binary location is already available in
+the runtime. Do not add binary download logic, a plugin architecture, provider
+hooks, or user-facing poster settings.
+
+The command must have a short timeout, initially 10 seconds. Timeout, missing
+binary, non-zero exit, and invalid output all produce missing poster metadata
+without failing the video artifact.
+
+Tests should inject a small poster extractor function instead of requiring
+`ffmpeg`.
 
 ## Preview API
 
-Replace the image-only generated preview semantics with artifact preview
-semantics.
+Keep the existing RPC name and replace the image-only semantics with artifact
+preview semantics.
 
 RPC:
 
 ```json
 {
-  "method": "read_generated_artifact_preview",
+  "method": "read_generated_media_preview",
   "params": {
     "sessionId": "<session id>",
     "artifactId": "<artifact id>"
@@ -202,7 +229,7 @@ returns poster bytes.
 ## Frontend Behavior
 
 `MessageAttachmentPreviewStrip` should treat image and video attachments as
-previewable through the same generated artifact preview API.
+previewable through the same generated media preview API.
 
 Video card rendering:
 
@@ -225,7 +252,9 @@ Rules:
 - Daemon playback URLs are not blob URLs and should not be revoked.
 
 Live `/video` results and reloaded session history should use the same preview
-path. There should be no live-only thumbnail behavior.
+path. `App.svelte` may create the live generated video attachment, but it
+should not fetch playback access for thumbnail rendering or maintain a
+separate thumbnail path.
 
 ## Error Handling
 
@@ -272,9 +301,12 @@ Rust tests:
   succeeds;
 - poster extraction failure leaves the video artifact successful and records
   missing poster state;
-- video preview API returns poster JPEG bytes;
-- video preview API returns `missing` when poster state or file is missing;
-- video preview API rejects poster symlink escape;
+- poster extraction timeout leaves the video artifact successful and records
+  missing poster state;
+- `read_generated_media_preview` returns poster JPEG bytes for video artifacts;
+- `read_generated_media_preview` returns `missing` when poster state or file is
+  missing;
+- `read_generated_media_preview` rejects poster symlink escape;
 - image preview behavior still returns image bytes;
 - playback access still returns video tickets for video artifacts.
 

@@ -4,10 +4,11 @@ use crate::runtime::media::chat_image_output::{
 use crate::runtime::media::discovery::TrustedImageDiscoveryClient;
 use crate::runtime::media::images_json::{ImagesJsonAdapter, ImagesJsonGenerationRequest};
 use crate::runtime::media::minimax_image::{MinimaxImageAdapter, MinimaxImageGenerationRequest};
-use crate::runtime::media::resolver::{resolve_media_capabilities, MediaDiscoveryCache};
 use crate::runtime::media::{
-    MediaArtifact, MediaGenerationService, MediaJob, MediaJobStatus, MediaKind,
+    artifacts::MediaArtifactPreviewState, MediaArtifact, MediaGenerationService, MediaJob,
+    MediaJobStatus, MediaKind,
 };
+use crate::runtime::media::resolver::{resolve_media_capabilities, MediaDiscoveryCache};
 use anyhow::{bail, Context, Result};
 use puffer_provider_registry::{AuthStore, MediaOperation, ProviderRegistry};
 use serde::{Deserialize, Serialize};
@@ -275,25 +276,73 @@ fn media_artifact_remote_source_url(artifact: &MediaArtifact) -> Option<String> 
         .map(str::to_string)
 }
 
-/// Reads generated image preview bytes by artifact id.
+/// Reads generated artifact preview bytes by artifact id.
 pub fn read_generated_media_preview_by_artifact(
     workspace_root: impl AsRef<Path>,
     artifact_id: &str,
 ) -> GeneratedMediaPreviewResult {
-    let service = MediaGenerationService::new(workspace_root.as_ref());
+    let workspace_root = workspace_root.as_ref();
+    let service = MediaGenerationService::new(workspace_root);
     let artifact = match service.load_artifact(artifact_id) {
         Ok(artifact) => artifact,
         Err(_) => return GeneratedMediaPreviewResult::Missing,
     };
-    if artifact.kind != MediaKind::Image {
+    match artifact.kind {
+        MediaKind::Image => {
+            let image_root = generated_media_image_root(workspace_root);
+            read_generated_media_preview_from_root_with_mime(
+                &image_root,
+                &artifact.path,
+                Some(&artifact.mime_type),
+            )
+        }
+        MediaKind::Video => read_generated_video_poster_preview(workspace_root, &artifact),
+    }
+}
+
+fn read_generated_video_poster_preview(workspace_root: &Path, artifact: &MediaArtifact) -> GeneratedMediaPreviewResult {
+    let Some(preview) = artifact.preview.as_ref() else {
+        return GeneratedMediaPreviewResult::Missing;
+    };
+    let poster = preview.poster();
+    if poster.state != MediaArtifactPreviewState::Available {
+        return GeneratedMediaPreviewResult::Missing;
+    }
+    let Some(path) = poster.path.as_ref() else {
+        return GeneratedMediaPreviewResult::Missing;
+    };
+    let Some(expected_mime_type) = poster
+        .mime_type
+        .as_deref()
+        .and_then(|mime_type| canonical_sidecar_image_mime_type(Some(mime_type)))
+    else {
+        return GeneratedMediaPreviewResult::Unsupported;
+    };
+    if expected_mime_type != "image/jpeg" {
         return GeneratedMediaPreviewResult::Unsupported;
     }
-    let image_root = generated_media_image_root(workspace_root.as_ref());
-    read_generated_media_preview_from_root_with_mime(
-        &image_root,
-        &artifact.path,
-        Some(&artifact.mime_type),
-    )
+    let artifact_root = generated_media_artifact_root(workspace_root, &artifact.id);
+    let canonical_path = match canonical_generated_media_artifact_path(&artifact_root, path) {
+        Ok(path) => path,
+        Err(GeneratedMediaPathError::Missing) => return GeneratedMediaPreviewResult::Missing,
+        Err(GeneratedMediaPathError::Unsupported) => {
+            return GeneratedMediaPreviewResult::Unsupported
+        }
+    };
+    let bytes = match std::fs::read(&canonical_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return GeneratedMediaPreviewResult::Missing;
+        }
+        Err(_) => return GeneratedMediaPreviewResult::Missing,
+    };
+    let Some(mime_type) = sniff_generated_image_mime_type(&bytes) else {
+        return GeneratedMediaPreviewResult::Unsupported;
+    };
+    if mime_type != expected_mime_type {
+        return GeneratedMediaPreviewResult::Unsupported;
+    }
+    GeneratedMediaPreviewResult::Available { mime_type: mime_type.to_string(), bytes }
 }
 
 /// Resolves trusted generated video metadata by artifact id.
@@ -357,10 +406,7 @@ fn read_generated_media_preview_from_root_with_mime(
     else {
         return GeneratedMediaPreviewResult::Unsupported;
     };
-    GeneratedMediaPreviewResult::Available {
-        mime_type: mime_type.to_string(),
-        bytes,
-    }
+    GeneratedMediaPreviewResult::Available { mime_type: mime_type.to_string(), bytes }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,19 +453,11 @@ fn generated_media_image_root(workspace_root: &Path) -> PathBuf {
 }
 
 fn generated_media_video_root(workspace_root: &Path, artifact_id: &str) -> PathBuf {
-    workspace_root
-        .join(".puffer")
-        .join("media")
-        .join("videos")
-        .join(artifact_id)
+    workspace_root.join(".puffer").join("media").join("videos").join(artifact_id)
 }
 
 fn generated_media_artifact_root(workspace_root: &Path, artifact_id: &str) -> PathBuf {
-    workspace_root
-        .join(".puffer")
-        .join("media")
-        .join("artifacts")
-        .join(artifact_id)
+    workspace_root.join(".puffer").join("media").join("artifacts").join(artifact_id)
 }
 
 fn canonical_generated_video_artifact_path(
@@ -810,10 +848,7 @@ fn exact_image_capability(
     })
 }
 
-fn exact_generation_result(
-    job: MediaJob,
-    artifacts: Vec<MediaArtifact>,
-) -> ExactImageGenerationResult {
+fn exact_generation_result(job: MediaJob, artifacts: Vec<MediaArtifact>) -> ExactImageGenerationResult {
     let artifacts = exact_generated_artifacts(artifacts);
     ExactImageGenerationResult {
         job_id: job.id,
@@ -825,10 +860,7 @@ fn exact_generation_result(
     }
 }
 
-fn exact_media_generation_result(
-    job: MediaJob,
-    artifacts: Vec<MediaArtifact>,
-) -> ExactMediaGenerationResult {
+fn exact_media_generation_result(job: MediaJob, artifacts: Vec<MediaArtifact>) -> ExactMediaGenerationResult {
     let artifacts = exact_generated_artifacts(artifacts);
     ExactMediaGenerationResult {
         job_id: job.id,
@@ -859,10 +891,7 @@ fn exact_generated_artifacts(artifacts: Vec<MediaArtifact>) -> Vec<ExactGenerate
         .collect()
 }
 
-fn load_media_job_artifacts(
-    service: &MediaGenerationService,
-    job: &MediaJob,
-) -> Result<Vec<MediaArtifact>> {
+fn load_media_job_artifacts(service: &MediaGenerationService, job: &MediaJob) -> Result<Vec<MediaArtifact>> {
     job.artifact_ids
         .iter()
         .map(|artifact_id| {

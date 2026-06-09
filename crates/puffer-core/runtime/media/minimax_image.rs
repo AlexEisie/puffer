@@ -192,6 +192,7 @@ impl MinimaxImageAdapter {
                     index,
                     created_at_ms,
                 ),
+                preview: None,
                 created_at_ms,
             };
             service.save_artifact(&artifact)?;

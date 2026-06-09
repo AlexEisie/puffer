@@ -12,6 +12,7 @@ pub(crate) mod relaydance_video;
 pub(crate) mod replicate_video;
 pub(crate) mod resolver;
 pub(crate) mod video_jobs;
+pub(crate) mod video_poster;
 
 pub(crate) use artifacts::MediaArtifact;
 pub(crate) use capabilities::MediaKind;
@@ -41,6 +42,11 @@ impl MediaGenerationService {
         validate_simple_id(artifact_id, "artifact id")?;
         validate_artifact_filename(filename)?;
         Ok(self.artifacts_dir().join(artifact_id).join(filename))
+    }
+
+    /// Resolves the fixed generated-video poster path below the artifact directory.
+    pub(crate) fn poster_artifact_file_path(&self, artifact_id: &str) -> Result<PathBuf> {
+        self.artifact_file_path(artifact_id, "poster.jpg")
     }
 
     /// Resolves a safe generated-image file path below the service image directory.
@@ -296,6 +302,20 @@ mod tests {
     }
 
     #[test]
+    fn media_poster_path_uses_fixed_safe_filename() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = MediaGenerationService::new(temp.path());
+
+        let path = service.poster_artifact_file_path("artifact-video-1").unwrap();
+
+        assert_eq!(
+            path,
+            temp.path()
+                .join(".puffer/media/artifacts/artifact-video-1/poster.jpg")
+        );
+    }
+
+    #[test]
     fn media_jobs_and_artifacts_roundtrip_through_json_sidecars() {
         let temp = tempfile::tempdir().unwrap();
         let service = MediaGenerationService::new(temp.path());
@@ -326,6 +346,7 @@ mod tests {
             mime_type: "image/png".to_string(),
             byte_count: 9,
             metadata: json!({"size": "1024x1024"}),
+            preview: None,
             created_at_ms: 12,
         };
         service.save_artifact(&artifact).unwrap();
@@ -333,5 +354,105 @@ mod tests {
         let loaded_artifact = service.load_artifact("artifact-1").unwrap();
         assert_eq!(loaded_artifact.path, artifact_path);
         assert_eq!(std::fs::read(artifact_path).unwrap(), b"png-bytes");
+    }
+
+    #[test]
+    fn media_artifacts_roundtrip_available_poster_preview() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = MediaGenerationService::new(temp.path());
+        let video_path = service
+            .write_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
+            .unwrap();
+        let poster_path = service
+            .write_artifact_bytes("artifact-video-1", "poster.jpg", &[0xff, 0xd8, 0xff, 0xd9])
+            .unwrap();
+        let artifact = MediaArtifact {
+            id: "artifact-video-1".to_string(),
+            job_id: "job-video-1".to_string(),
+            kind: MediaKind::Video,
+            path: video_path,
+            mime_type: "video/mp4".to_string(),
+            byte_count: 9,
+            metadata: json!({}),
+            preview: Some(super::artifacts::MediaArtifactPreview::available_poster(
+                poster_path.clone(),
+                4,
+            )),
+            created_at_ms: 12,
+        };
+        service.save_artifact(&artifact).unwrap();
+
+        let loaded_artifact = service.load_artifact("artifact-video-1").unwrap();
+
+        assert_eq!(loaded_artifact.preview, artifact.preview);
+        let preview = loaded_artifact
+            .preview
+            .as_ref()
+            .map(super::artifacts::MediaArtifactPreview::poster)
+            .expect("poster preview");
+        assert_eq!(
+            preview.state,
+            super::artifacts::MediaArtifactPreviewState::Available
+        );
+        assert_eq!(preview.path.as_deref(), Some(poster_path.as_path()));
+        assert_eq!(preview.mime_type.as_deref(), Some("image/jpeg"));
+        assert_eq!(preview.byte_count, Some(4));
+    }
+
+    #[test]
+    fn media_artifacts_roundtrip_missing_poster_preview() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = MediaGenerationService::new(temp.path());
+        let video_path = service
+            .write_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
+            .unwrap();
+        let artifact = MediaArtifact {
+            id: "artifact-video-1".to_string(),
+            job_id: "job-video-1".to_string(),
+            kind: MediaKind::Video,
+            path: video_path,
+            mime_type: "video/mp4".to_string(),
+            byte_count: 9,
+            metadata: json!({}),
+            preview: Some(super::artifacts::MediaArtifactPreview::missing_poster(
+                "ffmpeg exited with status 1",
+            )),
+            created_at_ms: 12,
+        };
+        service.save_artifact(&artifact).unwrap();
+
+        let loaded_artifact = service.load_artifact("artifact-video-1").unwrap();
+
+        let preview = loaded_artifact
+            .preview
+            .as_ref()
+            .map(super::artifacts::MediaArtifactPreview::poster)
+            .expect("poster preview");
+        assert_eq!(
+            preview.state,
+            super::artifacts::MediaArtifactPreviewState::Missing
+        );
+        assert_eq!(
+            preview.reason.as_deref(),
+            Some("ffmpeg exited with status 1")
+        );
+        assert_eq!(preview.path, None);
+    }
+
+    #[test]
+    fn media_artifacts_load_without_preview_metadata() {
+        let artifact: MediaArtifact = serde_json::from_value(json!({
+            "id": "artifact-video-1",
+            "jobId": "job-video-1",
+            "kind": "video",
+            "path": "/tmp/generated.mp4",
+            "mimeType": "video/mp4",
+            "byteCount": 9,
+            "metadata": {},
+            "createdAtMs": 12
+        }))
+        .unwrap();
+
+        assert_eq!(artifact.preview, None);
     }
 }

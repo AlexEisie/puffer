@@ -1,6 +1,11 @@
+use super::artifacts::MediaArtifactPreview;
+use super::video_poster::{
+    extract_video_poster, VideoPosterExtraction, VideoPosterExtractionRequest, VideoPosterOptions,
+};
 use super::{MediaArtifact, MediaGenerationService, MediaJob, MediaJobStatus, MediaKind};
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
+use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -88,10 +93,35 @@ pub(crate) fn persist_failed_video_job(
 /// Downloads and persists the MP4 artifact for a succeeded video job.
 pub(crate) fn complete_video_job(
     service: &MediaGenerationService,
+    job: MediaJob,
+    task: CompletedVideoTask<'_>,
+    now_ms: u64,
+    download_bytes: impl FnOnce(&str) -> Result<Vec<u8>>,
+) -> Result<MediaJob> {
+    complete_video_job_with_poster_extractor(
+        service,
+        job,
+        task,
+        now_ms,
+        download_bytes,
+        |video_path, poster_path| {
+            extract_video_poster(VideoPosterExtractionRequest::new(
+                video_path,
+                poster_path,
+                VideoPosterOptions::default(),
+            ))
+        },
+    )
+}
+
+/// Downloads and persists an MP4 artifact using an injected poster extractor.
+pub(crate) fn complete_video_job_with_poster_extractor(
+    service: &MediaGenerationService,
     mut job: MediaJob,
     task: CompletedVideoTask<'_>,
     now_ms: u64,
     download_bytes: impl FnOnce(&str) -> Result<Vec<u8>>,
+    extract_poster: impl FnOnce(&Path, &Path) -> VideoPosterExtraction,
 ) -> Result<MediaJob> {
     if !job.artifact_ids.is_empty() {
         job.transition(MediaJobStatus::Succeeded, now_ms)?;
@@ -112,6 +142,13 @@ pub(crate) fn complete_video_job(
         &format!("{}-{artifact_id}.mp4", task.filename_prefix),
         &bytes,
     )?;
+    let poster_path = service.poster_artifact_file_path(&artifact_id)?;
+    let preview = match extract_poster(&path, &poster_path) {
+        VideoPosterExtraction::Available { byte_count } => {
+            MediaArtifactPreview::available_poster(poster_path, byte_count)
+        }
+        VideoPosterExtraction::Missing { reason } => MediaArtifactPreview::missing_poster(reason),
+    };
     let artifact = MediaArtifact {
         id: artifact_id.clone(),
         job_id: job.id.clone(),
@@ -124,6 +161,7 @@ pub(crate) fn complete_video_job(
             "taskId": task.task_id,
             "remoteStatus": task.remote_status,
         }),
+        preview: Some(preview),
         created_at_ms: now_ms,
     };
     service.save_artifact(&artifact)?;
@@ -132,4 +170,105 @@ pub(crate) fn complete_video_job(
     job.transition(MediaJobStatus::Succeeded, now_ms)?;
     service.save_job(&job)?;
     Ok(job)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::artifacts::{MediaArtifactPreview, MediaArtifactPreviewState};
+    use super::super::video_poster::VideoPosterExtraction;
+    use super::*;
+
+    fn running_video_job() -> MediaJob {
+        let mut job = MediaJob::new(
+            "job-video-1",
+            MediaKind::Video,
+            "provider-1",
+            "model-1",
+            "animate",
+            1,
+            1,
+        );
+        job.transition(MediaJobStatus::Running, 2).unwrap();
+        job
+    }
+
+    fn completed_task<'a>() -> CompletedVideoTask<'a> {
+        CompletedVideoTask {
+            provider_id: "provider-1",
+            task_id: "task-1",
+            remote_status: "succeeded",
+            video_url: Some("https://media.test/generated.mp4"),
+            filename_prefix: "provider-video",
+            missing_url_message: "missing video URL",
+        }
+    }
+
+    #[test]
+    fn complete_video_job_records_available_poster_preview() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = MediaGenerationService::new(temp.path());
+
+        let completed = complete_video_job_with_poster_extractor(
+            &service,
+            running_video_job(),
+            completed_task(),
+            3,
+            |_| Ok(b"mp4-bytes".to_vec()),
+            |video_path, poster_path| {
+                assert!(video_path.exists());
+                assert_eq!(
+                    poster_path.file_name().and_then(|name| name.to_str()),
+                    Some("poster.jpg")
+                );
+                std::fs::create_dir_all(poster_path.parent().unwrap()).unwrap();
+                std::fs::write(poster_path, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
+                VideoPosterExtraction::Available { byte_count: 4 }
+            },
+        )
+        .unwrap();
+
+        let artifact = service.load_artifact(&completed.artifact_ids[0]).unwrap();
+        let preview = artifact
+            .preview
+            .as_ref()
+            .map(MediaArtifactPreview::poster)
+            .expect("poster preview");
+        assert_eq!(preview.state, MediaArtifactPreviewState::Available);
+        assert_eq!(preview.mime_type.as_deref(), Some("image/jpeg"));
+        assert_eq!(preview.byte_count, Some(4));
+        let expected_poster_path = service.poster_artifact_file_path(&artifact.id).unwrap();
+        assert_eq!(preview.path.as_deref(), Some(expected_poster_path.as_path()));
+    }
+
+    #[test]
+    fn complete_video_job_keeps_video_success_when_poster_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = MediaGenerationService::new(temp.path());
+
+        let completed = complete_video_job_with_poster_extractor(
+            &service,
+            running_video_job(),
+            completed_task(),
+            3,
+            |_| Ok(b"mp4-bytes".to_vec()),
+            |_video_path, _poster_path| VideoPosterExtraction::Missing {
+                reason: "ffmpeg timed out after 10s".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(completed.status, MediaJobStatus::Succeeded);
+        let artifact = service.load_artifact(&completed.artifact_ids[0]).unwrap();
+        let preview = artifact
+            .preview
+            .as_ref()
+            .map(MediaArtifactPreview::poster)
+            .expect("poster preview");
+        assert_eq!(preview.state, MediaArtifactPreviewState::Missing);
+        assert_eq!(
+            preview.reason.as_deref(),
+            Some("ffmpeg timed out after 10s")
+        );
+        assert!(preview.path.is_none());
+    }
 }

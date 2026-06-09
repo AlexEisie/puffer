@@ -286,12 +286,11 @@
     previewReadObjectUrl = null;
     if (
       attachment.kind === "video" &&
-      attachment.source.kind === "generated_media" &&
-      !attachment.previewUrl
+      attachment.source.kind === "generated_media"
     ) {
       const sessionId = session?.id ?? null;
       if (!sessionId) {
-        openAttachment = attachment;
+        openAttachment = { ...attachment, previewUrl: null };
         return;
       }
       const access = await createGeneratedVideoAccess(
@@ -302,7 +301,9 @@
       }));
       if ((session?.id ?? null) !== sessionId) return;
       openAttachment =
-        access.state === "available" ? { ...attachment, previewUrl: access.url } : attachment;
+        access.state === "available"
+          ? { ...attachment, previewUrl: access.url, mimeType: access.mimeType, size: access.size }
+          : { ...attachment, previewUrl: null };
       return;
     }
     if (attachment.kind !== "image" || attachment.previewUrl) {

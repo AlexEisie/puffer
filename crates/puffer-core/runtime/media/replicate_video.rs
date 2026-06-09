@@ -1,4 +1,5 @@
-use super::{MediaArtifact, MediaGenerationService, MediaJob, MediaJobStatus, MediaKind};
+use super::video_jobs::{complete_video_job, CompletedVideoTask};
+use super::{MediaGenerationService, MediaJob, MediaJobStatus, MediaKind};
 use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
@@ -9,7 +10,6 @@ use uuid::Uuid;
 
 const REPLICATE_PROVIDER_ID: &str = "replicate";
 const DEFAULT_REPLICATE_BASE_URL: &str = "https://api.replicate.com";
-const VIDEO_MIME_TYPE: &str = "video/mp4";
 
 /// Describes a Replicate prediction request for video generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -365,52 +365,25 @@ where
     fn complete_succeeded_prediction(
         &self,
         service: &MediaGenerationService,
-        mut job: MediaJob,
+        job: MediaJob,
         prediction: &ReplicatePrediction,
         now_ms: u64,
     ) -> Result<MediaJob> {
-        if !job.artifact_ids.is_empty() {
-            job.transition(MediaJobStatus::Succeeded, now_ms)?;
-            service.save_job(&job)?;
-            return Ok(job);
-        }
         let output_url = prediction.output_url()?;
-        let bytes = match self.transport.download_bytes(&output_url) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                job.error = Some(format!("{error:#}"));
-                job.transition(MediaJobStatus::Failed, now_ms)?;
-                service.save_job(&job)?;
-                return Err(error);
-            }
-        };
-        let artifact_id = Uuid::new_v4().to_string();
-        let path = service.write_video_artifact_bytes(
-            &artifact_id,
-            &format!("replicate-video-{artifact_id}.mp4"),
-            &bytes,
-        )?;
-        let artifact = MediaArtifact {
-            id: artifact_id.clone(),
-            job_id: job.id.clone(),
-            kind: MediaKind::Video,
-            path,
-            mime_type: VIDEO_MIME_TYPE.to_string(),
-            byte_count: bytes.len() as u64,
-            metadata: json!({
-                "provider": REPLICATE_PROVIDER_ID,
-                "predictionId": prediction.id,
-                "remoteStatus": prediction.status,
-                "outputUrlDownloaded": true
-            }),
-            created_at_ms: now_ms,
-        };
-        service.save_artifact(&artifact)?;
-        job.attach_artifact(artifact_id, now_ms);
-        job.error = None;
-        job.transition(MediaJobStatus::Succeeded, now_ms)?;
-        service.save_job(&job)?;
-        Ok(job)
+        complete_video_job(
+            service,
+            job,
+            CompletedVideoTask {
+                provider_id: REPLICATE_PROVIDER_ID,
+                task_id: &prediction.id,
+                remote_status: &prediction.status,
+                video_url: Some(output_url.as_str()),
+                filename_prefix: "replicate-video",
+                missing_url_message: "completed Replicate prediction is missing output URL",
+            },
+            now_ms,
+            |url| self.transport.download_bytes(url),
+        )
     }
 }
 

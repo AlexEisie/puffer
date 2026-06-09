@@ -6498,6 +6498,47 @@ models: []
         video_path
     }
 
+    fn write_generated_video_artifact_with_poster(
+        workspace: &std::path::Path,
+        artifact_id: &str,
+        filename: &str,
+        bytes: &[u8],
+        poster_bytes: &[u8],
+    ) {
+        let video_dir = workspace.join(".puffer/media/videos").join(artifact_id);
+        std::fs::create_dir_all(&video_dir).unwrap();
+        let video_path = video_dir.join(filename);
+        std::fs::write(&video_path, bytes).unwrap();
+        let poster_dir = workspace.join(".puffer/media/artifacts").join(artifact_id);
+        std::fs::create_dir_all(&poster_dir).unwrap();
+        let poster_path = poster_dir.join("poster.jpg");
+        std::fs::write(&poster_path, poster_bytes).unwrap();
+        let sidecar_dir = workspace.join(".puffer/media/artifact-sidecars");
+        std::fs::create_dir_all(&sidecar_dir).unwrap();
+        std::fs::write(
+            sidecar_dir.join(format!("{artifact_id}.json")),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": artifact_id,
+                "jobId": "job-video-1",
+                "kind": "video",
+                "path": video_path,
+                "mimeType": "video/mp4",
+                "byteCount": bytes.len(),
+                "metadata": {},
+                "preview": {
+                    "kind": "poster",
+                    "state": "available",
+                    "path": poster_path,
+                    "mimeType": "image/jpeg",
+                    "byteCount": poster_bytes.len()
+                },
+                "createdAtMs": 1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn read_generated_media_preview_resolves_session_cwd() {
         let temp = tempfile::tempdir().unwrap();
@@ -6520,6 +6561,38 @@ models: []
 
         assert_eq!(response["state"], "available");
         assert_eq!(response["mimeType"], "image/jpeg");
+    }
+
+    #[test]
+    fn read_generated_media_preview_returns_video_poster_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        let session_store = SessionStore::from_paths(&paths).unwrap();
+        let workspace = temp.path().join("other-workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let session = session_store.create_session(workspace.clone()).unwrap();
+        write_generated_video_artifact_with_poster(
+            &workspace,
+            "artifact-video-1",
+            "generated.mp4",
+            b"mp4-bytes",
+            b"\xff\xd8\xff\xd9",
+        );
+        let state = test_state_with_paths(paths);
+
+        let response = handle_read_generated_media_preview(
+            &state,
+            &serde_json::json!({
+                "sessionId": session.id.to_string(),
+                "artifactId": "artifact-video-1"
+            }),
+        )
+        .unwrap();
+        let bytes: Vec<u8> = serde_json::from_value(response["bytes"].clone()).unwrap();
+
+        assert_eq!(response["state"], "available");
+        assert_eq!(response["mimeType"], "image/jpeg");
+        assert_eq!(bytes, b"\xff\xd8\xff\xd9");
     }
 
     #[test]

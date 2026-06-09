@@ -289,6 +289,7 @@ fn exact_generation_result_returns_artifacts_in_order() {
             mime_type: "image/png".to_string(),
             byte_count: 10,
             metadata: serde_json::json!({"index": 0}),
+            preview: None,
             created_at_ms: 1,
         },
         MediaArtifact {
@@ -299,6 +300,7 @@ fn exact_generation_result_returns_artifacts_in_order() {
             mime_type: "image/png".to_string(),
             byte_count: 11,
             metadata: serde_json::json!({"index": 1}),
+            preview: None,
             created_at_ms: 1,
         },
     ];

@@ -17,6 +17,7 @@ fn generated_media_preview_by_artifact_uses_sidecar_path() {
             mime_type: "image/jpeg".to_string(),
             byte_count: 4,
             metadata: serde_json::json!({}),
+            preview: None,
             created_at_ms: 1,
         })
         .unwrap();
@@ -56,6 +57,7 @@ fn generated_media_preview_by_artifact_rejects_symlink_escape() {
             mime_type: "image/jpeg".to_string(),
             byte_count: 4,
             metadata: serde_json::json!({}),
+            preview: None,
             created_at_ms: 1,
         })
         .unwrap();
@@ -90,6 +92,7 @@ fn generated_media_attachment_metadata_rejects_symlink_escape() {
             mime_type: "image/jpeg".to_string(),
             byte_count: 4,
             metadata: serde_json::json!({}),
+            preview: None,
             created_at_ms: 1,
         })
         .unwrap();
@@ -142,6 +145,7 @@ fn generated_media_attachment_metadata_fallback_does_not_bypass_unsafe_sidecar()
             mime_type: "image/jpeg".to_string(),
             byte_count: 4,
             metadata: serde_json::json!({}),
+            preview: None,
             created_at_ms: 1,
         })
         .unwrap();
@@ -191,6 +195,7 @@ fn generated_media_preview_by_artifact_sniffs_mime_when_extension_lies() {
             mime_type: "image/png".to_string(),
             byte_count: 4,
             metadata: serde_json::json!({}),
+            preview: None,
             created_at_ms: 1,
         })
         .unwrap();
@@ -201,6 +206,296 @@ fn generated_media_preview_by_artifact_sniffs_mime_when_extension_lies() {
         result,
         GeneratedMediaPreviewResult::Available { mime_type, .. } if mime_type == "image/jpeg"
     ));
+}
+
+#[test]
+fn generated_media_preview_by_artifact_reads_video_poster_preview() {
+    let workspace = tempdir().unwrap();
+    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let video_path = service
+        .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
+        .unwrap();
+    let poster_path = service
+        .poster_artifact_file_path("artifact-video-1")
+        .unwrap();
+    std::fs::create_dir_all(poster_path.parent().unwrap()).unwrap();
+    std::fs::write(&poster_path, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
+    service
+        .save_artifact(&crate::runtime::media::MediaArtifact {
+            id: "artifact-video-1".to_string(),
+            job_id: "job-video-1".to_string(),
+            kind: crate::runtime::media::MediaKind::Video,
+            path: video_path,
+            mime_type: "video/mp4".to_string(),
+            byte_count: 9,
+            metadata: serde_json::json!({}),
+            preview: Some(
+                crate::runtime::media::artifacts::MediaArtifactPreview::available_poster(
+                    poster_path,
+                    4,
+                ),
+            ),
+            created_at_ms: 1,
+        })
+        .unwrap();
+
+    let result = read_generated_media_preview_by_artifact(workspace.path(), "artifact-video-1");
+
+    assert_eq!(
+        result,
+        GeneratedMediaPreviewResult::Available {
+            mime_type: "image/jpeg".to_string(),
+            bytes: vec![0xff, 0xd8, 0xff, 0xd9],
+        }
+    );
+}
+
+#[test]
+fn generated_media_preview_by_artifact_returns_missing_for_video_without_preview() {
+    let workspace = tempdir().unwrap();
+    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let video_path = service
+        .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
+        .unwrap();
+    service
+        .save_artifact(&crate::runtime::media::MediaArtifact {
+            id: "artifact-video-1".to_string(),
+            job_id: "job-video-1".to_string(),
+            kind: crate::runtime::media::MediaKind::Video,
+            path: video_path,
+            mime_type: "video/mp4".to_string(),
+            byte_count: 9,
+            metadata: serde_json::json!({}),
+            preview: None,
+            created_at_ms: 1,
+        })
+        .unwrap();
+
+    assert_eq!(
+        read_generated_media_preview_by_artifact(workspace.path(), "artifact-video-1"),
+        GeneratedMediaPreviewResult::Missing
+    );
+}
+
+#[test]
+fn generated_media_preview_by_artifact_returns_missing_for_failed_video_preview() {
+    let workspace = tempdir().unwrap();
+    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let video_path = service
+        .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
+        .unwrap();
+    service
+        .save_artifact(&crate::runtime::media::MediaArtifact {
+            id: "artifact-video-1".to_string(),
+            job_id: "job-video-1".to_string(),
+            kind: crate::runtime::media::MediaKind::Video,
+            path: video_path,
+            mime_type: "video/mp4".to_string(),
+            byte_count: 9,
+            metadata: serde_json::json!({}),
+            preview: Some(
+                crate::runtime::media::artifacts::MediaArtifactPreview::missing_poster(
+                    "ffmpeg timed out after 10s",
+                ),
+            ),
+            created_at_ms: 1,
+        })
+        .unwrap();
+
+    assert_eq!(
+        read_generated_media_preview_by_artifact(workspace.path(), "artifact-video-1"),
+        GeneratedMediaPreviewResult::Missing
+    );
+}
+
+#[test]
+fn generated_media_preview_by_artifact_returns_missing_for_absent_video_poster_file() {
+    let workspace = tempdir().unwrap();
+    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let video_path = service
+        .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
+        .unwrap();
+    let poster_path = service
+        .poster_artifact_file_path("artifact-video-1")
+        .unwrap();
+    service
+        .save_artifact(&crate::runtime::media::MediaArtifact {
+            id: "artifact-video-1".to_string(),
+            job_id: "job-video-1".to_string(),
+            kind: crate::runtime::media::MediaKind::Video,
+            path: video_path,
+            mime_type: "video/mp4".to_string(),
+            byte_count: 9,
+            metadata: serde_json::json!({}),
+            preview: Some(
+                crate::runtime::media::artifacts::MediaArtifactPreview::available_poster(
+                    poster_path,
+                    4,
+                ),
+            ),
+            created_at_ms: 1,
+        })
+        .unwrap();
+
+    assert_eq!(
+        read_generated_media_preview_by_artifact(workspace.path(), "artifact-video-1"),
+        GeneratedMediaPreviewResult::Missing
+    );
+}
+
+#[test]
+fn generated_media_preview_by_artifact_rejects_video_poster_bad_mime() {
+    let workspace = tempdir().unwrap();
+    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let video_path = service
+        .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
+        .unwrap();
+    let poster_path = service
+        .poster_artifact_file_path("artifact-video-1")
+        .unwrap();
+    std::fs::create_dir_all(poster_path.parent().unwrap()).unwrap();
+    std::fs::write(&poster_path, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
+    service
+        .save_artifact(&crate::runtime::media::MediaArtifact {
+            id: "artifact-video-1".to_string(),
+            job_id: "job-video-1".to_string(),
+            kind: crate::runtime::media::MediaKind::Video,
+            path: video_path,
+            mime_type: "video/mp4".to_string(),
+            byte_count: 9,
+            metadata: serde_json::json!({}),
+            preview: Some(crate::runtime::media::artifacts::MediaArtifactPreview::Poster(
+                crate::runtime::media::artifacts::MediaPosterPreview {
+                    state: crate::runtime::media::artifacts::MediaArtifactPreviewState::Available,
+                    path: Some(poster_path),
+                    mime_type: Some("image/png".to_string()),
+                    byte_count: Some(4),
+                    reason: None,
+                },
+            )),
+            created_at_ms: 1,
+        })
+        .unwrap();
+
+    assert_eq!(
+        read_generated_media_preview_by_artifact(workspace.path(), "artifact-video-1"),
+        GeneratedMediaPreviewResult::Unsupported
+    );
+}
+
+#[test]
+fn generated_media_preview_by_artifact_rejects_video_poster_non_image_bytes() {
+    let workspace = tempdir().unwrap();
+    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let video_path = service
+        .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
+        .unwrap();
+    let poster_path = service
+        .poster_artifact_file_path("artifact-video-1")
+        .unwrap();
+    std::fs::create_dir_all(poster_path.parent().unwrap()).unwrap();
+    std::fs::write(&poster_path, b"not-image").unwrap();
+    service
+        .save_artifact(&crate::runtime::media::MediaArtifact {
+            id: "artifact-video-1".to_string(),
+            job_id: "job-video-1".to_string(),
+            kind: crate::runtime::media::MediaKind::Video,
+            path: video_path,
+            mime_type: "video/mp4".to_string(),
+            byte_count: 9,
+            metadata: serde_json::json!({}),
+            preview: Some(
+                crate::runtime::media::artifacts::MediaArtifactPreview::available_poster(
+                    poster_path,
+                    9,
+                ),
+            ),
+            created_at_ms: 1,
+        })
+        .unwrap();
+
+    assert_eq!(
+        read_generated_media_preview_by_artifact(workspace.path(), "artifact-video-1"),
+        GeneratedMediaPreviewResult::Unsupported
+    );
+}
+
+#[test]
+fn generated_media_preview_by_artifact_rejects_video_poster_unsafe_path() {
+    let workspace = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let outside_poster = outside.path().join("poster.jpg");
+    std::fs::write(&outside_poster, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
+    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let video_path = service
+        .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
+        .unwrap();
+    service
+        .save_artifact(&crate::runtime::media::MediaArtifact {
+            id: "artifact-video-1".to_string(),
+            job_id: "job-video-1".to_string(),
+            kind: crate::runtime::media::MediaKind::Video,
+            path: video_path,
+            mime_type: "video/mp4".to_string(),
+            byte_count: 9,
+            metadata: serde_json::json!({}),
+            preview: Some(
+                crate::runtime::media::artifacts::MediaArtifactPreview::available_poster(
+                    outside_poster,
+                    4,
+                ),
+            ),
+            created_at_ms: 1,
+        })
+        .unwrap();
+
+    assert_eq!(
+        read_generated_media_preview_by_artifact(workspace.path(), "artifact-video-1"),
+        GeneratedMediaPreviewResult::Unsupported
+    );
+}
+
+#[test]
+fn generated_media_preview_by_artifact_rejects_video_poster_symlink_escape() {
+    let workspace = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let outside_poster = outside.path().join("poster.jpg");
+    std::fs::write(&outside_poster, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
+    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let video_path = service
+        .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
+        .unwrap();
+    let poster_path = service
+        .poster_artifact_file_path("artifact-video-1")
+        .unwrap();
+    std::fs::create_dir_all(poster_path.parent().unwrap()).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside_poster, &poster_path).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(&outside_poster, &poster_path).unwrap();
+    service
+        .save_artifact(&crate::runtime::media::MediaArtifact {
+            id: "artifact-video-1".to_string(),
+            job_id: "job-video-1".to_string(),
+            kind: crate::runtime::media::MediaKind::Video,
+            path: video_path,
+            mime_type: "video/mp4".to_string(),
+            byte_count: 9,
+            metadata: serde_json::json!({}),
+            preview: Some(
+                crate::runtime::media::artifacts::MediaArtifactPreview::available_poster(
+                    poster_path,
+                    4,
+                ),
+            ),
+            created_at_ms: 1,
+        })
+        .unwrap();
+
+    assert_eq!(
+        read_generated_media_preview_by_artifact(workspace.path(), "artifact-video-1"),
+        GeneratedMediaPreviewResult::Unsupported
+    );
 }
 
 #[test]
@@ -219,6 +514,7 @@ fn generated_video_access_metadata_accepts_video_under_video_root() {
             mime_type: "video/mp4".to_string(),
             byte_count: 9,
             metadata: serde_json::json!({}),
+            preview: None,
             created_at_ms: 1,
         })
         .unwrap();
@@ -250,6 +546,7 @@ fn generated_video_access_metadata_accepts_legacy_video_under_artifact_root() {
             mime_type: "video/mp4".to_string(),
             byte_count: 9,
             metadata: serde_json::json!({}),
+            preview: None,
             created_at_ms: 1,
         })
         .unwrap();
@@ -281,6 +578,7 @@ fn generated_video_access_metadata_rejects_non_video_artifact() {
             mime_type: "image/jpeg".to_string(),
             byte_count: 4,
             metadata: serde_json::json!({}),
+            preview: None,
             created_at_ms: 1,
         })
         .unwrap();
@@ -315,6 +613,7 @@ fn generated_video_access_metadata_rejects_symlink_escape() {
             mime_type: "video/mp4".to_string(),
             byte_count: 9,
             metadata: serde_json::json!({}),
+            preview: None,
             created_at_ms: 1,
         })
         .unwrap();

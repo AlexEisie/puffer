@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
   import AttachmentPreviewStrip from "./AttachmentPreviewStrip.svelte";
-  import { createGeneratedVideoAccess, readMessageAttachmentPreview } from "../../api/desktop";
+  import { readMessageAttachmentPreview } from "../../api/desktop";
   import type { ChatOpenIntent } from "../../chatOpenIntent";
   import type { MessageAttachment } from "../../types";
 
@@ -101,22 +101,16 @@
 
     previewLoads.add(key);
     try {
-      const preview =
-        attachment.kind === "video" && attachment.source.kind === "generated_media"
-          ? await createGeneratedVideoAccess(targetSessionId, attachment.source.artifactId)
-          : await readMessageAttachmentPreview(targetSessionId, attachment);
+      const preview = await readMessageAttachmentPreview(targetSessionId, attachment);
       if (destroyed || !previewStillNeeded(targetSessionId, attachment.id)) return;
       if (preview.state !== "available") {
         previewMisses.set(key, missState);
         return;
       }
 
-      const previewUrl =
-        "url" in preview
-          ? preview.url
-          : URL.createObjectURL(
-              new Blob([new Uint8Array(preview.bytes)], { type: preview.mimeType })
-            );
+      const previewUrl = URL.createObjectURL(
+        new Blob([new Uint8Array(preview.bytes)], { type: preview.mimeType })
+      );
       const previous = previewUrls[key];
       if (previous?.startsWith("blob:")) URL.revokeObjectURL(previous);
       previewMisses.delete(key);
