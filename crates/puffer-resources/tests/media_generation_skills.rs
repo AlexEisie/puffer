@@ -59,8 +59,12 @@ fn video_generation_skill_guides_foreground_bash_internal_tool_use() {
     assert!(body.contains("explicit long Bash timeout"));
     assert!(body.contains("puffer internal-tool video-generation --prompt"));
     assert!(body.contains("--parameters-json"));
-    assert!(body.contains("text-to-video only"));
+    assert!(body.contains("--image-reference"));
+    assert!(body.contains("https://"));
+    assert!(body.contains("asset://"));
+    assert!(body.contains("local paths"));
     assert!(body.contains("scalar"));
     assert!(body.contains("allowed-tools is guidance"));
     assert!(body.contains("persisted video artifact"));
+    assert!(!body.contains("text-to-video only"));
 }

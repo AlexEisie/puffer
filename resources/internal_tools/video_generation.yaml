@@ -4,16 +4,15 @@ aliases:
   - video-generation
   - videogen
 description: |-
-  Generate one text-to-video clip through Puffer's configured video media
-  settings and write the resulting video artifact into the workspace media
-  folder.
+  Generate one video clip through Puffer's configured video media settings and
+  write the resulting video artifact into the workspace media folder.
 
   Use one VideoGeneration call for one logical video-generation request. The
   tool reads a workspace-relative prompt file when the prompt value names one;
-  otherwise it treats prompt as literal text. This tool is text-to-video only:
-  it does not accept existing images, reference images, first frames, or last
-  frames. The result includes one media job id and one persisted video artifact
-  entry.
+  otherwise it treats prompt as literal text. BytePlus supports ordered image
+  references through public https:// URLs or approved asset:// URLs. Local image
+  paths are not accepted by this tool; upload or stage them before passing an
+  image reference.
 handler: runtime:workflow:video_generation
 approval_policy: ask
 sandbox_policy: network
@@ -31,6 +30,11 @@ input_schema:
           - type: string
           - type: number
           - type: boolean
+    imageReferences:
+      type: array
+      description: Ordered public https:// image URLs or approved asset:// image references. Prompts should refer to them as image 1, image 2, and so on. Local paths and base64/data URLs are not supported.
+      items:
+        type: string
     purpose:
       type: string
       description: Optional caller purpose preserved in result metadata.
