@@ -857,6 +857,38 @@ fn fill_expression_uses_native_value_setter() {
 }
 
 #[test]
+fn fill_expression_reads_back_value_to_catch_silent_failures() {
+    // Issue #580: filling a cross-origin payment iframe (Shopify hosted card
+    // fields) sets the value on a top-level shell element that isn't the real
+    // input, then returns success — the agent reports "card filled" with an
+    // empty form. The script must read the value back and throw when it didn't
+    // stick, so the turn fails loudly instead of placing an order with no card.
+    let expression = fill_expression(
+        &BrowserElementRef {
+            ref_id: "@e1".to_string(),
+            role: "textbox".to_string(),
+            name: "Card number".to_string(),
+            tag: "input".to_string(),
+            href: None,
+            x: 10.0,
+            y: 20.0,
+        },
+        "4242424242424242",
+    )
+    .unwrap();
+    // Reads the value back after setting it.
+    assert!(expression.contains("did not stick"));
+    // A cross-origin iframe can never accept a top-document fill — reject it
+    // explicitly rather than silently setting value on the iframe shell.
+    assert!(expression.contains("IFRAME"));
+    // The read-back must tolerate inputs that reformat on input (card numbers
+    // gain spaces, phone numbers gain separators) — it only flags an empty
+    // result, never an exact-match mismatch, so valid fills don't false-fail.
+    assert!(expression.contains("targetEl.value === ''"));
+    assert!(!expression.contains("targetEl.value !== expected"));
+}
+
+#[test]
 fn focus_expression_targets_focusable_elements() {
     let expression = focus_expression(&BrowserElementRef {
         ref_id: "@e1".to_string(),
