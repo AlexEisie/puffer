@@ -85,6 +85,12 @@ fn generate_replicate_video(
     request: &ExactMediaGenerationRequest,
     parameters: BTreeMap<String, String>,
 ) -> Result<ExactMediaGenerationResult> {
+    if !request.image_references.is_empty() {
+        bail!(
+            "provider {} does not support video image references",
+            request.provider_id
+        );
+    }
     let provider = registry.provider(&request.provider_id).with_context(|| {
         format!(
             "selected video model unavailable: {}/{} via {}",
@@ -201,6 +207,12 @@ fn generate_relaydance_video(
     capability: &MediaCapability,
     parameters: BTreeMap<String, String>,
 ) -> Result<ExactMediaGenerationResult> {
+    if !request.image_references.is_empty() {
+        bail!(
+            "provider {} does not support video image references",
+            request.provider_id
+        );
+    }
     let service = MediaGenerationService::new(workspace_root);
     let (adapter, secrets) = build_relaydance_adapter(
         registry,
@@ -249,6 +261,7 @@ fn generate_byteplus_video(
     let video_request = byteplus_video_request_from_parameters(
         request.model_id.clone(),
         request.prompt.clone(),
+        request.image_references.clone(),
         &capability.parameters,
         &parameters,
     )?;
@@ -400,5 +413,48 @@ mod tests {
         let reclaimed = adapter.poll(&service, loaded, 2).expect("reclaim poll");
         assert_eq!(reclaimed.status, MediaJobStatus::Succeeded);
         assert_eq!(reclaimed.artifact_ids.len(), 1);
+    }
+
+    #[test]
+    fn relaydance_rejects_video_image_references() {
+        let request = ExactMediaGenerationRequest {
+            kind: "video".to_string(),
+            provider_id: "relaydance".to_string(),
+            model_id: "doubao-seedance-2-0-720p".to_string(),
+            operation: "generate".to_string(),
+            adapter: RELAYDANCE_VIDEO_ADAPTER.to_string(),
+            prompt: "animate image 1".to_string(),
+            image_references: vec!["https://example.com/person.png".to_string()],
+            parameters: BTreeMap::new(),
+            count: 1,
+        };
+
+        let error = generate_relaydance_video(
+            &ProviderRegistry::new(),
+            &AuthStore::default(),
+            tempfile::tempdir().unwrap().path(),
+            &request,
+            &MediaCapability {
+                provider_id: "relaydance".to_string(),
+                provider_display_name: "Relaydance".to_string(),
+                model_id: "doubao-seedance-2-0-720p".to_string(),
+                model_display_name: "Seedance 2.0".to_string(),
+                kind: crate::runtime::media::capabilities::MediaKind::Video,
+                operation: "generate".to_string(),
+                adapter: RELAYDANCE_VIDEO_ADAPTER.to_string(),
+                parameters: Vec::new(),
+                defaults: BTreeMap::new(),
+                status: "available".to_string(),
+                source: "static".to_string(),
+                reason: None,
+                checked_at_ms: 0,
+            },
+            BTreeMap::new(),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("relaydance"));
+        assert!(error.contains("image references"));
     }
 }

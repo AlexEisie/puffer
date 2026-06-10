@@ -18,6 +18,7 @@ pub(crate) const BYTEPLUS_VIDEO_ADAPTER: &str = "byteplus_video";
 pub(crate) struct BytePlusVideoRequest {
     pub(crate) model: String,
     pub(crate) prompt: String,
+    pub(crate) image_references: Vec<String>,
     pub(crate) params: Vec<(String, Value)>,
 }
 
@@ -26,15 +27,19 @@ impl BytePlusVideoRequest {
     pub(crate) fn request_body(&self) -> Value {
         let mut body = Map::new();
         body.insert("model".to_string(), json!(self.model.trim()));
-        body.insert(
-            "content".to_string(),
-            json!([
-                {
-                    "type": "text",
-                    "text": self.prompt.trim()
+        let mut content = vec![json!({
+            "type": "text",
+            "text": self.prompt.trim()
+        })];
+        for reference in &self.image_references {
+            content.push(json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": reference.trim()
                 }
-            ]),
-        );
+            }));
+        }
+        body.insert("content".to_string(), Value::Array(content));
         // Default to silent video. BytePlus Seedance models default
         // `generate_audio` to true, and their auto-generated audio reliably
         // trips content moderation ("output audio may contain sensitive
@@ -53,6 +58,11 @@ impl BytePlusVideoRequest {
         }
         if self.prompt.trim().is_empty() {
             bail!("video prompt is required");
+        }
+        for (index, reference) in self.image_references.iter().enumerate() {
+            if reference.trim().is_empty() {
+                bail!("video image reference {index} is empty");
+            }
         }
         Ok(())
     }
@@ -77,6 +87,7 @@ fn byteplus_request_value(parameter: &MediaCapabilityParameter, value: &str) -> 
 pub(crate) fn byteplus_video_request_from_parameters(
     model_id: String,
     prompt: String,
+    image_references: Vec<String>,
     capability_parameters: &[MediaCapabilityParameter],
     selected: &BTreeMap<String, String>,
 ) -> Result<BytePlusVideoRequest> {
@@ -94,6 +105,7 @@ pub(crate) fn byteplus_video_request_from_parameters(
     let request = BytePlusVideoRequest {
         model: model_id,
         prompt,
+        image_references,
         params,
     };
     request.validate()?;
@@ -488,6 +500,7 @@ mod tests {
         let request = BytePlusVideoRequest {
             model: "dreamina-seedance-2-0-fast-260128".to_string(),
             prompt: "a cat".to_string(),
+            image_references: Vec::new(),
             params: vec![],
         };
         let body = request.request_body();
@@ -497,10 +510,46 @@ mod tests {
     }
 
     #[test]
+    fn byteplus_request_body_includes_public_image_references() {
+        let request = BytePlusVideoRequest {
+            model: "dreamina-seedance-2-0-fast-260128".to_string(),
+            prompt: "animate image 1".to_string(),
+            image_references: vec!["https://example.com/person.png".to_string()],
+            params: vec![],
+        };
+        let body = request.request_body();
+
+        assert_eq!(body["content"][0]["type"], json!("text"));
+        assert_eq!(body["content"][1]["type"], json!("image_url"));
+        assert_eq!(
+            body["content"][1]["image_url"]["url"],
+            json!("https://example.com/person.png")
+        );
+        assert!(body["content"][1].get("role").is_none());
+    }
+
+    #[test]
+    fn byteplus_request_body_includes_asset_image_references() {
+        let request = BytePlusVideoRequest {
+            model: "dreamina-seedance-2-0-fast-260128".to_string(),
+            prompt: "animate image 1".to_string(),
+            image_references: vec!["asset://approved-person".to_string()],
+            params: vec![],
+        };
+        let body = request.request_body();
+
+        assert_eq!(
+            body["content"][1]["image_url"]["url"],
+            json!("asset://approved-person")
+        );
+    }
+
+    #[test]
     fn byteplus_request_body_encodes_duration_as_number() {
         let request = BytePlusVideoRequest {
             model: "dreamina-seedance-2-0-fast-260128".to_string(),
             prompt: "a cat".to_string(),
+            image_references: Vec::new(),
             params: vec![
                 ("duration".to_string(), json!(5)),
                 ("ratio".to_string(), json!("16:9")),
@@ -517,6 +566,7 @@ mod tests {
         let request = BytePlusVideoRequest {
             model: "dreamina-seedance-2-0-fast-260128".to_string(),
             prompt: "a cat".to_string(),
+            image_references: Vec::new(),
             params: vec![],
         };
         let body = request.request_body();
@@ -530,6 +580,7 @@ mod tests {
         let request = BytePlusVideoRequest {
             model: "dreamina-seedance-2-0-fast-260128".to_string(),
             prompt: "a cat".to_string(),
+            image_references: Vec::new(),
             params: vec![("generate_audio".to_string(), json!(true))],
         };
         let body = request.request_body();
@@ -542,6 +593,7 @@ mod tests {
         let request = byteplus_video_request_from_parameters(
             "dreamina-seedance-2-0-260128".to_string(),
             "animate a calm lake".to_string(),
+            Vec::new(),
             &[MediaCapabilityParameter {
                 name: "duration_seconds".to_string(),
                 label: "Duration".to_string(),
@@ -564,6 +616,7 @@ mod tests {
         let error = byteplus_video_request_from_parameters(
             "dreamina-seedance-2-0-260128".to_string(),
             "animate a calm lake".to_string(),
+            Vec::new(),
             &[MediaCapabilityParameter {
                 name: "duration_seconds".to_string(),
                 label: "Duration".to_string(),
@@ -599,6 +652,7 @@ mod tests {
         let request = BytePlusVideoRequest {
             model: "dreamina-seedance-2-0-260128".to_string(),
             prompt: "a cat".to_string(),
+            image_references: Vec::new(),
             params: vec![],
         };
         let job = adapter
