@@ -11,7 +11,7 @@ export function attachmentOverlayAction(
 
   switch (attachment.source.kind) {
     case "local_file":
-      return { kind: "open_folder", path: attachment.source.path };
+      return null;
     case "generated_media":
       return attachment.source.localPath
         ? { kind: "open_folder", path: attachment.source.localPath }

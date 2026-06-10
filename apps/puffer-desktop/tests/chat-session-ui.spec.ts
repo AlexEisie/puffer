@@ -1582,7 +1582,9 @@ test("persisted ImageGeneration results render as assistant image attachments", 
   await expect(page.getByTestId("attachment-overlay")).toBeVisible();
 });
 
-test("generated video attachment renders a playable card", async ({ page }) => {
+test("generated video attachment overlay renders a playable card with folder action", async ({
+  page
+}) => {
   const sessionId = "session-generated-video-card";
   const daemon = new FakeDaemon({
     sessions: [
@@ -1665,6 +1667,11 @@ test("generated video attachment renders a playable card", async ({ page }) => {
   );
   const dialog = page.getByRole("dialog", { name: "Generated video" });
   await expect(dialog).toBeVisible();
+  const actions = dialog.locator(".pf-attachment-dialog-actions");
+  const folderButton = actions.getByRole("button", { name: "Open containing folder" });
+  const closeButton = actions.getByRole("button", { name: "Close attachment preview" });
+  await expect(folderButton).toBeVisible();
+  await expectOverlayActionBeforeClose(folderButton, closeButton);
   const video = dialog.locator("video");
   await expect(video).toBeVisible();
   await expect(video).toHaveAttribute("controls", "");
@@ -2462,14 +2469,14 @@ test("message attachments open image preview and file details", async ({ page })
   await expect(page.getByRole("button", { name: "Files" })).toHaveAttribute("aria-pressed", "false");
 });
 
-test("attachment overlay shows folder action for local image source", async ({ page }) => {
-  const sessionId = "session-local-image-overlay-action";
+test("attachment overlay hides folder action for uploaded staged local image source", async ({ page }) => {
+  const sessionId = "session-uploaded-local-image-overlay-action";
   const daemon = new FakeDaemon({
     sessions: [
       {
         sessionId,
-        displayName: "Local image overlay action",
-        title: "Local image overlay action",
+        displayName: "Uploaded local image overlay action",
+        title: "Uploaded local image overlay action",
         cwd: "/tmp/puffer",
         folderPath: "/tmp/puffer",
         updatedAtMs: baseTime,
@@ -2478,13 +2485,13 @@ test("attachment overlay shows folder action for local image source", async ({ p
         timeline: [
           {
             kind: "assistant_message",
-            id: "local-image-overlay-action-message",
-            text: "Local image attachment.",
+            id: "uploaded-local-image-overlay-action-message",
+            text: "Uploaded staged local image attachment.",
             createdAtMs: baseTime - 30_000,
             attachments: [
               {
-                id: "local-image-overlay-action",
-                name: "local-action.png",
+                id: "uploaded-local-image-overlay-action",
+                name: "uploaded-action.png",
                 mimeType: "image/png",
                 size: onePixelPngBytes.length,
                 extension: "PNG",
@@ -2492,7 +2499,7 @@ test("attachment overlay shows folder action for local image source", async ({ p
                 state: "available",
                 source: {
                   kind: "local_file",
-                  path: "/tmp/puffer/attachments/local-action.png"
+                  path: "/tmp/puffer/attachments/uploaded-action.png"
                 }
               }
             ]
@@ -2501,7 +2508,7 @@ test("attachment overlay shows folder action for local image source", async ({ p
       }
     ]
   });
-  daemon.seedAttachmentPreview(sessionId, "local-image-overlay-action", {
+  daemon.seedAttachmentPreview(sessionId, "uploaded-local-image-overlay-action", {
     state: "available",
     mimeType: "image/png",
     bytes: onePixelPngBytes
@@ -2509,16 +2516,90 @@ test("attachment overlay shows folder action for local image source", async ({ p
 
   await daemon.install(page);
   await daemon.open(page);
-  await openSession(page, /Local image overlay action/);
+  await openSession(page, /Uploaded local image overlay action/);
 
-  const thumbnail = page.getByRole("button", { name: "Open image attachment local-action.png" });
+  const thumbnail = page.getByRole("button", { name: "Open image attachment uploaded-action.png" });
   await expect(thumbnail).toBeVisible();
   await thumbnail.click();
 
   const overlay = page.getByTestId("attachment-overlay");
   await expect(overlay).toBeVisible();
+  await expect(overlay.getByAltText("uploaded-action.png")).toBeVisible();
+  await expect(overlay).toContainText("PNG");
+  await expect(overlay).toContainText("image/png");
   const actions = overlay.locator(".pf-attachment-dialog-actions");
-  const folderButton = actions.getByRole("button", { name: "Open image folder" });
+  const closeButton = actions.getByRole("button", { name: "Close attachment preview" });
+  await expect(closeButton).toBeVisible();
+  await expect(actions.getByRole("button", { name: "Open containing folder" })).toHaveCount(0);
+  await expect(actions.getByRole("button")).toHaveCount(1);
+
+  await page.keyboard.press("Escape");
+  await expect(overlay).toHaveCount(0);
+  await expect(thumbnail).toBeFocused();
+});
+
+test("attachment overlay shows folder action for generated media local path", async ({ page }) => {
+  const sessionId = "session-generated-media-overlay-action";
+  const artifactId = "artifact-generated-overlay-action";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId,
+        displayName: "Generated media overlay action",
+        title: "Generated media overlay action",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "generated-media-overlay-action-message",
+            text: "Generated media attachment.",
+            createdAtMs: baseTime - 30_000,
+            attachments: [
+              {
+                id: `generated-image:${artifactId}`,
+                name: "Generated image",
+                mimeType: "image/png",
+                size: onePixelPngBytes.length,
+                extension: "PNG",
+                kind: "image",
+                state: "available",
+                source: {
+                  kind: "generated_media",
+                  jobId: "job-generated-overlay-action",
+                  artifactId,
+                  index: 0,
+                  localPath: "/tmp/puffer/.puffer/media/images/artifact-generated-overlay-action.png"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  });
+  daemon.seedGeneratedMediaPreview(sessionId, artifactId, {
+    state: "available",
+    mimeType: "image/png",
+    bytes: onePixelPngBytes
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Generated media overlay action/);
+
+  const thumbnail = page.getByRole("button", { name: "Open image attachment Generated image" });
+  await expect(thumbnail).toBeVisible();
+  await thumbnail.click();
+
+  const overlay = page.getByTestId("attachment-overlay");
+  await expect(overlay).toBeVisible();
+  await expect(overlay.getByAltText("Generated image")).toBeVisible();
+  const actions = overlay.locator(".pf-attachment-dialog-actions");
+  const folderButton = actions.getByRole("button", { name: "Open containing folder" });
   const closeButton = actions.getByRole("button", { name: "Close attachment preview" });
   await expect(folderButton).toBeVisible();
   await expectOverlayActionBeforeClose(folderButton, closeButton);

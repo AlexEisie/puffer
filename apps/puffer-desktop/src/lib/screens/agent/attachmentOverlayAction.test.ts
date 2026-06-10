@@ -16,11 +16,8 @@ function attachment(overrides: Partial<MessageAttachment>): MessageAttachment {
   };
 }
 
-test("returns open folder for local image files", () => {
-  expect(attachmentOverlayAction(attachment({}))).toEqual({
-    kind: "open_folder",
-    path: "/tmp/puffer/pixel.png"
-  });
+test("returns null for uploaded local image files", () => {
+  expect(attachmentOverlayAction(attachment({}))).toBeNull();
 });
 
 test("returns download for remote URL image files", () => {
@@ -97,7 +94,7 @@ test("returns null for generated media without a local path even when it has a p
   ).toBeNull();
 });
 
-test("returns open folder for local non-image files", () => {
+test("returns null for uploaded local non-image files", () => {
   expect(
     attachmentOverlayAction(
       attachment({
@@ -108,7 +105,7 @@ test("returns open folder for local non-image files", () => {
         source: { kind: "local_file", path: "/tmp/puffer/report.pdf" }
       })
     )
-  ).toEqual({ kind: "open_folder", path: "/tmp/puffer/report.pdf" });
+  ).toBeNull();
 });
 
 test("returns null for remote-only files with no local path", () => {
