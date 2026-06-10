@@ -26,6 +26,8 @@ pub(crate) struct VideoGenerationMediaContext<'a> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VideoGenerationInput {
     prompt: String,
+    #[serde(default)]
+    image_references: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_scalar_parameters")]
     parameters: BTreeMap<String, String>,
     #[serde(default)]
@@ -39,6 +41,7 @@ struct VideoRequest {
     operation: String,
     adapter: String,
     prompt: String,
+    image_references: Vec<String>,
     parameters: BTreeMap<String, String>,
     purpose: Option<String>,
 }
@@ -76,6 +79,7 @@ fn build_video_request(
     settings: &MediaGenerationConfig,
 ) -> Result<VideoRequest> {
     let prompt = prompt_text(cwd, &input.prompt)?;
+    let image_references = validate_video_image_references(&input.image_references)?;
     let (provider, model, operation, adapter) = required_video_selection(settings)?;
     let mut parameters = settings.parameters.clone();
     parameters.extend(input.parameters);
@@ -85,6 +89,7 @@ fn build_video_request(
         operation,
         adapter,
         prompt,
+        image_references,
         parameters,
         purpose: input.purpose,
     })
@@ -124,9 +129,40 @@ fn exact_media_request(request: &VideoRequest) -> ExactMediaGenerationRequest {
         operation: request.operation.clone(),
         adapter: request.adapter.clone(),
         prompt: request.prompt.clone(),
+        image_references: request.image_references.clone(),
         parameters: request.parameters.clone(),
         count: 1,
     }
+}
+
+pub(crate) fn validate_video_image_references(values: &[String]) -> Result<Vec<String>> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| validate_video_image_reference(index, value))
+        .collect()
+}
+
+fn validate_video_image_reference(index: usize, value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        bail!("VideoGeneration imageReferences[{index}] must be an https:// or asset:// URL");
+    }
+    if let Some(asset_id) = trimmed.strip_prefix("asset://") {
+        if !asset_id.trim().is_empty() {
+            return Ok(trimmed.to_string());
+        }
+        bail!("VideoGeneration imageReferences[{index}] must be an https:// or asset:// URL");
+    }
+    let parsed = url::Url::parse(trimmed).map_err(|_| {
+        anyhow::anyhow!(
+            "VideoGeneration imageReferences[{index}] must be an https:// or asset:// URL"
+        )
+    })?;
+    if parsed.scheme() == "https" {
+        return Ok(trimmed.to_string());
+    }
+    bail!("VideoGeneration imageReferences[{index}] must be an https:// or asset:// URL")
 }
 
 fn video_generation_output(
@@ -521,6 +557,7 @@ mod tests {
             dir.path(),
             VideoGenerationInput {
                 prompt: "  ".to_string(),
+                image_references: Vec::new(),
                 parameters: BTreeMap::new(),
                 purpose: None,
             },
@@ -550,6 +587,63 @@ mod tests {
         .unwrap();
 
         assert!(input.parameters.is_empty());
+    }
+
+    #[test]
+    fn parses_video_generation_image_references() {
+        let input = serde_json::from_value::<VideoGenerationInput>(json!({
+            "prompt": "animate image 1",
+            "imageReferences": [
+                "https://example.com/person.png",
+                "asset://approved-person"
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            input.image_references,
+            vec![
+                "https://example.com/person.png".to_string(),
+                "asset://approved-person".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn validates_video_generation_image_references() {
+        let values = vec![
+            " https://example.com/person.png ".to_string(),
+            "asset://approved-person".to_string(),
+        ];
+
+        let validated = validate_video_image_references(&values).expect("valid refs");
+
+        assert_eq!(
+            validated,
+            vec![
+                "https://example.com/person.png".to_string(),
+                "asset://approved-person".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_video_generation_image_references() {
+        for value in [
+            "",
+            "http://example.com/person.png",
+            "file:///tmp/person.png",
+            "person.png",
+            "/tmp/person.png",
+            "data:image/png;base64,AAAA",
+            "asset://",
+        ] {
+            let error = validate_video_image_references(&[value.to_string()])
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("imageReferences[0]"), "{value}: {error}");
+            assert!(error.contains("https:// or asset://"), "{value}: {error}");
+        }
     }
 
     #[test]
@@ -590,6 +684,7 @@ mod tests {
             dir.path(),
             VideoGenerationInput {
                 prompt: "make a ship launch video".to_string(),
+                image_references: vec!["https://example.com/person.png".to_string()],
                 parameters: BTreeMap::from([
                     ("aspect_ratio".to_string(), "9:16".to_string()),
                     ("resolution".to_string(), "1080p".to_string()),
@@ -606,6 +701,10 @@ mod tests {
         assert_eq!(request.parameters["duration_seconds"], "5");
         assert_eq!(request.parameters["aspect_ratio"], "9:16");
         assert_eq!(request.parameters["resolution"], "1080p");
+        assert_eq!(
+            request.image_references,
+            vec!["https://example.com/person.png".to_string()]
+        );
         assert_eq!(request.purpose.as_deref(), Some("short launch clip"));
     }
 

@@ -647,6 +647,7 @@ fn exact_media_generation_rejects_unsupported_video_parameter() {
         operation: "generate".to_string(),
         adapter: "replicate_video".to_string(),
         prompt: "animate a logo".to_string(),
+        image_references: Vec::new(),
         parameters: BTreeMap::from([
             ("aspect_ratio".to_string(), "1:1".to_string()),
             ("duration_seconds".to_string(), "5".to_string()),
@@ -671,6 +672,7 @@ fn exact_media_generation_rejects_unsupported_adapter_before_http() {
         operation: "generate".to_string(),
         adapter: "images_json".to_string(),
         prompt: "animate a logo".to_string(),
+        image_references: Vec::new(),
         parameters: BTreeMap::from([
             ("aspect_ratio".to_string(), "16:9".to_string()),
             ("duration_seconds".to_string(), "5".to_string()),

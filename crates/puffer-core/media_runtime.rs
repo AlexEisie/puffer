@@ -94,6 +94,7 @@ pub struct ExactMediaGenerationRequest {
     pub operation: String,
     pub adapter: String,
     pub prompt: String,
+    pub image_references: Vec<String>,
     pub parameters: BTreeMap<String, String>,
     pub count: u8,
 }
