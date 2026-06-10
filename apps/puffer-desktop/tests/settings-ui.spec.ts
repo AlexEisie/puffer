@@ -84,6 +84,39 @@ test("web preview auto-connects to local dev backend websocket", async ({ page }
   await expect(pane.getByText("Preview mode")).toHaveCount(0);
 });
 
+test("web preview remembers URL-provided backend handshake across reopen", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    url: "ws://127.0.0.1:17778/ws",
+    workspaceRoot: "/tmp/persisted-puffer"
+  });
+  await daemon.install(page);
+
+  await daemon.open(page, { extraParams: { workspaceRoot: "/tmp/persisted-puffer" } });
+  await daemon.waitForRequest("load_settings_snapshot");
+
+  await expect.poll(() =>
+    page.evaluate(() => window.localStorage.getItem("puffer.backendUrl"))
+  ).toBe(daemon.url);
+  await expect.poll(() =>
+    page.evaluate(() => window.localStorage.getItem("puffer.backendToken"))
+  ).toBe("test");
+  await expect.poll(() =>
+    page.evaluate(() => window.localStorage.getItem("puffer.workspaceRoot"))
+  ).toBe("/tmp/persisted-puffer");
+
+  const settingsRequestCount = daemon.requests.filter(
+    (request) => request.method === "load_settings_snapshot"
+  ).length;
+  const socketCount = daemon.socketUrls.length;
+
+  await page.goto("/?skipOnboarding=1");
+  await expect
+    .poll(() => daemon.requests.filter((request) => request.method === "load_settings_snapshot").length)
+    .toBeGreaterThan(settingsRequestCount);
+  await expect.poll(() => daemon.socketUrls.length).toBeGreaterThan(socketCount);
+  expect(daemon.socketUrls.at(-1)).toContain("ws://127.0.0.1:17778/ws");
+});
+
 test("default model cannot be saved before provider models load", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse(
