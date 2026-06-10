@@ -15,6 +15,12 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
+#[path = "daemon_contacts_telegram_peer_cache.rs"]
+mod daemon_contacts_telegram_peer_cache;
+use daemon_contacts_telegram_peer_cache::{
+    collect_telegram_peer_cache_candidates, hydrate_telegram_peer_cache_if_needed,
+};
+
 const DEFAULT_LIMIT: usize = 30;
 const DAY_MS: i128 = 86_400_000;
 
@@ -68,6 +74,8 @@ struct TelegramScore {
 #[derive(Debug, Default, Deserialize)]
 struct TelegramPeerCacheEntry {
     #[serde(default)]
+    numeric_id: i64,
+    #[serde(default)]
     kind: String,
     #[serde(default)]
     title: Option<String>,
@@ -103,11 +111,13 @@ pub(super) fn collect_telegram_candidates(
     }
     for entry in std::fs::read_dir(&root).with_context(|| format!("read {}", root.display()))? {
         let Ok(entry) = entry else { continue };
-        let path = entry.path().join("message-diagnostics.ndjson");
+        let account_dir = entry.path();
+        hydrate_telegram_peer_cache_if_needed(paths, &account_dir);
+        collect_telegram_peer_cache_candidates(&account_dir, by_id);
+        let path = account_dir.join("message-diagnostics.ndjson");
         if !path.exists() {
             continue;
         }
-        let account_dir = entry.path();
         let self_user_id = telegram_session_user_id(&account_dir.join("telegram.session"));
         let peer_metadata = read_telegram_peer_metadata_from_account(&account_dir);
         let messages = read_telegram_messages(
@@ -593,10 +603,15 @@ pub(super) fn telegram_contact_id(payload: &Value, chat_kind: &str) -> Option<St
     {
         return None;
     }
-    payload
+    if let Some(id) = payload
         .get("chat_username")
         .and_then(Value::as_str)
         .and_then(|username| normalize_contact_id(&format!("telegram@{username}")))
+    {
+        return Some(id);
+    }
+    telegram_payload_user_id(payload)
+        .and_then(|user_id| normalize_contact_id(&format!("telegram-user-id@{user_id}")))
 }
 
 /// Returns the best display name for a Telegram diagnostic payload.
@@ -784,10 +799,7 @@ fn read_telegram_peer_metadata_from_account(
         if peer_metadata.name.is_none() && peer_metadata.avatar.is_none() {
             continue;
         }
-        for username in peer_cache_entry_usernames(&peer) {
-            let Some(id) = normalize_contact_id(&format!("telegram@{username}")) else {
-                continue;
-            };
+        for id in peer_cache_entry_contact_ids(&peer) {
             merge_peer_metadata(&mut metadata, id, peer_metadata.clone());
         }
     }
@@ -850,6 +862,29 @@ fn peer_cache_entry_usernames(peer: &TelegramPeerCacheEntry) -> Vec<String> {
         .into_iter()
         .filter(|value| !value.is_empty())
         .collect()
+}
+
+fn peer_cache_entry_contact_ids(peer: &TelegramPeerCacheEntry) -> Vec<String> {
+    let mut ids = Vec::new();
+    for username in peer_cache_entry_usernames(peer) {
+        if let Some(id) = normalize_contact_id(&format!("telegram@{username}")) {
+            ids.push(id);
+        }
+    }
+    if ids.is_empty() && peer.numeric_id > 0 {
+        if let Some(id) = normalize_contact_id(&format!("telegram-user-id@{}", peer.numeric_id)) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+fn telegram_payload_user_id(payload: &Value) -> Option<i64> {
+    payload
+        .get("chat_id")
+        .and_then(Value::as_i64)
+        .or_else(|| payload.get("sender_id").and_then(Value::as_i64))
+        .filter(|id| *id > 0)
 }
 
 fn telegram_contact_username(payload: &Value, chat_kind: &str) -> Option<String> {

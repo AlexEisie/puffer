@@ -1,6 +1,9 @@
 import { execSync } from "node:child_process";
-import { defineConfig } from "vite";
+import { readFileSync } from "node:fs";
+import { defineConfig, type ViteDevServer } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
+
+const workspaceDaemonHandshakeUrl = new URL("../../.puffer/daemon.handshake", import.meta.url);
 
 const host =
   (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
@@ -17,11 +20,42 @@ function gitShortHash(): string {
   }
 }
 
+function workspaceDaemonHandshake(): string | null {
+  try {
+    const raw = readFileSync(workspaceDaemonHandshakeUrl, { encoding: "utf8" }).trim();
+    return raw ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+function workspaceDaemonHandshakePlugin() {
+  return {
+    name: "puffer-workspace-daemon-handshake",
+    configureServer(server: ViteDevServer) {
+      server.middlewares.use("/__puffer/daemon-handshake", (_req, res) => {
+        const raw = workspaceDaemonHandshake();
+        if (!raw) {
+          res.statusCode = 404;
+          res.setHeader("content-type", "application/json");
+          res.end("{}");
+          return;
+        }
+        res.statusCode = 200;
+        res.setHeader("cache-control", "no-store");
+        res.setHeader("content-type", "application/json");
+        res.end(raw);
+      });
+    }
+  };
+}
+
 export default defineConfig({
   define: {
     __COMMIT_HASH__: JSON.stringify(gitShortHash())
   },
   plugins: [
+    workspaceDaemonHandshakePlugin(),
     svelte({
       compilerOptions: {
         compatibility: {

@@ -191,21 +191,42 @@ pub(super) fn fill_expression(target: &BrowserElementRef, text: &str) -> Result<
         target,
         &format!(
             r#"  const targetEl = refElement.closest('input, textarea, [contenteditable="true"]') || refElement;
+  // A cross-origin payment iframe (e.g. Shopify hosted card fields) renders its
+  // real <input> in a separate document the top frame can't reach. Resolving a
+  // ref to the IFRAME shell and "filling" it would silently set value on the
+  // wrong element and report success — that's how #580 placed orders with no
+  // card. Reject it instead of pretending the fill worked.
+  if (targetEl.tagName === 'IFRAME') {{
+    throw new Error('Target resolves to a cross-origin IFRAME (e.g. a hosted payment field); its input cannot be filled from the top document');
+  }}
+  const expected = {text};
   if ('value' in targetEl) {{
     const prototype = targetEl instanceof HTMLTextAreaElement
       ? HTMLTextAreaElement.prototype
       : HTMLInputElement.prototype;
     const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
     if (descriptor && descriptor.set) {{
-      descriptor.set.call(targetEl, {text});
+      descriptor.set.call(targetEl, expected);
     }} else {{
-      targetEl.value = {text};
+      targetEl.value = expected;
     }}
-    targetEl.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }}));
+    targetEl.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: expected }}));
     targetEl.dispatchEvent(new Event('change', {{ bubbles: true }}));
+    // Read the value back: a framework-controlled or guarded input can ignore
+    // the programmatic set and stay empty. Surface that rather than claiming
+    // the field was filled when it wasn't (#580). Check for an empty result
+    // only — many inputs legitimately reformat on input (card numbers add
+    // spaces, phone numbers add separators), so requiring an exact match would
+    // turn working fills into false failures.
+    if (expected !== '' && targetEl.value === '') {{
+      throw new Error('fill failed: value did not stick (the field may be inside a cross-origin iframe or guarded by the page)');
+    }}
   }} else if (targetEl.isContentEditable) {{
-    targetEl.textContent = {text};
-    targetEl.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }}));
+    targetEl.textContent = expected;
+    targetEl.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: expected }}));
+    if (expected !== '' && (targetEl.textContent ?? '') === '') {{
+      throw new Error('fill failed: value did not stick (the field may be inside a cross-origin iframe or guarded by the page)');
+    }}
   }} else {{
     throw new Error('Target is not editable');
   }}

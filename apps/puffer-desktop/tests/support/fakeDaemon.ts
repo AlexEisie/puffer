@@ -204,6 +204,10 @@ function overlapsContactIds(record: JsonRecord, contactIds: string[]): boolean {
   return normalizeContactIds(record.contact_ids).some((id) => saved.has(id));
 }
 
+function includesKnownContactId(contactIds: string[], knownIds: Set<string>): boolean {
+  return contactIds.some((id) => knownIds.has(id));
+}
+
 function mergedOverlappingContactIds(contacts: JsonRecord[], savedId: string, contactIds: string[]): string[] {
   const merged = [...contactIds];
   for (const contact of contacts) {
@@ -331,6 +335,38 @@ function cloneMediaCapability(capability: FakeMediaCapability): FakeMediaCapabil
     })),
     defaults: { ...capability.defaults }
   };
+}
+
+function contactsQuery(params: JsonRecord): string {
+  if (params.query !== undefined && typeof params.query !== "string") {
+    throw new Error("invalid contact query");
+  }
+  return String(params.query ?? "").trim().toLowerCase();
+}
+
+function contactsLimit(params: JsonRecord): number {
+  if (
+    params.limit !== undefined &&
+    (typeof params.limit !== "number" || !Number.isFinite(params.limit))
+  ) {
+    throw new Error("invalid contact limit");
+  }
+  return Math.max(1, Math.min(120, Math.trunc(Number(params.limit ?? 60))));
+}
+
+function savedContactMatches(record: JsonRecord, query: string): boolean {
+  if (!query) return true;
+  return [
+    record.id,
+    record.name,
+    record.description,
+    Array.isArray(record.contact_ids) ? record.contact_ids.join(" ") : ""
+  ].join(" ").toLowerCase().includes(query);
+}
+
+function candidateContactMatches(record: JsonRecord, query: string): boolean {
+  if (!query) return true;
+  return [record.id, record.name].join(" ").toLowerCase().includes(query);
 }
 
 const session = {
@@ -942,12 +978,13 @@ export class FakeDaemon {
           }
         ]
       }
-    ],
-    proposals: []
+    ]
   };
+  private inferredContactProposals: JsonRecord[] = [];
   private nextTab = 2;
   private nextPty = 1;
   private rejectConnections = false;
+  private legacyContactInferResponse = false;
 
   constructor(options: {
     sessions?: FakeDaemonSessionInput[];
@@ -1129,9 +1166,13 @@ export class FakeDaemon {
   setContactsSnapshot(snapshot: ContactsSnapshotFixture): void {
     this.contactsSnapshot = {
       contacts: snapshot.contacts.map((contact) => ({ ...contact })),
-      candidates: snapshot.candidates.map((candidate) => ({ ...candidate })),
-      proposals: snapshot.proposals?.map((proposal) => ({ ...proposal })) ?? []
+      candidates: snapshot.candidates.map((candidate) => ({ ...candidate }))
     };
+    this.inferredContactProposals = snapshot.proposals?.map((proposal) => ({ ...proposal })) ?? [];
+  }
+
+  setLegacyContactInferResponse(enabled = true): void {
+    this.legacyContactInferResponse = enabled;
   }
 
   setConnectorSetupQuestions(questions: ConnectorSetupQuestionFixture[]): void {
@@ -1843,13 +1884,17 @@ export class FakeDaemon {
   }
 
   private contactsList(params: JsonRecord): JsonRecord {
-    const query = String(params.query ?? "").trim().toLowerCase();
-    const limit = Math.max(1, Number(params.limit ?? 60) || 60);
-    const matches = (record: JsonRecord) => !query || JSON.stringify(record).toLowerCase().includes(query);
+    const query = contactsQuery(params);
+    const limit = contactsLimit(params);
     return {
-      contacts: this.contactsSnapshot.contacts.filter(matches).slice(0, limit).map((contact) => ({ ...contact })),
-      candidates: this.contactsSnapshot.candidates.filter(matches).slice(0, limit).map((candidate) => ({ ...candidate })),
-      proposals: this.contactsSnapshot.proposals.map((proposal) => ({ ...proposal }))
+      contacts: this.contactsSnapshot.contacts
+        .filter((contact) => savedContactMatches(contact, query))
+        .map((contact) => ({ ...contact })),
+      candidates: this.contactsSnapshot.candidates
+        .filter((candidate) => candidateContactMatches(candidate, query))
+        .slice(0, limit)
+        .map((candidate) => ({ ...candidate })),
+      proposals: this.inferredContactProposals.map((proposal) => ({ ...proposal }))
     };
   }
 
@@ -1879,9 +1924,11 @@ export class FakeDaemon {
           candidate.id !== id && !overlapsContactIds(candidate, contactIds)
         ),
         contact
-      ].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""))),
-      proposals: this.contactsSnapshot.proposals.filter((proposal) => !overlapsContactIds(proposal, contactIds))
+      ].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")))
     };
+    this.inferredContactProposals = this.inferredContactProposals.filter(
+      (proposal) => !overlapsContactIds(proposal, contactIds)
+    );
     return this.contactsList({});
   }
 
@@ -1902,26 +1949,35 @@ export class FakeDaemon {
         Array.isArray(contact.contact_ids) ? contact.contact_ids : []
       )
     );
-    const proposals = this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({
-      name: String(candidate.name ?? candidate.id ?? "Contact"),
-      description: `Messages from ${String(candidate.id ?? "this contact")} are frequent and have task-like context. They are retained because the candidate has recent conversation content rather than isolated bulk traffic.`,
-      avatar: candidate.avatar ?? null,
-      contact_ids: [String(candidate.id ?? "")]
-    })).filter((proposal) => proposal.contact_ids[0] && !overlapsContactIds(proposal, savedContactIds));
-    this.contactsSnapshot = {
-      ...this.contactsSnapshot,
-      proposals
-    };
-    return {
+    const knownContactIds = new Set(savedContactIds);
+    const proposals: JsonRecord[] = [];
+    for (const candidate of this.contactsSnapshot.candidates.slice(0, limit)) {
+      const contactIds = normalizeContactIds([String(candidate.id ?? "")]);
+      const name = String(candidate.name ?? candidate.id ?? "Contact").trim();
+      if (!name || contactIds.length === 0 || includesKnownContactId(contactIds, knownContactIds)) {
+        continue;
+      }
+      proposals.push({
+        name,
+        description: `Messages from ${String(candidate.id ?? "this contact")} are frequent and have task-like context. They are retained because the candidate has recent conversation content rather than isolated bulk traffic.`,
+        avatar: candidate.avatar ?? null,
+        contact_ids: contactIds
+      });
+      for (const id of contactIds) knownContactIds.add(id);
+    }
+    this.inferredContactProposals = proposals;
+    const response = {
       proposals: proposals.map((proposal) => ({ ...proposal })),
       candidates: this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({ ...candidate }))
     };
+    return this.legacyContactInferResponse ? response : { ...this.contactsList({ limit }), ...response };
   }
 
   private contactContext(params: JsonRecord): JsonRecord {
-    const ids = Array.isArray(params.contact_ids)
-      ? params.contact_ids.map((item) => String(item).trim()).filter(Boolean)
-      : [];
+    const ids = normalizeContactIds(Array.isArray(params.contact_ids) ? params.contact_ids : []);
+    if (ids.length === 0) {
+      throw new Error("contact context requires at least one valid contact id");
+    }
     const context = this.contactsSnapshot.candidates
       .filter((candidate) => ids.includes(String(candidate.id ?? "")))
       .flatMap((candidate) => Array.isArray(candidate.context) ? candidate.context : [])

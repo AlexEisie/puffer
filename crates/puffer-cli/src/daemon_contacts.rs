@@ -30,7 +30,7 @@ use daemon_contacts_params::{
     ContactSaveParams,
 };
 use daemon_contacts_store::{
-    load_store, prune_proposals_for_contact_ids, save_proposals, save_store,
+    load_proposals, load_store, prune_proposals_for_contact_ids, save_proposals, save_store,
 };
 use daemon_contacts_telegram::{
     collect_telegram_candidates, read_telegram_peer_avatars, read_telegram_peer_names,
@@ -95,7 +95,7 @@ impl CandidateContextOptions {
     }
 
     fn limit_for_id(self, id: &str) -> usize {
-        if id.starts_with("telegram@") {
+        if id.starts_with("telegram@") || id.starts_with("telegram-user-id@") {
             self.telegram_limit
         } else {
             self.other_limit
@@ -118,10 +118,7 @@ impl CandidateContextOptions {
 /// Lists saved contacts plus ranked connector candidates.
 pub(crate) fn handle_contacts_list(paths: &ConfigPaths, params: &Value) -> Result<Value> {
     let params: ContactListParams =
-        serde_json::from_value(params.clone()).unwrap_or(ContactListParams {
-            limit: Some(DEFAULT_LIMIT),
-            query: None,
-        });
+        serde_json::from_value(params.clone()).context("invalid contact list params")?;
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let query = params
         .query
@@ -129,23 +126,21 @@ pub(crate) fn handle_contacts_list(paths: &ConfigPaths, params: &Value) -> Resul
         .map(str::trim)
         .filter(|q| !q.is_empty());
     let store = load_store(paths)?;
+    let proposals = load_proposals(paths)?;
     let mut saved = filtered_saved_contacts(store.contacts, query);
     enrich_saved_contact_avatars(paths, &mut saved);
     let candidates = filtered_candidates(paths, limit, query)?;
     Ok(json!({
         "contacts": saved,
         "candidates": candidates,
-        "proposals": store.proposals,
+        "proposals": proposals,
     }))
 }
 
 /// Searches connector contact ids for autocomplete.
 pub(crate) fn handle_contacts_search(paths: &ConfigPaths, params: &Value) -> Result<Value> {
     let params: ContactListParams =
-        serde_json::from_value(params.clone()).unwrap_or(ContactListParams {
-            limit: Some(DEFAULT_LIMIT),
-            query: None,
-        });
+        serde_json::from_value(params.clone()).context("invalid contact search params")?;
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let query = params
         .query
@@ -153,13 +148,14 @@ pub(crate) fn handle_contacts_search(paths: &ConfigPaths, params: &Value) -> Res
         .map(str::trim)
         .filter(|q| !q.is_empty());
     let store = load_store(paths)?;
+    let proposals = load_proposals(paths)?;
     let mut saved = filtered_saved_contacts(store.contacts, query);
     enrich_saved_contact_avatars(paths, &mut saved);
     let candidates = searched_candidates(paths, limit, query)?;
     Ok(json!({
         "contacts": saved,
         "candidates": candidates,
-        "proposals": store.proposals,
+        "proposals": proposals,
     }))
 }
 
@@ -207,8 +203,8 @@ pub(crate) fn handle_contacts_save(paths: &ConfigPaths, params: &Value) -> Resul
             .to_ascii_lowercase()
             .cmp(&right.name.to_ascii_lowercase())
     });
-    prune_proposals_for_contact_ids(&mut store, &saved_contact_ids);
     save_store(paths, &store)?;
+    prune_proposals_for_contact_ids(paths, &saved_contact_ids)?;
     handle_contacts_list(paths, &json!({ "limit": DEFAULT_LIMIT }))
 }
 
@@ -235,6 +231,9 @@ pub(crate) fn handle_contacts_context(paths: &ConfigPaths, params: &Value) -> Re
     let params: ContactContextParams =
         serde_json::from_value(params.clone()).context("invalid contact context params")?;
     let contact_ids = normalize_contact_ids(params.contact_ids);
+    if contact_ids.is_empty() {
+        anyhow::bail!("contact context requires at least one valid contact id");
+    }
     let limit = params
         .limit
         .unwrap_or(TELEGRAM_CONTEXT_LIMIT)
@@ -243,14 +242,10 @@ pub(crate) fn handle_contacts_context(paths: &ConfigPaths, params: &Value) -> Re
     Ok(json!({ "contact_ids": contact_ids, "context": contexts }))
 }
 
-/// Infers contact group proposals from top connector candidates.
+/// Infers contact proposals from top connector candidates.
 pub(crate) fn handle_contacts_infer(state: &DaemonState, params: &Value) -> Result<Value> {
     let params: ContactInferParams =
-        serde_json::from_value(params.clone()).unwrap_or(ContactInferParams {
-            limit: Some(DEFAULT_LIMIT),
-            model: None,
-            trace_id: None,
-        });
+        serde_json::from_value(params.clone()).context("invalid contact infer params")?;
     let limit = params
         .limit
         .unwrap_or(DEFAULT_LIMIT)
@@ -260,7 +255,7 @@ pub(crate) fn handle_contacts_infer(state: &DaemonState, params: &Value) -> Resu
     trace.message(
         "assistant",
         "Contact inference",
-        "Collecting ranked connector candidates before asking the model for contact proposals.",
+        "Collecting ranked connector candidates before asking the model to create contacts.",
     );
     trace.message("system", "System prompt", contact_infer_system_prompt());
     let collect_call = trace.tool_id("CollectContacts");
@@ -319,9 +314,14 @@ pub(crate) fn handle_contacts_infer(state: &DaemonState, params: &Value) -> Resu
     trace.message(
         "assistant",
         "Inference complete",
-        format!("Prepared {} contact proposal(s).", proposals.len()),
+        format!("Inferred {} contact proposal(s).", proposals.len()),
     );
-    Ok(json!({ "proposals": proposals, "candidates": candidates }))
+    let mut snapshot = handle_contacts_list(paths, &json!({ "limit": DEFAULT_LIMIT }))?;
+    if let Some(object) = snapshot.as_object_mut() {
+        object.insert("candidates".to_string(), json!(candidates));
+        object.insert("proposals".to_string(), json!(proposals));
+    }
+    Ok(snapshot)
 }
 
 fn filtered_candidates(
@@ -345,7 +345,7 @@ fn filtered_candidates(
     candidates.truncate(limit);
     Ok(candidates
         .into_iter()
-        .map(Candidate::into_contact)
+        .map(Candidate::into_preview_contact)
         .collect())
 }
 
@@ -360,9 +360,6 @@ fn searched_candidates(
     let mut by_id: HashMap<String, Candidate> = HashMap::new();
     let context_options = CandidateContextOptions::none();
     collect_telegram_candidates(paths, &mut by_id, context_options)?;
-    if context_options.uses_connector_commands() {
-        collect_connector_method_search_candidates(&mut by_id, query, Some(limit), context_options);
-    }
     collect_history_candidates(paths, &mut by_id, context_options);
     let query = query.to_ascii_lowercase();
     let mut candidates = by_id
@@ -388,7 +385,7 @@ fn searched_candidates(
     candidates.truncate(limit);
     Ok(candidates
         .into_iter()
-        .map(Candidate::into_contact)
+        .map(Candidate::into_preview_contact)
         .collect())
 }
 
@@ -522,25 +519,6 @@ fn sample_inference_candidates(candidates: Vec<Candidate>, per_connector: usize)
         }
     }
     sampled
-}
-
-fn collect_connector_method_search_candidates(
-    by_id: &mut HashMap<String, Candidate>,
-    query: &str,
-    limit: Option<usize>,
-    context_options: CandidateContextOptions,
-) {
-    let Ok(manager) = puffer_core::subscription_manager() else {
-        return;
-    };
-    for connection in manager.connection_store().list() {
-        let Ok(Some(contacts)) =
-            manager.search_connector_contacts(&connection.slug, query.to_string(), limit)
-        else {
-            continue;
-        };
-        merge_connector_contacts(by_id, &connection.connector_slug, contacts, context_options);
-    }
 }
 
 fn collect_connector_method_candidates(
@@ -977,6 +955,16 @@ impl Candidate {
             avatar: self.avatar,
             name: self.name,
             context: self.context,
+            score: self.score,
+        }
+    }
+
+    fn into_preview_contact(self) -> ConnectorContact {
+        ConnectorContact {
+            id: self.id,
+            avatar: None,
+            name: self.name,
+            context: Vec::new(),
             score: self.score,
         }
     }

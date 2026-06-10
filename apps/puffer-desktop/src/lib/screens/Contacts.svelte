@@ -130,8 +130,12 @@
     }
   }
 
-  function applyContactsSnapshot(next: ContactsSnapshot) {
-    snapshot = { ...next, proposals: next.proposals ?? [] };
+  function applyContactsSnapshot(next: Partial<ContactsSnapshot>) {
+    snapshot = {
+      contacts: next.contacts ?? snapshot.contacts,
+      candidates: next.candidates ?? snapshot.candidates,
+      proposals: next.proposals ?? []
+    };
     proposals = snapshot.proposals;
   }
 
@@ -242,9 +246,10 @@
     try {
       inferTraceUnsubscribe = await subscribeContactInferEvents(traceId, applyInferTraceEvent);
       const result = await inferContacts(30, traceId);
-      proposals = result.proposals;
-      snapshot = { ...snapshot, candidates: result.candidates, proposals: result.proposals };
-      notice = proposals.length === 0 ? "No proposals returned." : `Inferred ${proposals.length} contacts.`;
+      applyContactsSnapshot(result);
+      notice = proposals.length === 0
+        ? "No proposals returned."
+        : `Inferred ${proposals.length} proposal${proposals.length === 1 ? "" : "s"}.`;
     } catch (err) {
       inferError = `Could not infer contacts: ${messageOf(err)}`;
     } finally {
@@ -802,7 +807,9 @@
         <header class="pf-task-config-head">
           <div>
             <h2 id="pf-contact-infer-title">Infer contacts</h2>
-            <span>{proposals.length} proposal{proposals.length === 1 ? "" : "s"}</span>
+            <span>
+              {proposals.length} proposal{proposals.length === 1 ? "" : "s"}
+            </span>
           </div>
           <div class="pf-contact-modal-actions">
             <button
@@ -904,7 +911,7 @@
               {/each}
             </div>
           {:else if inferring}
-            <div class="pf-tasks-empty">Waiting for proposals...</div>
+            <div class="pf-tasks-empty">Waiting for contacts...</div>
           {:else if proposals.length === 0}
             <div class="pf-tasks-empty">No inferred contacts yet.</div>
           {/if}

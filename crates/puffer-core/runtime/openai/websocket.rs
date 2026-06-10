@@ -6,7 +6,7 @@ use super::super::structured_output_support::{
     openai_responses_text_config, openai_tool_definitions_for_request,
 };
 use super::super::system_prompt::render_runtime_system_prompt;
-use super::super::{run_turn_hooks, TurnStreamEvent};
+use super::super::{run_turn_hooks, RetryAttemptKind, TurnStreamEvent};
 use super::conversation::{
     append_managed_system_prompt_1_to_instructions, append_reasoning_items, append_tool_results,
     compact_conversation, inject_post_compact_context, items_to_responses_input,
@@ -362,6 +362,7 @@ where
                         attempt: 1,
                         max_attempts: 1,
                         error: error.to_string(),
+                        kind: RetryAttemptKind::WsFallback,
                     });
                     return fallback_to_sse(
                         state, resources, providers, provider, &model_id, auth_store, input,
@@ -528,6 +529,7 @@ where
                     attempt,
                     max_attempts,
                     error: error.to_string(),
+                    kind: RetryAttemptKind::WsFallback,
                 });
                 if !delay.is_zero() {
                     std::thread::sleep(delay);

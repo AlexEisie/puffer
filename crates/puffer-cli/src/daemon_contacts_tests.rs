@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 #[test]
-fn telegram_candidates_require_private_usernames_and_ignore_bots_groups() {
+fn telegram_candidates_require_private_users_and_ignore_bots_groups() {
     assert_eq!(
         telegram_contact_id(
             &json!({
@@ -20,15 +20,17 @@ fn telegram_candidates_require_private_usernames_and_ignore_bots_groups() {
         ),
         Some("telegram@alice".to_string())
     );
-    assert!(telegram_contact_id(
-        &json!({
-            "chat_kind": "user",
-            "chat_id": 5229190700_i64,
-            "chat_title": "Direct Numeric"
-        }),
-        "user"
-    )
-    .is_none());
+    assert_eq!(
+        telegram_contact_id(
+            &json!({
+                "chat_kind": "user",
+                "chat_id": 5229190700_i64,
+                "chat_title": "Direct Numeric"
+            }),
+            "user"
+        ),
+        Some("telegram-user-id@5229190700".to_string())
+    );
     assert!(telegram_contact_id(
         &json!({
             "chat_kind": "group",
@@ -401,6 +403,22 @@ fn inference_context_avoids_live_connector_commands() {
 }
 
 #[test]
+fn contact_list_and_search_reject_malformed_params() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_config_paths(temp.path());
+
+    let list_error = handle_contacts_list(&paths, &json!({ "limit": "many" })).unwrap_err();
+    let search_error = handle_contacts_search(&paths, &json!({ "query": 42 })).unwrap_err();
+
+    assert!(list_error
+        .to_string()
+        .contains("invalid contact list params"));
+    assert!(search_error
+        .to_string()
+        .contains("invalid contact search params"));
+}
+
+#[test]
 fn telegram_direct_payload_name_prefers_chat_title() {
     assert_eq!(
         name_from_payload(&json!({
@@ -499,6 +517,7 @@ fn contacts_list_returns_lightweight_candidate_previews() {
         .unwrap();
 
     assert!(candidate.get("context").is_none(), "{candidate:#}");
+    assert!(candidate.get("avatar").is_none(), "{candidate:#}");
     assert_eq!(candidate["name"], "Alice (@alice_smith)");
     assert!(!candidates
         .iter()
@@ -572,7 +591,19 @@ fn contacts_list_prefers_telegram_peer_cache_names() {
         .unwrap();
 
     assert_eq!(candidate["name"], "Rin Tohsaka");
-    assert_eq!(candidate["avatar"], avatar);
+    assert!(candidate.get("avatar").is_none(), "{candidate:#}");
+
+    let search = handle_contacts_search(&paths, &json!({ "query": "rin", "limit": 10 })).unwrap();
+    let search_candidate = search["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["id"] == "telegram@tohsakar_in")
+        .unwrap();
+    assert!(
+        search_candidate.get("avatar").is_none(),
+        "{search_candidate:#}"
+    );
 
     let saved = handle_contacts_save(
         &paths,
@@ -585,6 +616,82 @@ fn contacts_list_prefers_telegram_peer_cache_names() {
     .unwrap();
     let saved_contact = saved["contacts"].as_array().unwrap().first().unwrap();
     assert_eq!(saved_contact["avatar"], avatar);
+}
+
+#[test]
+fn contacts_list_uses_telegram_peer_cache_without_message_diagnostics() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_config_paths(temp.path());
+    let account_dir = paths
+        .user_config_dir
+        .join("telegram-accounts")
+        .join("telegram-user");
+    std::fs::create_dir_all(&account_dir).unwrap();
+    std::fs::write(
+        account_dir.join("peer-cache.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "peers": [
+                {
+                    "id": "37253512",
+                    "numeric_id": 37253512_i64,
+                    "kind": "user",
+                    "title": "Rin Tohsaka",
+                    "username": "tohsakar_in",
+                    "first_name": "Rin",
+                    "is_bot": false,
+                    "updated_at_ms": 1_700_000_000_000_i64
+                },
+                {
+                    "id": "5229190700",
+                    "numeric_id": 5229190700_i64,
+                    "kind": "user",
+                    "title": "Numeric Direct",
+                    "first_name": "Numeric",
+                    "is_bot": false,
+                    "updated_at_ms": 1_700_000_000_000_i64
+                },
+                {
+                    "id": "9",
+                    "numeric_id": 9_i64,
+                    "kind": "user",
+                    "title": "Build Bot",
+                    "username": "buildbot",
+                    "is_bot": true,
+                    "updated_at_ms": 1_700_000_000_000_i64
+                },
+                {
+                    "id": "-100123",
+                    "numeric_id": -100123_i64,
+                    "kind": "channel",
+                    "title": "Announcements",
+                    "username": "announcements",
+                    "is_bot": false,
+                    "updated_at_ms": 1_700_000_000_000_i64
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let result = handle_contacts_list(&paths, &json!({ "limit": 10 })).unwrap();
+    let candidates = result["candidates"].as_array().unwrap();
+
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate["id"] == "telegram@tohsakar_in"
+            && candidate["name"] == "Rin Tohsaka"));
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate["id"] == "telegram-user-id@5229190700"
+            && candidate["name"] == "Numeric Direct"));
+    assert!(!candidates
+        .iter()
+        .any(|candidate| candidate["id"] == "telegram@buildbot"));
+    assert!(!candidates
+        .iter()
+        .any(|candidate| candidate["id"] == "telegram@announcements"));
 }
 
 #[test]
@@ -773,6 +880,22 @@ fn contacts_context_returns_marked_telegram_destination_context() {
         context[0].pointer("/payload/destination/label"),
         Some(&json!("Alice Smith"))
     );
+}
+
+#[test]
+fn contacts_context_rejects_empty_or_invalid_contact_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_config_paths(temp.path());
+
+    for params in [
+        json!({ "contact_ids": [] }),
+        json!({ "contact_ids": ["not-a-contact"] }),
+    ] {
+        let error = handle_contacts_context(&paths, &params).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("contact context requires at least one valid contact id"));
+    }
 }
 
 #[test]

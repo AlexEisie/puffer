@@ -1,7 +1,7 @@
 use super::{
     execute_tool_call, is_parallel_safe_tool, parse_http_json_response, resolve_tool_permission,
-    PermissionOutcome, ToolExecutionBackend, ToolInvocation, TurnStreamEvent, APP_VERSION,
-    OPENAI_CODEX_COMPAT_VERSION,
+    PermissionOutcome, RetryAttemptKind, ToolExecutionBackend, ToolInvocation, TurnStreamEvent,
+    APP_VERSION, OPENAI_CODEX_COMPAT_VERSION,
 };
 mod adapters;
 mod completions_session;
@@ -746,6 +746,7 @@ where
                         attempt,
                         max_attempts: max,
                         error: error.to_string(),
+                        kind: RetryAttemptKind::Transport,
                     });
                 },
             )
@@ -792,6 +793,7 @@ where
                         attempt,
                         max_attempts: max,
                         error: error.to_string(),
+                        kind: RetryAttemptKind::Transport,
                     });
                 },
             )

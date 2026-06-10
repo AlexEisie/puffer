@@ -198,6 +198,7 @@ impl BenchmarkTraceRecorder {
                 attempt,
                 max_attempts,
                 error,
+                ..
             } => {
                 self.push_event(BenchmarkTraceEvent::RetryAttempt {
                     attempt: *attempt,
