@@ -8,7 +8,6 @@ use puffer_subscriptions::{
     contact_ids_from_payload, normalize_contact_id, normalize_contact_ids, ConnectorContact,
     ContactContext, SavedContact,
 };
-use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -17,6 +16,8 @@ use uuid::Uuid;
 
 #[path = "daemon_contacts_infer.rs"]
 mod daemon_contacts_infer;
+#[path = "daemon_contacts_params.rs"]
+mod daemon_contacts_params;
 #[path = "daemon_contacts_store.rs"]
 mod daemon_contacts_store;
 #[path = "daemon_contacts_telegram.rs"]
@@ -24,6 +25,10 @@ mod daemon_contacts_telegram;
 #[path = "daemon_contacts_trace.rs"]
 mod daemon_contacts_trace;
 use daemon_contacts_infer::{candidate_trace_sample, contact_infer_system_prompt, infer_proposals};
+use daemon_contacts_params::{
+    ContactContextParams, ContactDeleteParams, ContactInferParams, ContactListParams,
+    ContactSaveParams,
+};
 use daemon_contacts_store::{
     load_store, prune_proposals_for_contact_ids, save_proposals, save_store,
 };
@@ -43,50 +48,6 @@ const INFERENCE_CONTEXT_LIMIT: usize =
     TELEGRAM_RECENT_CONTEXT_LIMIT + (TELEGRAM_INTERACTION_CONTEXT_LIMIT * 2);
 const HISTORY_CANDIDATE_LIMIT: usize = 1_000;
 const DAY_MS: i128 = 86_400_000;
-
-#[derive(Debug, Deserialize)]
-struct ContactListParams {
-    #[serde(default)]
-    limit: Option<usize>,
-    #[serde(default)]
-    query: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContactSaveParams {
-    #[serde(default)]
-    id: Option<String>,
-    name: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    avatar: Option<String>,
-    #[serde(default)]
-    contact_ids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContactDeleteParams {
-    id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContactContextParams {
-    #[serde(default)]
-    contact_ids: Vec<String>,
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContactInferParams {
-    #[serde(default)]
-    limit: Option<usize>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default, alias = "traceId")]
-    trace_id: Option<String>,
-}
 
 #[derive(Debug, Clone)]
 struct Candidate {
