@@ -42,6 +42,13 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             CommandKind::Ui,
         ),
         cmd(
+            "telegram-relationships",
+            &["tg-rel"],
+            "Rank your top Telegram contacts by recent chat frequency and analyze each relationship",
+            Some("[connection-slug]"),
+            CommandKind::Ui,
+        ),
+        cmd(
             "autodream",
             &["dream"],
             "Consolidate durable project memory and suggest skill-worthy traces",
@@ -294,6 +301,13 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             "Create connector monitors that turn messages into tasks",
             Some("[connection search | connection ...]"),
             CommandKind::Local,
+        ),
+        cmd(
+            "night",
+            &[],
+            "Autonomous overnight work: AutoDream surfaces tasks, subagents implement them in an isolated git worktree with e2e tests + screenshots (fork-PR only if experimentally enabled)",
+            None,
+            CommandKind::Prompt,
         ),
         cmd(
             "pentest",

@@ -9,17 +9,18 @@ use std::time::Duration;
 
 use crate::daemon::{DaemonState, ServerEnvelope};
 
+use super::dom_inspect::dom_inspect_expression;
 use super::params::{optional_u32, required_string, required_string_array};
 use super::ref_resolution::{
-    click_expression, double_click_expression, fill_expression, focus_expression, hover_expression,
-    scroll_into_view_expression, select_expression, set_checkable_state_expression,
-    upload_input_handle_expression,
+    fill_expression, focus_expression, scroll_into_view_expression, select_expression,
+    set_checkable_state_expression, target_point_expression, upload_input_handle_expression,
 };
 use super::screenshot::{parse_agent_screenshot_options, BrowserElementRef};
+use super::session::BrowserSession;
 use super::tabs::{backend_session_id, BrowserTabInfo, BrowserTabsState};
 use super::{
-    BrowserHistoryDirection, BrowserInputEvent, BrowserRegistry, DEFAULT_URL, INITIAL_HEIGHT,
-    INITIAL_WIDTH,
+    browser_debug, BrowserHistoryDirection, BrowserInputEvent, BrowserRegistry, DEFAULT_URL,
+    INITIAL_HEIGHT, INITIAL_WIDTH,
 };
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +36,17 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
     let root_session_id = required_string(params, "sessionId")?;
     let width = optional_u32(params, "width").unwrap_or(INITIAL_WIDTH);
     let height = optional_u32(params, "height").unwrap_or(INITIAL_HEIGHT);
+    browser_debug(
+        "agent.request",
+        format!(
+            "action={} root_session_id={} tab_id={:?} width={} height={}",
+            action,
+            root_session_id,
+            optional_string(params, "tabId"),
+            width,
+            height
+        ),
+    );
     match action.as_str() {
         "list" => Ok(serde_json::to_value(
             state.browsers.list_tabs(&root_session_id),
@@ -86,6 +98,10 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
                         .map(|tab| tab.tab_id)
                 })
                 .with_context(|| format!("no browser tabs for session `{root_session_id}`"))?;
+            browser_debug(
+                "agent.close.resolved",
+                format!("root_session_id={} tab_id={}", root_session_id, tab_id),
+            );
             let tabs = state.browsers.close_tab(&root_session_id, &tab_id)?;
             publish_tabs(state, &root_session_id);
             Ok(serde_json::to_value(tabs)?)
@@ -133,6 +149,17 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state.browsers.arm_agent_recording(&backend_id);
             state.browsers.agent_snapshot(&backend_id)
         }
+        "domInspect" => {
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            state.browsers.arm_agent_recording(&backend_id);
+            let query = required_string(params, "query")?;
+            Ok(state
+                .browsers
+                .get(&backend_id)?
+                .evaluate(dom_inspect_expression(&query)?)?
+                .value)
+        }
         "consoleLogs" | "console" => {
             let (_, backend_id) =
                 ensure_target_tab(state, &root_session_id, params, width, height)?;
@@ -141,6 +168,16 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             state.browsers.console_logs(&backend_id, clear)
+        }
+        "waitNetworkIdle" => {
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            state.browsers.wait_for_network_idle(
+                &backend_id,
+                network_idle_duration(params),
+                navigation_timeout(params),
+            )?;
+            Ok(json!({ "ok": true }))
         }
         "screenshot" => {
             let (tab_id, backend_id) =
@@ -418,25 +455,33 @@ fn resolve_open_target_tab_id(
 impl BrowserRegistry {
     /// Clicks an element ref from the last agent snapshot.
     pub(crate) fn agent_click(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
-        let target = self.lookup_ref(backend_session_id, ref_id)?;
-        self.get(backend_session_id)?
-            .evaluate(click_expression(&target)?)?;
+        let session = self.get(backend_session_id)?;
+        let (x, y) = self.agent_target_point(backend_session_id, ref_id)?;
+        dispatch_agent_mouse_click(&session, x, y, 1)?;
         Ok(())
     }
 
     /// Double-clicks an element ref from the last agent snapshot.
     pub(crate) fn agent_double_click(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
-        let target = self.lookup_ref(backend_session_id, ref_id)?;
-        self.get(backend_session_id)?
-            .evaluate(double_click_expression(&target)?)?;
+        let session = self.get(backend_session_id)?;
+        let (x, y) = self.agent_target_point(backend_session_id, ref_id)?;
+        dispatch_agent_mouse_click(&session, x, y, 1)?;
+        dispatch_agent_mouse_click(&session, x, y, 2)?;
         Ok(())
     }
 
     /// Moves the pointer over an element ref from the last agent snapshot.
     pub(crate) fn agent_hover(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
-        let target = self.lookup_ref(backend_session_id, ref_id)?;
-        self.get(backend_session_id)?
-            .evaluate(hover_expression(&target)?)?;
+        let session = self.get(backend_session_id)?;
+        let (x, y) = self.agent_target_point(backend_session_id, ref_id)?;
+        session.input(BrowserInputEvent::Mouse {
+            event_type: "mouseMoved".to_string(),
+            x,
+            y,
+            button: "none".to_string(),
+            buttons: Some(0),
+            click_count: 0,
+        })?;
         Ok(())
     }
 
@@ -571,6 +616,59 @@ impl BrowserRegistry {
             .and_then(|refs| refs.iter().find(|item| item.ref_id == ref_id).cloned())
             .with_context(|| format!("no browser ref `{ref_id}`; run snapshot again"))
     }
+
+    fn agent_target_point(&self, backend_session_id: &str, ref_id: &str) -> Result<(f64, f64)> {
+        let target = self.lookup_ref(backend_session_id, ref_id)?;
+        let evaluated = self
+            .get(backend_session_id)?
+            .evaluate(target_point_expression(&target)?)?;
+        let x = evaluated
+            .value
+            .get("x")
+            .and_then(Value::as_f64)
+            .context("browser ref target point missing x")?;
+        let y = evaluated
+            .value
+            .get("y")
+            .and_then(Value::as_f64)
+            .context("browser ref target point missing y")?;
+        if !x.is_finite() || !y.is_finite() {
+            bail!("browser ref target point is not finite");
+        }
+        Ok((x, y))
+    }
+}
+
+fn dispatch_agent_mouse_click(
+    session: &BrowserSession,
+    x: f64,
+    y: f64,
+    click_count: u32,
+) -> Result<()> {
+    session.input(BrowserInputEvent::Mouse {
+        event_type: "mouseMoved".to_string(),
+        x,
+        y,
+        button: "none".to_string(),
+        buttons: Some(0),
+        click_count: 0,
+    })?;
+    session.input(BrowserInputEvent::Mouse {
+        event_type: "mousePressed".to_string(),
+        x,
+        y,
+        button: "left".to_string(),
+        buttons: Some(1),
+        click_count,
+    })?;
+    session.input(BrowserInputEvent::Mouse {
+        event_type: "mouseReleased".to_string(),
+        x,
+        y,
+        button: "left".to_string(),
+        buttons: Some(0),
+        click_count,
+    })
 }
 
 fn ensure_target_tab(
@@ -668,11 +766,19 @@ fn ensure_backend_session(
         height,
         !background,
     )?;
+    let native_cef_session_id = state
+        .browsers
+        .tabs
+        .lock()
+        .unwrap()
+        .tab(root_session_id, tab_id)
+        .and_then(|tab| tab.native_cef_session_id);
     state.browsers.tabs.lock().unwrap().open_tab(
         root_session_id,
         Some(tab_id.to_string()),
         None,
         backend_id.to_string(),
+        native_cef_session_id,
         browser_state,
         false,
     );
@@ -717,6 +823,14 @@ fn navigation_timeout(params: &Value) -> Duration {
         optional_u32(params, "timeoutMs")
             .unwrap_or(30_000)
             .clamp(1, 120_000),
+    ))
+}
+
+fn network_idle_duration(params: &Value) -> Duration {
+    Duration::from_millis(u64::from(
+        optional_u32(params, "idleMs")
+            .unwrap_or(500)
+            .clamp(0, 30_000),
     ))
 }
 
@@ -791,6 +905,7 @@ mod tests {
             Some(tab_id.clone()),
             None,
             backend_id.clone(),
+            None,
             test_browser_state("about:blank"),
             true,
         );
@@ -812,6 +927,7 @@ mod tests {
             Some("existing".to_string()),
             None,
             backend_session_id("root", "existing"),
+            None,
             test_browser_state("https://example.com"),
             true,
         );

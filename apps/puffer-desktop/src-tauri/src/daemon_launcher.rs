@@ -6,8 +6,13 @@
 //! opens a local port-forward to the remote WebSocket so the frontend can
 //! continue to connect to `ws://127.0.0.1:<localport>/ws` transparently.
 
+#[path = "daemon_process.rs"]
+mod daemon_process;
+
 use anyhow::{Context, Result};
+use daemon_process::terminate_existing_daemon;
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, ErrorKind, Read};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -242,11 +247,16 @@ check that sshd allows TCP forwarding and that the remote daemon really bound"
 }
 
 fn spawn_daemon(workspace_cwd: PathBuf) -> Result<DaemonChild> {
+    spawn_daemon_attempt(workspace_cwd, true)
+}
+
+fn spawn_daemon_attempt(workspace_cwd: PathBuf, may_replace_existing: bool) -> Result<DaemonChild> {
     let binary = resolve_puffer_binary()?;
     // Workspace is keyed by (host, path). The caller decides where sessions
     // live by picking `workspace_cwd` — typically $HOME, but the UI's
     // WorkspacePicker can pass any path when the user switches workspaces.
     let mut cmd = Command::new(&binary);
+    let browser_debug = daemon_browser_debug_enabled();
     cmd.current_dir(&workspace_cwd)
         .arg("daemon")
         .arg("--bind")
@@ -255,8 +265,10 @@ fn spawn_daemon(workspace_cwd: PathBuf) -> Result<DaemonChild> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT").is_none() {
-        cmd.env("PUFFER_CEF_REMOTE_DEBUGGING_PORT", "9333");
+    close_inherited_fds(&mut cmd);
+    apply_default_cef_remote_debugging_port(&mut cmd);
+    if browser_debug && std::env::var_os("PUFFER_BROWSER_DEBUG").is_none() {
+        cmd.env("PUFFER_BROWSER_DEBUG", "1");
     }
     if std::env::var_os("PUFFER_CEF_PROFILE_DIR").is_none() {
         if let Some(profile_dir) = default_cef_profile_dir() {
@@ -294,6 +306,9 @@ fn spawn_daemon(workspace_cwd: PathBuf) -> Result<DaemonChild> {
         let status = child.wait().ok();
         let message = daemon_handshake_failure_message(status, &stderr_text);
         if message.contains("another Puffer daemon is already running") {
+            if may_replace_existing && terminate_existing_daemon(&user_config_dir())? {
+                return spawn_daemon_attempt(workspace_cwd, false);
+            }
             if let Some(handshake) = existing_daemon_handshake(&workspace_cwd) {
                 return Ok(DaemonChild::attached(handshake));
             }
@@ -304,8 +319,12 @@ fn spawn_daemon(workspace_cwd: PathBuf) -> Result<DaemonChild> {
         serde_json::from_str(line).context("parsing daemon handshake JSON")?;
     // Drop the reader — further daemon stdout just goes to /dev/null.
     drop(reader);
-    drain_daemon_stderr(stderr);
+    drain_daemon_stderr(stderr, browser_debug);
     Ok(DaemonChild::spawned(child, handshake))
+}
+
+fn daemon_browser_debug_enabled() -> bool {
+    cfg!(debug_assertions) || std::env::var_os("PUFFER_BROWSER_DEBUG").is_some()
 }
 
 fn default_cef_profile_dir() -> Option<PathBuf> {
@@ -398,13 +417,61 @@ fn daemon_handshake_failure_message(
     format!("daemon exited before printing handshake{status}: {stderr_text}")
 }
 
-fn drain_daemon_stderr(stderr: Option<std::process::ChildStderr>) {
+fn apply_default_cef_remote_debugging_port(cmd: &mut Command) {
+    if let Some((key, value)) =
+        default_cef_remote_debugging_port_env(std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT"))
+    {
+        cmd.env(key, value);
+    }
+}
+
+fn default_cef_remote_debugging_port_env(
+    current: Option<OsString>,
+) -> Option<(&'static str, &'static str)> {
+    current
+        .is_none()
+        .then_some(("PUFFER_CEF_REMOTE_DEBUGGING_PORT", "9333"))
+}
+
+#[cfg(unix)]
+fn close_inherited_fds(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    unsafe {
+        cmd.pre_exec(|| {
+            let raw_max = libc::sysconf(libc::_SC_OPEN_MAX);
+            let max_fd = if raw_max > 0 && raw_max < 4096 {
+                raw_max as i32
+            } else {
+                4096
+            };
+            for fd in 3..max_fd {
+                libc::close(fd);
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn close_inherited_fds(_cmd: &mut Command) {}
+
+fn drain_daemon_stderr(stderr: Option<std::process::ChildStderr>, forward: bool) {
     let Some(mut stderr) = stderr else {
         return;
     };
     std::thread::spawn(move || {
-        let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+        if forward || should_log_daemon_stderr() {
+            let _ = std::io::copy(&mut stderr, &mut std::io::stderr());
+        } else {
+            let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+        }
     });
+}
+
+fn should_log_daemon_stderr() -> bool {
+    std::env::var_os("PUFFER_DAEMON_LOG_STDERR").is_some()
+        || std::env::var_os("PUFFER_BROWSER_LOG").is_some()
 }
 
 /// The default workspace cwd — `$HOME` unless the caller overrides it via
@@ -730,6 +797,20 @@ mod tests {
         let message = daemon_handshake_failure_message(None, "");
 
         assert_eq!(message, "daemon exited before printing handshake");
+    }
+
+    #[test]
+    fn cef_remote_debugging_port_defaults_for_local_daemon() {
+        let env = default_cef_remote_debugging_port_env(None);
+
+        assert_eq!(env, Some(("PUFFER_CEF_REMOTE_DEBUGGING_PORT", "9333")));
+    }
+
+    #[test]
+    fn cef_remote_debugging_port_env_is_not_overwritten() {
+        let env = default_cef_remote_debugging_port_env(Some(OsString::from("9444")));
+
+        assert!(env.is_none());
     }
 
     #[test]

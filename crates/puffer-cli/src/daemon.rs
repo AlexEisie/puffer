@@ -74,7 +74,7 @@ use std::io::{BufReader, Read};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -449,9 +449,20 @@ pub(crate) struct DaemonState {
     /// so UIs that disconnected mid-turn don't miss deltas. Size capped at
     /// `RECENT_EVENT_CAPACITY` (oldest evicted) to keep memory bounded.
     recent_events: Arc<Mutex<VecDeque<ServerEnvelope>>>,
+    /// Number of live WebSocket clients. When this drops to zero the
+    /// disconnect watchdog cancels orphaned interactive turns after a grace
+    /// window so a runaway browser checkout can't keep running once the user's
+    /// app has gone away (issue #600).
+    live_connections: Arc<AtomicUsize>,
 }
 
 const RECENT_EVENT_CAPACITY: usize = 500;
+
+/// Grace window after the last WebSocket client disconnects before orphaned
+/// interactive turns are cancelled. Long enough to ride out an app reload /
+/// transient network blip (the UI reconnects and replays the ring buffer),
+/// short enough to stop a runaway checkout promptly (issue #600).
+const DISCONNECT_CANCEL_GRACE: Duration = Duration::from_secs(15);
 
 impl DaemonState {
     /// The daemon's working directory — used as one of the allowed roots
@@ -597,6 +608,7 @@ impl DaemonState {
             media_discovery_cache: Arc::new(Mutex::new(None)),
             generated_video_tickets: Arc::new(Mutex::new(HashMap::new())),
             recent_events: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_EVENT_CAPACITY))),
+            live_connections: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -1001,6 +1013,9 @@ fn lambda_gate_stream_phase(payload: &Value) -> LambdaGateStreamPhase {
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<DaemonState>) {
+    // Count this client for the lifetime of the connection; on drop (any exit
+    // path) the watchdog is armed if it was the last one (issue #600).
+    let _connection = ConnectionGuard::new(state.clone());
     let (ws_tx, mut ws_rx) = socket.split();
     let tx = Arc::new(AsyncMutex::new(ws_tx));
     let subscriptions = Arc::new(AsyncMutex::new(HashSet::<String>::new()));
@@ -1299,6 +1314,39 @@ async fn dispatch_request(
         "save_proxy_settings" => respond!(detached!(|s, p| handle_save_proxy_settings(&s, &p))),
         "save_secret" => respond!(detached!(|s, p| handle_save_secret(&s, &p))),
         "delete_secret" => respond!(detached!(|s, p| handle_delete_secret(&s, &p))),
+        "contacts_list" => {
+            respond!(detached!(|s, p| {
+                crate::daemon_contacts::handle_contacts_list(s.config_paths(), &p)
+            }))
+        }
+        "contacts_search" => {
+            respond!(detached!(|s, p| {
+                crate::daemon_contacts::handle_contacts_search(s.config_paths(), &p)
+            }))
+        }
+        "contacts_context" => {
+            respond!(detached!(|s, p| {
+                crate::daemon_contacts::handle_contacts_context(s.config_paths(), &p)
+            }))
+        }
+        "contacts_save" => {
+            respond!(detached!(|s, p| {
+                crate::daemon_contacts::handle_contacts_save(s.config_paths(), &p)
+            }))
+        }
+        "contacts_delete" => {
+            respond!(detached!(|s, p| {
+                crate::daemon_contacts::handle_contacts_delete(s.config_paths(), &p)
+            }))
+        }
+        "contacts_infer" => {
+            respond!(detached!(|s, p| {
+                crate::daemon_contacts::handle_contacts_infer(s.config_paths(), &p)
+            }))
+        }
+        "telegram_rank_relationships" => {
+            respond!(detached!(|s, p| handle_telegram_rank_relationships(&s, &p)))
+        }
         "import_chrome_secrets" => {
             respond!(detached!(|s| handle_import_chrome_secrets(&s)))
         }
@@ -1398,6 +1446,9 @@ async fn dispatch_request(
         ),
         "monitor_task_ignore" | "task_monitor_ignore" => respond!(
             crate::daemon_workflows::handle_monitor_task_ignore(&state.paths, &params)
+        ),
+        "monitor_task_complete" | "task_monitor_complete" => respond!(
+            crate::daemon_workflows::handle_monitor_task_complete(&state.paths, &params)
         ),
         "monitor_memory_save" | "task_monitor_memory_save" => respond!(
             crate::daemon_workflows::handle_monitor_memory_save(&state.paths, &params)
@@ -1892,6 +1943,79 @@ fn handle_save_secret(state: &DaemonState, params: &Value) -> Result<Value> {
 fn handle_delete_secret(state: &DaemonState, params: &Value) -> Result<Value> {
     let _ = crate::daemon_secrets::delete_secret(state.config_paths(), params)?;
     handle_load_settings_snapshot(state)
+}
+
+/// Ranks the top-5 Telegram contacts by recent chat frequency and runs a local
+/// qwen35 relationship analysis, pushing progress + result over the event bus.
+/// `params.connectionSlug` is optional — the first connected account is used
+/// when omitted.
+fn handle_telegram_rank_relationships(state: &DaemonState, params: &Value) -> Result<Value> {
+    let tg_root = state
+        .config_paths()
+        .user_config_dir
+        .join("telegram-accounts");
+    let slug = match params
+        .get("connectionSlug")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => s.to_string(),
+        None => first_telegram_account_slug(&tg_root).context(
+            "no connected Telegram account with message diagnostics found under telegram-accounts/",
+        )?,
+    };
+    let diagnostics = tg_root.join(&slug).join("message-diagnostics.ndjson");
+    if !diagnostics.exists() {
+        anyhow::bail!(
+            "no message diagnostics for telegram account `{slug}` at {}",
+            diagnostics.display()
+        );
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    // Model backend: cloud (default — ~$0.002/run, better quality) or local
+    // qwen35 (privacy). Cloud reads the stored OpenAI key.
+    let use_local = params
+        .get("useLocal")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let backend = if use_local {
+        crate::daemon_telegram_ranking::ModelBackend::local()
+    } else {
+        let auth_path = state.config_paths().user_config_dir.join("auth.json");
+        let auth_store = AuthStore::load(&auth_path).context("load auth store for cloud model")?;
+        let key = match auth_store.providers.get("openai") {
+            Some(StoredCredential::ApiKey { key }) => key.clone(),
+            _ => anyhow::bail!(
+                "cloud analysis needs an OpenAI API key — connect OpenAI, or set useLocal: true to use the local qwen35 model"
+            ),
+        };
+        crate::daemon_telegram_ranking::ModelBackend::cloud(key)
+    };
+
+    crate::daemon_telegram_ranking::run(
+        &diagnostics,
+        &state.event_sender(),
+        &slug,
+        &backend,
+        now_ms,
+    )
+}
+
+/// Picks a default Telegram account: the first sub-directory of
+/// `telegram-accounts/` that has a `message-diagnostics.ndjson`.
+fn first_telegram_account_slug(root: &std::path::Path) -> Option<String> {
+    let mut slugs: Vec<String> = std::fs::read_dir(root)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().join("message-diagnostics.ndjson").exists())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    slugs.sort();
+    slugs.into_iter().next()
 }
 
 fn handle_import_chrome_secrets(state: &DaemonState) -> Result<Value> {
@@ -3293,7 +3417,7 @@ fn local_model_id_param(params: &Value) -> &str {
         .get("modelId")
         .or_else(|| params.get("model_id"))
         .and_then(Value::as_str)
-        .unwrap_or("minicpm5")
+        .unwrap_or("qwen35")
 }
 
 fn handle_local_model_status(state: &DaemonState, params: &Value) -> Result<Value> {
@@ -3727,16 +3851,33 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
         .or_else(|| params.get("turn_id"))
         .and_then(|v| v.as_str())
         .context("missing turnId")?;
+    if cancel_turn_by_id(state, turn_id) {
+        Ok(json!({"ok": true}))
+    } else {
+        Ok(json!({"ok": false, "error": "turn not found"}))
+    }
+}
+
+/// Cancels one running turn by id: flips its cancel token, denies any pending
+/// permission/question prompts, reports the cancellation to listeners, and
+/// removes it from the registry. Returns whether a turn with this id existed.
+/// Shared by the `cancel_turn` RPC and the client-disconnect watchdog (#600).
+fn cancel_turn_by_id(state: &DaemonState, turn_id: &str) -> bool {
     let handle = {
         let turns = state.turns.lock().unwrap();
         turns.get(turn_id).cloned()
     };
-    if let Some(handle) = handle {
-        handle.cancel.cancel();
+    let Some(handle) = handle else {
+        return false;
+    };
+    handle.cancel.cancel();
+    {
         let mut pending = handle.pending.lock().unwrap();
         for (_, tx) in pending.drain() {
             let _ = tx.send(PermissionPromptAction::Deny);
         }
+    }
+    {
         let mut pending_questions = handle.pending_questions.lock().unwrap();
         for (_, tx) in pending_questions.drain() {
             let _ = tx.send(UserQuestionPromptResponse {
@@ -3744,34 +3885,90 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
                 annotations: serde_json::Map::new(),
             });
         }
-        if let (Some(session_uuid), Some(session_id)) =
-            (handle.session_uuid, handle.session_id.as_deref())
-        {
-            report_cancelled_turn(
-                state,
-                session_uuid,
-                session_id,
-                &handle.channel,
-                turn_id,
-                &handle.message,
-                &handle.attachments,
-                &handle.cancel_reported,
-                &handle.user_prompt_persisted,
-                &handle.progress,
-            )?;
-        } else {
-            report_cancelled_sessionless_turn(
-                state,
-                &handle.channel,
-                turn_id,
-                &handle.cancel_reported,
+    }
+    // Cancellation cleanup is best-effort: never let a failed report block the
+    // cancel (especially on the disconnect path, where no client is waiting).
+    if let (Some(session_uuid), Some(session_id)) =
+        (handle.session_uuid, handle.session_id.as_deref())
+    {
+        let _ = report_cancelled_turn(
+            state,
+            session_uuid,
+            session_id,
+            &handle.channel,
+            turn_id,
+            &handle.message,
+            &handle.attachments,
+            &handle.cancel_reported,
+            &handle.user_prompt_persisted,
+            &handle.progress,
+        );
+    } else {
+        report_cancelled_sessionless_turn(state, &handle.channel, turn_id, &handle.cancel_reported);
+    }
+    state.turns.lock().unwrap().remove(turn_id);
+    true
+}
+
+/// Cancels every running turn in the registry. Only WS-initiated interactive
+/// turns live here (`start_turn` / slash-command / connector-setup) — Telegram
+/// monitor / connector-message turns run outside this registry — so this is
+/// safe to call when the last UI client disconnects without affecting
+/// background work (issue #600).
+fn cancel_all_active_turns(state: &DaemonState) -> usize {
+    let turn_ids: Vec<String> = state.turns.lock().unwrap().keys().cloned().collect();
+    turn_ids
+        .iter()
+        .filter(|turn_id| cancel_turn_by_id(state, turn_id))
+        .count()
+}
+
+/// Tracks a live WebSocket client. On drop (client disconnect) it decrements
+/// the live-connection count and, when the last client goes away, arms the
+/// disconnect watchdog so orphaned interactive turns get cancelled after a
+/// grace window (issue #600).
+struct ConnectionGuard {
+    state: Arc<DaemonState>,
+}
+
+impl ConnectionGuard {
+    fn new(state: Arc<DaemonState>) -> Self {
+        state.live_connections.fetch_add(1, Ordering::SeqCst);
+        Self { state }
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        let remaining = self
+            .state
+            .live_connections
+            .fetch_sub(1, Ordering::SeqCst)
+            .saturating_sub(1);
+        if remaining == 0 {
+            arm_disconnect_cancel_watchdog(self.state.clone());
+        }
+    }
+}
+
+/// After the last client disconnects, wait out the grace window; if no client
+/// has reconnected, cancel orphaned interactive turns (issue #600).
+fn arm_disconnect_cancel_watchdog(state: Arc<DaemonState>) {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep(DISCONNECT_CANCEL_GRACE).await;
+        if state.live_connections.load(Ordering::SeqCst) != 0 {
+            return; // a client reconnected during the grace window
+        }
+        let cancelled = cancel_all_active_turns(&state);
+        if cancelled > 0 {
+            eprintln!(
+                "cancelled {cancelled} orphaned interactive turn(s) after the last UI client disconnected"
             );
         }
-        state.turns.lock().unwrap().remove(turn_id);
-        Ok(json!({"ok": true}))
-    } else {
-        Ok(json!({"ok": false, "error": "turn not found"}))
-    }
+    });
 }
 
 const CANCELLED_TURN_MESSAGE: &str = "Interrupted by user.";
@@ -4613,6 +4810,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         "turnId": question_turn.clone(),
                         "requestId": request_id,
                         "questions": req.questions,
+                        "metadata": req.metadata,
                     }),
                     &question_actor,
                 ),
@@ -4879,6 +5077,7 @@ async fn start_slash_command_turn(state: Arc<DaemonState>, params: Value) -> Res
                         "turnId": question_turn.clone(),
                         "requestId": request_id,
                         "questions": req.questions,
+                        "metadata": req.metadata,
                     }),
                     &question_actor,
                 ),
@@ -5139,6 +5338,7 @@ async fn start_connector_setup_turn(state: Arc<DaemonState>, params: Value) -> R
                         "turnId": question_turn.clone(),
                         "requestId": request_id,
                         "questions": req.questions,
+                        "metadata": req.metadata,
                     }),
                     &question_actor,
                 ),
@@ -5598,6 +5798,7 @@ fn apply_daemon_yolo_mode(app_state: &mut AppState) {
 mod tests {
     use super::{
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
+        cancel_all_active_turns, CancelToken, ConnectionGuard, TurnHandle,
         browser_permission_payload_json, connector_setup_connect_args, connector_setup_id,
         daemon_now_ms, desktop_latency_ms, file_media_mime_type, generated_video_handler,
         handle_create_file_media_access, handle_create_generated_video_access,
@@ -5631,10 +5832,10 @@ mod tests {
     };
     use puffer_session_store::{SessionMetadata, SessionStore, TranscriptEvent};
     use serde_json::json;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::thread;
@@ -6129,6 +6330,144 @@ models: []
         (home_guard, temp, state)
     }
 
+    /// End-to-end through the real `browser_open` RPC handler + a real
+    /// `DaemonState`: native-CEF pool exhaustion (issue #603) must self-heal by
+    /// reclaiming a slot, not hard-fail. Backs the daemon-RPC verification.
+    #[test]
+    fn browser_open_rpc_self_heals_native_cef_pool_exhaustion() {
+        use crate::daemon_browser::test_support::{cef_env_lock, FakeCefDevtools};
+
+        let _cef_guard = cef_env_lock().lock().unwrap();
+        let _home_guard = PufferHomeEnvGuard::set();
+        let previous_port = std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT");
+        let previous_profile = std::env::var_os("PUFFER_CEF_PROFILE_DIR");
+
+        // Fake native CEF with exactly two prewarmed page slots.
+        let cef = FakeCefDevtools::spawn(2);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", cef.port.to_string());
+        std::env::set_var(
+            "PUFFER_CEF_PROFILE_DIR",
+            paths.user_config_dir.join("cef-profile"),
+        );
+
+        let state = Arc::new(
+            DaemonState::load(workspace_root, paths, "token".into(), false, false, false)
+                .expect("daemon state"),
+        );
+        let open = |session_id: &str| {
+            crate::daemon_browser::handle_browser_open(&state, &json!({ "sessionId": session_id }))
+        };
+
+        open("sess-a:browser:t1").expect("browser_open A allocates the first prewarm slot");
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        open("sess-b:browser:t1").expect("browser_open B allocates the second prewarm slot");
+        std::thread::sleep(std::time::Duration::from_millis(40));
+
+        // Pool exhausted: the third browser_open RPC must self-heal by reclaiming
+        // the least-recently-active slot instead of returning "no available
+        // prewarmed page targets".
+        let third = open("sess-c:browser:t1");
+
+        match previous_port {
+            Some(value) => std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", value),
+            None => std::env::remove_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT"),
+        }
+        match previous_profile {
+            Some(value) => std::env::set_var("PUFFER_CEF_PROFILE_DIR", value),
+            None => std::env::remove_var("PUFFER_CEF_PROFILE_DIR"),
+        }
+
+        assert!(
+            third.is_ok(),
+            "third browser_open RPC should self-heal native-CEF pool exhaustion, got {:?}",
+            third.err()
+        );
+    }
+
+    fn empty_turn_handle(cancel: CancelToken) -> TurnHandle {
+        TurnHandle {
+            session_id: None,
+            session_uuid: None,
+            channel: "agent".to_string(),
+            message: String::new(),
+            attachments: Vec::new(),
+            cancel,
+            cancel_reported: Arc::new(AtomicBool::new(false)),
+            user_prompt_persisted: Arc::new(AtomicBool::new(false)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_questions: Arc::new(Mutex::new(HashMap::new())),
+            progress: Arc::new(Mutex::new(TurnProgress::default())),
+        }
+    }
+
+    fn test_daemon_state() -> DaemonState {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state")
+    }
+
+    /// Core of the client-disconnect watchdog (issue #600): orphaned interactive
+    /// turns in the registry get their cancel token flipped and are removed.
+    #[test]
+    fn cancel_all_active_turns_cancels_orphaned_interactive_turns() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let state = test_daemon_state();
+
+        let cancel = CancelToken::new();
+        let observer = cancel.clone();
+        state
+            .turns
+            .lock()
+            .unwrap()
+            .insert("turn-1".to_string(), empty_turn_handle(cancel));
+
+        assert!(!observer.is_cancelled());
+        let cancelled = cancel_all_active_turns(&state);
+
+        assert_eq!(cancelled, 1, "the orphaned interactive turn is cancelled");
+        assert!(observer.is_cancelled(), "its cancel token must be flipped");
+        assert!(
+            state.turns.lock().unwrap().is_empty(),
+            "cancelled turns are removed from the registry"
+        );
+    }
+
+    /// The live-client counter that arms the watchdog (issue #600): it tracks
+    /// open connections and dropping the last guard returns cleanly even without
+    /// a Tokio runtime (the watchdog is simply not armed).
+    #[test]
+    fn connection_guard_tracks_live_client_count() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let state = Arc::new(test_daemon_state());
+        assert_eq!(state.live_connections.load(Ordering::SeqCst), 0);
+
+        let first = ConnectionGuard::new(state.clone());
+        let second = ConnectionGuard::new(state.clone());
+        assert_eq!(state.live_connections.load(Ordering::SeqCst), 2);
+
+        drop(second);
+        assert_eq!(state.live_connections.load(Ordering::SeqCst), 1);
+        drop(first); // last client gone — decrements to 0 without panicking
+        assert_eq!(state.live_connections.load(Ordering::SeqCst), 0);
+    }
+
     #[test]
     fn high_volume_browser_events_require_explicit_subscription() {
         assert!(requires_explicit_subscription(
@@ -6146,7 +6485,7 @@ models: []
     }
 
     #[test]
-    fn local_model_status_handler_returns_minicpm5_contract() {
+    fn local_model_status_handler_returns_qwen35_contract() {
         let _home_guard = PufferHomeEnvGuard::set();
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
@@ -6161,11 +6500,11 @@ models: []
             .expect("daemon state");
 
         let status =
-            handle_local_model_status(&state, &json!({"modelId": "minicpm5"})).expect("status");
+            handle_local_model_status(&state, &json!({"modelId": "qwen35"})).expect("status");
 
-        assert_eq!(status["id"], "minicpm5");
-        assert_eq!(status["modelId"], "minicpm5-1b");
-        assert_eq!(status["displayName"], "MiniCPM5-1B (local)");
+        assert_eq!(status["id"], "qwen35");
+        assert_eq!(status["modelId"], "qwen3.5-0.8b");
+        assert_eq!(status["displayName"], "Qwen3.5-0.8B (local)");
         assert!(status["checks"]
             .as_array()
             .is_some_and(|checks| !checks.is_empty()));

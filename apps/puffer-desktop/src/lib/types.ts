@@ -229,6 +229,7 @@ export type AskUserQuestionItem = {
   options: AskUserQuestionOption[];
   multiSelect?: boolean;
   searchable?: boolean;
+  secret?: boolean;
 };
 
 export type UserQuestionTimelineItem = TimelineBase & {
@@ -236,6 +237,8 @@ export type UserQuestionTimelineItem = TimelineBase & {
   status: string;
   questions: AskUserQuestionItem[];
   answers?: Record<string, string | string[]>;
+  /** Free-form marker from the tool's `metadata` (e.g. { kind: "canvas-offer" }). */
+  metadata?: Record<string, unknown>;
 };
 
 export type DiffTimelineItem = TimelineBase & {
@@ -826,9 +829,45 @@ export type WorkflowBinding = {
   model?: string | null;
   filter_pattern?: string | null;
   ignore_filters?: WorkflowFilterRule[];
+  contact_ids?: string[];
   monitor?: boolean;
   monitor_memory_path?: string | null;
   created_at_ms?: number | null;
+};
+
+export type ContactContextItem = {
+  kind: string;
+  text: string;
+  timestamp_ms?: number | null;
+  payload?: Record<string, unknown> | null;
+};
+
+export type ConnectorContact = {
+  id: string;
+  avatar?: string | null;
+  name?: string | null;
+  context?: ContactContextItem[];
+  score?: number;
+};
+
+export type SavedContact = {
+  id: string;
+  name: string;
+  description: string;
+  avatar?: string | null;
+  contact_ids: string[];
+};
+
+export type ContactProposal = {
+  name: string;
+  description: string;
+  avatar?: string | null;
+  contact_ids: string[];
+};
+
+export type ContactsSnapshot = {
+  contacts: SavedContact[];
+  candidates: ConnectorContact[];
 };
 
 export type WorkflowBindingCreateRequest = {

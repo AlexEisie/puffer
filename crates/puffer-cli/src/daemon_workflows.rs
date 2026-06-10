@@ -6,6 +6,7 @@ mod monitor_create;
 mod monitor_history;
 mod monitor_ignore_result;
 mod monitor_memory;
+mod monitor_task_complete;
 mod monitor_task_ignore;
 mod planned;
 mod task_snapshot;
@@ -15,6 +16,7 @@ pub(crate) use connection_delete::handle_workflow_connection_delete;
 pub(crate) use monitor_create::handle_monitor_create;
 pub(crate) use monitor_history::handle_monitor_history_list;
 pub(crate) use monitor_memory::handle_monitor_memory_save;
+pub(crate) use monitor_task_complete::handle_monitor_task_complete;
 pub(crate) use monitor_task_ignore::handle_monitor_task_ignore;
 
 use anyhow::{Context, Result};
@@ -295,6 +297,7 @@ fn workflow_binding_json(paths: &ConfigPaths, binding: WorkflowBindingSpec) -> V
     let filter_pattern = workflow_filter_pattern(binding.filter.as_ref());
     let ignore_filters =
         serde_json::to_value(&binding.ignore_filters).unwrap_or_else(|_| Value::Array(Vec::new()));
+    let contact_ids = binding.contact_ids.clone();
     let monitor = binding.slug.starts_with("monitor-")
         || (matches!(binding.action, ActionSpec::TriageAgent { .. })
             && binding.description.to_ascii_lowercase().contains("monitor"));
@@ -320,6 +323,7 @@ fn workflow_binding_json(paths: &ConfigPaths, binding: WorkflowBindingSpec) -> V
         "model": model,
         "filter_pattern": filter_pattern,
         "ignore_filters": ignore_filters,
+        "contact_ids": contact_ids,
         "monitor": monitor,
         "monitor_memory_path": monitor_memory_path,
         "created_at_ms": binding.created_at_ms,
@@ -502,6 +506,7 @@ fn file_append_binding_from_params(
             })
         }),
         ignore_filters: Vec::new(),
+        contact_ids: Vec::new(),
         classify_prompt: None,
         classify_model: None,
         action,
@@ -849,6 +854,7 @@ mod tests {
             status: WorkflowBindingStatus::Paused,
             filter: None,
             ignore_filters: Vec::new(),
+            contact_ids: Vec::new(),
             classify_prompt: None,
             classify_model: None,
             action: ActionSpec::TriageAgent {

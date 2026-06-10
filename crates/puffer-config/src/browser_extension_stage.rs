@@ -67,6 +67,7 @@ pub fn stage_builtin_captcha_extension(
     let staged_dir = stage_root.join(seed.solver_id());
     reset_staged_dir(source_dir, &staged_dir)?;
     patch_nopecha_manifest(&staged_dir.join("manifest.json"), seed)?;
+    flip_nopecha_force_base_api(&staged_dir.join("background.js"))?;
     Ok(staged_dir)
 }
 
@@ -125,6 +126,47 @@ fn patch_nopecha_manifest(manifest_path: &Path, seed: &CaptchaExtensionSeed) -> 
         serde_json::to_string_pretty(&manifest).context("serialize NopeCHA staged manifest")?;
     fs::write(manifest_path, updated)
         .with_context(|| format!("write NopeCHA staged manifest {}", manifest_path.display()))
+}
+
+/// The pinned NopeCHA `chromium_automation` build hard-codes `forceBaseApi: true`,
+/// whose config merge overrides the manifest's `_base_api` host back to
+/// `api.nopecha.com` — defeating the staged `_base_api`. Flip that single obfuscated
+/// literal to `false` so the build honors `_base_api`. The anchor is unique to the
+/// pinned bundle (catalog sha256 `4871e1c6…`): `i(608)+i(609)` decodes to the property
+/// key `forceBaseApi` and `!t[0]` (shared constant `t[0] == 0`) is its `true` value;
+/// `!t[1]` (`t[1] == 1`) is `false`. If upstream re-bundles NopeCHA the obfuscation
+/// reshuffles and the anchor stops matching, in which case the bundle is left as-is
+/// (host stays api.nopecha.com) and a warning is logged rather than failing the
+/// browser launch.
+const NOPECHA_FORCE_BASE_API_ANCHOR: &str = "i(608)+i(609)]:!t[0]";
+const NOPECHA_FORCE_BASE_API_FLIPPED: &str = "i(608)+i(609)]:!t[1]";
+
+fn flip_nopecha_force_base_api(background_js: &Path) -> Result<()> {
+    if !background_js.exists() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(background_js).with_context(|| {
+        format!(
+            "read staged NopeCHA background.js {}",
+            background_js.display()
+        )
+    })?;
+    let count = content.matches(NOPECHA_FORCE_BASE_API_ANCHOR).count();
+    if count != 1 {
+        eprintln!(
+            "puffer: NopeCHA forceBaseApi anchor matched {count} time(s) (expected 1) in {}; \
+             leaving the host override in place — re-derive the anchor for this bundle",
+            background_js.display()
+        );
+        return Ok(());
+    }
+    let patched = content.replace(NOPECHA_FORCE_BASE_API_ANCHOR, NOPECHA_FORCE_BASE_API_FLIPPED);
+    fs::write(background_js, patched).with_context(|| {
+        format!(
+            "write patched NopeCHA background.js {}",
+            background_js.display()
+        )
+    })
 }
 
 #[cfg(test)]
@@ -190,5 +232,41 @@ mod tests {
 
         assert_eq!(resolved, source);
         assert!(!dir.path().join("stage").exists());
+    }
+
+    #[test]
+    fn flips_nopecha_force_base_api_in_staged_background() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("manifest.json"),
+            serde_json::to_string_pretty(&json!({
+                "name": "NopeCHA: CAPTCHA Solver",
+                "manifest_version": 3,
+                "nopecha": { "enabled": false, "key": "", "_base_api": "" }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            source.join("background.js"),
+            "x=ot({...a,...s},{[i(607)+t[140]]:_1,[i(608)+i(609)]:!t[0]});y=!t[0]",
+        )
+        .unwrap();
+        let seed = CaptchaExtensionSeed::new("nopecha", "k", "https://api.example.test");
+
+        let staged =
+            stage_builtin_captcha_extension(&source, &dir.path().join("stage"), &seed).unwrap();
+
+        let bg = fs::read_to_string(staged.join("background.js")).unwrap();
+        // The forceBaseApi literal flips to false; the unrelated trailing !t[0] stays.
+        assert!(bg.contains("[i(608)+i(609)]:!t[1]"));
+        assert!(!bg.contains("[i(608)+i(609)]:!t[0]"));
+        assert!(bg.ends_with("y=!t[0]"));
+        // The source bundle is left pristine.
+        assert!(fs::read_to_string(source.join("background.js"))
+            .unwrap()
+            .contains("[i(608)+i(609)]:!t[0]"));
     }
 }

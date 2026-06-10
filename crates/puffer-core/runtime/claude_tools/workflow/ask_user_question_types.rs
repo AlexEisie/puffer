@@ -25,6 +25,8 @@ pub(super) struct AskUserQuestionItem {
     pub(super) multi_select: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub(super) searchable: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(super) secret: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -76,6 +78,12 @@ fn validate_question_options(item: &AskUserQuestionItem) -> Result<()> {
 }
 
 fn validate_choice_question(item: &AskUserQuestionItem) -> Result<()> {
+    if item.secret {
+        bail!(
+            "AskUserQuestion choice question `{}` cannot use secret",
+            item.header
+        );
+    }
     let max_options = if item.searchable || item.multi_select {
         50
     } else {

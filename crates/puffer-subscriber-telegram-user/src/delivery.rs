@@ -6,8 +6,6 @@
 //! Telegram's live update delta alone.
 
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
-use std::io::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
@@ -21,7 +19,6 @@ use crate::notifications::NotificationMuteCache;
 use crate::state::SkillEnv;
 
 const DELIVERY_SOURCE_LIVE: &str = "live";
-static MESSAGE_DIAGNOSTIC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub(crate) struct DeliveryCursor {
@@ -122,10 +119,19 @@ pub(crate) async fn emit_message_if_new(
     }
     let notification_muted = notification_mutes.message_chat_muted(message);
     let notification_silent = message.silent();
-    if message_notifications_suppressed(notification_muted, notification_silent) {
+    let is_outgoing = message.outgoing();
+    if should_suppress_message(is_outgoing, notification_muted, notification_silent) {
+        // Outgoing (self-sent) messages are recorded as seen but never emitted
+        // into the triage pipeline: otherwise the user's own messages spin up a
+        // triage turn (burning credits) and can be misread as incoming tasks.
+        let stage = if is_outgoing {
+            "suppressed_outgoing"
+        } else {
+            "suppressed"
+        };
         append_message_diagnostic(
             env,
-            "suppressed",
+            stage,
             message,
             delivery_source,
             source_received_at_ms,
@@ -137,9 +143,10 @@ pub(crate) async fn emit_message_if_new(
         info!(
             chat = %message.chat().id(),
             message_id = message.id(),
+            is_outgoing,
             notification_muted,
             notification_silent,
-            "skipped suppressed Telegram message"
+            "skipped Telegram message (outgoing or muted/silent)"
         );
         return Ok(false);
     }
@@ -188,6 +195,18 @@ fn message_notifications_suppressed(notification_muted: bool, notification_silen
     notification_muted || notification_silent
 }
 
+/// Whether a message should be recorded as seen but NOT emitted into the triage
+/// pipeline. Outgoing (self-sent) messages are always suppressed so the user's
+/// own messages never trigger a triage turn (the #569 credit-burn bug); muted /
+/// silent chats are suppressed per the user's notification settings.
+fn should_suppress_message(
+    is_outgoing: bool,
+    notification_muted: bool,
+    notification_silent: bool,
+) -> bool {
+    is_outgoing || message_notifications_suppressed(notification_muted, notification_silent)
+}
+
 fn message_chat_key(message: &Message) -> String {
     message.chat().id().to_string()
 }
@@ -205,14 +224,16 @@ fn append_message_diagnostic(
     let now_ms = now_unix_millis();
     let chat = message.chat();
     let (chat_kind, chat_title, chat_username) = describe_chat(&chat);
+    let chat_is_bot = telegram_chat_is_bot(&chat);
     let date_ms = i128::from(message.date().timestamp_millis());
-    let (sender_id, sender_username, sender_name) = match message.sender() {
+    let (sender_id, sender_username, sender_name, sender_is_bot) = match message.sender() {
         Some(sender) => (
             Some(sender.id()),
             sender.username().map(|value| value.to_string()),
             Some(sender.name().to_string()),
+            telegram_chat_is_bot(&sender),
         ),
-        None => (None, None, None),
+        None => (None, None, None, false),
     };
     let record = json!({
         "at_ms": now_ms,
@@ -222,9 +243,11 @@ fn append_message_diagnostic(
         "chat_kind": chat_kind,
         "chat_title": chat_title,
         "chat_username": chat_username,
+        "chat_is_bot": chat_is_bot,
         "sender_id": sender_id,
         "sender_username": sender_username,
         "sender_name": sender_name,
+        "sender_is_bot": sender_is_bot,
         "message_id": message.id(),
         "date_ms": date_ms,
         "source_received_at_ms": source_received_at_ms,
@@ -236,19 +259,7 @@ fn append_message_diagnostic(
         "is_outgoing": message.outgoing(),
         "text_prefix": truncate_text(message.text(), 200),
     });
-    let Some(parent) = path.parent() else {
-        return;
-    };
-    if std::fs::create_dir_all(parent).is_err() {
-        return;
-    }
-    let Ok(_guard) = MESSAGE_DIAGNOSTIC_LOCK.lock() else {
-        return;
-    };
-    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) else {
-        return;
-    };
-    let _ = writeln!(file, "{record}");
+    crate::diagnostics::append_ndjson(&path, &record);
 }
 
 fn describe_chat(chat: &Chat) -> (&'static str, Option<String>, Option<String>) {
@@ -269,6 +280,10 @@ fn describe_chat(chat: &Chat) -> (&'static str, Option<String>, Option<String>) 
             chat.username().map(|value| value.to_string()),
         ),
     }
+}
+
+fn telegram_chat_is_bot(chat: &Chat) -> bool {
+    matches!(chat, Chat::User(user) if user.raw.bot)
 }
 
 fn truncate_text(value: &str, max_chars: usize) -> String {
@@ -303,5 +318,18 @@ mod tests {
         assert!(message_notifications_suppressed(false, true));
         assert!(message_notifications_suppressed(true, true));
         assert!(!message_notifications_suppressed(false, false));
+    }
+
+    #[test]
+    fn outgoing_messages_are_suppressed() {
+        // #569: the user's own (outgoing) messages must be suppressed from the
+        // triage pipeline even when the chat is not muted/silent.
+        assert!(should_suppress_message(true, false, false));
+        assert!(should_suppress_message(true, true, false));
+        assert!(should_suppress_message(true, false, true));
+        // Incoming messages still follow the notification-suppression rules.
+        assert!(!should_suppress_message(false, false, false));
+        assert!(should_suppress_message(false, true, false));
+        assert!(should_suppress_message(false, false, true));
     }
 }

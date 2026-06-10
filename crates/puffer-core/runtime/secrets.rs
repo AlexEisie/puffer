@@ -37,6 +37,20 @@ pub(crate) fn expand_secret_placeholders(state: &AppState, value: &Value) -> Res
     }
 }
 
+/// Expands one model-visible secret placeholder into its raw secret value.
+pub(crate) fn expand_secret_placeholder_value(state: &AppState, text: &str) -> Result<String> {
+    if !is_secret_placeholder_token(text) {
+        bail!("expected a single Puffer secret placeholder");
+    }
+    let secrets = state
+        .masked_secrets
+        .lock()
+        .map_err(|_| anyhow::anyhow!("masked secret store lock poisoned"))?;
+    secrets.get(text).cloned().ok_or_else(|| {
+        anyhow::anyhow!("tool input references an unknown Puffer secret placeholder")
+    })
+}
+
 /// Redacts raw secret values from text using their registered placeholders.
 pub(crate) fn redact_known_secrets(state: &AppState, text: &str) -> String {
     let Ok(secrets) = state.masked_secrets.lock() else {
@@ -101,6 +115,14 @@ fn expand_string(state: &AppState, text: &str) -> Result<String> {
     Ok(expanded)
 }
 
+fn is_secret_placeholder_token(text: &str) -> bool {
+    text.len() == MASK_PREFIX.len() + 32
+        && text.starts_with(MASK_PREFIX)
+        && text[MASK_PREFIX.len()..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +177,17 @@ mod tests {
             redact_json_value(&state, &json!({"nested": ["raw-secret"]})),
             json!({"nested": [token]})
         );
+    }
+
+    #[test]
+    fn expands_only_a_single_masked_token_value() {
+        let state = temp_state();
+        let token = register_masked_secret(&state, "raw-secret".to_string()).unwrap();
+        assert_eq!(
+            expand_secret_placeholder_value(&state, &token).unwrap(),
+            "raw-secret"
+        );
+        assert!(expand_secret_placeholder_value(&state, &format!("{token}-suffix")).is_err());
+        assert!(expand_secret_placeholder_value(&state, &format!(" {token}")).is_err());
     }
 }

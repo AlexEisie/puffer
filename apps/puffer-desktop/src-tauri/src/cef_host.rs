@@ -1,6 +1,12 @@
 //! Native Chromium Embedded Framework host commands for Puffer Desktop.
 
+#[path = "cef_error_buffer.rs"]
+mod cef_error_buffer;
+
+use crate::browser_debug::{cef_log, cef_result, cef_state_summary};
 use anyhow::{anyhow, bail, Context, Result};
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+use cef_error_buffer::ErrorBuffer;
 #[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
 use puffer_config::{stage_builtin_captcha_extension, CaptchaExtensionSeed, ConfigPaths};
 #[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
@@ -10,9 +16,9 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::c_void;
 #[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
-use std::ffi::CString;
+use std::ffi::{c_char, CStr, CString};
 #[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
 use std::fs::{self, File};
 #[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
@@ -23,6 +29,8 @@ use std::process::Command;
 use std::sync::OnceLock;
 #[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
 use std::time::Duration;
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+use tauri::WebviewWindow;
 use tauri::Window;
 
 const DEFAULT_REMOTE_DEBUGGING_PORT: u16 = 9333;
@@ -74,7 +82,7 @@ pub(crate) fn browser_cef_native_status() -> Value {
     let diagnostic_runtime = initialized_runtime.or_else(|| discovered_runtime.as_ref().ok());
     let initialization_error = initialization.and_then(|value| value.as_ref().err().cloned());
     let available = initialization_error.is_none() && diagnostic_runtime.is_some();
-    json!(CefNativeStatus {
+    let status = json!(CefNativeStatus {
         available,
         active: initialized_runtime.is_some(),
         root: diagnostic_runtime.map(|value| display_path(&value.root)),
@@ -82,7 +90,9 @@ pub(crate) fn browser_cef_native_status() -> Value {
         remote_debugging_port: remote_debugging_port(),
         build_enabled: native_enabled(),
         error: initialization_error.or(discovery_error),
-    })
+    });
+    cef_log("status", cef_state_summary(&status));
+    status
 }
 
 /// Opens or focuses a native CEF browser for a Browser tab.
@@ -93,15 +103,21 @@ pub(crate) fn browser_cef_native_open(
     url: Option<String>,
     rect: CefBrowserRect,
 ) -> Result<Value, String> {
-    let state = with_native_browser(&session_id, |session_id| {
-        native_open(
+    let requested_url = url.unwrap_or_else(|| "about:blank".to_string());
+    cef_log(
+        "open begin",
+        format!(
+            "session_id={} url={} rect={}",
             session_id,
-            window_handle(&window)?,
-            &url.unwrap_or_else(|| "about:blank".to_string()),
-            rect,
-        )
-    })?;
-    Ok(state)
+            requested_url,
+            rect_summary(rect)
+        ),
+    );
+    let state = with_native_browser(&session_id, |session_id| {
+        native_open(session_id, window_handle(&window)?, &requested_url, rect)
+    });
+    cef_result("open", &session_id, &state);
+    state
 }
 
 /// Resizes the native CEF browser for a Browser tab.
@@ -111,10 +127,15 @@ pub(crate) fn browser_cef_native_resize(
     session_id: String,
     rect: CefBrowserRect,
 ) -> Result<Value, String> {
+    cef_log(
+        "resize begin",
+        format!("session_id={} rect={}", session_id, rect_summary(rect)),
+    );
     let state = with_native_browser(&session_id, |session_id| {
         native_resize(session_id, window_handle(&window)?, rect)
-    })?;
-    Ok(state)
+    });
+    cef_result("resize", &session_id, &state);
+    state
 }
 
 /// Navigates a native CEF browser.
@@ -123,29 +144,42 @@ pub(crate) fn browser_cef_native_navigate(
     session_id: String,
     url: String,
 ) -> Result<Value, String> {
-    ensure_native_initialized()
+    cef_log(
+        "navigate begin",
+        format!("session_id={} url={}", session_id, url),
+    );
+    let state = ensure_native_initialized()
         .and_then(|()| native_navigate(&session_id, &url))
         .and_then(|()| native_state(&session_id))
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string());
+    cef_result("navigate", &session_id, &state);
+    state
 }
 
 /// Returns the last known state for a native CEF browser.
 #[tauri::command]
 pub(crate) fn browser_cef_native_state(session_id: String) -> Result<Value, String> {
-    match CEF_INITIALIZATION.get() {
+    let state = match CEF_INITIALIZATION.get() {
         Some(Ok(_)) => native_state(&session_id).map_err(|error| error.to_string()),
         Some(Err(error)) => Err(error.clone()),
         None => Ok(native_disconnected_state()),
+    };
+    if state.as_ref().is_err() {
+        cef_result("state", &session_id, &state);
     }
+    state
 }
 
 /// Reloads a native CEF browser.
 #[tauri::command]
 pub(crate) fn browser_cef_native_reload(session_id: String) -> Result<Value, String> {
-    ensure_native_initialized()
+    cef_log("reload begin", format!("session_id={}", session_id));
+    let state = ensure_native_initialized()
         .and_then(|()| native_reload(&session_id))
         .and_then(|()| native_state(&session_id))
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string());
+    cef_result("reload", &session_id, &state);
+    state
 }
 
 /// Moves a native CEF browser backward or forward in history.
@@ -154,39 +188,110 @@ pub(crate) fn browser_cef_native_history(
     session_id: String,
     direction: String,
 ) -> Result<Value, String> {
+    cef_log(
+        "history begin",
+        format!("session_id={} direction={}", session_id, direction),
+    );
     let direction = if direction.eq_ignore_ascii_case("back") {
         -1
     } else {
         1
     };
-    ensure_native_initialized()
+    let state = ensure_native_initialized()
         .and_then(|()| native_history(&session_id, direction))
         .and_then(|()| native_state(&session_id))
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string());
+    cef_result("history", &session_id, &state);
+    state
 }
 
 /// Closes a native CEF browser.
 #[tauri::command]
 pub(crate) fn browser_cef_native_close(session_id: String) -> Result<Value, String> {
-    match CEF_INITIALIZATION.get() {
+    cef_log("close begin", format!("session_id={}", session_id));
+    let state = match CEF_INITIALIZATION.get() {
         Some(Ok(_)) => native_close(&session_id)
             .map(|()| json!({ "ok": true }))
             .map_err(|error| error.to_string()),
         Some(Err(error)) => Err(error.clone()),
         None => Ok(json!({ "ok": true })),
-    }
+    };
+    cef_result("close", &session_id, &state);
+    state
 }
 
 /// Hides a native CEF browser without closing its renderer process.
 #[tauri::command]
 pub(crate) fn browser_cef_native_hide(session_id: String) -> Result<Value, String> {
-    match CEF_INITIALIZATION.get() {
+    cef_log("hide begin", format!("session_id={}", session_id));
+    let state = match CEF_INITIALIZATION.get() {
         Some(Ok(_)) => native_hide(&session_id)
             .map(|()| json!({ "ok": true }))
             .map_err(|error| error.to_string()),
         Some(Err(error)) => Err(error.clone()),
         None => Ok(json!({ "ok": true })),
+    };
+    cef_result("hide", &session_id, &state);
+    state
+}
+
+fn rect_summary(rect: CefBrowserRect) -> String {
+    format!(
+        "x={:.1},y={:.1},w={:.1},h={:.1}",
+        rect.x, rect.y, rect.width, rect.height
+    )
+}
+
+/// Opens a native CEF browser over the main window for packaged-app smoke tests.
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+pub(crate) fn browser_cef_native_smoke_open(
+    window: WebviewWindow,
+    url: String,
+) -> Result<Value, String> {
+    let rect = CefBrowserRect {
+        x: 120.0,
+        y: 120.0,
+        width: 960.0,
+        height: 600.0,
+    };
+    let state = with_native_browser("__cef_smoke__", |session_id| {
+        native_open(session_id, webview_window_handle(&window)?, &url, rect)
+    })?;
+    Ok(state)
+}
+
+/// Creates hidden native CEF browser targets for daemon-owned browser sessions.
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+pub(crate) fn browser_cef_native_prewarm_targets(
+    window: WebviewWindow,
+    count: usize,
+) -> Result<(), String> {
+    let rect = CefBrowserRect {
+        x: -10_000.0,
+        y: -10_000.0,
+        width: 1.0,
+        height: 1.0,
+    };
+    for index in 0..count {
+        let session_id = format!("__cef_prewarm_{index}__");
+        let prewarm_url = format!("about:blank#puffer-cef-slot={session_id}");
+        with_native_browser(&session_id, |session_id| {
+            native_open(
+                session_id,
+                webview_window_handle(&window)?,
+                &prewarm_url,
+                rect,
+            )?;
+            native_hide(session_id)
+        })?;
     }
+    Ok(())
+}
+
+/// Initializes native CEF before the desktop WebView starts using WebKit.
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+pub(crate) fn browser_cef_native_preinitialize() -> Result<(), String> {
+    ensure_native_initialized().map_err(|error| error.to_string())
 }
 
 fn with_native_browser<F>(session_id: &str, action: F) -> Result<Value, String>
@@ -225,6 +330,13 @@ fn window_handle(window: &Window) -> Result<*mut c_void> {
         let _ = window;
         bail!("native CEF embedding is only implemented on macOS")
     }
+}
+
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+fn webview_window_handle(window: &WebviewWindow) -> Result<*mut c_void> {
+    window
+        .ns_window()
+        .map_err(|error| anyhow!("read Tauri NSWindow handle: {error}"))
 }
 
 impl CefRuntime {
@@ -660,7 +772,11 @@ fn native_cef_extension_dirs() -> Result<String> {
         return Ok(String::new());
     }
     let mut dirs = Vec::new();
-    for extension in browser.extensions.iter().filter(|extension| extension.enabled) {
+    for extension in browser
+        .extensions
+        .iter()
+        .filter(|extension| extension.enabled)
+    {
         push_extension_dir(&mut dirs, PathBuf::from(&extension.path));
     }
     if browser.captcha.enabled {
@@ -867,70 +983,6 @@ fn cstring_path(path: &Path) -> Result<CString> {
     CString::new(path.to_string_lossy().as_bytes()).context("encode CEF path")
 }
 
-struct ErrorBuffer {
-    bytes: Vec<c_char>,
-}
-
-impl ErrorBuffer {
-    fn new() -> Self {
-        Self {
-            bytes: vec![0; 2048],
-        }
-    }
-
-    fn as_mut_ptr(&mut self) -> *mut c_char {
-        self.bytes.as_mut_ptr()
-    }
-
-    fn len(&self) -> usize {
-        self.bytes.len()
-    }
-
-    fn message(&self) -> String {
-        unsafe { CStr::from_ptr(self.bytes.as_ptr()) }
-            .to_string_lossy()
-            .trim()
-            .to_string()
-    }
-
-    fn result(self, ok: i32, context: &str) -> Result<()> {
-        if ok != 0 {
-            return Ok(());
-        }
-        let message = self.message();
-        if message.is_empty() {
-            bail!("{context} failed");
-        }
-        bail!("{context}: {message}")
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn native_status_does_not_treat_lazy_initialization_as_error() {
-        if CEF_INITIALIZATION.get().is_some() {
-            return;
-        }
-        let status = browser_cef_native_status();
-        assert_eq!(status["active"], serde_json::json!(false));
-        assert_ne!(
-            status["error"],
-            serde_json::json!(
-                "native CEF was not initialized before the desktop event loop started"
-            )
-        );
-    }
-
-    #[test]
-    fn native_state_before_initialization_is_disconnected() {
-        if CEF_INITIALIZATION.get().is_some() {
-            return;
-        }
-        let state = browser_cef_native_state("tab-1".to_string()).unwrap();
-        assert_eq!(state["connected"], serde_json::json!(false));
-        assert_eq!(state["url"], serde_json::json!("about:blank"));
-    }
-}
+#[path = "cef_host_tests.rs"]
+mod cef_host_tests;

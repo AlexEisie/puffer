@@ -26,10 +26,10 @@
   $: actionLabel = (() => {
     if (busy || status?.installing) return phase === "serve" ? "Starting…" : "Installing…";
     if (!status?.supported) return "Unsupported";
-    if (ready) return "MiniCPM5 ready";
-    if (status?.installed && status?.configured && !status?.running) return "Start MiniCPM5";
-    if (status?.installed && !status?.configured) return "Register MiniCPM5";
-    return "Install MiniCPM5";
+    if (ready) return "Qwen3.5 ready";
+    if (status?.installed && status?.configured && !status?.running) return "Start Qwen3.5";
+    if (status?.installed && !status?.configured) return "Register Qwen3.5";
+    return "Install Qwen3.5";
   })();
   $: detailText = (() => {
     if (!status) return "Checks for macOS Apple Silicon support and local install state.";
@@ -59,7 +59,7 @@
       ];
     }
     try {
-      const next = await localModelStatus("minicpm5");
+      const next = await localModelStatus("qwen35");
       status = next;
       busy = next.installing;
       if (showDiagnostics) {
@@ -78,7 +78,7 @@
   async function subscribeProgress() {
     try {
       const client = await ensureLocalDaemonClient();
-      unsubscribe = client.on("local-model:minicpm5:event", (payload) => {
+      unsubscribe = client.on("local-model:qwen35:event", (payload) => {
         handleProgress(payload as LocalModelEvent);
       });
     } catch {
@@ -87,7 +87,7 @@
   }
 
   function handleProgress(event: LocalModelEvent) {
-    if (event.modelId !== "minicpm5-1b") return;
+    if (event.modelId !== "qwen3.5-0.8b") return;
     if (jobId && jobId !== "active" && event.jobId !== jobId) return;
     phase = event.phase;
     progress = [...progress.slice(-5), event.message];
@@ -112,9 +112,9 @@
     busy = true;
     error = null;
     phase = "starting";
-    progress = [status?.installed ? "Starting MiniCPM5 local server…" : "Starting MiniCPM5 install…"];
+    progress = [status?.installed ? "Starting Qwen3.5 local server…" : "Starting Qwen3.5 install…"];
     try {
-      const job = await installLocalModel("minicpm5");
+      const job = await installLocalModel("qwen35");
       jobId = job.jobId;
       status = job.status;
     } catch (e) {
@@ -148,17 +148,17 @@
   </div>
   <div class="pf-local-model-body">
     <div class="pf-local-model-topline">
-      <h3>MiniCPM5 local model</h3>
+      <h3>Qwen3.5 local model</h3>
       <span class="pf-local-model-pill" data-ready={ready}>
         {ready ? "Ready" : status?.installed ? "Installed" : status?.recommended ? "Recommended" : "Optional"}
       </span>
     </div>
     <p>
-      MiniCPM5-1B runs on-device with MLX for private, always-on behavior analysis. It is
+      Qwen3.5-0.8B runs on-device with MLX for private, always-on behavior analysis. It is
       configured as a local Puffer provider, not as the main frontier coding model.
     </p>
     <div class="pf-local-model-meta">
-      <span>{status?.size ?? "~589MB"}</span>
+      <span>{status?.size ?? "~992MB"}</span>
       <span>{status?.endpoint ?? "127.0.0.1:8088/v1"}</span>
       {#if status?.providerPath}
         <span title={status.providerPath}>provider yaml</span>
@@ -205,7 +205,7 @@
       data-size="sm"
       disabled={loading || busy || status?.installing}
       onclick={() => refreshStatus(true)}
-      title="Check MiniCPM5 install status"
+      title="Check Qwen3.5 install status"
     >
       {loading ? "Checking…" : "Check status"}
     </button>
@@ -224,7 +224,7 @@
     gap: 12px;
     align-items: start;
     padding: 14px;
-    margin: 0 0 14px;
+    min-height: 176px;
     box-shadow: 0 14px 30px rgba(15, 23, 42, 0.05);
   }
   .pf-local-model-card[data-compact="true"] {
@@ -243,6 +243,9 @@
   }
   .pf-local-model-body {
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
   .pf-local-model-topline {
     display: flex;
@@ -270,17 +273,16 @@
     background: color-mix(in oklab, oklch(0.7 0.18 145) 14%, var(--background));
   }
   .pf-local-model-body p {
-    margin: 5px 0 0;
-    max-width: 760px;
+    margin: 0;
+    max-width: 700px;
     color: var(--muted-foreground);
     font-size: 12.5px;
-    line-height: 1.45;
+    line-height: 18px;
   }
   .pf-local-model-meta {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    margin-top: 9px;
   }
   .pf-local-model-meta span {
     border-radius: 999px;
@@ -292,7 +294,6 @@
     padding: 2px 7px;
   }
   .pf-local-model-detail {
-    margin-top: 8px;
     font-size: 11.5px;
     color: var(--muted-foreground);
     line-height: 1.45;
@@ -301,13 +302,11 @@
     color: var(--destructive, #c03232);
   }
   .pf-local-model-checked {
-    margin-top: 4px;
     color: color-mix(in oklab, var(--muted-foreground) 80%, var(--foreground));
     font-family: var(--font-mono);
     font-size: 10.5px;
   }
   .pf-local-model-progress {
-    margin-top: 8px;
     border-radius: 8px;
     border: 1px solid var(--border);
     background: color-mix(in oklab, var(--background) 88%, black 2%);

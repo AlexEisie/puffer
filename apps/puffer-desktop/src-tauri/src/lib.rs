@@ -1,5 +1,6 @@
 mod backend;
 mod browser;
+mod browser_debug;
 mod cef_host;
 mod chat_attachments;
 mod codex_app_server;
@@ -13,8 +14,8 @@ mod local_model;
 mod lsp;
 mod media_capabilities;
 mod mini_window;
-mod minicpm5;
 mod pty;
+mod qwen35;
 mod remote_client;
 mod repo_actions;
 mod websocket;
@@ -62,8 +63,8 @@ const REGISTERED_TAURI_COMMANDS: &[&str] = &[
     "open_image_dir",
     "open_video_dir",
     "summon_mini_window",
-    "minicpm5_recommend",
-    "minicpm5_install",
+    "qwen35_recommend",
+    "qwen35_install",
     "browser_cef_native_status",
     "browser_cef_native_open",
     "browser_cef_native_resize",
@@ -463,7 +464,52 @@ fn video_dir_for_cwd(cwd: &Path) -> Result<PathBuf, String> {
     Ok(cwd.join(".puffer").join("media").join("videos"))
 }
 
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+fn spawn_cef_native_warmup(app_handle: AppHandle, smoke_url: Option<String>, prewarm_targets: usize) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    use tauri::Manager;
+
+    std::thread::spawn(move || {
+        let done = Arc::new(AtomicBool::new(false));
+        let start = Instant::now();
+        while !done.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(250));
+            let app_for_main = app_handle.clone();
+            let done_for_main = Arc::clone(&done);
+            let smoke_url_for_main = smoke_url.clone();
+            if let Err(err) = app_handle.run_on_main_thread(move || {
+                let Some(window) = app_for_main.get_webview_window("main") else {
+                    return;
+                };
+                if let Some(url) = smoke_url_for_main {
+                    if let Err(err) = cef_host::browser_cef_native_smoke_open(window.clone(), url) {
+                        eprintln!("CEF smoke open failed: {err}");
+                    }
+                }
+                if let Err(err) =
+                    cef_host::browser_cef_native_prewarm_targets(window, prewarm_targets)
+                {
+                    eprintln!("CEF prewarm failed: {err}");
+                }
+                done_for_main.store(true, Ordering::SeqCst);
+            }) {
+                eprintln!("CEF warmup dispatch failed: {err}");
+                break;
+            }
+        }
+        if !done.load(Ordering::SeqCst) {
+            eprintln!("CEF warmup skipped: main window was not available");
+        }
+    });
+}
+
 pub fn run() {
+    #[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+    if let Err(err) = cef_host::browser_cef_native_preinitialize() {
+        eprintln!("native CEF preinitialize failed: {err}");
+    }
+
     let backend = Arc::new(BackendState::new());
     let launcher = Arc::new(DaemonLauncher::new());
     websocket::start_backend_ws(backend.clone());
@@ -494,6 +540,17 @@ pub fn run() {
         )
         .setup(move |app| {
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
+            #[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+            {
+                let smoke_url = std::env::var("PUFFER_CEF_SMOKE_URL").ok();
+                let prewarm_targets = std::env::var("PUFFER_CEF_PREWARM_TARGETS")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(8);
+                if smoke_url.is_some() || prewarm_targets > 0 {
+                    spawn_cef_native_warmup(app.handle().clone(), smoke_url, prewarm_targets);
+                }
+            }
             if let Err(err) = app.global_shortcut().register(mini_shortcut) {
                 eprintln!("mini-window shortcut unavailable (continuing without it): {err}");
             }
@@ -531,8 +588,8 @@ pub fn run() {
             open_image_dir,
             open_video_dir,
             mini_window::summon_mini_window,
-            minicpm5::minicpm5_recommend,
-            minicpm5::minicpm5_install,
+            qwen35::qwen35_recommend,
+            qwen35::qwen35_install,
             cef_host::browser_cef_native_status,
             cef_host::browser_cef_native_open,
             cef_host::browser_cef_native_resize,

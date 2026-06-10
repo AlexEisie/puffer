@@ -9,6 +9,7 @@ use crate::command_match::command_matches_terminal_event;
 use crate::connection::{ConnectionState, ConnectionStore};
 use crate::connector_process;
 use crate::connector_stream::{ConnectorEventProcessor, ConnectorStreamHandle};
+use crate::contacts::contact_ids_for_connector;
 use crate::history::WorkflowHistoryStore;
 use crate::protocol::{ConnectorActionRequest, ConnectorActionResponse};
 use crate::proxy::{
@@ -33,6 +34,8 @@ use tokio::runtime::Handle;
 const CONNECTOR_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const COMMAND_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const COMMAND_RESTART_RESENDS: usize = 2;
+
+mod contact_methods;
 
 /// Host-provided auth checker for built-in connectors whose credentials are
 /// owned by the embedding process instead of a connector subprocess.
@@ -151,6 +154,16 @@ impl SubscriptionManagerBuilder {
         let connector_store = Arc::new(ConnectorCatalogStore::load(&self.connector_store_path)?);
         let connection_store = Arc::new(ConnectionStore::load(&self.connection_store_path)?);
         let history_store = Arc::new(WorkflowHistoryStore::load(&self.history_store_path)?);
+        // Root cause D: reclaim runs left `Running` by a previous process (crash/kill
+        // before completion) so their messages are no longer dedup-blocked forever.
+        // Must run before the router starts consuming live events.
+        let reclaimed = history_store.reclaim_orphaned_running_on_boot();
+        if reclaimed > 0 {
+            tracing::info!(
+                count = reclaimed,
+                "reclaimed orphaned Running workflow runs on startup"
+            );
+        }
         let proxy_store = Arc::new(AgentProxyStore::load(&self.proxy_store_path)?);
         let dispatcher = self.dispatcher.clone();
         let classifier = self.classifier.clone();
@@ -252,6 +265,16 @@ impl SubscriptionManager {
                     ConnectionState::Active | ConnectionState::Authenticated
                 )
             {
+                tracing::info!(
+                    connection = %connection.slug,
+                    connector = %connection.connector_slug,
+                    has_workflow_consumer,
+                    has_proxy_consumer,
+                    has_consumer,
+                    previous_has_consumer = connection.has_consumer,
+                    previous_state = ?connection.state,
+                    "refreshing connection consumer state"
+                );
                 self.connection_store.update(&connection.slug, |record| {
                     record.set_has_consumer(has_consumer)
                 })?;
@@ -279,7 +302,7 @@ impl SubscriptionManager {
         }
         for connection in self.connection_store.list() {
             let should_stream = connection.should_stream();
-            let is_running = self
+            let mut is_running = self
                 .connector_streams
                 .lock()
                 .unwrap()
@@ -304,6 +327,33 @@ impl SubscriptionManager {
                 }
                 continue;
             }
+            let contact_ids = if should_stream && stream_supported {
+                self.contact_ids_for_connection(&connection.slug)
+            } else {
+                Vec::new()
+            };
+            if should_stream && stream_supported && is_running {
+                let filter_changed = self
+                    .connector_streams
+                    .lock()
+                    .unwrap()
+                    .get(&connection.slug)
+                    .is_some_and(|handle| handle.contact_ids() != contact_ids.as_slice());
+                if filter_changed {
+                    if let Some(handle) = self
+                        .connector_streams
+                        .lock()
+                        .unwrap()
+                        .remove(&connection.slug)
+                    {
+                        block_on_manager_handle(&self.handle, async move {
+                            handle.shutdown().await;
+                            Ok(())
+                        })?;
+                    }
+                    is_running = false;
+                }
+            }
             if should_stream && !is_running {
                 let Some(template) = template else {
                     continue;
@@ -327,6 +377,7 @@ impl SubscriptionManager {
                         template,
                         slug,
                         cursor,
+                        contact_ids,
                         bus,
                         store,
                         Some(processor),
@@ -374,6 +425,26 @@ impl SubscriptionManager {
             }
         }
         Ok(())
+    }
+
+    fn contact_ids_for_connection(&self, connection_slug: &str) -> Vec<String> {
+        let Some(connection) = self.connection_store.get(connection_slug) else {
+            return Vec::new();
+        };
+        let mut contact_ids = std::collections::BTreeSet::new();
+        for binding in self.store.list().into_iter().filter(|binding| {
+            binding.status == crate::spec::WorkflowBindingStatus::Enabled
+                && binding.connection_slug == connection_slug
+        }) {
+            if binding.contact_ids.is_empty() {
+                return Vec::new();
+            }
+            contact_ids.extend(contact_ids_for_connector(
+                &connection.connector_slug,
+                &binding.contact_ids,
+            ));
+        }
+        contact_ids.into_iter().collect()
     }
 
     /// Runs auth checks for connections whose connector template exposes a
@@ -507,8 +578,20 @@ impl SubscriptionManager {
         let id = manifest.spec.id.clone();
         let mut guard = self.subscribers.lock().unwrap();
         if guard.contains_key(&id) {
+            tracing::info!(
+                subscriber = %id,
+                topic = %manifest.topic(),
+                "subscriber already running"
+            );
             return Ok(id);
         }
+        tracing::info!(
+            subscriber = %id,
+            topic = %manifest.topic(),
+            manifest_dir = %manifest.dir.display(),
+            state_dir = ?manifest.spec.state.as_ref().map(|state| state.dir.as_str()),
+            "starting subscriber"
+        );
         let bus = self.bus.clone();
         let handle = block_on_manager_handle(&self.handle, async move {
             SubscriberSupervisor::spawn(manifest, bus, SupervisorConfig::default()).await

@@ -51,9 +51,14 @@ enum RuntimeCommandOutcome {
 ///   concurrently with `tokio::select!`.
 pub async fn run() -> anyhow::Result<()> {
     let env = SkillEnv::from_env();
+    // Install tracing first so every log below is durably written to
+    // <state>/telegram.log. Held for the whole process: dropping the guard
+    // flushes and stops the non-blocking file writer.
+    let _log_guard = crate::logging::init(&env);
     info!(
         session = %env.session_path.display(),
         topic = %env.topic,
+        log = %env.state_dir.join("telegram.log").display(),
         "starting telegram-user subscriber"
     );
 
@@ -390,6 +395,9 @@ async fn try_resume_session(env: &SkillEnv) -> anyhow::Result<Option<Client>> {
     let session = Session::load_file_or_create(&env.session_path)
         .with_context(|| format!("load session file {}", env.session_path.display()))?;
     if !session.signed_in() {
+        // Normal fresh-login path (no session yet, or it was cleared); not a
+        // #570 anomaly, but recorded so the taken path is visible in logs.
+        crate::health::report_resume_failed(env, "not_signed_in", false, "none", json!({}));
         return Ok(None);
     }
 
@@ -400,7 +408,13 @@ async fn try_resume_session(env: &SkillEnv) -> anyhow::Result<Option<Client>> {
     let (api_id, api_hash) = match resolve_api_credentials(None, None, &persisted) {
         Ok(pair) => pair,
         Err(error) => {
-            warn!(%error, "resume credentials unavailable; falling back to login");
+            crate::health::report_resume_failed(
+                env,
+                "credentials_unavailable",
+                true,
+                "config",
+                json!({ "error": error.to_string() }),
+            );
             return Ok(None);
         }
     };
@@ -414,15 +428,31 @@ async fn try_resume_session(env: &SkillEnv) -> anyhow::Result<Option<Client>> {
     let client = match Client::connect(config).await {
         Ok(c) => c,
         Err(err) => {
-            warn!(error = %err, "resume connect failed; falling back to login");
+            let detail = err.to_string();
+            let class = crate::health::classify_error(&detail);
+            crate::health::report_resume_failed(
+                env,
+                "connect_failed",
+                true,
+                class,
+                json!({ "error": detail }),
+            );
             return Ok(None);
         }
     };
     match client.is_authorized().await {
         Ok(true) => Ok(Some(client)),
-        Ok(false) => Ok(None),
+        Ok(false) => {
+            // Connected, but the server reports the session is no longer
+            // authorized: the key was invalidated server-side. This is the
+            // core #570 "suddenly unauthenticated" case.
+            crate::health::report_resume_failed(env, "key_invalidated", true, "auth", json!({}));
+            Ok(None)
+        }
         Err(err) => {
-            warn!(error = %err, "is_authorized probe failed; falling back to login");
+            let detail = err.to_string();
+            let class = crate::health::classify_error(&detail);
+            crate::health::report_resume_failed(env, "probe_failed", true, class, json!({ "error": detail }));
             Ok(None)
         }
     }
@@ -456,6 +486,10 @@ async fn run_update_loop(
                 };
                 if let LiveUpdateEvent::Error(error) = update {
                     live_task.abort();
+                    // #570: the live update stream died — "connected but stops
+                    // receiving". Record it (classified) before tearing down so
+                    // the drop is queryable instead of a bare tracing line.
+                    crate::health::report_update_loop_error(env, &error);
                     error!(%error, "next_update failed");
                     return Err(anyhow::anyhow!("next_update: {error}"));
                 }

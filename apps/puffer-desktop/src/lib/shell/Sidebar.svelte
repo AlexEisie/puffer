@@ -58,6 +58,7 @@
     { id: "workspace", label: "Project", icon: "sparkles" },
     { id: "workflows", label: "Workflows", icon: "git" },
     { id: "tasks", label: "Tasks", icon: "listTodo" },
+    { id: "contacts", label: "Contacts", icon: "plug" },
     { id: "settings", label: "Settings", icon: "settings" }
   ];
 
