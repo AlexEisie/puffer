@@ -117,6 +117,35 @@ test("web preview remembers URL-provided backend handshake across reopen", async
   expect(daemon.socketUrls.at(-1)).toContain("ws://127.0.0.1:17778/ws");
 });
 
+test("web preview falls back to workspace daemon handshake when dev default is unavailable", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    url: "ws://127.0.0.1:17779/ws",
+    workspaceRoot: "/tmp/workspace-handshake-puffer"
+  });
+  await daemon.install(page);
+  await page.route("**/__puffer/daemon-handshake", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        url: daemon.url,
+        token: "test",
+        protocolVersion: "1",
+        workspaceRoot: "/tmp/workspace-handshake-puffer"
+      })
+    });
+  });
+
+  await page.goto("/?skipOnboarding=1");
+  await daemon.waitForRequest("load_settings_snapshot");
+
+  expect(daemon.socketUrls.some((url) => url.startsWith("ws://127.0.0.1:17779/ws"))).toBe(true);
+  await page.getByRole("button", { name: "Settings" }).click();
+  const pane = page.locator(".pf-settings-pane");
+  await expect(pane.locator(".pf-settings-row").filter({ hasText: "Daemon" })).toContainText(
+    "ws://127.0.0.1:17779/ws"
+  );
+});
+
 test("default model cannot be saved before provider models load", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse(
