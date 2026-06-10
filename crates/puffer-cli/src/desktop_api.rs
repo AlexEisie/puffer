@@ -1161,7 +1161,8 @@ fn timeline_items(session_store: &SessionStore, record: &SessionRecord) -> Vec<T
                 });
             }
             TranscriptEvent::SystemMessage { text, actor } => {
-                let parsed = parse_system_message(index, text, actor.clone(), current_turn_id.clone());
+                let parsed =
+                    parse_system_message(index, text, actor.clone(), current_turn_id.clone());
                 if parse_tool_message(text).is_none() {
                     flush_pending_assistant(&mut items, &mut pending_assistant);
                 }

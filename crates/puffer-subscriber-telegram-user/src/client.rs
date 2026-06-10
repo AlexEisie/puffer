@@ -5,7 +5,7 @@
 //! infinite `next_update` loop that emits ndjson message events.
 
 use anyhow::Context as _;
-use grammers_client::{Client, Config, session::Session};
+use grammers_client::{session::Session, Client, Config};
 use puffer_subscriber_runtime::SubscriberCommand;
 use serde_json::json;
 use tracing::{error, info, warn};
@@ -14,16 +14,16 @@ use crate::actions::handle_telegram_act;
 use crate::commands::CommandStream;
 use crate::delivery::DeliveryCursor;
 use crate::events::emit_control;
-use crate::import::{TdataImportOptions, TdataImportOutcome, import_tdata};
+use crate::import::{import_tdata, TdataImportOptions, TdataImportOutcome};
 use crate::login;
 use crate::notifications::NotificationMuteCache;
 use crate::outbound::handle_send_message;
 use crate::peers::{handle_list_messages, handle_list_peers, handle_search_messages};
 use crate::qr_login;
 use crate::state::{
-    LoginState, PersistedCredentials, SkillEnv, default_init_params, resolve_api_credentials,
+    default_init_params, resolve_api_credentials, LoginState, PersistedCredentials, SkillEnv,
 };
-use crate::updates::{LiveUpdateEvent, handle_live_update, spawn_live_update_task};
+use crate::updates::{handle_live_update, spawn_live_update_task, LiveUpdateEvent};
 
 enum UpdateLoopExit {
     StdinClosed,

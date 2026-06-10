@@ -1159,6 +1159,12 @@ async fn dispatch_request(
         "monitor_task_ignore" | "task_monitor_ignore" => respond!(
             crate::daemon_workflows::handle_monitor_task_ignore(&state.paths, &params)
         ),
+        "monitor_rule_add" | "task_monitor_rule_add" => respond!(
+            crate::daemon_workflows::handle_monitor_rule_add(&state.paths, &params)
+        ),
+        "monitor_rule_delete" | "task_monitor_rule_delete" => respond!(
+            crate::daemon_workflows::handle_monitor_rule_delete(&state.paths, &params)
+        ),
         "monitor_task_complete" | "task_monitor_complete" => respond!(
             crate::daemon_workflows::handle_monitor_task_complete(&state.paths, &params)
         ),
@@ -3464,7 +3470,12 @@ fn append_turn_started(
     session_uuid: Uuid,
     turn_id: &str,
 ) -> Result<()> {
-    append_turn_boundary(session_store, session_uuid, turn_id, TurnBoundaryState::Started)
+    append_turn_boundary(
+        session_store,
+        session_uuid,
+        turn_id,
+        TurnBoundaryState::Started,
+    )
 }
 
 fn append_turn_finished(
@@ -3472,7 +3483,12 @@ fn append_turn_finished(
     session_uuid: Uuid,
     turn_id: &str,
 ) -> Result<()> {
-    append_turn_boundary(session_store, session_uuid, turn_id, TurnBoundaryState::Finished)
+    append_turn_boundary(
+        session_store,
+        session_uuid,
+        turn_id,
+        TurnBoundaryState::Finished,
+    )
 }
 
 fn report_cancelled_turn(
@@ -4472,11 +4488,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         trace,
                     );
                 }
-                let _ = append_turn_finished(
-                    &inputs.session_store,
-                    session_uuid,
-                    &turn_id_thread,
-                );
+                let _ = append_turn_finished(&inputs.session_store, session_uuid, &turn_id_thread);
                 let _ = inputs
                     .session_store
                     .append_event(session_uuid, app_state.snapshot_event());
@@ -4522,11 +4534,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         actor: Some(stream_actor.clone()),
                     },
                 );
-                let _ = append_turn_finished(
-                    &inputs.session_store,
-                    session_uuid,
-                    &turn_id_thread,
-                );
+                let _ = append_turn_finished(&inputs.session_store, session_uuid, &turn_id_thread);
                 publish_turn_error_event(
                     &setup_state,
                     &channel_thread,

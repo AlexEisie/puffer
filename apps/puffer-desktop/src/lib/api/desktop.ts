@@ -36,6 +36,7 @@ import type {
   TimelineItem,
   WorkflowDefinition,
   WorkflowBindingCreateRequest,
+  WorkflowFilterRule,
   WorkflowMonitorHistoryMessage,
   WorkflowRun,
   WorkflowSnapshot
@@ -1537,6 +1538,36 @@ export async function saveMonitorMemory(connectionSlug: string, content: string)
   return client.request<WorkflowSnapshot>("task_monitor_memory_save", {
     connection_slug: connectionSlug,
     content
+  });
+}
+
+/** Add one include or exclude monitor rule and return the refreshed workflow snapshot. */
+export async function addMonitorRule(params: {
+  connection_slug: string;
+  mode: "exclude" | "include";
+  keywords: string[];
+  case_insensitive?: boolean;
+}): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("task_monitor_rule_add", {
+    connection_slug: params.connection_slug,
+    mode: params.mode,
+    keywords: params.keywords,
+    case_insensitive: params.case_insensitive ?? true
+  });
+}
+
+/** Delete one displayed include or exclude monitor rule. */
+export async function deleteMonitorRule(
+  connectionSlug: string,
+  mode: "exclude" | "include",
+  rule: WorkflowFilterRule
+): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("task_monitor_rule_delete", {
+    connection_slug: connectionSlug,
+    mode,
+    rule
   });
 }
 

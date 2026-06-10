@@ -740,6 +740,8 @@ export type WorkflowBinding = {
   action_format?: string | null;
   model?: string | null;
   filter_pattern?: string | null;
+  include_filter?: WorkflowFilterRule | null;
+  include_filters?: WorkflowFilterRule[];
   ignore_filters?: WorkflowFilterRule[];
   contact_ids?: string[];
   monitor?: boolean;
