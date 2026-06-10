@@ -1158,6 +1158,12 @@ async fn dispatch_request(
         "monitor_task_ignore" | "task_monitor_ignore" => respond!(
             crate::daemon_workflows::handle_monitor_task_ignore(&state.paths, &params)
         ),
+        "monitor_rule_add" | "task_monitor_rule_add" => respond!(
+            crate::daemon_workflows::handle_monitor_rule_add(&state.paths, &params)
+        ),
+        "monitor_rule_delete" | "task_monitor_rule_delete" => respond!(
+            crate::daemon_workflows::handle_monitor_rule_delete(&state.paths, &params)
+        ),
         "monitor_task_complete" | "task_monitor_complete" => respond!(
             crate::daemon_workflows::handle_monitor_task_complete(&state.paths, &params)
         ),
