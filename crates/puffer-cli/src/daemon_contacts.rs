@@ -212,11 +212,15 @@ pub(crate) fn handle_contacts_save(paths: &ConfigPaths, params: &Value) -> Resul
 pub(crate) fn handle_contacts_delete(paths: &ConfigPaths, params: &Value) -> Result<Value> {
     let params: ContactDeleteParams =
         serde_json::from_value(params.clone()).context("invalid contact delete params")?;
+    let id = params.id.trim();
+    if id.is_empty() {
+        anyhow::bail!("contact id must not be empty");
+    }
     let mut store = load_store(paths)?;
     let before = store.contacts.len();
-    store.contacts.retain(|contact| contact.id != params.id);
+    store.contacts.retain(|contact| contact.id != id);
     if store.contacts.len() == before {
-        anyhow::bail!("contact `{}` not found", params.id);
+        anyhow::bail!("contact `{}` not found", id);
     }
     save_store(paths, &store)?;
     handle_contacts_list(paths, &json!({ "limit": DEFAULT_LIMIT }))
@@ -952,6 +956,10 @@ impl Candidate {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "daemon_contacts_delete_tests.rs"]
+mod delete_tests;
 
 #[cfg(test)]
 #[path = "daemon_contacts_tests.rs"]
