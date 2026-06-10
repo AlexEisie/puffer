@@ -305,7 +305,7 @@ export function configuredBrowserDaemonHandshake(): DaemonHandshake | null {
 
   const params = new URLSearchParams(window.location.search);
   const viteEnv = (import.meta as unknown as { env?: Record<string, boolean | string | undefined> }).env;
-  const url =
+  const urlFromParams =
     params.get("pufferBackend") ||
     params.get("corbinaBackend") ||
     params.get("backendUrl") ||
@@ -313,7 +313,21 @@ export function configuredBrowserDaemonHandshake(): DaemonHandshake | null {
     params.get("pufferRemoteBackend") ||
     params.get("corbinaRemoteBackend") ||
     params.get("remoteBackendUrl") ||
-    params.get("remoteBackend") ||
+    params.get("remoteBackend");
+  const tokenFromParams =
+    params.get("pufferToken") ||
+    params.get("corbinaToken") ||
+    params.get("token") ||
+    params.get("pufferRemoteToken") ||
+    params.get("corbinaRemoteToken") ||
+    params.get("remoteToken");
+  const workspaceRootFromParams =
+    params.get("workspaceRoot") ||
+    params.get("pufferRemoteWorkspaceRoot") ||
+    params.get("corbinaRemoteWorkspaceRoot") ||
+    params.get("remoteWorkspaceRoot");
+  const url =
+    urlFromParams ||
     window.localStorage.getItem("puffer.backendUrl") ||
     window.localStorage.getItem("corbina.backendUrl") ||
     stringEnv(viteEnv?.VITE_PUFFER_DAEMON_URL) ||
@@ -324,15 +338,10 @@ export function configuredBrowserDaemonHandshake(): DaemonHandshake | null {
 
   if (!url || (!url.startsWith("ws://") && !url.startsWith("wss://"))) return null;
 
-  return {
+  const handshake = {
     url,
     token:
-      params.get("pufferToken") ||
-      params.get("corbinaToken") ||
-      params.get("token") ||
-      params.get("pufferRemoteToken") ||
-      params.get("corbinaRemoteToken") ||
-      params.get("remoteToken") ||
+      tokenFromParams ||
       window.localStorage.getItem("puffer.backendToken") ||
       window.localStorage.getItem("corbina.backendToken") ||
       stringEnv(viteEnv?.VITE_PUFFER_DAEMON_TOKEN) ||
@@ -345,14 +354,15 @@ export function configuredBrowserDaemonHandshake(): DaemonHandshake | null {
       params.get("remoteProtocolVersion") ||
       "1",
     workspaceRoot:
-      params.get("workspaceRoot") ||
-      params.get("pufferRemoteWorkspaceRoot") ||
-      params.get("corbinaRemoteWorkspaceRoot") ||
-      params.get("remoteWorkspaceRoot") ||
+      workspaceRootFromParams ||
       window.localStorage.getItem("puffer.workspaceRoot") ||
       window.localStorage.getItem("corbina.workspaceRoot") ||
       ""
   };
+  if (urlFromParams || tokenFromParams || workspaceRootFromParams) {
+    rememberBrowserDaemonHandshake(handshake, "local");
+  }
+  return handshake;
 }
 
 function stringEnv(value: boolean | string | undefined): string | undefined {
@@ -378,13 +388,27 @@ export function configuredBrowserRemoteDaemonHandshake(): DaemonHandshake | null
 
   const params = new URLSearchParams(window.location.search);
   const viteEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
-  const url =
+  const urlFromParams =
     params.get("pufferRemoteBackend") ||
     params.get("corbinaRemoteBackend") ||
     params.get("remoteBackendUrl") ||
     params.get("remoteBackend") ||
     params.get("backendUrl") ||
-    params.get("backend") ||
+    params.get("backend");
+  const tokenFromParams =
+    params.get("pufferRemoteToken") ||
+    params.get("corbinaRemoteToken") ||
+    params.get("remoteToken") ||
+    params.get("pufferToken") ||
+    params.get("corbinaToken") ||
+    params.get("token");
+  const workspaceRootFromParams =
+    params.get("pufferRemoteWorkspaceRoot") ||
+    params.get("corbinaRemoteWorkspaceRoot") ||
+    params.get("remoteWorkspaceRoot") ||
+    params.get("workspaceRoot");
+  const url =
+    urlFromParams ||
     window.localStorage.getItem("puffer.remoteBackendUrl") ||
     window.localStorage.getItem("corbina.remoteBackendUrl") ||
     viteEnv?.VITE_PUFFER_REMOTE_DAEMON_URL ||
@@ -392,15 +416,10 @@ export function configuredBrowserRemoteDaemonHandshake(): DaemonHandshake | null
 
   if (!url || (!url.startsWith("ws://") && !url.startsWith("wss://"))) return null;
 
-  return {
+  const handshake = {
     url,
     token:
-      params.get("pufferRemoteToken") ||
-      params.get("corbinaRemoteToken") ||
-      params.get("remoteToken") ||
-      params.get("pufferToken") ||
-      params.get("corbinaToken") ||
-      params.get("token") ||
+      tokenFromParams ||
       window.localStorage.getItem("puffer.remoteBackendToken") ||
       window.localStorage.getItem("corbina.remoteBackendToken") ||
       viteEnv?.VITE_PUFFER_REMOTE_DAEMON_TOKEN ||
@@ -411,14 +430,15 @@ export function configuredBrowserRemoteDaemonHandshake(): DaemonHandshake | null
       params.get("remoteProtocolVersion") ||
       "1",
     workspaceRoot:
-      params.get("pufferRemoteWorkspaceRoot") ||
-      params.get("corbinaRemoteWorkspaceRoot") ||
-      params.get("remoteWorkspaceRoot") ||
-      params.get("workspaceRoot") ||
+      workspaceRootFromParams ||
       window.localStorage.getItem("puffer.remoteWorkspaceRoot") ||
       window.localStorage.getItem("corbina.remoteWorkspaceRoot") ||
       ""
   };
+  if (urlFromParams || tokenFromParams || workspaceRootFromParams) {
+    rememberBrowserDaemonHandshake(handshake, "remote");
+  }
+  return handshake;
 }
 
 export function canReachDaemon(): boolean {
@@ -465,6 +485,7 @@ export async function ensureRemoteDaemonClient(
 
 export async function switchDaemonClient(handshake: DaemonHandshake): Promise<DaemonClient> {
   sharedClient?.close();
+  rememberBrowserDaemonHandshake(handshake, "local");
   sharedClient = new DaemonClient(handshake);
   await sharedClient.connect();
   return sharedClient;
@@ -472,4 +493,26 @@ export async function switchDaemonClient(handshake: DaemonHandshake): Promise<Da
 
 export function currentDaemonClient(): DaemonClient | null {
   return sharedClient;
+}
+
+function rememberBrowserDaemonHandshake(
+  handshake: DaemonHandshake,
+  scope: "local" | "remote"
+): void {
+  if (typeof window === "undefined" || canInvokeTauri() || !handshake.url) return;
+  const keys =
+    scope === "remote"
+      ? {
+          url: "puffer.remoteBackendUrl",
+          token: "puffer.remoteBackendToken",
+          workspaceRoot: "puffer.remoteWorkspaceRoot"
+        }
+      : {
+          url: "puffer.backendUrl",
+          token: "puffer.backendToken",
+          workspaceRoot: "puffer.workspaceRoot"
+        };
+  window.localStorage.setItem(keys.url, handshake.url);
+  window.localStorage.setItem(keys.token, handshake.token);
+  window.localStorage.setItem(keys.workspaceRoot, handshake.workspaceRoot);
 }
