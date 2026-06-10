@@ -2398,6 +2398,83 @@ test("turn completion replaces partial streamed text after transcript reload", a
   await expect(page.locator('.pf-msg[data-role="agent"]').filter({ hasText: finalText })).toHaveCount(1);
 });
 
+test("settled live assistant text stays before the next submitted prompt", async ({ page }) => {
+  const firstPrompt = "First prompt creates delayed live text";
+  const firstReply = "Previous turn live reply should stay above the next prompt.";
+  const secondPrompt = "Second prompt must not inherit previous activity";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-live-carryover",
+        displayName: "Live carryover",
+        title: "Live carryover",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Live carryover/);
+  await page.locator(".pf-composer textarea").fill(firstPrompt);
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-live-carryover" &&
+      request.params.message === firstPrompt
+  );
+
+  const turnId = "turn-session-live-carryover";
+  daemon.emit("session:session-live-carryover:event", { type: "turn-start", turnId });
+  daemon.emit("session:session-live-carryover:event", {
+    type: "text-delta",
+    turnId,
+    delta: firstReply
+  });
+  await expect(page.getByText(firstReply)).toBeVisible();
+
+  daemon.delayResponse(
+    "load_session_detail",
+    (request) => request.params.sessionId === "session-live-carryover",
+    360
+  );
+  daemon.emit("session:session-live-carryover:event", {
+    type: "turn-complete",
+    turnId,
+    assistantText: firstReply
+  });
+  await page.waitForTimeout(20);
+
+  await page.locator(".pf-composer textarea").fill(secondPrompt);
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-live-carryover" &&
+      request.params.message === secondPrompt
+  );
+
+  const rowOrder = await page.locator(".pf-msg").evaluateAll((nodes) =>
+    nodes.map((node) => (node.textContent ?? "").replace(/\s+/g, " ").trim())
+  );
+  const firstPromptIndex = rowOrder.findIndex((text) => text.includes(firstPrompt));
+  const firstReplyIndex = rowOrder.findIndex((text) => text.includes(firstReply));
+  const secondPromptIndex = rowOrder.findIndex((text) => text.includes(secondPrompt));
+
+  expect(firstPromptIndex).toBeGreaterThanOrEqual(0);
+  expect(firstReplyIndex).toBeGreaterThan(firstPromptIndex);
+  expect(secondPromptIndex).toBeGreaterThan(firstReplyIndex);
+});
+
 test("generated title reload does not duplicate the first submitted prompt", async ({ page }) => {
   const prompt = "First prompt should not flash twice";
   const reply = "First reply stays single.";

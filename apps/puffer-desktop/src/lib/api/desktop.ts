@@ -983,9 +983,15 @@ export type ContactInferTracePayload =
 
 export type ContactInferResult = Partial<ContactsSnapshot>;
 
+const CONTACT_INFER_TIMEOUT_MS = 180_000;
+
 export async function inferContacts(limit = 30, traceId?: string): Promise<ContactInferResult> {
   const client = await ensureLocalDaemonClient();
-  return client.request("contacts_infer", { limit, trace_id: traceId });
+  return client.request(
+    "contacts_infer",
+    { limit, trace_id: traceId },
+    { timeoutMs: CONTACT_INFER_TIMEOUT_MS }
+  );
 }
 
 export async function subscribeContactInferEvents(
