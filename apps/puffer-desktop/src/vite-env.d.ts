@@ -21,3 +21,7 @@ declare const __COMMIT_HASH__: string;
 declare module "node:child_process" {
   export function execSync(command: string, options?: { encoding?: string }): string;
 }
+
+declare module "node:fs" {
+  export function readFileSync(path: string | URL, options?: { encoding?: string }): string;
+}
