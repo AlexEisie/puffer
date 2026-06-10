@@ -42,6 +42,9 @@ pub(crate) struct VideoGenerationArgs {
     /// Optional scalar video parameter overrides, encoded as JSON.
     #[arg(long = "parameters-json")]
     pub(crate) parameters_json: Option<String>,
+    /// Ordered public https:// image URLs or approved asset:// references.
+    #[arg(long = "image-reference")]
+    pub(crate) image_references: Vec<String>,
 }
 
 /// Runs one image-generation internal CLI request through the parent runtime.
@@ -80,6 +83,18 @@ pub(crate) fn video_generation_input(args: &VideoGenerationArgs) -> Result<Value
         object.insert(
             "parameters".to_string(),
             parse_json_arg("--parameters-json", raw)?,
+        );
+    }
+    if !args.image_references.is_empty() {
+        object.insert(
+            "imageReferences".to_string(),
+            Value::Array(
+                args.image_references
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
         );
     }
     Ok(Value::Object(object))
@@ -181,6 +196,10 @@ mod tests {
             "storyboard",
             "--parameters-json",
             "{\"duration_seconds\":5,\"camera_fixed\":false}",
+            "--image-reference",
+            "https://example.com/person.png",
+            "--image-reference",
+            "asset://approved-person",
         ]);
         let Some(Command::InternalTool {
             command: InternalToolCommand::VideoGeneration(args),
@@ -196,6 +215,10 @@ mod tests {
             json!({
                 "prompt": "clip prompt",
                 "purpose": "storyboard",
+                "imageReferences": [
+                    "https://example.com/person.png",
+                    "asset://approved-person"
+                ],
                 "parameters": {
                     "duration_seconds": 5,
                     "camera_fixed": false
@@ -218,6 +241,7 @@ mod tests {
             prompt: "clip".to_string(),
             purpose: None,
             parameters_json: Some("{".to_string()),
+            image_references: Vec::new(),
         };
 
         assert!(image_generation_input(&image)
