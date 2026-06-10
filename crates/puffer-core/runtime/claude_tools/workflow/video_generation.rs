@@ -145,24 +145,25 @@ pub(crate) fn validate_video_image_references(values: &[String]) -> Result<Vec<S
 
 fn validate_video_image_reference(index: usize, value: &str) -> Result<String> {
     let trimmed = value.trim();
-    if trimmed.is_empty() {
-        bail!("VideoGeneration imageReferences[{index}] must be an https:// or asset:// URL");
+    if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
+        bail!("{}", invalid_video_image_reference_message(index));
     }
     if let Some(asset_id) = trimmed.strip_prefix("asset://") {
-        if !asset_id.trim().is_empty() {
+        if !asset_id.is_empty() {
             return Ok(trimmed.to_string());
         }
-        bail!("VideoGeneration imageReferences[{index}] must be an https:// or asset:// URL");
+        bail!("{}", invalid_video_image_reference_message(index));
     }
-    let parsed = url::Url::parse(trimmed).map_err(|_| {
-        anyhow::anyhow!(
-            "VideoGeneration imageReferences[{index}] must be an https:// or asset:// URL"
-        )
-    })?;
+    let parsed = url::Url::parse(trimmed)
+        .map_err(|_| anyhow::anyhow!("{}", invalid_video_image_reference_message(index)))?;
     if parsed.scheme() == "https" {
         return Ok(trimmed.to_string());
     }
-    bail!("VideoGeneration imageReferences[{index}] must be an https:// or asset:// URL")
+    bail!("{}", invalid_video_image_reference_message(index))
+}
+
+fn invalid_video_image_reference_message(index: usize) -> String {
+    format!("VideoGeneration imageReferences[{index}] must be an https:// or asset:// URL")
 }
 
 fn video_generation_output(
@@ -637,6 +638,7 @@ mod tests {
             "/tmp/person.png",
             "data:image/png;base64,AAAA",
             "asset://",
+            "asset:// approved-person",
         ] {
             let error = validate_video_image_references(&[value.to_string()])
                 .unwrap_err()

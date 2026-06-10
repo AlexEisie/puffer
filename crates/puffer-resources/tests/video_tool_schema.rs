@@ -29,9 +29,7 @@ fn video_generation_tool_schema_accepts_image_references() {
     let image_references = &tool["input_schema"]["properties"]["imageReferences"];
     assert_eq!(image_references["type"], "array");
     assert_eq!(image_references["items"]["type"], "string");
-    assert!(
-        image_references["description"]
-            .as_str()
-            .is_some_and(|value| value.contains("https://") && value.contains("asset://"))
-    );
+    assert!(image_references["description"]
+        .as_str()
+        .is_some_and(|value| value.contains("https://") && value.contains("asset://")));
 }

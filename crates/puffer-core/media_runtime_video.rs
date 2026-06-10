@@ -85,12 +85,7 @@ fn generate_replicate_video(
     request: &ExactMediaGenerationRequest,
     parameters: BTreeMap<String, String>,
 ) -> Result<ExactMediaGenerationResult> {
-    if !request.image_references.is_empty() {
-        bail!(
-            "provider {} does not support video image references",
-            request.provider_id
-        );
-    }
+    reject_unsupported_video_image_references(&request.provider_id, &request.image_references)?;
     let provider = registry.provider(&request.provider_id).with_context(|| {
         format!(
             "selected video model unavailable: {}/{} via {}",
@@ -207,12 +202,7 @@ fn generate_relaydance_video(
     capability: &MediaCapability,
     parameters: BTreeMap<String, String>,
 ) -> Result<ExactMediaGenerationResult> {
-    if !request.image_references.is_empty() {
-        bail!(
-            "provider {} does not support video image references",
-            request.provider_id
-        );
-    }
+    reject_unsupported_video_image_references(&request.provider_id, &request.image_references)?;
     let service = MediaGenerationService::new(workspace_root);
     let (adapter, secrets) = build_relaydance_adapter(
         registry,
@@ -286,6 +276,16 @@ fn finish_exact_video_job(
 ) -> Result<ExactMediaGenerationResult> {
     let artifacts = load_media_job_artifacts(service, &job)?;
     Ok(exact_media_generation_result(job, artifacts))
+}
+
+fn reject_unsupported_video_image_references(
+    provider_id: &str,
+    image_references: &[String],
+) -> Result<()> {
+    if image_references.is_empty() {
+        return Ok(());
+    }
+    bail!("provider {provider_id} does not support video image references")
 }
 
 fn replicate_video_request_from_parameters(
@@ -417,6 +417,7 @@ mod tests {
 
     #[test]
     fn relaydance_rejects_video_image_references() {
+        let workspace = tempfile::tempdir().unwrap();
         let request = ExactMediaGenerationRequest {
             kind: "video".to_string(),
             provider_id: "relaydance".to_string(),
@@ -432,7 +433,7 @@ mod tests {
         let error = generate_relaydance_video(
             &ProviderRegistry::new(),
             &AuthStore::default(),
-            tempfile::tempdir().unwrap().path(),
+            workspace.path(),
             &request,
             &MediaCapability {
                 provider_id: "relaydance".to_string(),
@@ -455,6 +456,35 @@ mod tests {
         .to_string();
 
         assert!(error.contains("relaydance"));
+        assert!(error.contains("image references"));
+    }
+
+    #[test]
+    fn replicate_rejects_video_image_references() {
+        let workspace = tempfile::tempdir().unwrap();
+        let request = ExactMediaGenerationRequest {
+            kind: "video".to_string(),
+            provider_id: "replicate".to_string(),
+            model_id: "owner/model-version".to_string(),
+            operation: "generate".to_string(),
+            adapter: "replicate_video".to_string(),
+            prompt: "animate image 1".to_string(),
+            image_references: vec!["https://example.com/person.png".to_string()],
+            parameters: BTreeMap::new(),
+            count: 1,
+        };
+
+        let error = generate_replicate_video(
+            &ProviderRegistry::new(),
+            &AuthStore::default(),
+            workspace.path(),
+            &request,
+            BTreeMap::new(),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("replicate"));
         assert!(error.contains("image references"));
     }
 }
