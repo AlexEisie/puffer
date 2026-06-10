@@ -78,7 +78,7 @@ pub struct SavedContact {
 pub struct ContactProposal {
     /// Proposed display name.
     pub name: String,
-    /// Two-sentence explanation of why this is important and not spam.
+    /// Two-sentence relationship summary grounded in connector context.
     pub description: String,
     /// Optional avatar URL or data URI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -117,7 +117,7 @@ pub fn normalize_contact_id(input: &str) -> Option<String> {
 /// Returns connector slugs that may own `contact_id`.
 pub fn connector_slugs_for_contact_id(contact_id: &str) -> Vec<&'static str> {
     match contact_id_prefix(contact_id) {
-        Some(TELEGRAM_CONTACT_PREFIX) => vec!["telegram-login", "telegram-bot"],
+        Some(TELEGRAM_CONTACT_PREFIX) => vec!["telegram-login"],
         Some(GOOGLE_CONTACT_PREFIX) => vec!["email", "gmail-browser", "gcal-browser"],
         Some(SLACK_CONTACT_PREFIX) => vec!["slack-login", "slack-app", "slack-bot"],
         Some(DISCORD_CONTACT_PREFIX) => vec!["discord-bot"],
@@ -214,6 +214,40 @@ pub fn contact_ids_from_payload(payload: &Value) -> Vec<String> {
     ids.into_iter().collect()
 }
 
+/// Returns the best display name implied by a connector event payload.
+pub fn contact_display_name_from_payload(payload: &Value) -> Option<String> {
+    if payload
+        .get("chat_kind")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind == "user")
+    {
+        if let Some(value) = string_at(payload, &["chat_title"]) {
+            return Some(value);
+        }
+    }
+    if let Some(value) = string_at(payload, &["sender_name"]) {
+        return Some(value);
+    }
+    for path in [
+        &["from"][..],
+        &["from_email"],
+        &["sender_email"],
+        &["organizer_email"],
+        &["message", "sender"],
+        &["message", "from"],
+    ] {
+        if let Some(value) = string_at(payload, path) {
+            return contact_display_name_from_header(&value);
+        }
+    }
+    for path in [&["event", "title"][..], &["event", "summary"]] {
+        if let Some(value) = string_at(payload, path) {
+            return Some(value);
+        }
+    }
+    None
+}
+
 /// Returns true when `filter_ids` is empty or intersects payload contact ids.
 pub fn contact_filter_matches(filter_ids: &[String], payload: &Value) -> bool {
     if filter_ids.is_empty() {
@@ -247,15 +281,18 @@ fn normalize_contact_suffix(prefix: &str, suffix: &str) -> Option<String> {
     if suffix.is_empty() {
         return None;
     }
-    if prefix == TELEGRAM_CONTACT_PREFIX {
-        suffix = suffix.to_ascii_lowercase();
-        if suffix.chars().all(|ch| ch.is_ascii_digit())
-            || !suffix
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        {
-            return None;
+    match prefix {
+        TELEGRAM_CONTACT_PREFIX => {
+            suffix = suffix.to_ascii_lowercase();
+            if suffix.chars().all(|ch| ch.is_ascii_digit())
+                || !suffix
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            {
+                return None;
+            }
         }
+        _ => {}
     }
     if prefix == GOOGLE_CONTACT_PREFIX {
         suffix = suffix.to_ascii_lowercase();
@@ -285,22 +322,47 @@ fn collect_explicit_ids(payload: &Value, ids: &mut BTreeSet<String>) {
 fn collect_telegram_ids(payload: &Value, ids: &mut BTreeSet<String>) {
     let chat_kind = string_at(payload, &["chat_kind"]);
     let direct_user = chat_kind.as_deref() == Some("user");
-    if direct_user {
-        if payload.get("chat_is_bot").and_then(Value::as_bool) == Some(true) {
+    if !direct_user || payload.get("chat_is_bot").and_then(Value::as_bool) == Some(true) {
+        return;
+    }
+    if let Some(username) = string_at(payload, &["chat_username"]) {
+        if telegram_username_looks_like_bot(&username) {
             return;
         }
-        if let Some(username) = string_at(payload, &["chat_username"]) {
-            insert_prefixed(ids, TELEGRAM_CONTACT_PREFIX, &username);
-        }
+        insert_prefixed(ids, TELEGRAM_CONTACT_PREFIX, &username);
     }
-    if !direct_user || string_at(payload, &["sender_username"]).is_some() {
-        if payload.get("sender_is_bot").and_then(Value::as_bool) == Some(true) {
-            return;
-        }
-        if let Some(username) = string_at(payload, &["sender_username"]) {
-            insert_prefixed(ids, TELEGRAM_CONTACT_PREFIX, &username);
-        }
+}
+
+fn telegram_username_looks_like_bot(username: &str) -> bool {
+    username.to_ascii_lowercase().ends_with("bot")
+}
+
+fn contact_display_name_from_header(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
     }
+    let emails = extract_emails(trimmed);
+    if emails.is_empty() {
+        return Some(trimmed.to_string());
+    }
+    if emails.len() == 1 {
+        return display_name_before_angle_addr(trimmed);
+    }
+    None
+}
+
+fn display_name_before_angle_addr(value: &str) -> Option<String> {
+    let open = value.find('<')?;
+    value[open + 1..].find('>')?;
+    let display = value[..open]
+        .trim()
+        .trim_matches(|ch: char| matches!(ch, '"' | '\''))
+        .trim();
+    if display.is_empty() || looks_like_email(display) {
+        return None;
+    }
+    Some(display.to_string())
 }
 
 fn collect_google_ids(payload: &Value, ids: &mut BTreeSet<String>) {
@@ -460,6 +522,8 @@ mod tests {
             Some("telegram@alice".to_string())
         );
         assert_eq!(normalize_contact_id("telegram@12345"), None);
+        assert_eq!(normalize_contact_id(" telegram-user-id@5229190700 "), None);
+        assert_eq!(normalize_contact_id(" telegram-chat-id@-100123 "), None);
         assert_eq!(
             normalize_contact_id("google@Alice@Example.COM"),
             Some("google@alice@example.com".to_string())
@@ -468,23 +532,41 @@ mod tests {
     }
 
     #[test]
-    fn extracts_telegram_direct_and_group_contacts() {
+    fn extracts_telegram_private_username_contacts_only() {
         assert_eq!(
             contact_ids_from_payload(&json!({
                 "chat_kind": "user",
                 "chat_username": "alice",
-                "sender_username": "alice"
+                "sender_username": "local_user",
+                "is_outgoing": true
             })),
             vec!["telegram@alice"]
         );
-        assert_eq!(
-            contact_ids_from_payload(&json!({
-                "chat_kind": "group",
-                "chat_id": -1,
-                "sender_username": "bob"
-            })),
-            vec!["telegram@bob"]
-        );
+        assert!(contact_ids_from_payload(&json!({
+            "chat_kind": "user",
+            "chat_id": 5229190700_i64,
+            "sender_id": 5229190700_i64
+        }))
+        .is_empty());
+        assert!(contact_ids_from_payload(&json!({
+            "chat_kind": "user",
+            "chat_username": "alertbot",
+            "chat_is_bot": true
+        }))
+        .is_empty());
+        assert!(contact_ids_from_payload(&json!({
+            "chat_kind": "group",
+            "chat_id": -1,
+            "sender_username": "bob"
+        }))
+        .is_empty());
+        assert!(contact_ids_from_payload(&json!({
+            "chat_kind": "group",
+            "chat_id": -1,
+            "sender_username": "local_user",
+            "is_outgoing": true
+        }))
+        .is_empty());
         assert!(contact_ids_from_payload(&json!({
             "chat_kind": "group",
             "chat_id": -1,
@@ -492,9 +574,19 @@ mod tests {
         }))
         .is_empty());
         assert!(contact_ids_from_payload(&json!({
+            "chat_kind": "channel",
+            "chat_id": -100,
+            "sender_username": "news"
+        }))
+        .is_empty());
+        assert!(contact_ids_from_payload(&json!({
             "chat_kind": "user",
-            "chat_username": "alertbot",
-            "chat_is_bot": true
+            "chat_username": "alertbot"
+        }))
+        .is_empty());
+        assert!(contact_ids_from_payload(&json!({
+            "chat_kind": "group",
+            "sender_username": "deploybot"
         }))
         .is_empty());
     }
@@ -518,6 +610,74 @@ mod tests {
     }
 
     #[test]
+    fn display_name_from_payload_cleans_email_headers() {
+        assert_eq!(
+            contact_display_name_from_payload(&json!({"from": "Alice <Alice@Example.COM>"}))
+                .as_deref(),
+            Some("Alice")
+        );
+        assert_eq!(
+            contact_display_name_from_payload(
+                &json!({"from": "\"Alice Example\" <alice@example.com>"})
+            )
+            .as_deref(),
+            Some("Alice Example")
+        );
+        assert_eq!(
+            contact_display_name_from_payload(&json!({"from": "alice@example.com"})),
+            None
+        );
+        assert_eq!(
+            contact_display_name_from_payload(
+                &json!({"message": {"sender": "Service <robot@example.net>"}})
+            )
+            .as_deref(),
+            Some("Service")
+        );
+        assert_eq!(
+            contact_display_name_from_payload(&json!({"message": {"sender": "robot@example.net"}})),
+            None
+        );
+        assert_eq!(
+            contact_display_name_from_payload(&json!({
+                "chat_kind": "user",
+                "chat_title": "Alice Profile",
+                "sender_name": "Local User"
+            }))
+            .as_deref(),
+            Some("Alice Profile")
+        );
+        assert_eq!(
+            contact_display_name_from_payload(&json!({
+                "chat_kind": "user",
+                "chat_title": "Alice Profile"
+            }))
+            .as_deref(),
+            Some("Alice Profile")
+        );
+        assert_eq!(
+            contact_display_name_from_payload(&json!({
+                "chat_kind": "group",
+                "chat_title": "Launch Team"
+            })),
+            None
+        );
+        assert_eq!(
+            contact_display_name_from_payload(&json!({
+                "chat_kind": "group",
+                "chat_title": "Launch Team",
+                "sender_name": "Alice"
+            }))
+            .as_deref(),
+            Some("Alice")
+        );
+        assert_eq!(
+            contact_display_name_from_payload(&json!({"from": "Tony"})).as_deref(),
+            Some("Tony")
+        );
+    }
+
+    #[test]
     fn contact_filter_uses_normalized_payload_ids() {
         let payload = json!({"from": "Alice <alice@example.com>"});
 
@@ -529,6 +689,10 @@ mod tests {
             &["google@bob@example.com".to_string()],
             &payload
         ));
+        assert!(!contact_filter_matches(
+            &["telegram@bob".to_string()],
+            &json!({"chat_kind":"group","chat_id":-1,"sender_username":"bob"})
+        ));
     }
 
     #[test]
@@ -539,6 +703,8 @@ mod tests {
                 &[
                     "google@alice@example.com".to_string(),
                     "telegram@ALICE".to_string(),
+                    "telegram-user-id@42".to_string(),
+                    "telegram-chat-id@-1".to_string(),
                     "lark@ou_1".to_string(),
                 ],
             ),

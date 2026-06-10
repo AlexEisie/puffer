@@ -1,4 +1,5 @@
 import type { Page, WebSocketRoute } from "@playwright/test";
+import { normalizeContactIds } from "../../src/lib/contactIds";
 
 export const FAKE_DAEMON_URL = "ws://127.0.0.1:17777/ws";
 
@@ -73,6 +74,7 @@ type MonitorHistoryFixture = {
 type ContactsSnapshotFixture = {
   contacts: JsonRecord[];
   candidates: JsonRecord[];
+  proposals?: JsonRecord[];
 };
 
 type ConnectorSetupQuestionFixture = {
@@ -120,6 +122,19 @@ const ONE_PIXEL_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==";
 
 const now = Date.now();
+function overlapsContactIds(record: JsonRecord, contactIds: string[]): boolean {
+  const saved = new Set(contactIds);
+  return normalizeContactIds(record.contact_ids).some((id) => saved.has(id));
+}
+
+function mergedOverlappingContactIds(contacts: JsonRecord[], savedId: string, contactIds: string[]): string[] {
+  const merged = [...contactIds];
+  for (const contact of contacts) {
+    if (String(contact.id ?? "") === savedId || !overlapsContactIds(contact, contactIds)) continue;
+    merged.push(...normalizeContactIds(contact.contact_ids));
+  }
+  return Array.from(new Set(merged)).sort();
+}
 
 const session = {
   sessionId: "session-browser",
@@ -729,7 +744,8 @@ export class FakeDaemon {
           }
         ]
       }
-    ]
+    ],
+    proposals: []
   };
   private nextTab = 2;
   private nextPty = 1;
@@ -912,7 +928,8 @@ export class FakeDaemon {
   setContactsSnapshot(snapshot: ContactsSnapshotFixture): void {
     this.contactsSnapshot = {
       contacts: snapshot.contacts.map((contact) => ({ ...contact })),
-      candidates: snapshot.candidates.map((candidate) => ({ ...candidate }))
+      candidates: snapshot.candidates.map((candidate) => ({ ...candidate })),
+      proposals: snapshot.proposals?.map((proposal) => ({ ...proposal })) ?? []
     };
   }
 
@@ -1586,17 +1603,22 @@ export class FakeDaemon {
     const matches = (record: JsonRecord) => !query || JSON.stringify(record).toLowerCase().includes(query);
     return {
       contacts: this.contactsSnapshot.contacts.filter(matches).slice(0, limit).map((contact) => ({ ...contact })),
-      candidates: this.contactsSnapshot.candidates.filter(matches).slice(0, limit).map((candidate) => ({ ...candidate }))
+      candidates: this.contactsSnapshot.candidates.filter(matches).slice(0, limit).map((candidate) => ({ ...candidate })),
+      proposals: this.contactsSnapshot.proposals.map((proposal) => ({ ...proposal }))
     };
   }
 
   private saveContact(params: JsonRecord): JsonRecord {
     const name = String(params.name ?? "").trim();
     if (!name) throw new Error("missing contact name");
-    const id = String(params.id ?? `contact-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "custom"}`);
-    const contactIds = Array.isArray(params.contact_ids)
-      ? Array.from(new Set(params.contact_ids.map((item) => String(item).trim()).filter(Boolean))).sort()
-      : [];
+    const id = String(
+      params.id ?? `contact-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "custom"}`
+    ).trim();
+    const contactIds = mergedOverlappingContactIds(
+      this.contactsSnapshot.contacts,
+      id,
+      normalizeContactIds(params.contact_ids)
+    );
     if (contactIds.length === 0) throw new Error("missing contact ids");
     const contact = {
       id,
@@ -1608,15 +1630,19 @@ export class FakeDaemon {
     this.contactsSnapshot = {
       ...this.contactsSnapshot,
       contacts: [
-        ...this.contactsSnapshot.contacts.filter((candidate) => candidate.id !== id),
+        ...this.contactsSnapshot.contacts.filter((candidate) =>
+          candidate.id !== id && !overlapsContactIds(candidate, contactIds)
+        ),
         contact
-      ].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")))
+      ].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""))),
+      proposals: this.contactsSnapshot.proposals.filter((proposal) => !overlapsContactIds(proposal, contactIds))
     };
     return this.contactsList({});
   }
 
   private deleteContact(params: JsonRecord): JsonRecord {
-    const id = String(params.id ?? "");
+    const id = String(params.id ?? "").trim();
+    if (!id) throw new Error("missing contact id");
     this.contactsSnapshot = {
       ...this.contactsSnapshot,
       contacts: this.contactsSnapshot.contacts.filter((contact) => contact.id !== id)
@@ -1626,13 +1652,23 @@ export class FakeDaemon {
 
   private inferContacts(params: JsonRecord): JsonRecord {
     const limit = Math.max(1, Number(params.limit ?? 30) || 30);
+    const savedContactIds = normalizeContactIds(
+      this.contactsSnapshot.contacts.flatMap((contact) =>
+        Array.isArray(contact.contact_ids) ? contact.contact_ids : []
+      )
+    );
+    const proposals = this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({
+      name: String(candidate.name ?? candidate.id ?? "Contact"),
+      description: `Messages from ${String(candidate.id ?? "this contact")} are frequent and have task-like context. They are retained because the candidate has recent conversation content rather than isolated bulk traffic.`,
+      avatar: candidate.avatar ?? null,
+      contact_ids: [String(candidate.id ?? "")]
+    })).filter((proposal) => proposal.contact_ids[0] && !overlapsContactIds(proposal, savedContactIds));
+    this.contactsSnapshot = {
+      ...this.contactsSnapshot,
+      proposals
+    };
     return {
-      proposals: this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({
-        name: String(candidate.name ?? candidate.id ?? "Contact"),
-        description: `Messages from ${String(candidate.id ?? "this contact")} are frequent and have task-like context. They are retained because the candidate has recent conversation content rather than isolated bulk traffic.`,
-        avatar: candidate.avatar ?? null,
-        contact_ids: [String(candidate.id ?? "")]
-      })).filter((proposal) => proposal.contact_ids[0]),
+      proposals: proposals.map((proposal) => ({ ...proposal })),
       candidates: this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({ ...candidate }))
     };
   }
