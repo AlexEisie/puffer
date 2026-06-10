@@ -742,6 +742,7 @@ mod tests {
             query_params: IndexMap::new(),
             chat_completions_path: None,
             discovery: None,
+            media: None,
             models: Vec::new(),
         }
     }

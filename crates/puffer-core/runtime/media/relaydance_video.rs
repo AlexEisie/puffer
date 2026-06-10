@@ -866,7 +866,10 @@ mod tests {
         assert_eq!(polled.status, MediaJobStatus::Queued); // still non-terminal
         let saved = service.load_job(&job.id).expect("saved job");
         assert_eq!(saved.status, MediaJobStatus::Queued); // not marked Failed
-        assert!(saved.error.as_deref().is_some_and(|e| e.contains("missing task id")));
+        assert!(saved
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("missing task id")));
         assert!(saved.updated_at_ms >= saved.created_at_ms); // persisted refresh, not frozen
     }
 }

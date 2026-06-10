@@ -230,7 +230,10 @@ mod tests {
         use super::map_video_task_status;
         assert_eq!(map_video_task_status("NOT_START"), MediaJobStatus::Queued);
         assert_eq!(map_video_task_status("submitted"), MediaJobStatus::Queued);
-        assert_eq!(map_video_task_status("IN_PROGRESS"), MediaJobStatus::Running);
+        assert_eq!(
+            map_video_task_status("IN_PROGRESS"),
+            MediaJobStatus::Running
+        );
         assert_eq!(map_video_task_status("SUCCESS"), MediaJobStatus::Succeeded);
         assert_eq!(map_video_task_status("FAILURE"), MediaJobStatus::Failed);
         assert_eq!(map_video_task_status("canceled"), MediaJobStatus::Canceled);

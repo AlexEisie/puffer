@@ -30,8 +30,80 @@ test("contacts tab saves a user-curated contact", async ({ page }) => {
   await dialog.getByRole("button", { name: /^Create$/ }).click();
 
   const request = await daemon.waitForRequest("contacts_save");
-  expect(request.params.contact_ids).toEqual(["telegram@alice", "google@alice@example.com"]);
+  expect(request.params.contact_ids).toEqual(["google@alice@example.com", "telegram@alice"]);
   await expect(selectedContact).toContainText("Launch Alice");
+});
+
+test("contacts save selects the sanitized backend-normalized saved contact", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setContactsSnapshot({
+    contacts: [
+      {
+        id: "contact-aaron",
+        name: "Aaron",
+        description: "Aaron should remain in the list but not steal selection.",
+        avatar: null,
+        contact_ids: ["telegram@aaron"]
+      }
+    ],
+    candidates: []
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openContacts(page);
+  await daemon.waitForRequest("contacts_list");
+
+  await page.getByRole("button", { name: "New" }).click();
+  const dialog = page.getByRole("dialog", { name: "Create contact" });
+  await dialog.getByLabel("Name").fill("Casey");
+  await dialog.getByLabel("Description").fill("Casey has a normalized Telegram id.");
+  await dialog.getByLabel("Contact IDs").fill("not-a-contact\nTelegram@@Casey\ntelegram@12345\nTelegram@@Casey");
+  await dialog.getByRole("button", { name: /^Create$/ }).click();
+
+  const request = await daemon.waitForRequest("contacts_save");
+  expect(request.params.contact_ids).toEqual(["telegram@casey"]);
+  const selectedContact = page.getByRole("complementary", { name: "Selected contact" });
+  await expect(selectedContact).toContainText("Casey");
+  await expect(selectedContact).toContainText("telegram@casey");
+  await expect(selectedContact).not.toContainText("Aaron should remain");
+});
+
+test("contacts save replaces an existing saved identity", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setContactsSnapshot({
+    contacts: [
+      {
+        id: "contact-alice",
+        name: "Alice",
+        description: "Original Alice record.",
+        avatar: null,
+        contact_ids: ["telegram@alice", "google@alice@example.com"]
+      }
+    ],
+    candidates: []
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openContacts(page);
+  await daemon.waitForRequest("contacts_list");
+
+  await page.getByRole("button", { name: "New" }).click();
+  const dialog = page.getByRole("dialog", { name: "Create contact" });
+  await dialog.getByLabel("Name").fill("Alice Work");
+  await dialog.getByLabel("Description").fill("Replacement Alice record.");
+  await dialog.getByLabel("Contact IDs").fill("Telegram@@Alice");
+  await dialog.getByRole("button", { name: /^Create$/ }).click();
+
+  const request = await daemon.waitForRequest("contacts_save");
+  expect(request.params.contact_ids).toEqual(["telegram@alice"]);
+  await expect(page.getByRole("heading", { name: "Contacts 1" })).toBeVisible();
+  const selectedContact = page.getByRole("complementary", { name: "Selected contact" });
+  await expect(selectedContact).toContainText("Alice Work");
+  await expect(selectedContact).toContainText("telegram@alice");
+  await expect(selectedContact).toContainText("google@alice@example.com");
+  await expect(page.getByLabel("Contact list").locator(".pf-task-row")).toHaveCount(1);
 });
 
 test("contacts list lazily renders large snapshots", async ({ page }) => {
@@ -58,6 +130,37 @@ test("contacts list lazily renders large snapshots", async ({ page }) => {
   await list.getByRole("button", { name: "Load 25 more contacts" }).scrollIntoViewIfNeeded();
   await expect(list.locator(".pf-task-row")).toHaveCount(65);
   await expect(list).toContainText("Lazy Contact 64");
+});
+
+test("contacts avatars render without exposing raw data URIs", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setContactsSnapshot({
+    contacts: [
+      {
+        id: "contact-alice",
+        name: "Alice",
+        description: "Alice sends actionable deployment and support questions.",
+        avatar: ALICE_AVATAR,
+        contact_ids: ["telegram@alice"]
+      }
+    ],
+    candidates: []
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openContacts(page);
+  await daemon.waitForRequest("contacts_list");
+
+  const row = page.locator(".pf-task-row").filter({ hasText: "Alice" });
+  await expect(row.locator(".pf-contact-avatar img")).toHaveAttribute("src", ALICE_AVATAR);
+  await expect(row).toContainText("Avatar saved");
+  await expect(row).not.toContainText(ALICE_AVATAR);
+
+  const selectedContact = page.getByRole("complementary", { name: "Selected contact" });
+  await expect(selectedContact.locator(".pf-contact-avatar img")).toHaveAttribute("src", ALICE_AVATAR);
+  await expect(selectedContact).toContainText("Avatar saved");
+  await expect(selectedContact).not.toContainText(ALICE_AVATAR);
 });
 
 test("contacts infer modal reruns only from explicit action", async ({ page }) => {

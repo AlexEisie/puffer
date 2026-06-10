@@ -1,4 +1,5 @@
 import type { Page, WebSocketRoute } from "@playwright/test";
+import { normalizeContactIds } from "../../src/lib/contactIds";
 
 export const FAKE_DAEMON_URL = "ws://127.0.0.1:17777/ws";
 
@@ -198,15 +199,18 @@ export const ONE_PIXEL_JPEG_BASE64 =
   "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/ASP/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/ASP/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Asf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QE//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QE//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QE//Z";
 
 const now = Date.now();
-
-function normalizedContactIds(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return Array.from(new Set(value.map((item) => String(item).trim()).filter(Boolean))).sort();
-}
-
 function overlapsContactIds(record: JsonRecord, contactIds: string[]): boolean {
   const saved = new Set(contactIds);
-  return normalizedContactIds(record.contact_ids).some((id) => saved.has(id));
+  return normalizeContactIds(record.contact_ids).some((id) => saved.has(id));
+}
+
+function mergedOverlappingContactIds(contacts: JsonRecord[], savedId: string, contactIds: string[]): string[] {
+  const merged = [...contactIds];
+  for (const contact of contacts) {
+    if (String(contact.id ?? "") === savedId || !overlapsContactIds(contact, contactIds)) continue;
+    merged.push(...normalizeContactIds(contact.contact_ids));
+  }
+  return Array.from(new Set(merged)).sort();
 }
 
 function defaultMediaSettings(): FakeMediaSettings {
@@ -1855,7 +1859,11 @@ export class FakeDaemon {
     const id = String(
       params.id ?? `contact-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "custom"}`
     ).trim();
-    const contactIds = normalizedContactIds(params.contact_ids);
+    const contactIds = mergedOverlappingContactIds(
+      this.contactsSnapshot.contacts,
+      id,
+      normalizeContactIds(params.contact_ids)
+    );
     if (contactIds.length === 0) throw new Error("missing contact ids");
     const contact = {
       id,
@@ -1867,7 +1875,9 @@ export class FakeDaemon {
     this.contactsSnapshot = {
       ...this.contactsSnapshot,
       contacts: [
-        ...this.contactsSnapshot.contacts.filter((candidate) => candidate.id !== id),
+        ...this.contactsSnapshot.contacts.filter((candidate) =>
+          candidate.id !== id && !overlapsContactIds(candidate, contactIds)
+        ),
         contact
       ].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""))),
       proposals: this.contactsSnapshot.proposals.filter((proposal) => !overlapsContactIds(proposal, contactIds))
@@ -1887,7 +1897,7 @@ export class FakeDaemon {
 
   private inferContacts(params: JsonRecord): JsonRecord {
     const limit = Math.max(1, Number(params.limit ?? 30) || 30);
-    const savedContactIds = normalizedContactIds(
+    const savedContactIds = normalizeContactIds(
       this.contactsSnapshot.contacts.flatMap((contact) =>
         Array.isArray(contact.contact_ids) ? contact.contact_ids : []
       )
