@@ -4281,6 +4281,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                     attempt,
                     max_attempts,
                     error,
+                    kind,
                 } => {
                     let mut progress = ev_progress.lock().unwrap();
                     let checkpoint = progress
@@ -4298,6 +4299,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         "attempt": attempt,
                         "maxAttempts": max_attempts,
                         "error": error,
+                        "kind": kind.as_str(),
                     })
                 }
             };

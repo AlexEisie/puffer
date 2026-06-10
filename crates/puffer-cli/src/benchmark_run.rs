@@ -329,6 +329,7 @@ pub(crate) fn run_benchmark_command(
                     attempt,
                     max_attempts,
                     error,
+                    ..
                 } => {
                     if let Some(lock) = incremental_ref {
                         if let Ok(mut f) = lock.lock() {

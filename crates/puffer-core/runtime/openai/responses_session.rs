@@ -47,7 +47,7 @@ use crate::runtime::structured_output_support::{
 use crate::runtime::system_prompt::render_runtime_system_prompt;
 use crate::runtime::tool_executor::ToolExecutionBackend;
 use crate::runtime::TurnRequestOptions;
-use crate::runtime::{ToolCallRequest, TurnStreamEvent, TurnUsageReport};
+use crate::runtime::{RetryAttemptKind, ToolCallRequest, TurnStreamEvent, TurnUsageReport};
 use crate::AppState;
 
 /// Per-prompt session for the OpenAI Responses API. All static-per-prompt
@@ -167,6 +167,7 @@ impl OpenAIResponsesTurnSession {
                 error:
                     "OpenAI rejected the reasoning include selector; retrying without reasoning."
                         .to_string(),
+                kind: RetryAttemptKind::ReasoningFallback,
             });
             let fallback_body =
                 self.build_request_body_with_reasoning(wire_input.clone(), state, true, false);
@@ -207,6 +208,7 @@ impl OpenAIResponsesTurnSession {
                         attempt,
                         max_attempts,
                         error: error.to_string(),
+                        kind: RetryAttemptKind::Stream,
                     });
                     if !delay.is_zero() {
                         std::thread::sleep(delay);

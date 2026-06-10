@@ -16,7 +16,7 @@ use crate::runtime::structured_output_support::{
     openai_responses_text_config, openai_tool_definitions_for_request,
 };
 use crate::runtime::system_prompt::render_runtime_system_prompt;
-use crate::runtime::{run_turn_hooks, TurnStreamEvent};
+use crate::runtime::{run_turn_hooks, RetryAttemptKind, TurnStreamEvent};
 use crate::AppState;
 use anyhow::Result;
 use puffer_provider_openai::build_json_post_request;
@@ -245,6 +245,7 @@ where
                             attempt,
                             max_attempts,
                             error: error.to_string(),
+                            kind: RetryAttemptKind::Stream,
                         });
                         if !delay.is_zero() {
                             std::thread::sleep(delay);
