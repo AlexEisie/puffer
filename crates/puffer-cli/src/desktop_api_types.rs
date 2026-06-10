@@ -107,6 +107,29 @@ pub(crate) struct ChatAttachmentDto {
     pub(crate) extension: String,
     pub(crate) kind: String,
     pub(crate) state: String,
+    pub(crate) source: ChatAttachmentSourceDto,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ChatAttachmentSourceDto {
+    LocalFile {
+        path: String,
+    },
+    RemoteUrl {
+        url: String,
+    },
+    GeneratedMedia {
+        #[serde(rename = "jobId")]
+        job_id: String,
+        #[serde(rename = "artifactId")]
+        artifact_id: String,
+        index: usize,
+        #[serde(rename = "localPath", skip_serializing_if = "Option::is_none")]
+        local_path: Option<String>,
+        #[serde(rename = "remoteSourceUrl", skip_serializing_if = "Option::is_none")]
+        remote_source_url: Option<String>,
+    },
 }
 
 impl ChatAttachmentDto {
@@ -131,6 +154,12 @@ impl ChatAttachmentDto {
                 StoredAttachmentKind::File => "file".to_string(),
             },
             state: state.to_string(),
+            source: ChatAttachmentSourceDto::LocalFile {
+                path: session_store
+                    .attachment_original_path(session_id, attachment)
+                    .display()
+                    .to_string(),
+            },
         }
     }
 }
@@ -158,6 +187,7 @@ pub(crate) enum TimelineItemDto {
     AssistantMessage {
         id: String,
         text: String,
+        attachments: Vec<ChatAttachmentDto>,
         #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
     },
@@ -485,11 +515,57 @@ pub(crate) struct SettingsConfigDto {
     pub(crate) default_model: Option<String>,
     pub(crate) openai_base_url: Option<String>,
     pub(crate) theme: String,
+    pub(crate) media: MediaSettingsDto,
     pub(crate) mascot_id: String,
     pub(crate) mascot_display_name: String,
     pub(crate) mascot_enabled: bool,
     pub(crate) ui_no_alt_screen: bool,
     pub(crate) ui_tmux_golden_mode: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaSettingsDto {
+    pub(crate) image: Option<MediaGenerationSettingsDto>,
+    pub(crate) video: Option<MediaGenerationSettingsDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaGenerationSettingsDto {
+    pub(crate) provider_id: String,
+    pub(crate) model_id: String,
+    pub(crate) operation: String,
+    pub(crate) adapter: String,
+    pub(crate) parameters: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaCapabilityInfoDto {
+    pub(crate) provider_id: String,
+    pub(crate) provider_display_name: String,
+    pub(crate) model_id: String,
+    pub(crate) model_display_name: String,
+    pub(crate) kind: String,
+    pub(crate) operation: String,
+    pub(crate) adapter: String,
+    pub(crate) parameters: Vec<MediaCapabilityParameterDto>,
+    pub(crate) defaults: std::collections::BTreeMap<String, String>,
+    pub(crate) status: String,
+    pub(crate) source: String,
+    pub(crate) reason: Option<String>,
+    pub(crate) checked_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaCapabilityParameterDto {
+    pub(crate) name: String,
+    pub(crate) label: String,
+    pub(crate) values: Vec<String>,
+    pub(crate) default: String,
+    pub(crate) request_field: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

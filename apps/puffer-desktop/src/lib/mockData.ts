@@ -652,6 +652,10 @@ export const mockSettingsSnapshot: SettingsSnapshot = {
     defaultModel: "claude-sonnet-4-5",
     openaiBaseUrl: null,
     theme: "puffer",
+    media: {
+      image: null,
+      video: null
+    },
     mascotId: "clawd",
     mascotDisplayName: "Clawd",
     mascotEnabled: true,

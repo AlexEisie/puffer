@@ -31,6 +31,37 @@ export type AttachmentPreviewFixture =
   | { state: "missing" }
   | { state: "unsupported" };
 
+type GeneratedVideoAccessFixture =
+  | {
+      state: "available";
+      path: string;
+      mimeType: string;
+      size: number;
+      expiresAtMs: number;
+      bytes?: Buffer;
+    }
+  | { state: "missing" }
+  | { state: "unsupported" };
+
+type GeneratedMediaArtifactFixture = {
+  artifactId: string;
+  index: number;
+  path: string;
+  mimeType: string;
+  size: number;
+};
+
+type GeneratedMediaResultFixture = Partial<{
+  jobId: string;
+  requestedCount: number;
+  kind: "image" | "video";
+  artifacts: GeneratedMediaArtifactFixture[];
+  providerId: string;
+  modelId: string;
+  status: string;
+  prompt: string;
+}>;
+
 type FakeFileValue =
   | string
   | {
@@ -92,6 +123,49 @@ type SessionDetailOverrides = {
   divergence: JsonRecord;
 };
 
+type FakeMediaSelection = {
+  providerId: string;
+  modelId: string;
+  operation: "generate";
+  adapter: string;
+  parameters: Record<string, string>;
+};
+
+type FakeMediaSettings = {
+  image: FakeMediaSelection | null;
+  video: FakeMediaSelection | null;
+};
+
+type FakeSettingsConfig = {
+  defaultProvider: string | null;
+  defaultModel: string | null;
+  openaiBaseUrl: string | null;
+  media: FakeMediaSettings;
+};
+
+export type FakeMediaCapability = {
+  providerId: string;
+  providerDisplayName: string;
+  modelId: string;
+  modelDisplayName: string;
+  kind: "image" | "video";
+  operation: string;
+  adapter: string;
+  parameters: Array<{
+    name: string;
+    label: string;
+    values: string[];
+    default: string;
+    requestField: string | null;
+    wireType: "string" | "number";
+  }>;
+  defaults: Record<string, string>;
+  status: string;
+  source: string;
+  reason: string | null;
+  checkedAtMs: number;
+};
+
 export type FakeDaemonSessionInput = {
   sessionId: string;
   displayName?: string | null;
@@ -120,6 +194,9 @@ export type FakeDaemonSessionInput = {
 const ONE_PIXEL_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==";
 
+export const ONE_PIXEL_JPEG_BASE64 =
+  "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/ASP/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/ASP/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Asf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QE//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QE//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QE//Z";
+
 const now = Date.now();
 
 function normalizedContactIds(value: unknown): string[] {
@@ -130,6 +207,126 @@ function normalizedContactIds(value: unknown): string[] {
 function overlapsContactIds(record: JsonRecord, contactIds: string[]): boolean {
   const saved = new Set(contactIds);
   return normalizedContactIds(record.contact_ids).some((id) => saved.has(id));
+}
+
+function defaultMediaSettings(): FakeMediaSettings {
+  return {
+    image: null,
+    video: null
+  };
+}
+
+function cloneMediaSettings(media: FakeMediaSettings): FakeMediaSettings {
+  return {
+    image: cloneMediaSelection(media.image),
+    video: cloneMediaSelection(media.video)
+  };
+}
+
+function normalizeMediaSettings(value: unknown): FakeMediaSettings {
+  const defaults = defaultMediaSettings();
+  if (!value || typeof value !== "object") return defaults;
+  const record = value as JsonRecord;
+  return {
+    image: normalizeMediaSelection(record.image),
+    video: normalizeMediaSelection(record.video)
+  };
+}
+
+function cloneMediaSelection(selection: FakeMediaSelection | null): FakeMediaSelection | null {
+  return selection ? { ...selection, parameters: { ...selection.parameters } } : null;
+}
+
+function normalizeMediaSelection(value: unknown): FakeMediaSelection | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as JsonRecord;
+  if (
+    typeof record.providerId !== "string" ||
+    typeof record.modelId !== "string" ||
+    record.operation !== "generate" ||
+    typeof record.adapter !== "string" ||
+    !record.parameters ||
+    typeof record.parameters !== "object" ||
+    Array.isArray(record.parameters)
+  ) {
+    return null;
+  }
+  return {
+    providerId: record.providerId,
+    modelId: record.modelId,
+    operation: record.operation,
+    adapter: record.adapter,
+    parameters: normalizeStringRecord(record.parameters)
+  };
+}
+
+function normalizeStringRecord(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object") return {};
+  return Object.fromEntries(
+    Object.entries(value as JsonRecord)
+      .filter(([, entry]) => typeof entry === "string")
+      .map(([key, entry]) => [key, entry as string])
+  );
+}
+
+export function defaultFakeMediaCapabilities(): FakeMediaCapability[] {
+  return [
+    {
+      providerId: "openai",
+      providerDisplayName: "OpenAI",
+      modelId: "gpt-image-1",
+      modelDisplayName: "GPT Image 1",
+      kind: "image",
+      operation: "generate",
+      adapter: "images_json",
+      parameters: [
+        {
+          name: "size",
+          label: "Size",
+          values: ["1024x1024", "1024x1536", "1536x1024"],
+          default: "1024x1024",
+          requestField: "size",
+          wireType: "string"
+        },
+        {
+          name: "quality",
+          label: "Quality",
+          values: ["auto", "low", "medium", "high"],
+          default: "auto",
+          requestField: "quality",
+          wireType: "string"
+        },
+        {
+          name: "output_format",
+          label: "Output format",
+          values: ["png", "jpeg", "webp"],
+          default: "png",
+          requestField: "output_format",
+          wireType: "string"
+        }
+      ],
+      defaults: {
+        size: "1024x1024",
+        quality: "auto",
+        output_format: "png"
+      },
+      status: "available",
+      source: "fake-daemon",
+      reason: null,
+      checkedAtMs: now
+    }
+  ];
+}
+
+function cloneMediaCapability(capability: FakeMediaCapability): FakeMediaCapability {
+  return {
+    ...capability,
+    parameters: capability.parameters.map((parameter) => ({
+      ...parameter,
+      values: [...parameter.values]
+    })),
+    defaults: { ...capability.defaults }
+  };
 }
 
 const session = {
@@ -305,6 +502,9 @@ export class FakeDaemon {
   private readonly projectTags = new Map<string, string[]>();
   private readonly timelines = new Map<string, JsonRecord[]>();
   private readonly attachmentPreviews = new Map<string, AttachmentPreviewFixture>();
+  private readonly generatedMediaPreviews = new Map<string, AttachmentPreviewFixture>();
+  private readonly generatedVideoAccesses = new Map<string, GeneratedVideoAccessFixture>();
+  private generatedMediaResult: GeneratedMediaResultFixture | null = null;
   private readonly details = new Map<string, SessionDetailOverrides>();
   private groupedSessionFilter: ((metadata: JsonRecord) => boolean) | null = null;
   private readonly files = new Map<string, FakeFileValue>();
@@ -314,19 +514,17 @@ export class FakeDaemon {
   private readonly lspLocations = new Map<string, string>();
   private readonly providerModels: Record<string, JsonRecord[]>;
   private readonly providerSummaries: JsonRecord[] | null;
+  private mediaCapabilities: FakeMediaCapability[];
   private readonly emitBrowserOpenFrame: boolean;
   private readonly emitBrowserResizeFrame: boolean;
   private workspaceRoot = "/tmp/puffer";
   private authStatuses: JsonRecord[];
   private externalCredentials: JsonRecord[];
-  private settingsConfig: {
-    defaultProvider: string | null;
-    defaultModel: string | null;
-    openaiBaseUrl: string | null;
-  } = {
+  private settingsConfig: FakeSettingsConfig = {
     defaultProvider: "codex",
     defaultModel: "test-model",
-    openaiBaseUrl: null
+    openaiBaseUrl: null,
+    media: defaultMediaSettings()
   };
   private secrets: JsonRecord[] = [];
   private permissions: JsonRecord = {
@@ -751,6 +949,7 @@ export class FakeDaemon {
     sessions?: FakeDaemonSessionInput[];
     providerModels?: Record<string, JsonRecord[]>;
     providers?: JsonRecord[];
+    mediaCapabilities?: FakeMediaCapability[];
     mcpServers?: JsonRecord[];
     protocol?: "legacy" | "real";
     workspaceRoot?: string;
@@ -785,6 +984,9 @@ export class FakeDaemon {
     }
     this.providerModels = options.providerModels ?? {};
     this.providerSummaries = options.providers ?? null;
+    this.mediaCapabilities = (options.mediaCapabilities ?? defaultFakeMediaCapabilities()).map(
+      cloneMediaCapability
+    );
     this.mcpServers = options.mcpServers ?? this.mcpServers;
     this.emitBrowserOpenFrame = options.emitBrowserOpenFrame ?? true;
     this.emitBrowserResizeFrame = options.emitBrowserResizeFrame ?? false;
@@ -798,21 +1000,20 @@ export class FakeDaemon {
     };
   }
 
-  setSettingsConfig(
-    config: Partial<{
-      defaultProvider: string | null;
-      defaultModel: string | null;
-      openaiBaseUrl: string | null;
-    }>
-  ): void {
+  setSettingsConfig(config: Partial<FakeSettingsConfig>): void {
     this.settingsConfig = {
       ...this.settingsConfig,
-      ...config
+      ...config,
+      media: config.media ? cloneMediaSettings(config.media) : this.settingsConfig.media
     };
   }
 
   setProviderModels(providerId: string, models: JsonRecord[]): void {
     this.providerModels[providerId] = models;
+  }
+
+  setMediaCapabilities(capabilities: FakeMediaCapability[]): void {
+    this.mediaCapabilities = capabilities.map(cloneMediaCapability);
   }
 
   setNetworkProxy(networkProxy: JsonRecord): void {
@@ -974,6 +1175,22 @@ export class FakeDaemon {
         this.sockets.delete(socket);
       });
     });
+    const httpOrigin = expectedUrl.origin.replace(/^ws/, "http");
+    await page.route(`${httpOrigin}/media/generated-video/**`, async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      const access = Array.from(this.generatedVideoAccesses.values()).find(
+        (entry) => entry.state === "available" && entry.path === path
+      );
+      if (!access || access.state !== "available") {
+        await route.fulfill({ status: 404, body: "" });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: access.mimeType,
+        body: access.bytes ?? Buffer.from("mp4-bytes")
+      });
+    });
   }
 
   async dropConnections(): Promise<void> {
@@ -1084,6 +1301,26 @@ export class FakeDaemon {
     preview: AttachmentPreviewFixture
   ): void {
     this.attachmentPreviews.set(this.attachmentPreviewKey(sessionId, attachmentId), preview);
+  }
+
+  seedGeneratedMediaPreview(
+    sessionId: string,
+    artifactId: string,
+    preview: AttachmentPreviewFixture
+  ): void {
+    this.generatedMediaPreviews.set(this.generatedMediaPreviewKey(sessionId, artifactId), preview);
+  }
+
+  seedGeneratedVideoAccess(
+    sessionId: string,
+    artifactId: string,
+    access: GeneratedVideoAccessFixture
+  ): void {
+    this.generatedVideoAccesses.set(this.generatedMediaPreviewKey(sessionId, artifactId), access);
+  }
+
+  setGeneratedMediaResult(result: GeneratedMediaResultFixture | null): void {
+    this.generatedMediaResult = result ? { ...result } : null;
   }
 
   updateSessionMetadata(sessionId: string, updates: JsonRecord): void {
@@ -1223,6 +1460,10 @@ export class FakeDaemon {
         return this.runAgentTurn(request.params);
       case "read_chat_attachment_preview":
         return this.readChatAttachmentPreview(request.params);
+      case "read_generated_media_preview":
+        return this.readGeneratedMediaPreview(request.params);
+      case "create_generated_video_access":
+        return this.createGeneratedVideoAccess(request.params);
       case "start_connector_setup":
         return this.startConnectorSetup(request.params);
       case "cancel_turn": {
@@ -1241,6 +1482,10 @@ export class FakeDaemon {
           providerId: String(request.params.providerId ?? "codex"),
           models: this.modelsForProvider(String(request.params.providerId ?? "codex"))
         };
+      case "list_media_capabilities":
+        return this.listMediaCapabilities(request.params);
+      case "generate_media":
+        return this.generateMedia(request.params);
       case "update_config":
         return this.updateConfig(request.params);
       case "local_model_status":
@@ -1831,8 +2076,32 @@ export class FakeDaemon {
     };
   }
 
+  private readGeneratedMediaPreview(params: JsonRecord): AttachmentPreviewFixture {
+    const sessionId = String(params.sessionId ?? "");
+    const artifactId = String(params.artifactId ?? "");
+    return this.generatedMediaPreviews.get(this.generatedMediaPreviewKey(sessionId, artifactId)) ?? {
+      state: "missing"
+    };
+  }
+
+  private createGeneratedVideoAccess(params: JsonRecord): GeneratedVideoAccessFixture {
+    const sessionId = String(params.sessionId ?? "");
+    const artifactId = String(params.artifactId ?? "");
+    const access = this.generatedVideoAccesses.get(
+      this.generatedMediaPreviewKey(sessionId, artifactId)
+    );
+    if (!access) return { state: "missing" };
+    if (access.state !== "available") return access;
+    const { bytes: _bytes, ...wire } = access;
+    return wire;
+  }
+
   private attachmentPreviewKey(sessionId: string, attachmentId: string): string {
     return `${sessionId}:${attachmentId}`;
+  }
+
+  private generatedMediaPreviewKey(sessionId: string, artifactId: string): string {
+    return `${sessionId}\u0000${artifactId}`;
   }
 
   private startConnectorSetup(params: JsonRecord): JsonRecord {
@@ -1980,7 +2249,59 @@ export class FakeDaemon {
       this.settingsConfig.openaiBaseUrl =
         typeof params.openaiBaseUrl === "string" ? params.openaiBaseUrl : null;
     }
+    if ("media" in params) {
+      this.settingsConfig.media = normalizeMediaSettings(params.media);
+    }
     return this.settingsSnapshot();
+  }
+
+  private listMediaCapabilities(params: JsonRecord): JsonRecord {
+    const kind = typeof params.kind === "string" ? params.kind : null;
+    return {
+      capabilities: this.mediaCapabilities
+        .filter((capability) => !kind || capability.kind === kind)
+        .map(cloneMediaCapability)
+    };
+  }
+
+  private generateMedia(params: JsonRecord): JsonRecord {
+    const kind = params.kind === "video" ? "video" : "image";
+    const prompt = typeof params.prompt === "string" ? params.prompt.trim() : "";
+    if (!prompt) throw new Error(`/${kind} requires a prompt.`);
+    const capabilities = this.mediaCapabilities.filter(
+      (capability) => capability.kind === kind && capability.status === "available"
+    );
+    if (capabilities.length === 0) {
+      throw new Error(`No ${kind} capabilities available.`);
+    }
+    const settings = this.settingsConfig.media[kind];
+    if (!settings) {
+      throw new Error(`${kind} media provider/model/adapter is not configured.`);
+    }
+    const capability = capabilities.find(
+      (item) =>
+        item.providerId === settings.providerId &&
+        item.modelId === settings.modelId &&
+        item.adapter === settings.adapter
+    );
+    if (!capability) {
+      throw new Error(
+        `selected ${kind} model unavailable: ${settings.providerId}/${settings.modelId} via ${settings.adapter}`
+      );
+    }
+    const jobId = `media-job-${Date.now().toString(36)}`;
+    const fixture = this.generatedMediaResult;
+    const artifacts = fixture?.artifacts ?? [];
+    return {
+      jobId: fixture?.jobId ?? jobId,
+      requestedCount: fixture?.requestedCount ?? artifacts.length,
+      artifacts,
+      kind: fixture?.kind ?? kind,
+      providerId: fixture?.providerId ?? settings.providerId,
+      modelId: fixture?.modelId ?? settings.modelId,
+      status: fixture?.status ?? "queued",
+      prompt: fixture?.prompt ?? prompt
+    };
   }
 
   private testProxy(params: JsonRecord): JsonRecord {
@@ -2188,6 +2509,7 @@ export class FakeDaemon {
         defaultModel: this.settingsConfig.defaultModel,
         openaiBaseUrl: this.settingsConfig.openaiBaseUrl,
         theme: "system",
+        media: cloneMediaSettings(this.settingsConfig.media),
         mascotId: "puffer",
         mascotDisplayName: "Puffer",
         mascotEnabled: true,

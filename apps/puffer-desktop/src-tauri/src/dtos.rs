@@ -3,6 +3,7 @@ use puffer_session_store::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// Describes one session row rendered in the desktop sidebar.
@@ -98,6 +99,29 @@ pub(crate) struct ChatAttachmentDto {
     pub extension: String,
     pub kind: String,
     pub state: String,
+    pub source: ChatAttachmentSourceDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ChatAttachmentSourceDto {
+    LocalFile {
+        path: String,
+    },
+    RemoteUrl {
+        url: String,
+    },
+    GeneratedMedia {
+        #[serde(rename = "jobId")]
+        job_id: String,
+        #[serde(rename = "artifactId")]
+        artifact_id: String,
+        index: usize,
+        #[serde(rename = "localPath", skip_serializing_if = "Option::is_none")]
+        local_path: Option<String>,
+        #[serde(rename = "remoteSourceUrl", skip_serializing_if = "Option::is_none")]
+        remote_source_url: Option<String>,
+    },
 }
 
 impl ChatAttachmentDto {
@@ -122,6 +146,12 @@ impl ChatAttachmentDto {
                 StoredAttachmentKind::File => "file".to_string(),
             },
             state: state.to_string(),
+            source: ChatAttachmentSourceDto::LocalFile {
+                path: store
+                    .attachment_original_path(session_id, attachment)
+                    .display()
+                    .to_string(),
+            },
         }
     }
 }
@@ -151,6 +181,7 @@ pub(crate) enum TimelineItemDto {
     AssistantMessage {
         id: String,
         text: String,
+        attachments: Vec<ChatAttachmentDto>,
         #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
     },
@@ -361,11 +392,61 @@ pub(crate) struct SettingsConfigDto {
     pub default_model: Option<String>,
     pub openai_base_url: Option<String>,
     pub theme: String,
+    pub media: MediaSettingsDto,
     pub mascot_id: String,
     pub mascot_display_name: String,
     pub mascot_enabled: bool,
     pub ui_no_alt_screen: bool,
     pub ui_tmux_golden_mode: bool,
+}
+
+/// Describes persisted image and video generation defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaSettingsDto {
+    pub image: Option<MediaGenerationSettingsDto>,
+    pub video: Option<MediaGenerationSettingsDto>,
+}
+
+/// Describes one persisted media generation default.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaGenerationSettingsDto {
+    pub provider_id: String,
+    pub model_id: String,
+    pub operation: String,
+    pub adapter: String,
+    pub parameters: BTreeMap<String, String>,
+}
+
+/// Describes one verified media generation capability.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaCapabilityInfoDto {
+    pub provider_id: String,
+    pub provider_display_name: String,
+    pub model_id: String,
+    pub model_display_name: String,
+    pub kind: String,
+    pub operation: String,
+    pub adapter: String,
+    pub parameters: Vec<MediaCapabilityParameterDto>,
+    pub defaults: BTreeMap<String, String>,
+    pub status: String,
+    pub source: String,
+    pub reason: Option<String>,
+    pub checked_at_ms: u64,
+}
+
+/// Describes one selectable media parameter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaCapabilityParameterDto {
+    pub name: String,
+    pub label: String,
+    pub values: Vec<String>,
+    pub default: String,
+    pub request_field: Option<String>,
 }
 
 /// Describes aggregate loaded resource counts.

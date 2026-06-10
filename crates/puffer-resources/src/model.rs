@@ -1,6 +1,6 @@
 use puffer_provider_registry::{
-    AuthMode, ModelDescriptor, ModelDiscoveryConfig, ProviderDescriptor, ProviderSource,
-    ProviderSourceKind,
+    AuthMode, ModelDescriptor, ModelDiscoveryConfig, ProviderDescriptor, ProviderMediaDescriptor,
+    ProviderSource, ProviderSourceKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -514,6 +514,8 @@ pub struct ProviderPack {
     #[serde(default)]
     pub discovery: Option<ModelDiscoveryConfig>,
     #[serde(default)]
+    pub media: Option<ProviderMediaDescriptor>,
+    #[serde(default)]
     pub models: Vec<ModelDescriptor>,
 }
 
@@ -530,6 +532,7 @@ impl ProviderPack {
             query_params: self.query_params,
             chat_completions_path: self.chat_completions_path,
             discovery: self.discovery,
+            media: self.media,
             models: self.models,
         }
     }
@@ -603,6 +606,343 @@ mod tests {
         );
     }
 
+    /// Confirms OpenAI declares only concrete executable Image API models for
+    /// the shared exact media resolver.
+    #[test]
+    fn openai_yaml_declares_exact_gpt_image_descriptor() {
+        let yaml = include_str!("../../../resources/providers/openai.yaml");
+        let pack: ProviderPack = serde_yaml::from_str(yaml).expect("openai.yaml parses");
+        let descriptor = pack.into_descriptor();
+
+        descriptor
+            .validate_media_descriptors()
+            .expect("media descriptor validates");
+        let image = descriptor
+            .media
+            .as_ref()
+            .and_then(|media| media.image.as_ref())
+            .expect("image media descriptor");
+        assert_eq!(
+            image
+                .execution
+                .as_ref()
+                .map(|execution| execution.path.as_str()),
+            Some("/v1/images/generations")
+        );
+        assert!(image.models.iter().any(|model| {
+            model.id == "gpt-image-1"
+                && model
+                    .operations
+                    .contains(&puffer_provider_registry::MediaOperation::Generate)
+                && model.parameters.iter().any(|parameter| {
+                    parameter.name == "size" && parameter.values.contains(&"1024x1024".to_string())
+                })
+                && model.parameters.iter().any(|parameter| {
+                    parameter.name == "quality" && parameter.values.contains(&"auto".to_string())
+                })
+                && model.parameters.iter().any(|parameter| {
+                    parameter.name == "output_format"
+                        && parameter.values.contains(&"png".to_string())
+                })
+        }));
+        let gpt_image_2 = image
+            .models
+            .iter()
+            .find(|model| model.id == "gpt-image-2")
+            .expect("OpenAI should include the current GPT Image 2 model");
+        let size = gpt_image_2
+            .parameters
+            .iter()
+            .find(|parameter| parameter.name == "size")
+            .expect("gpt-image-2 size parameter");
+        assert!(size.values.contains(&"2048x2048".to_string()));
+        assert!(size.values.contains(&"3840x2160".to_string()));
+        assert!(!image.models.iter().any(|model| model.id == "auto"));
+    }
+
+    /// Confirms provider image model lists include all official static models
+    /// that fit the currently implemented media execution adapters.
+    #[test]
+    fn bundled_static_image_model_lists_cover_official_provider_models() {
+        let cases = [
+            (
+                "xai",
+                include_str!("../../../resources/providers/xai.yaml"),
+                &["grok-imagine-image-quality", "grok-imagine-image"][..],
+            ),
+            (
+                "minimax-cn",
+                include_str!("../../../resources/providers/minimax-cn.yaml"),
+                &["image-01", "image-01-live"][..],
+            ),
+        ];
+
+        for (provider_id, yaml, expected_models) in cases {
+            let pack: ProviderPack = serde_yaml::from_str(yaml).expect("provider yaml parses");
+            assert_eq!(pack.id, provider_id);
+            let descriptor = pack.into_descriptor();
+            let image = descriptor
+                .media
+                .as_ref()
+                .and_then(|media| media.image.as_ref())
+                .expect("image media descriptor");
+            for expected_model in expected_models {
+                assert!(
+                    image.models.iter().any(|model| model.id == *expected_model),
+                    "{provider_id} should include {expected_model}"
+                );
+            }
+        }
+    }
+
+    /// Confirms cloud providers with documented synchronous JSON image APIs
+    /// declare exact executable descriptors.
+    #[test]
+    fn bundled_cloud_image_providers_declare_executable_descriptors() {
+        let providers = [
+            (
+                "byteplus",
+                include_str!("../../../resources/providers/byteplus.yaml"),
+                "seedream-5-0-260128",
+                puffer_provider_registry::MediaExecutionKind::ImagesJson,
+            ),
+            (
+                "zhipu",
+                include_str!("../../../resources/providers/zhipu.yaml"),
+                "glm-image",
+                puffer_provider_registry::MediaExecutionKind::ImagesJson,
+            ),
+            (
+                "xai",
+                include_str!("../../../resources/providers/xai.yaml"),
+                "grok-imagine-image-quality",
+                puffer_provider_registry::MediaExecutionKind::ImagesJson,
+            ),
+            (
+                "vercel-ai-gateway",
+                include_str!("../../../resources/providers/vercel-ai-gateway.yaml"),
+                "openai/gpt-image-2",
+                puffer_provider_registry::MediaExecutionKind::ImagesJson,
+            ),
+            (
+                "minimax",
+                include_str!("../../../resources/providers/minimax.yaml"),
+                "image-01",
+                puffer_provider_registry::MediaExecutionKind::MinimaxImage,
+            ),
+            (
+                "minimax-cn",
+                include_str!("../../../resources/providers/minimax-cn.yaml"),
+                "image-01",
+                puffer_provider_registry::MediaExecutionKind::MinimaxImage,
+            ),
+        ];
+
+        for (provider_id, yaml, expected_model, expected_adapter) in providers {
+            let pack: ProviderPack = serde_yaml::from_str(yaml).expect("provider yaml parses");
+            assert_eq!(pack.id, provider_id);
+            let descriptor = pack.into_descriptor();
+            descriptor
+                .validate_media_descriptors()
+                .expect("media descriptor validates");
+            let image = descriptor
+                .media
+                .as_ref()
+                .and_then(|media| media.image.as_ref())
+                .expect("image media descriptor");
+            let model = image
+                .models
+                .iter()
+                .find(|model| model.id == expected_model)
+                .unwrap_or_else(|| panic!("{provider_id} should include {expected_model}"));
+            let effective_adapter = model
+                .execution
+                .as_ref()
+                .or(image.execution.as_ref())
+                .map(|execution| execution.adapter);
+            assert_eq!(effective_adapter, Some(expected_adapter));
+            assert!(!image.models.iter().any(|model| model.id == "auto"));
+        }
+    }
+
+    /// Guards the BytePlus video duration contract end-to-end: the bundled
+    /// descriptor must encode `duration` as a JSON number for both Seedance 2.0
+    /// models. The fast model rejects a string `duration` with `InvalidParameter`,
+    /// so a dropped `wire_type` (defaulting to `String`) silently breaks
+    /// submission. See resources/providers/byteplus.yaml.
+    #[test]
+    fn bundled_byteplus_video_duration_is_numeric() {
+        let pack: ProviderPack =
+            serde_yaml::from_str(include_str!("../../../resources/providers/byteplus.yaml"))
+                .expect("byteplus.yaml parses");
+        let descriptor = pack.into_descriptor();
+        let video = descriptor
+            .media
+            .as_ref()
+            .and_then(|media| media.video.as_ref())
+            .expect("byteplus video media descriptor");
+
+        for model_id in [
+            "dreamina-seedance-2-0-260128",
+            "dreamina-seedance-2-0-fast-260128",
+        ] {
+            let model = video
+                .models
+                .iter()
+                .find(|model| model.id == model_id)
+                .unwrap_or_else(|| panic!("byteplus video should include {model_id}"));
+            let duration = model
+                .parameters
+                .iter()
+                .find(|parameter| parameter.name == "duration_seconds")
+                .unwrap_or_else(|| panic!("{model_id} should declare duration_seconds"));
+            assert_eq!(duration.request_field.as_deref(), Some("duration"));
+            assert_eq!(
+                duration.wire_type,
+                puffer_provider_registry::MediaParameterWireType::Number,
+                "{model_id} duration must serialize as a JSON number, not a string",
+            );
+        }
+    }
+
+    /// Confirms trusted router/gateway media discovery is only declared with
+    /// executable chat image-output adapters.
+    #[test]
+    fn bundled_router_gateway_image_discovery_uses_chat_output_adapter() {
+        let providers = [
+            (
+                "openrouter",
+                include_str!("../../../resources/providers/openrouter.yaml"),
+            ),
+            (
+                "vercel-ai-gateway",
+                include_str!("../../../resources/providers/vercel-ai-gateway.yaml"),
+            ),
+        ];
+
+        for (provider_id, yaml) in providers {
+            let pack: ProviderPack = serde_yaml::from_str(yaml).expect("provider yaml parses");
+            assert_eq!(pack.id, provider_id);
+            let descriptor = pack.into_descriptor();
+            descriptor
+                .validate_media_descriptors()
+                .expect("media descriptor validates");
+            let image = descriptor
+                .media
+                .as_ref()
+                .and_then(|media| media.image.as_ref())
+                .expect("image media descriptor");
+            assert_eq!(
+                image.discovery.as_ref().map(|discovery| discovery.adapter),
+                Some(puffer_provider_registry::MediaDiscoveryKind::TrustedImageOutput)
+            );
+            assert_eq!(
+                image.execution.as_ref().map(|execution| execution.adapter),
+                Some(puffer_provider_registry::MediaExecutionKind::ChatImageOutput)
+            );
+        }
+    }
+
+    /// Confirms Vercel's static image-only models remain executable through
+    /// Images JSON while provider-level discovery uses chat image output.
+    #[test]
+    fn vercel_static_image_models_override_discovery_execution_adapter() {
+        let yaml = include_str!("../../../resources/providers/vercel-ai-gateway.yaml");
+        let pack: ProviderPack = serde_yaml::from_str(yaml).expect("vercel yaml parses");
+        let descriptor = pack.into_descriptor();
+        descriptor
+            .validate_media_descriptors()
+            .expect("media descriptor validates");
+        let image = descriptor
+            .media
+            .as_ref()
+            .and_then(|media| media.image.as_ref())
+            .expect("image media descriptor");
+        let model = image
+            .models
+            .iter()
+            .find(|model| model.id == "openai/gpt-image-2")
+            .expect("vercel static image model");
+
+        assert_eq!(
+            model.execution.as_ref().map(|execution| execution.adapter),
+            Some(puffer_provider_registry::MediaExecutionKind::ImagesJson)
+        );
+    }
+
+    /// Confirms Vercel's official image-only model list is mirrored as a
+    /// static Images JSON fallback when discovery is unavailable.
+    #[test]
+    fn vercel_static_image_models_cover_official_gateway_image_type() {
+        let yaml = include_str!("../../../resources/providers/vercel-ai-gateway.yaml");
+        let pack: ProviderPack = serde_yaml::from_str(yaml).expect("vercel yaml parses");
+        let descriptor = pack.into_descriptor();
+        let image = descriptor
+            .media
+            .as_ref()
+            .and_then(|media| media.image.as_ref())
+            .expect("image media descriptor");
+        let expected_models = [
+            "bfl/flux-2-flex",
+            "bfl/flux-2-klein-4b",
+            "bfl/flux-2-klein-9b",
+            "bfl/flux-2-max",
+            "bfl/flux-2-pro",
+            "bfl/flux-kontext-max",
+            "bfl/flux-kontext-pro",
+            "bfl/flux-pro-1.0-fill",
+            "bfl/flux-pro-1.1",
+            "bfl/flux-pro-1.1-ultra",
+            "bytedance/seedream-4.0",
+            "bytedance/seedream-4.5",
+            "bytedance/seedream-5.0-lite",
+            "google/imagen-4.0-fast-generate-001",
+            "google/imagen-4.0-generate-001",
+            "google/imagen-4.0-ultra-generate-001",
+            "openai/gpt-image-1",
+            "openai/gpt-image-1-mini",
+            "openai/gpt-image-1.5",
+            "openai/gpt-image-2",
+            "prodia/flux-fast-schnell",
+            "recraft/recraft-v2",
+            "recraft/recraft-v3",
+            "recraft/recraft-v4",
+            "recraft/recraft-v4-pro",
+            "recraft/recraft-v4.1",
+            "recraft/recraft-v4.1-pro",
+            "recraft/recraft-v4.1-utility",
+            "recraft/recraft-v4.1-utility-pro",
+            "xai/grok-imagine-image",
+        ];
+        let expected_model_ids: std::collections::BTreeSet<_> =
+            expected_models.iter().copied().collect();
+        let actual_model_ids: Vec<_> = image.models.iter().map(|model| model.id.as_str()).collect();
+        let unique_actual_model_ids: std::collections::BTreeSet<_> =
+            actual_model_ids.iter().copied().collect();
+
+        assert_eq!(
+            actual_model_ids.len(),
+            unique_actual_model_ids.len(),
+            "vercel static image fallback models must not contain duplicates"
+        );
+        assert_eq!(
+            unique_actual_model_ids, expected_model_ids,
+            "vercel static image fallback must exactly mirror official image-type models"
+        );
+
+        for expected_model in expected_models {
+            let model = image
+                .models
+                .iter()
+                .find(|model| model.id == expected_model)
+                .unwrap_or_else(|| panic!("vercel should include {expected_model}"));
+            assert_eq!(
+                model.execution.as_ref().map(|execution| execution.adapter),
+                Some(puffer_provider_registry::MediaExecutionKind::ImagesJson)
+            );
+        }
+    }
+
     /// Confirms the bundled provider catalog includes WorldRouter so desktop
     /// provider selection does not depend on workspace-local resource files.
     #[test]
@@ -624,6 +964,10 @@ mod tests {
         assert!(
             descriptor.models.iter().any(|model| model.id == "auto"),
             "WorldRouter should expose the auto routing fallback model"
+        );
+        assert!(
+            descriptor.media.is_none(),
+            "WorldRouter auto chat routing must not become an image capability"
         );
     }
 }

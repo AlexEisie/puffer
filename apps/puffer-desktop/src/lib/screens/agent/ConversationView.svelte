@@ -11,6 +11,7 @@
   import QuestionPrompt from "./QuestionPrompt.svelte";
   import CanvasOffer from "./CanvasOffer.svelte";
   import ModelPicker from "./ModelPicker.svelte";
+  import MediaSettingsModal from "./MediaSettingsModal.svelte";
   import AttachmentPreviewStrip from "./AttachmentPreviewStrip.svelte";
   import MessageAttachmentPreviewStrip from "./MessageAttachmentPreviewStrip.svelte";
   import {
@@ -33,6 +34,8 @@
     ToolTimelineItem,
     DiffTimelineItem,
     MessageTimelineItem,
+    MediaKind,
+    MediaSettings,
     UserQuestionTimelineItem
   } from "../../types";
   import type { AgentState } from "../../shell/tweaks";
@@ -55,6 +58,14 @@
   const RECAP_DISPLAY_PREFIX = "\u203B recap: ";
   const COMPOSER_MAX_HEIGHT_PX = 200;
   const THREAD_BOTTOM_THRESHOLD_PX = 100;
+  const DEFAULT_MEDIA_SETTINGS: MediaSettings = {
+    image: null,
+    video: null
+  };
+  const MEDIA_SETTINGS_LABELS: Record<MediaKind, string> = {
+    image: "Image generation settings",
+    video: "Video generation settings"
+  };
   type SubmitMessageResult = boolean | void | Promise<boolean | void>;
   type ComposerRoutingPreference = {
     providerId: string | null;
@@ -95,6 +106,7 @@
     ) => void;
     onCancelTurn?: () => void;
     onOpenChatIntent?: (intent: ChatOpenIntent) => void;
+    onMediaSettingsSaved: (snapshot: SettingsSnapshot) => void;
     onDraftChange?: (hasDraft: boolean) => void;
   };
 
@@ -120,6 +132,7 @@
     onResolveUserQuestion,
     onCancelTurn,
     onOpenChatIntent,
+    onMediaSettingsSaved,
     onDraftChange
   }: Props = $props();
 
@@ -144,6 +157,7 @@
   let attachmentDraftsBySessionId = $state<Record<string, ComposerAttachmentDraft[]>>({});
   let attachmentError = $state<string | null>(null);
   let attachmentMenuOpen = $state(false);
+  let mediaSettingsKind = $state<MediaKind | null>(null);
   let attachmentDropActive = $state(false);
   let attachmentDragDepth = 0;
   let attachmentIdSequence = 0;
@@ -984,6 +998,16 @@
     fileInputEl?.click();
   }
 
+  function openMediaSettings(kind: MediaKind) {
+    if (composerDisabled) return;
+    attachmentMenuOpen = false;
+    mediaSettingsKind = kind;
+  }
+
+  function closeMediaSettings() {
+    mediaSettingsKind = null;
+  }
+
   function toggleAttachmentMenu(event: MouseEvent) {
     event.stopPropagation();
     if (composerDisabled) return;
@@ -1028,6 +1052,12 @@
     const suffix = `\n\n${attachmentSummary}`;
     if (body.endsWith(suffix)) return body.slice(0, -suffix.length).trimEnd();
     return item.body;
+  }
+
+  function hasGeneratedMediaAttachments(item: MessageTimelineItem): boolean {
+    return Boolean(
+      item.attachments?.some((attachment) => attachment.source.kind === "generated_media")
+    );
   }
 
   $effect(() => {
@@ -2287,9 +2317,27 @@
                     </div>
                   {/if}
                   {#if row.item}
-                    <div class="pf-msg-text">
-                      <MessageBody body={row.item.body} {onOpenChatIntent} />
-                    </div>
+                    {@const messageItem = row.item as MessageTimelineItem}
+                    {@const visibleBody = visibleMessageBody(messageItem)}
+                    {@const hasVisibleBody = Boolean(visibleBody.trim())}
+                    {@const hasGeneratedMedia = hasGeneratedMediaAttachments(messageItem)}
+                    {#if hasGeneratedMedia && hasVisibleBody}
+                      <div class="pf-msg-text">
+                        <MessageBody body={visibleBody} {onOpenChatIntent} />
+                      </div>
+                    {/if}
+                    {#if messageItem.attachments?.length}
+                      <MessageAttachmentPreviewStrip
+                        sessionId={session?.id ?? null}
+                        attachments={messageItem.attachments}
+                        {onOpenChatIntent}
+                      />
+                    {/if}
+                    {#if !hasGeneratedMedia && hasVisibleBody}
+                      <div class="pf-msg-text">
+                        <MessageBody body={visibleBody} {onOpenChatIntent} />
+                      </div>
+                    {/if}
                   {/if}
                 </div>
               </div>
@@ -2379,6 +2427,24 @@
                 <Icon name="paperclip" size={15} />
                 <span>Add images and files</span>
               </button>
+              <button
+                type="button"
+                class="pf-attachment-dropdown-item"
+                role="menuitem"
+                onclick={() => openMediaSettings("image")}
+              >
+                <Icon name="image" size={15} />
+                <span>{MEDIA_SETTINGS_LABELS.image}</span>
+              </button>
+              <button
+                type="button"
+                class="pf-attachment-dropdown-item"
+                role="menuitem"
+                onclick={() => openMediaSettings("video")}
+              >
+                <Icon name="video" size={15} />
+                <span>{MEDIA_SETTINGS_LABELS.video}</span>
+              </button>
             </div>
           {/if}
         </div>
@@ -2444,6 +2510,17 @@
       </div>
     </div>
   </div>
+
+  {#if mediaSettingsKind}
+    <MediaSettingsModal
+      kind={mediaSettingsKind}
+      sessionCwd={session?.cwd ?? ""}
+      settings={settingsSnapshot?.config.media ?? DEFAULT_MEDIA_SETTINGS}
+      settingsReady={settingsSnapshot !== null}
+      onSaved={onMediaSettingsSaved}
+      onClose={closeMediaSettings}
+    />
+  {/if}
 </div>
 
 <style>

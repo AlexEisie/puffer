@@ -74,6 +74,7 @@ fn context_command_renders_anthropic_context_breakdown() {
         headers: Default::default(),
         query_params: Default::default(),
         discovery: None,
+        media: None,
         models: vec![ModelDescriptor {
             provider: "anthropic".to_string(),
             id: "claude-sonnet-4-5".to_string(),
@@ -153,6 +154,7 @@ fn context_command_renders_openai_context_breakdown() {
         headers: Default::default(),
         query_params: Default::default(),
         discovery: None,
+        media: None,
         models: vec![ModelDescriptor {
             provider: "openai".to_string(),
             id: "gpt-5".to_string(),

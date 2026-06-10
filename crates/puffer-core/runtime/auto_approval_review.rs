@@ -563,6 +563,7 @@ mod tests {
             query_params: Default::default(),
             chat_completions_path: None,
             discovery: None,
+            media: None,
             models,
         }
     }

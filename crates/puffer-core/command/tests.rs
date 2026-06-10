@@ -319,6 +319,7 @@ fn doctor_reports_discovery_and_diagnostics() {
             display_name_field: Some("display_name".to_string()),
             headers: Default::default(),
         }),
+        media: None,
         models: Vec::new(),
         chat_completions_path: None,
     });

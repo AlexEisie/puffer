@@ -1910,6 +1910,7 @@ mod tests {
             headers: indexmap::IndexMap::new(),
             query_params: indexmap::IndexMap::new(),
             discovery: None,
+            media: None,
             models: vec![puffer_provider_registry::ModelDescriptor {
                 id: "gpt-5".into(),
                 display_name: "GPT-5".into(),

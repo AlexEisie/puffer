@@ -36,6 +36,7 @@ pub(crate) mod lambda_skill_activation;
 pub(crate) mod lambda_tool;
 mod local_tools;
 pub mod mcp_discovery;
+pub(crate) mod media;
 mod microcompact;
 mod openai;
 mod openai_sse;
@@ -458,6 +459,8 @@ pub fn execute_side_question(
 pub fn execute_tool_action_once(
     state: &mut AppState,
     resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &AuthStore,
     cwd: &std::path::Path,
     tool_id: &str,
     input: Value,
@@ -472,6 +475,8 @@ pub fn execute_tool_action_once(
     claude_tools::execute_tool(
         state,
         resources,
+        providers,
+        auth_store,
         &registry,
         &definition,
         cwd,

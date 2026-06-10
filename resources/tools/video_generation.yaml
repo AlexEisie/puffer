@@ -1,0 +1,45 @@
+id: VideoGeneration
+name: VideoGeneration
+description: |-
+  Generate one text-to-video clip through Puffer's configured video media
+  settings and write the resulting video artifact into the workspace media
+  folder.
+
+  Use one VideoGeneration call for one logical video-generation request. The
+  tool reads a workspace-relative prompt file when the prompt value names one;
+  otherwise it treats prompt as literal text. This tool is text-to-video only:
+  it does not accept existing images, reference images, first frames, or last
+  frames. The result includes one media job id and one persisted video artifact
+  entry.
+handler: runtime:workflow:video_generation
+approval_policy: ask
+sandbox_policy: network
+input_schema:
+  type: object
+  properties:
+    prompt:
+      type: string
+      description: Literal text prompt or a workspace-relative prompt file path.
+    parameters:
+      type: object
+      description: Optional scalar video parameter overrides.
+      additionalProperties:
+        oneOf:
+          - type: string
+          - type: number
+          - type: boolean
+    purpose:
+      type: string
+      description: Optional caller purpose preserved in result metadata.
+  required:
+    - prompt
+  additionalProperties: false
+metadata:
+  may_spawn_processes: false
+  may_read_files: true
+  may_write_files: true
+  may_access_network: true
+display:
+  group: media
+  title: VideoGeneration
+  show_in_status: true

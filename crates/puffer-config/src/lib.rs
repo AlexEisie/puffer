@@ -63,6 +63,8 @@ pub struct PufferConfig {
     pub browser: BrowserConfig,
     #[serde(default)]
     pub network: NetworkConfig,
+    #[serde(default)]
+    pub media: MediaConfig,
     pub mascot: MascotConfig,
     pub ui: UiConfig,
     /// When set, the runtime constructs a remote `RemoteToolRunner` against
@@ -134,6 +136,29 @@ pub struct StatusLineConfig {
     pub command: String,
     #[serde(default)]
     pub padding: u16,
+}
+
+/// Configures media generation defaults shared by UI and runtime tools.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MediaConfig {
+    #[serde(default)]
+    pub image: Option<MediaGenerationConfig>,
+    #[serde(default)]
+    pub video: Option<MediaGenerationConfig>,
+}
+
+/// Configures one default media generation selection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MediaGenerationConfig {
+    #[serde(alias = "providerId")]
+    pub provider_id: String,
+    #[serde(alias = "modelId")]
+    pub model_id: String,
+    #[serde(default = "default_media_operation")]
+    pub operation: String,
+    pub adapter: String,
+    #[serde(default)]
+    pub parameters: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -238,6 +263,7 @@ impl Default for PufferConfig {
             night: NightConfig::default(),
             browser: BrowserConfig::default(),
             network: NetworkConfig::default(),
+            media: MediaConfig::default(),
             mascot: MascotConfig {
                 id: "clawd".to_string(),
                 display_name: "Clawd".to_string(),
@@ -287,6 +313,10 @@ fn default_editor_mode() -> String {
 
 fn default_remote_runner_wait_for_ready() -> bool {
     true
+}
+
+fn default_media_operation() -> String {
+    "generate".to_string()
 }
 
 fn default_memory_enabled() -> bool {
@@ -417,48 +447,62 @@ impl ConfigPaths {
 /// Loads layered Puffer configuration from the user and workspace config files.
 pub fn load_config(paths: &ConfigPaths) -> Result<PufferConfig> {
     let mut config = PufferConfig::default();
-    let mut user_selection = None;
+    let mut user_preferences = None;
     if paths.user_config_file().exists() {
         merge_config_file(&mut config, &paths.user_config_file())?;
-        user_selection = Some((
-            config.default_provider.clone(),
-            config.default_model.clone(),
-            config.theme.clone(),
-            config.editor_mode.clone(),
-            config.fast_mode,
-            config.effort_level.clone(),
-            config.copy_full_response,
-            config.browser.clone(),
-            config.network.clone(),
-        ));
+        user_preferences = Some(UserPreferenceSnapshot::capture(&config));
     }
     if paths.workspace_config_file().exists() {
         merge_config_file(&mut config, &paths.workspace_config_file())?;
     }
     apply_claude_status_line_fallback(&mut config, paths);
-    if let Some((
-        provider,
-        model,
-        theme,
-        editor_mode,
-        fast_mode,
-        effort_level,
-        copy_full_response,
-        browser,
-        network,
-    )) = user_selection
-    {
-        config.default_provider = provider;
-        config.default_model = model;
-        config.theme = theme;
-        config.editor_mode = editor_mode;
-        config.fast_mode = fast_mode;
-        config.effort_level = effort_level;
-        config.copy_full_response = copy_full_response;
-        config.browser = browser;
-        config.network = network;
+    if let Some(snapshot) = user_preferences {
+        snapshot.restore(&mut config);
     }
     Ok(config)
+}
+
+struct UserPreferenceSnapshot {
+    default_provider: Option<String>,
+    default_model: Option<String>,
+    theme: String,
+    editor_mode: String,
+    fast_mode: bool,
+    effort_level: Option<String>,
+    copy_full_response: bool,
+    browser: BrowserConfig,
+    network: NetworkConfig,
+    media: MediaConfig,
+}
+
+impl UserPreferenceSnapshot {
+    fn capture(config: &PufferConfig) -> Self {
+        Self {
+            default_provider: config.default_provider.clone(),
+            default_model: config.default_model.clone(),
+            theme: config.theme.clone(),
+            editor_mode: config.editor_mode.clone(),
+            fast_mode: config.fast_mode,
+            effort_level: config.effort_level.clone(),
+            copy_full_response: config.copy_full_response,
+            browser: config.browser.clone(),
+            network: config.network.clone(),
+            media: config.media.clone(),
+        }
+    }
+
+    fn restore(self, config: &mut PufferConfig) {
+        config.default_provider = self.default_provider;
+        config.default_model = self.default_model;
+        config.theme = self.theme;
+        config.editor_mode = self.editor_mode;
+        config.fast_mode = self.fast_mode;
+        config.effort_level = self.effort_level;
+        config.copy_full_response = self.copy_full_response;
+        config.browser = self.browser;
+        config.network = self.network;
+        config.media = self.media;
+    }
 }
 
 /// Saves the user-level Puffer configuration file.
@@ -612,6 +656,50 @@ mod tests {
     }
 
     #[test]
+    fn media_config_parses_unified_image_and_video_selections() {
+        let toml = r#"
+app_name = "Puffer"
+theme = "system"
+mascot = { id = "none", display_name = "None", enabled = false }
+ui = { no_alt_screen = false, tmux_golden_mode = false }
+
+[media.image]
+provider_id = "openai"
+model_id = "gpt-image-1"
+operation = "generate"
+adapter = "images_json"
+parameters = { size = "1024x1024", quality = "auto", output_format = "png" }
+
+[media.video]
+provider_id = "replicate"
+model_id = "owner/video-version"
+operation = "generate"
+adapter = "replicate_video"
+parameters = { aspect_ratio = "16:9", duration_seconds = "5" }
+"#;
+
+        let parsed: PufferConfig = toml::from_str(toml).expect("config parses");
+        assert_eq!(parsed.media.image.as_ref().unwrap().adapter, "images_json");
+        assert_eq!(
+            parsed
+                .media
+                .video
+                .as_ref()
+                .unwrap()
+                .parameters
+                .get("duration_seconds"),
+            Some(&"5".to_string())
+        );
+    }
+
+    #[test]
+    fn media_config_defaults_to_unconfigured_selections() {
+        let config = MediaConfig::default();
+        assert!(config.image.is_none());
+        assert!(config.video.is_none());
+    }
+
+    #[test]
     fn load_config_preserves_user_provider_selection_over_workspace_defaults() {
         let _guard = lock_puffer_home();
         let tempdir = tempdir().expect("tempdir");
@@ -634,6 +722,13 @@ mod tests {
         user.editor_mode = "vim".to_string();
         user.fast_mode = true;
         user.effort_level = Some("high".to_string());
+        user.media.image = Some(MediaGenerationConfig {
+            provider_id: "user-image-provider".to_string(),
+            model_id: "user-image-model".to_string(),
+            operation: "generate".to_string(),
+            adapter: "user-adapter".to_string(),
+            parameters: BTreeMap::from([("size".to_string(), "1024x1024".to_string())]),
+        });
         save_user_config(&paths, &user).expect("user config");
 
         let mut workspace = PufferConfig::default();
@@ -644,6 +739,13 @@ mod tests {
         workspace.openai_query_params =
             BTreeMap::from([("workspace_param".to_string(), "2".to_string())]);
         workspace.theme = "harbor".to_string();
+        workspace.media.image = Some(MediaGenerationConfig {
+            provider_id: "workspace-image-provider".to_string(),
+            model_id: "workspace-image-model".to_string(),
+            operation: "generate".to_string(),
+            adapter: "workspace-adapter".to_string(),
+            parameters: BTreeMap::new(),
+        });
         save_workspace_config(&paths, &workspace).expect("workspace config");
 
         let loaded = load_config(&paths).expect("load");
@@ -668,6 +770,7 @@ mod tests {
         assert_eq!(loaded.editor_mode, "vim");
         assert!(loaded.fast_mode);
         assert_eq!(loaded.effort_level.as_deref(), Some("high"));
+        assert_eq!(loaded.media, user.media);
     }
 
     #[test]
@@ -833,6 +936,13 @@ tmux_golden_mode = false
             command: "printf puffer-status".to_string(),
             padding: 2,
         });
+        workspace_config.media.image = Some(MediaGenerationConfig {
+            provider_id: "workspace-image-provider".to_string(),
+            model_id: "workspace-image-model".to_string(),
+            operation: "generate".to_string(),
+            adapter: "workspace-adapter".to_string(),
+            parameters: BTreeMap::new(),
+        });
         save_workspace_config(&paths, &workspace_config).expect("workspace config");
 
         let loaded = load_config(&paths).expect("load");
@@ -852,6 +962,7 @@ tmux_golden_mode = false
                 .map(|status_line| status_line.padding),
             Some(2)
         );
+        assert_eq!(loaded.media, workspace_config.media);
     }
 
     #[test]

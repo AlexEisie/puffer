@@ -17,6 +17,7 @@ fn provider(
         headers: Default::default(),
         query_params: Default::default(),
         discovery: None,
+        media: None,
         models: vec![puffer_provider_registry::ModelDescriptor {
             id: "model".to_string(),
             display_name: "model".to_string(),

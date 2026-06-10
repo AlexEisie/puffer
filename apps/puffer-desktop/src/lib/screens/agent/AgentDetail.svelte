@@ -21,7 +21,11 @@
     UserQuestionTimelineItem
   } from "../../types";
   import type { AgentState } from "../../shell/tweaks";
-  import { readChatAttachmentPreview, type AgentTurnSubmitOptions } from "../../api/desktop";
+  import {
+    createGeneratedVideoAccess,
+    readChatAttachmentPreview,
+    type AgentTurnSubmitOptions
+  } from "../../api/desktop";
   type SubmitMessageResult = boolean | void | Promise<boolean | void>;
 
   type Props = {
@@ -52,6 +56,7 @@
       annotations?: Record<string, Record<string, string>>
     ) => void;
     onCancelTurn?: () => void;
+    onMediaSettingsSaved: (snapshot: SettingsSnapshot) => void;
     onDraftChange?: (hasDraft: boolean) => void;
     onRenameTitle?: (title: string) => void | Promise<void>;
   };
@@ -79,6 +84,7 @@
     onResolvePermission,
     onResolveUserQuestion,
     onCancelTurn,
+    onMediaSettingsSaved,
     onDraftChange,
     onRenameTitle
   }: Props = $props();
@@ -278,6 +284,28 @@
   async function openAttachmentIntent(attachment: MessageAttachment) {
     if (previewReadObjectUrl) URL.revokeObjectURL(previewReadObjectUrl);
     previewReadObjectUrl = null;
+    if (
+      attachment.kind === "video" &&
+      attachment.source.kind === "generated_media"
+    ) {
+      const sessionId = session?.id ?? null;
+      if (!sessionId) {
+        openAttachment = { ...attachment, previewUrl: null };
+        return;
+      }
+      const access = await createGeneratedVideoAccess(
+        sessionId,
+        attachment.source.artifactId
+      ).catch(() => ({
+        state: "missing" as const
+      }));
+      if ((session?.id ?? null) !== sessionId) return;
+      openAttachment =
+        access.state === "available"
+          ? { ...attachment, previewUrl: access.url, mimeType: access.mimeType, size: access.size }
+          : { ...attachment, previewUrl: null };
+      return;
+    }
     if (attachment.kind !== "image" || attachment.previewUrl) {
       openAttachment = attachment;
       return;
@@ -663,6 +691,7 @@
         {onResolvePermission}
         {onResolveUserQuestion}
         {onCancelTurn}
+        {onMediaSettingsSaved}
         {onDraftChange}
         onOpenChatIntent={openChatIntent}
         {fileToOpen}
@@ -716,6 +745,7 @@
           {onResolvePermission}
           {onResolveUserQuestion}
           {onCancelTurn}
+          {onMediaSettingsSaved}
           {onDraftChange}
           onOpenChatIntent={openChatIntent}
           {fileToOpen}
