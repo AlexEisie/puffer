@@ -270,6 +270,7 @@ fn execute_user_prompt_streaming_retries_incomplete_responses_sse() {
             attempt: 1,
             max_attempts: 2,
             error,
+            ..
         } if error.contains("Incomplete response returned, reason: content_filter")
     )));
 }
@@ -442,6 +443,7 @@ fn execute_user_prompt_streaming_retries_incomplete_after_websocket_fallback() {
             attempt: 1,
             max_attempts: 2,
             error,
+            ..
         } if error.contains("Incomplete response returned, reason: content_filter")
     )));
 }
@@ -564,6 +566,7 @@ fn execute_user_prompt_streaming_retries_incomplete_over_websocket() {
             attempt: 1,
             max_attempts: 2,
             error,
+            ..
         } if error.contains("Incomplete response returned, reason: content_filter")
     )));
 }

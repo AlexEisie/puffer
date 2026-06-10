@@ -502,6 +502,7 @@ pub(crate) fn handle_prompt_submit(
                         attempt,
                         max_attempts,
                         error,
+                        ..
                     } => {
                         let _ = event_sender.send(PendingSubmitEvent::RetryAttempt {
                             attempt,
