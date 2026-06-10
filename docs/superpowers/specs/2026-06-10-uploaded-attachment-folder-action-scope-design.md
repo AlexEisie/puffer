@@ -42,6 +42,10 @@ This supersedes `2026-06-10-uploaded-attachment-original-folder-design.md` for
 the uploaded-attachment overlay action. The original-folder path-aware upload
 model remains a possible future feature, but it is not part of this fix.
 
+This is intentionally a frontend action-policy change. It should not change
+attachment staging, transcript persistence, DTO source variants, preview reads,
+or native file-opening commands.
+
 ## Behavior
 
 | Attachment source | Action |
@@ -80,6 +84,17 @@ The existing Tauri `open_containing_folder` command remains useful for generated
 media and should keep its validation: absolute path, existing file,
 canonicalize, open parent directory.
 
+Do not remove or rename `openContainingFolder` or the Tauri
+`open_containing_folder` command. The command is still the right bridge for
+generated image/video artifacts. The problem is only that uploaded
+`local_file.path` points at an internal staged copy, so uploaded attachments
+should not request this bridge.
+
+Preview loading is unchanged. Uploaded `local_file` images still use
+`readChatAttachmentPreview`/`readMessageAttachmentPreview` for thumbnails and
+overlay previews. Hiding the folder icon must not make uploaded image previews
+unavailable.
+
 ## UX
 
 Uploaded attachment overlays still show metadata, preview when available, and
@@ -89,6 +104,11 @@ showing a persistent warning for normal uploads.
 
 Generated media overlays keep the folder icon. For those artifacts the app owns
 the output location, so the action is stable and expected.
+
+The visible label, icon, busy state, and error handling for generated-media
+folder opens remain unchanged. This fix should not introduce a new menu,
+secondary fallback button, tooltip explanation, or special uploaded-attachment
+warning.
 
 ## Testing
 
@@ -105,8 +125,13 @@ Update frontend unit tests for the action resolver:
 Update UI coverage so an uploaded attachment overlay contains no folder action,
 while generated media overlays still show it.
 
-Rust command tests do not need broad changes because the native folder opener
-still exists for generated media. Keep existing validation tests intact.
+The existing Playwright fixture named around "local image source" should be
+reframed as an uploaded/staged local source and assert that no folder action is
+shown. A separate positive generated-media fixture should assert the folder
+action remains visible for `generated_media.localPath`.
+
+Rust command tests do not need changes because the native folder opener still
+exists and its validation behavior is unchanged.
 
 ## Non-Goals
 
@@ -116,3 +141,5 @@ still exists for generated media. Keep existing validation tests intact.
 - No session metadata migration.
 - No staged-copy fallback button.
 - No generic download action for remote non-image files.
+- No `open_containing_folder` command rename/removal.
+- No label/icon redesign.
