@@ -309,12 +309,29 @@
   //   done    = merged / clean on a branch with closed PR
   //   idle    = otherwise
   // ─────────────────────────────────────────────────────────────
+  function orderedTransientTimeline(
+    submitted: TimelineItem[],
+    live: TimelineItem[]
+  ): TimelineItem[] {
+    return [...submitted, ...live]
+      .map((item, index) => ({ item, index }))
+      .sort((a, b) => {
+        const aCreatedAt = timelineItemCreatedAtMs(a.item);
+        const bCreatedAt = timelineItemCreatedAtMs(b.item);
+        if (aCreatedAt !== null && bCreatedAt !== null && aCreatedAt !== bCreatedAt) {
+          return aCreatedAt - bCreatedAt;
+        }
+        return a.index - b.index;
+      })
+      .map(({ item }) => item);
+  }
+
   let persistedTimeline = $derived<TimelineItem[]>(sessionDetail?.timeline ?? []);
+  let transientTimeline = $derived<TimelineItem[]>(
+    orderedTransientTimeline(submittedMessages, liveStreamItems)
+  );
   let combinedTimeline = $derived<TimelineItem[]>(
-    mergeTransientTimeline(
-      mergeTransientTimeline(persistedTimeline, submittedMessages),
-      liveStreamItems
-    )
+    mergeTransientTimeline(persistedTimeline, transientTimeline)
   );
   function isPendingPermission(item: PermissionTimelineItem): boolean {
     const status = item.status?.toLowerCase() ?? "";
@@ -3221,17 +3238,27 @@
     }
   }
 
+  function withLiveTimestamp(item: TimelineItem, previous?: TimelineItem): TimelineItem {
+    if (timelineItemCreatedAtMs(item) !== null) return item;
+    const previousCreatedAt = previous ? timelineItemCreatedAtMs(previous) : null;
+    return { ...item, createdAtMs: previousCreatedAt ?? Date.now() };
+  }
+
   function appendLive(item: TimelineItem) {
     const existingIdx = liveStreamItems.findIndex((existing) => existing.id === item.id);
+    const stamped = withLiveTimestamp(
+      item,
+      existingIdx >= 0 ? liveStreamItems[existingIdx] : undefined
+    );
     if (existingIdx >= 0) {
       liveStreamItems = [
         ...liveStreamItems.slice(0, existingIdx),
-        item,
+        stamped,
         ...liveStreamItems.slice(existingIdx + 1)
       ];
       return;
     }
-    liveStreamItems = [...liveStreamItems, item];
+    liveStreamItems = [...liveStreamItems, stamped];
   }
 
   function errorText(error: unknown): string {
@@ -3612,6 +3639,7 @@
       {
         id: `live-complete-assistant-${turnId}`,
         kind: "assistant",
+        createdAtMs: Date.now(),
         title: "Assistant",
         summary: trimmed,
         body: trimmed,
@@ -3726,6 +3754,7 @@
       {
         id: nextStreamingAssistantId(items, turnId),
         kind: "assistant",
+        createdAtMs: Date.now(),
         title: "Assistant",
         summary: delta,
         body: delta,
@@ -3969,11 +3998,12 @@
             metadata: inv.metadata
           };
           if (existingIdx >= 0) {
+            const stamped = withLiveTimestamp(payload, liveStreamItems[existingIdx]);
             // Upgrade the pending card in place. Svelte needs a new array
             // reference to observe the change.
             liveStreamItems = [
               ...liveStreamItems.slice(0, existingIdx),
-              payload,
+              stamped,
               ...liveStreamItems.slice(existingIdx + 1)
             ];
           } else {
@@ -4001,9 +4031,10 @@
           };
           const existingIdx = liveStreamItems.findIndex((item) => item.id === id);
           if (existingIdx >= 0) {
+            const stamped = withLiveTimestamp(payload, liveStreamItems[existingIdx]);
             liveStreamItems = [
               ...liveStreamItems.slice(0, existingIdx),
-              payload,
+              stamped,
               ...liveStreamItems.slice(existingIdx + 1)
             ];
           } else {
