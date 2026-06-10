@@ -1607,7 +1607,9 @@ export class FakeDaemon {
   private saveContact(params: JsonRecord): JsonRecord {
     const name = String(params.name ?? "").trim();
     if (!name) throw new Error("missing contact name");
-    const id = String(params.id ?? `contact-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "custom"}`);
+    const id = String(
+      params.id ?? `contact-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "custom"}`
+    ).trim();
     const contactIds = normalizedContactIds(params.contact_ids);
     if (contactIds.length === 0) throw new Error("missing contact ids");
     const contact = {
@@ -1629,7 +1631,8 @@ export class FakeDaemon {
   }
 
   private deleteContact(params: JsonRecord): JsonRecord {
-    const id = String(params.id ?? "");
+    const id = String(params.id ?? "").trim();
+    if (!id) throw new Error("missing contact id");
     this.contactsSnapshot = {
       ...this.contactsSnapshot,
       contacts: this.contactsSnapshot.contacts.filter((contact) => contact.id !== id)
