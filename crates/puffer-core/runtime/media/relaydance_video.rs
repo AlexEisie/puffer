@@ -1,4 +1,3 @@
-use super::capabilities::MediaCapabilityParameter;
 use super::video_jobs::{
     complete_video_job, persist_failed_video_job, poll_video_until_terminal, video_poll_url,
     CompletedVideoTask, VideoPollingConfig,
@@ -57,28 +56,18 @@ impl RelaydanceVideoRequest {
     }
 }
 
-/// Maps a validated selection's parameters into a Relaydance video request.
-///
-/// Emits params in capability order using each parameter's `request_field`
-/// (only parameters that declare one). The selected value (already defaulted
-/// by the caller) is used, falling back to the parameter default.
+/// Maps resolved request parameters (keyed by upstream request field) into a
+/// Relaydance video request. A `metadata.<k>` field is nested under the body's
+/// `metadata` object; every other field is top-level.
 pub(crate) fn relaydance_video_request_from_parameters(
     model_id: String,
     prompt: String,
-    capability_parameters: &[MediaCapabilityParameter],
-    selected: &BTreeMap<String, String>,
+    parameters: &BTreeMap<String, String>,
 ) -> Result<RelaydanceVideoRequest> {
-    let mut params = Vec::new();
-    for parameter in capability_parameters {
-        let Some(field) = parameter.request_field.clone() else {
-            continue;
-        };
-        let value = selected
-            .get(&parameter.name)
-            .cloned()
-            .unwrap_or_else(|| parameter.default.clone());
-        params.push((field, value));
-    }
+    let params = parameters
+        .iter()
+        .map(|(field, value)| (field.clone(), value.clone()))
+        .collect();
     let request = RelaydanceVideoRequest {
         model: model_id,
         prompt,
@@ -499,35 +488,25 @@ pub(crate) mod tests_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use puffer_provider_registry::MediaParameterWireType;
     use std::time::Duration;
 
-    fn parameter(name: &str, request_field: &str, default: &str) -> MediaCapabilityParameter {
-        MediaCapabilityParameter {
-            name: name.to_string(),
-            label: name.to_string(),
-            values: vec![default.to_string()],
-            default: default.to_string(),
-            request_field: Some(request_field.to_string()),
-            wire_type: MediaParameterWireType::String,
-        }
+    fn params(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
     fn splits_top_level_and_metadata_params() {
-        let params = vec![
-            parameter("duration_seconds", "seconds", "5"),
-            parameter("resolution", "metadata.resolution", "720p"),
-            parameter("aspect_ratio", "metadata.ratio", "16:9"),
-        ];
-        let mut selected = BTreeMap::new();
-        selected.insert("resolution".to_string(), "1080p".to_string());
-
         let request = relaydance_video_request_from_parameters(
             "doubao-seedance-2-0-1080p".to_string(),
             "a cat".to_string(),
-            &params,
-            &selected,
+            &params(&[
+                ("seconds", "5"),
+                ("metadata.resolution", "1080p"),
+                ("metadata.ratio", "16:9"),
+            ]),
         )
         .expect("request");
 
@@ -542,12 +521,10 @@ mod tests {
 
     #[test]
     fn omits_metadata_when_no_metadata_params() {
-        let params = vec![parameter("duration_seconds", "seconds", "5")];
         let request = relaydance_video_request_from_parameters(
             "m".to_string(),
             "a cat".to_string(),
-            &params,
-            &BTreeMap::new(),
+            &params(&[("seconds", "5")]),
         )
         .expect("request");
         let body = request.request_body();
@@ -559,7 +536,6 @@ mod tests {
         let request = relaydance_video_request_from_parameters(
             "grok-imagine-video".to_string(),
             "a city skyline".to_string(),
-            &[],
             &BTreeMap::new(),
         )
         .expect("request");
@@ -577,7 +553,6 @@ mod tests {
         let error = relaydance_video_request_from_parameters(
             "m".to_string(),
             "   ".to_string(),
-            &[],
             &BTreeMap::new(),
         )
         .unwrap_err()

@@ -6,7 +6,6 @@ use crate::runtime::media::byteplus_video::{
     byteplus_video_request_from_parameters, BytePlusVideoAdapter, BytePlusVideoPollingConfig,
     BYTEPLUS_VIDEO_ADAPTER,
 };
-use crate::runtime::media::capabilities::MediaCapability;
 use crate::runtime::media::http_support::{
     bearer_token, provider_error_secrets, provider_execution_url, redact_secrets,
     CredentialAliasMode,
@@ -19,7 +18,7 @@ use crate::runtime::media::replicate_video::{
     ReplicatePollingConfig, ReplicateVideoAdapter, ReplicateVideoRequest,
 };
 use crate::runtime::media::resolver::{
-    resolve_video_execution_descriptor, validate_media_generate_selection, MediaGenerationSelection,
+    resolve_media_request, resolve_video_execution_descriptor, ResolvedMediaRequest,
 };
 use crate::runtime::media::{MediaGenerationService, MediaJob, MediaKind};
 use anyhow::{anyhow, bail, Context, Result};
@@ -28,6 +27,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Executes an exact text-to-video request through the selected video adapter.
+///
+/// `request.model_id` is the logical model id and `request.parameters` are the
+/// user's axis selections (keyed by axis id); both are resolved into a concrete
+/// upstream model id, adapter, and request-field-keyed parameters before
+/// dispatch.
 pub(super) fn generate_exact_video_from_media_request(
     registry: &ProviderRegistry,
     auth_store: &AuthStore,
@@ -36,44 +40,27 @@ pub(super) fn generate_exact_video_from_media_request(
     discovery_cache: &ExactMediaDiscoveryCache,
 ) -> Result<ExactMediaGenerationResult> {
     reclaim_orphaned_video_jobs(registry, auth_store, workspace_root);
-    let operation = parse_media_operation(&request.operation)?;
-    let selection = MediaGenerationSelection {
-        kind: MediaKind::Video,
-        provider_id: &request.provider_id,
-        model_id: &request.model_id,
-        operation,
-        adapter: &request.adapter,
-        parameters: &request.parameters,
-    };
-    let capability = validate_media_generate_selection(
+    parse_media_operation(&request.operation)?;
+    validate_video_count(request.count)?;
+    let resolved = resolve_media_request(
         registry,
         auth_store,
-        &selection,
-        now_ms(),
+        &request.provider_id,
+        &request.model_id,
+        MediaKind::Video,
+        &request.parameters,
         &discovery_cache.inner,
     )?;
-    validate_video_count(request.count)?;
-    let parameters = selected_parameters_with_defaults(&capability, &request.parameters);
-    match request.adapter.as_str() {
+    match resolved.adapter.as_str() {
         "replicate_video" => {
-            generate_replicate_video(registry, auth_store, workspace_root, &request, parameters)
+            generate_replicate_video(registry, auth_store, workspace_root, &request, &resolved)
         }
-        "relaydance_video" => generate_relaydance_video(
-            registry,
-            auth_store,
-            workspace_root,
-            &request,
-            &capability,
-            parameters,
-        ),
-        "byteplus_video" => generate_byteplus_video(
-            registry,
-            auth_store,
-            workspace_root,
-            &request,
-            &capability,
-            parameters,
-        ),
+        "relaydance_video" => {
+            generate_relaydance_video(registry, auth_store, workspace_root, &request, &resolved)
+        }
+        "byteplus_video" => {
+            generate_byteplus_video(registry, auth_store, workspace_root, &request, &resolved)
+        }
         adapter => bail!("video media adapter unavailable for {adapter}"),
     }
 }
@@ -83,13 +70,13 @@ fn generate_replicate_video(
     auth_store: &AuthStore,
     workspace_root: &Path,
     request: &ExactMediaGenerationRequest,
-    parameters: BTreeMap<String, String>,
+    resolved: &ResolvedMediaRequest,
 ) -> Result<ExactMediaGenerationResult> {
     reject_unsupported_video_image_references(&request.provider_id, &request.image_references)?;
     let provider = registry.provider(&request.provider_id).with_context(|| {
         format!(
             "selected video model unavailable: {}/{} via {}",
-            request.provider_id, request.model_id, request.adapter
+            request.provider_id, resolved.model_id, resolved.adapter
         )
     })?;
     let api_key = bearer_token(provider, auth_store, CredentialAliasMode::Strict)?
@@ -97,9 +84,9 @@ fn generate_replicate_video(
     let service = MediaGenerationService::new(workspace_root);
     let adapter = ReplicateVideoAdapter::new(api_key)?;
     let video_request = replicate_video_request_from_parameters(
-        request.model_id.clone(),
+        resolved.model_id.clone(),
         request.prompt.clone(),
-        parameters,
+        resolved.parameters.clone(),
     )?;
     let job = adapter.submit(&service, video_request, now_ms())?;
     let job = adapter.poll_until_terminal(&service, job, ReplicatePollingConfig::default())?;
@@ -199,8 +186,7 @@ fn generate_relaydance_video(
     auth_store: &AuthStore,
     workspace_root: &Path,
     request: &ExactMediaGenerationRequest,
-    capability: &MediaCapability,
-    parameters: BTreeMap<String, String>,
+    resolved: &ResolvedMediaRequest,
 ) -> Result<ExactMediaGenerationResult> {
     reject_unsupported_video_image_references(&request.provider_id, &request.image_references)?;
     let service = MediaGenerationService::new(workspace_root);
@@ -208,17 +194,16 @@ fn generate_relaydance_video(
         registry,
         auth_store,
         &request.provider_id,
-        &request.model_id,
-        &request.adapter,
+        &resolved.model_id,
+        &resolved.adapter,
     )?;
     let video_request = relaydance_video_request_from_parameters(
-        request.model_id.clone(),
+        resolved.model_id.clone(),
         request.prompt.clone(),
-        &capability.parameters,
-        &parameters,
+        &resolved.parameters,
     )?;
     let job = adapter
-        .submit(&service, video_request, parameters, now_ms())
+        .submit(&service, video_request, resolved.parameters.clone(), now_ms())
         .map_err(|error| anyhow!("{}", redact_secrets(&error.to_string(), &secrets)))?;
     let job = adapter
         .poll_until_terminal(
@@ -237,26 +222,24 @@ fn generate_byteplus_video(
     auth_store: &AuthStore,
     workspace_root: &Path,
     request: &ExactMediaGenerationRequest,
-    capability: &MediaCapability,
-    parameters: BTreeMap<String, String>,
+    resolved: &ResolvedMediaRequest,
 ) -> Result<ExactMediaGenerationResult> {
     let service = MediaGenerationService::new(workspace_root);
     let (adapter, secrets) = build_byteplus_adapter(
         registry,
         auth_store,
         &request.provider_id,
-        &request.model_id,
-        &request.adapter,
+        &resolved.model_id,
+        &resolved.adapter,
     )?;
     let video_request = byteplus_video_request_from_parameters(
-        request.model_id.clone(),
+        resolved.model_id.clone(),
         request.prompt.clone(),
         request.image_references.clone(),
-        &capability.parameters,
-        &parameters,
+        &resolved.parameters,
     )?;
     let job = adapter
-        .submit(&service, video_request, parameters, now_ms())
+        .submit(&service, video_request, resolved.parameters.clone(), now_ms())
         .map_err(|error| anyhow!("{}", redact_secrets(&error.to_string(), &secrets)))?;
     let job = adapter
         .poll_until_terminal(
@@ -308,23 +291,6 @@ fn replicate_video_request_from_parameters(
         aspect_ratio,
         duration_seconds,
     })
-}
-
-fn selected_parameters_with_defaults(
-    capability: &MediaCapability,
-    selected: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    capability
-        .parameters
-        .iter()
-        .map(|parameter| {
-            let value = selected
-                .get(&parameter.name)
-                .cloned()
-                .unwrap_or_else(|| parameter.default.clone());
-            (parameter.name.clone(), value)
-        })
-        .collect()
 }
 
 fn validate_video_count(count: u8) -> Result<u8> {
@@ -435,22 +401,13 @@ mod tests {
             &AuthStore::default(),
             workspace.path(),
             &request,
-            &MediaCapability {
+            &ResolvedMediaRequest {
                 provider_id: "relaydance".to_string(),
-                provider_display_name: "Relaydance".to_string(),
                 model_id: "doubao-seedance-2-0-720p".to_string(),
-                model_display_name: "Seedance 2.0".to_string(),
-                kind: crate::runtime::media::capabilities::MediaKind::Video,
-                operation: "generate".to_string(),
                 adapter: RELAYDANCE_VIDEO_ADAPTER.to_string(),
-                parameters: Vec::new(),
-                defaults: BTreeMap::new(),
-                status: "available".to_string(),
-                source: "static".to_string(),
-                reason: None,
-                checked_at_ms: 0,
+                operation: puffer_provider_registry::MediaOperation::Generate,
+                parameters: BTreeMap::new(),
             },
-            BTreeMap::new(),
         )
         .unwrap_err()
         .to_string();
@@ -479,7 +436,13 @@ mod tests {
             &AuthStore::default(),
             workspace.path(),
             &request,
-            BTreeMap::new(),
+            &ResolvedMediaRequest {
+                provider_id: "replicate".to_string(),
+                model_id: "owner/model-version".to_string(),
+                adapter: "replicate_video".to_string(),
+                operation: puffer_provider_registry::MediaOperation::Generate,
+                parameters: BTreeMap::new(),
+            },
         )
         .unwrap_err()
         .to_string();

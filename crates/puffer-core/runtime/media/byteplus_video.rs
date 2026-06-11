@@ -1,11 +1,9 @@
-use super::capabilities::MediaCapabilityParameter;
 use super::video_jobs::{
     complete_video_job, persist_failed_video_job, poll_video_until_terminal, video_poll_url,
     CompletedVideoTask, VideoPollingConfig,
 };
 use super::{MediaGenerationService, MediaJob, MediaJobStatus, MediaKind};
 use anyhow::{bail, Context, Result};
-use puffer_provider_registry::MediaParameterWireType;
 use reqwest::blocking::Client;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -68,40 +66,31 @@ impl BytePlusVideoRequest {
     }
 }
 
-fn byteplus_request_value(parameter: &MediaCapabilityParameter, value: &str) -> Result<Value> {
+/// Encodes one resolved BytePlus parameter value as JSON. BytePlus requires
+/// `duration` to be a JSON number (the fast model rejects a string duration);
+/// every other BytePlus field (`ratio`, `resolution`) is a non-numeric string,
+/// so an integer-parse check reproduces the previous declared-`wire_type`
+/// behavior for BytePlus's field set.
+fn byteplus_request_value(value: &str) -> Value {
     let value = value.trim();
-    match parameter.wire_type {
-        MediaParameterWireType::String => Ok(json!(value)),
-        MediaParameterWireType::Number => {
-            value.parse::<u64>().map(Value::from).with_context(|| {
-                format!(
-                    "video generation parameter {}={} must be a number",
-                    parameter.name, value
-                )
-            })
-        }
+    match value.parse::<u64>() {
+        Ok(number) => Value::from(number),
+        Err(_) => json!(value),
     }
 }
 
-/// Maps a validated selection into a BytePlus text-to-video request.
+/// Maps resolved request parameters (keyed by upstream request field) into a
+/// BytePlus text-to-video request.
 pub(crate) fn byteplus_video_request_from_parameters(
     model_id: String,
     prompt: String,
     image_references: Vec<String>,
-    capability_parameters: &[MediaCapabilityParameter],
-    selected: &BTreeMap<String, String>,
+    parameters: &BTreeMap<String, String>,
 ) -> Result<BytePlusVideoRequest> {
-    let mut params = Vec::new();
-    for parameter in capability_parameters {
-        let Some(field) = parameter.request_field.clone() else {
-            continue;
-        };
-        let value = selected
-            .get(&parameter.name)
-            .cloned()
-            .unwrap_or_else(|| parameter.default.clone());
-        params.push((field, byteplus_request_value(parameter, &value)?));
-    }
+    let params = parameters
+        .iter()
+        .map(|(field, value)| (field.clone(), byteplus_request_value(value)))
+        .collect();
     let request = BytePlusVideoRequest {
         model: model_id,
         prompt,
@@ -471,7 +460,6 @@ pub(crate) mod tests_support {
 mod tests {
     use super::tests_support::ScriptedTransport;
     use super::*;
-    use puffer_provider_registry::MediaParameterWireType;
     use serde_json::json;
     use std::cell::RefCell;
 
@@ -589,49 +577,24 @@ mod tests {
     }
 
     #[test]
-    fn byteplus_request_body_uses_parameter_wire_type_for_numbers() {
+    fn byteplus_request_body_encodes_integer_fields_as_numbers() {
         let request = byteplus_video_request_from_parameters(
             "dreamina-seedance-2-0-260128".to_string(),
             "animate a calm lake".to_string(),
             Vec::new(),
-            &[MediaCapabilityParameter {
-                name: "duration_seconds".to_string(),
-                label: "Duration".to_string(),
-                values: vec!["4".to_string(), "5".to_string()],
-                default: "5".to_string(),
-                request_field: Some("duration".to_string()),
-                wire_type: MediaParameterWireType::Number,
-            }],
-            &BTreeMap::from([("duration_seconds".to_string(), "5".to_string())]),
+            &BTreeMap::from([
+                ("duration".to_string(), "5".to_string()),
+                ("ratio".to_string(), "16:9".to_string()),
+                ("resolution".to_string(), "720p".to_string()),
+            ]),
         )
         .expect("request");
 
         let body = request.request_body();
 
         assert_eq!(body["duration"], json!(5));
-    }
-
-    #[test]
-    fn byteplus_rejects_invalid_number_wire_value_before_http() {
-        let error = byteplus_video_request_from_parameters(
-            "dreamina-seedance-2-0-260128".to_string(),
-            "animate a calm lake".to_string(),
-            Vec::new(),
-            &[MediaCapabilityParameter {
-                name: "duration_seconds".to_string(),
-                label: "Duration".to_string(),
-                values: vec!["fast".to_string()],
-                default: "fast".to_string(),
-                request_field: Some("duration".to_string()),
-                wire_type: MediaParameterWireType::Number,
-            }],
-            &BTreeMap::new(),
-        )
-        .unwrap_err()
-        .to_string();
-
-        assert!(error.contains("duration_seconds"));
-        assert!(error.contains("number"));
+        assert_eq!(body["ratio"], json!("16:9"));
+        assert_eq!(body["resolution"], json!("720p"));
     }
 
     #[test]

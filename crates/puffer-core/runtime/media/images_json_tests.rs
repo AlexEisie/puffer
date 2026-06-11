@@ -2,10 +2,10 @@ use super::*;
 use crate::runtime::media::MediaGenerationService;
 use indexmap::IndexMap;
 use puffer_provider_registry::{
-    AuthMode, AuthStore, MediaBatchDescriptor, MediaBatchMode, MediaExecutionDescriptor,
-    MediaExecutionKind, MediaKindDescriptor, MediaModelDescriptor, MediaOperation,
-    MediaParameterSpec, MediaParameterWireType, ModelDescriptor, ProviderDescriptor,
-    ProviderMediaDescriptor, ProviderRegistry,
+    AuthMode, AuthStore, Axis, AxisRole, ControlKind, MediaBatchDescriptor, MediaBatchMode,
+    MediaExecutionDescriptor, MediaExecutionKind, MediaKindDescriptor, MediaModelDescriptor,
+    MediaOperation, ModelDescriptor, ProviderDescriptor, ProviderMediaDescriptor, ProviderRegistry,
+    Variant, Variants, WireType,
 };
 use serde_json::json;
 use std::io::{Read, Write};
@@ -24,7 +24,7 @@ fn registry_with_provider_id(provider_id: &str, base_url: String) -> ProviderReg
 fn registry_with_provider_parameters(
     provider_id: &str,
     base_url: String,
-    parameters: Vec<MediaParameterSpec>,
+    parameters: Vec<Axis>,
 ) -> ProviderRegistry {
     registry_with_provider_parameters_and_batch(
         provider_id,
@@ -37,7 +37,7 @@ fn registry_with_provider_parameters(
 fn registry_with_provider_parameters_and_batch(
     provider_id: &str,
     base_url: String,
-    parameters: Vec<MediaParameterSpec>,
+    parameters: Vec<Axis>,
     batch: MediaBatchDescriptor,
 ) -> ProviderRegistry {
     let mut registry = ProviderRegistry::new();
@@ -65,7 +65,11 @@ fn registry_with_provider_parameters_and_batch(
                     display_name: Some("Exact Image Model".to_string()),
                     execution: None,
                     operations: vec![MediaOperation::Generate],
-                    parameters,
+                    axes: parameters,
+                    variants: Variants::Single(Variant {
+                        model_id: "exact-image-model".to_string(),
+                        base_params: ::std::collections::BTreeMap::new(),
+                    }),
                 }],
             }),
             video: None,
@@ -75,32 +79,31 @@ fn registry_with_provider_parameters_and_batch(
     registry
 }
 
-fn image_parameters() -> Vec<MediaParameterSpec> {
+fn param_axis(id: &str, label: &str, values: &[&str], default: &str, request_field: &str) -> Axis {
+    Axis {
+        id: id.to_string(),
+        label: label.to_string(),
+        role: AxisRole::Param,
+        control: ControlKind::Enum {
+            values: values.iter().map(|v| v.to_string()).collect(),
+            default: default.to_string(),
+        },
+        request_field: Some(request_field.to_string()),
+        wire_type: WireType::String,
+    }
+}
+
+fn image_parameters() -> Vec<Axis> {
     vec![
-        MediaParameterSpec {
-            name: "size".to_string(),
-            label: "Size".to_string(),
-            values: vec!["1024x1024".to_string()],
-            default: "1024x1024".to_string(),
-            request_field: Some("size".to_string()),
-            wire_type: MediaParameterWireType::String,
-        },
-        MediaParameterSpec {
-            name: "quality".to_string(),
-            label: "Quality".to_string(),
-            values: vec!["auto".to_string()],
-            default: "auto".to_string(),
-            request_field: Some("quality".to_string()),
-            wire_type: MediaParameterWireType::String,
-        },
-        MediaParameterSpec {
-            name: "output_format".to_string(),
-            label: "Output format".to_string(),
-            values: vec!["png".to_string(), "webp".to_string()],
-            default: "png".to_string(),
-            request_field: Some("output_format".to_string()),
-            wire_type: MediaParameterWireType::String,
-        },
+        param_axis("size", "Size", &["1024x1024"], "1024x1024", "size"),
+        param_axis("quality", "Quality", &["auto"], "auto", "quality"),
+        param_axis(
+            "output_format",
+            "Output format",
+            &["png", "webp"],
+            "png",
+            "output_format",
+        ),
     ]
 }
 
@@ -118,15 +121,14 @@ fn exact_batch(limit: u8) -> MediaBatchDescriptor {
     }
 }
 
-fn sequential_generation_parameter() -> MediaParameterSpec {
-    MediaParameterSpec {
-        name: "sequential_image_generation".to_string(),
-        label: "Sequential image generation".to_string(),
-        values: vec!["disabled".to_string(), "auto".to_string()],
-        default: "disabled".to_string(),
-        request_field: Some("sequential_image_generation".to_string()),
-        wire_type: MediaParameterWireType::String,
-    }
+fn sequential_generation_parameter() -> Axis {
+    param_axis(
+        "sequential_image_generation",
+        "Sequential image generation",
+        &["disabled", "auto"],
+        "disabled",
+        "sequential_image_generation",
+    )
 }
 
 fn auth_store() -> AuthStore {
@@ -241,6 +243,10 @@ fn images_json_repeats_single_image_calls_in_per_image_mode() {
             ("size".to_string(), "1024x1024".to_string()),
             ("quality".to_string(), "auto".to_string()),
             ("output_format".to_string(), "png".to_string()),
+            (
+                "sequential_image_generation".to_string(),
+                "disabled".to_string(),
+            ),
         ]),
         count: 2,
     };
@@ -509,22 +515,14 @@ fn request_body_uses_descriptor_request_field_mapping() {
         stream.write_all(response.as_bytes()).expect("response");
         request_text
     });
-    let mut parameters = image_parameters();
-    parameters[0].name = "resolution_choice".to_string();
-    parameters[0].request_field = Some("resolution".to_string());
-    parameters[0].values = vec!["2k".to_string()];
-    parameters[0].default = "2k".to_string();
-    let registry = registry_with_provider_parameters(
-        "exact-provider",
-        format!("http://{address}"),
-        parameters,
-    );
+    let registry = registry_with_provider(format!("http://{address}"));
     let service_dir = tempdir().expect("tempdir");
     let mut request = request();
+    // Adapter receives parameters already keyed by upstream request field.
     request.parameters.remove("size");
     request
         .parameters
-        .insert("resolution_choice".to_string(), "2k".to_string());
+        .insert("resolution".to_string(), "2k".to_string());
 
     ImagesJsonAdapter::new()
         .expect("adapter")
@@ -538,7 +536,6 @@ fn request_body_uses_descriptor_request_field_mapping() {
 
     let request_text = server.join().expect("server");
     assert!(request_text.contains("\"resolution\":\"2k\""));
-    assert!(!request_text.contains("\"resolution_choice\""));
 }
 
 #[test]
@@ -561,6 +558,10 @@ fn request_body_preserves_sequential_generation_descriptor_default() {
         ..request()
     };
     request.prompt = "draw two images".to_string();
+    request.parameters.insert(
+        "sequential_image_generation".to_string(),
+        "disabled".to_string(),
+    );
 
     let result = ImagesJsonAdapter::new()
         .unwrap()
@@ -625,17 +626,12 @@ fn artifact_metadata_uses_resolved_descriptor_defaults() {
         stream.write_all(response.as_bytes()).expect("response");
         request_text
     });
-    let mut parameters = image_parameters();
-    parameters[2].values = vec!["png".to_string(), "jpeg".to_string()];
-    parameters[2].default = "jpeg".to_string();
-    let registry = registry_with_provider_parameters(
-        "exact-provider",
-        format!("http://{address}"),
-        parameters,
-    );
+    let registry = registry_with_provider(format!("http://{address}"));
     let service_dir = tempdir().expect("tempdir");
     let mut request = request();
-    request.parameters.remove("output_format");
+    request
+        .parameters
+        .insert("output_format".to_string(), "jpeg".to_string());
 
     let result = ImagesJsonAdapter::new()
         .expect("adapter")
@@ -682,14 +678,7 @@ fn artifact_format_follows_response_bytes_when_output_format_undeclared() {
         stream.write_all(response.as_bytes()).expect("response");
     });
     // Model declares no output_format parameter (mirrors BytePlus Seedream 4.5/4.0).
-    let parameters = vec![MediaParameterSpec {
-        name: "size".to_string(),
-        label: "Size".to_string(),
-        values: vec!["2K".to_string()],
-        default: "2K".to_string(),
-        request_field: Some("size".to_string()),
-        wire_type: MediaParameterWireType::String,
-    }];
+    let parameters = vec![param_axis("size", "Size", &["2K"], "2K", "size")];
     let registry = registry_with_provider_parameters(
         "exact-provider",
         format!("http://{address}"),
@@ -841,13 +830,15 @@ fn external_http_image_url_is_rejected_before_download() {
 }
 
 #[test]
-fn unsupported_parameter_fails_before_http_request() {
+fn unsupported_request_field_in_parameters_fails_before_http_request() {
+    // Value validation now lives in the resolver; the adapter only rejects
+    // request fields outside its allowlist.
     let registry = registry_with_provider("http://127.0.0.1:9".to_string());
     let service_dir = tempdir().expect("tempdir");
     let mut request = request();
     request
         .parameters
-        .insert("size".to_string(), "2048x2048".to_string());
+        .insert("watermark".to_string(), "on".to_string());
 
     let error = ImagesJsonAdapter::new()
         .expect("adapter")
@@ -857,39 +848,36 @@ fn unsupported_parameter_fails_before_http_request() {
             &MediaGenerationService::new(service_dir.path()),
             request,
         )
-        .expect_err("unsupported parameter should fail");
-
-    assert_eq!(
-        error.to_string(),
-        "image generation parameter unsupported: size=2048x2048"
-    );
-}
-
-#[test]
-fn unsupported_request_field_fails_before_http_request() {
-    let mut parameters = image_parameters();
-    parameters[0].request_field = Some("watermark".to_string());
-    let registry = registry_with_provider_parameters(
-        "exact-provider",
-        "http://127.0.0.1:9".to_string(),
-        parameters,
-    );
-    let service_dir = tempdir().expect("tempdir");
-
-    let error = ImagesJsonAdapter::new()
-        .expect("adapter")
-        .execute(
-            &registry,
-            &auth_store(),
-            &MediaGenerationService::new(service_dir.path()),
-            request(),
-        )
-        .expect_err("unsupported request field should fail before HTTP");
+        .expect_err("unsupported request field should fail");
 
     assert_eq!(
         error.to_string(),
         "image generation request field unsupported: watermark"
     );
+}
+
+#[test]
+fn resolver_rejects_unsupported_image_value() {
+    // The resolver validates axis values for a logical image selection.
+    let registry = registry_with_provider("http://127.0.0.1:9".to_string());
+    let selection = crate::media_runtime::ExactImageGenerationRequest {
+        provider_id: "exact-provider".to_string(),
+        model_id: "exact-image-model".to_string(),
+        adapter: "images_json".to_string(),
+        prompt: "draw a precise icon".to_string(),
+        parameters: BTreeMap::from([("size".to_string(), "2048x2048".to_string())]),
+        count: 1,
+    };
+
+    let error = crate::media_runtime::resolved_exact_image_parameters_with_cache(
+        &registry,
+        &auth_store(),
+        &selection,
+        &crate::media_runtime::ExactMediaDiscoveryCache::empty(),
+    )
+    .expect_err("unsupported size value should fail");
+
+    assert!(error.to_string().contains("size"), "{error}");
 }
 
 #[test]

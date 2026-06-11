@@ -5,10 +5,7 @@ use super::http_support::{
 };
 use super::jobs::{MediaJob, MediaJobStatus};
 use super::planner::plan_image_generation;
-use super::resolver::{
-    resolve_image_execution_descriptor, validate_image_generate_selection,
-    ImageGenerationSelection, MediaDiscoveryCache,
-};
+use super::resolver::{resolve_image_execution_descriptor, MediaDiscoveryCache};
 use super::{MediaGenerationService, MediaKind};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -100,20 +97,9 @@ impl MinimaxImageAdapter {
         service: &MediaGenerationService,
         request: MinimaxImageGenerationRequest,
     ) -> Result<MinimaxImageGenerationResult> {
-        let capability = validate_image_generate_selection(
-            registry,
-            auth_store,
-            &ImageGenerationSelection {
-                provider_id: &request.provider_id,
-                model_id: &request.model_id,
-                adapter: &request.adapter,
-                parameters: &request.parameters,
-            },
-            now_ms(),
-            &MediaDiscoveryCache::default(),
-        )?;
-        let selected_parameters =
-            selected_parameters_with_defaults(&capability, &request.parameters)?;
+        // `request.parameters` are already resolved and keyed by upstream
+        // request field; validate them against the adapter's allowlist.
+        let selected_parameters = validated_request_fields(&request.parameters)?;
 
         let discovery_cache = MediaDiscoveryCache::default();
         let (provider, execution) = resolve_image_execution_descriptor(
@@ -252,26 +238,15 @@ struct MinimaxOutput {
     remote_source_url: Option<String>,
 }
 
-fn selected_parameters_with_defaults(
-    capability: &crate::runtime::media::capabilities::MediaCapability,
-    selected: &BTreeMap<String, String>,
+fn validated_request_fields(
+    parameters: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>> {
-    let mut request_parameters = BTreeMap::new();
-    for parameter in &capability.parameters {
-        let request_field = parameter
-            .request_field
-            .as_deref()
-            .unwrap_or(parameter.name.as_str());
-        if !MINIMAX_ALLOWED_REQUEST_FIELDS.contains(&request_field) {
+    for request_field in parameters.keys() {
+        if !MINIMAX_ALLOWED_REQUEST_FIELDS.contains(&request_field.as_str()) {
             bail!("MiniMax image request field unsupported: {request_field}");
         }
-        let value = selected
-            .get(&parameter.name)
-            .cloned()
-            .unwrap_or_else(|| parameter.default.clone());
-        request_parameters.insert(request_field.to_string(), value);
     }
-    Ok(request_parameters)
+    Ok(parameters.clone())
 }
 
 fn minimax_output_from_response(client: &Client, value: &Value) -> Result<MinimaxOutput> {
@@ -358,7 +333,7 @@ mod tests {
     use puffer_provider_registry::{
         AuthMode, AuthStore, MediaBatchDescriptor, MediaBatchMode, MediaExecutionDescriptor,
         MediaExecutionKind, MediaKindDescriptor, MediaModelDescriptor, MediaOperation,
-        MediaParameterSpec, MediaParameterWireType, ModelDescriptor, ProviderDescriptor,
+        Axis, AxisRole, ControlKind, Variant, Variants, WireType, ModelDescriptor, ProviderDescriptor,
         ProviderMediaDescriptor, ProviderRegistry,
     };
     use serde_json::json;
@@ -401,25 +376,10 @@ mod tests {
                         display_name: Some("Image 01".to_string()),
                         execution: None,
                         operations: vec![MediaOperation::Generate],
-                        parameters: vec![
-                            MediaParameterSpec {
-                                name: "aspect_ratio".to_string(),
-                                label: "Aspect ratio".to_string(),
-                                values: vec!["1:1".to_string(), "16:9".to_string()],
-                                default: "1:1".to_string(),
-                                request_field: Some("aspect_ratio".to_string()),
-                                wire_type: MediaParameterWireType::String,
-                            },
-                            MediaParameterSpec {
-                                name: "response_format".to_string(),
-                                label: "Response format".to_string(),
-                                values: vec!["url".to_string(), "base64".to_string()],
-                                default: "base64".to_string(),
-                                request_field: Some("response_format".to_string()),
-                                wire_type: MediaParameterWireType::String,
-                            },
-                        ],
-                    }],
+                        axes: vec![
+                            Axis { id: "aspect_ratio".to_string(), label: "Aspect ratio".to_string(), role: AxisRole::Param, control: ControlKind::Enum { values: vec!["1:1".to_string(), "16:9".to_string()], default: "1:1".to_string() }, request_field: Some("aspect_ratio".to_string()), wire_type: WireType::String },
+                            Axis { id: "response_format".to_string(), label: "Response format".to_string(), role: AxisRole::Param, control: ControlKind::Enum { values: vec!["url".to_string(), "base64".to_string()], default: "base64".to_string() }, request_field: Some("response_format".to_string()), wire_type: WireType::String },
+                        ], variants: Variants::Single(Variant { model_id: "image-01".to_string(), base_params: ::std::collections::BTreeMap::new() }),}],
                 }),
                 video: None,
             }),

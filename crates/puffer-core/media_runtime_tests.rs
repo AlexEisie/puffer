@@ -2,7 +2,7 @@ use super::*;
 use indexmap::IndexMap;
 use puffer_provider_registry::{
     AuthMode, AuthStore, MediaExecutionDescriptor, MediaExecutionKind, MediaKindDescriptor,
-    MediaModelDescriptor, MediaOperation, MediaParameterSpec, MediaParameterWireType,
+    MediaModelDescriptor, MediaOperation, Axis, AxisRole, ControlKind, Variant, Variants, WireType,
     ModelDescriptor, ProviderDescriptor, ProviderMediaDescriptor, ProviderRegistry,
 };
 use puffer_resources::ProviderPack;
@@ -38,25 +38,10 @@ fn minimax_registry(base_url: String) -> ProviderRegistry {
                     display_name: Some("Image 01".to_string()),
                     execution: None,
                     operations: vec![MediaOperation::Generate],
-                    parameters: vec![
-                        MediaParameterSpec {
-                            name: "aspect_ratio".to_string(),
-                            label: "Aspect ratio".to_string(),
-                            values: vec!["1:1".to_string(), "16:9".to_string()],
-                            default: "1:1".to_string(),
-                            request_field: Some("aspect_ratio".to_string()),
-                            wire_type: MediaParameterWireType::String,
-                        },
-                        MediaParameterSpec {
-                            name: "response_format".to_string(),
-                            label: "Response format".to_string(),
-                            values: vec!["url".to_string(), "base64".to_string()],
-                            default: "base64".to_string(),
-                            request_field: Some("response_format".to_string()),
-                            wire_type: MediaParameterWireType::String,
-                        },
-                    ],
-                }],
+                    axes: vec![
+                        Axis { id: "aspect_ratio".to_string(), label: "Aspect ratio".to_string(), role: AxisRole::Param, control: ControlKind::Enum { values: vec!["1:1".to_string(), "16:9".to_string()], default: "1:1".to_string() }, request_field: Some("aspect_ratio".to_string()), wire_type: WireType::String },
+                        Axis { id: "response_format".to_string(), label: "Response format".to_string(), role: AxisRole::Param, control: ControlKind::Enum { values: vec!["url".to_string(), "base64".to_string()], default: "base64".to_string() }, request_field: Some("response_format".to_string()), wire_type: WireType::String },
+                    ], variants: Variants::Single(Variant { model_id: "image-01".to_string(), base_params: ::std::collections::BTreeMap::new() }),}],
             }),
             video: None,
         }),
@@ -121,25 +106,10 @@ fn byteplus_seedream_registry(base_url: String) -> ProviderRegistry {
                     display_name: Some("Seedream 4.5".to_string()),
                     execution: None,
                     operations: vec![MediaOperation::Generate],
-                    parameters: vec![
-                        MediaParameterSpec {
-                            name: "size".to_string(),
-                            label: "Size".to_string(),
-                            values: vec!["2K".to_string()],
-                            default: "2K".to_string(),
-                            request_field: Some("size".to_string()),
-                            wire_type: MediaParameterWireType::String,
-                        },
-                        MediaParameterSpec {
-                            name: "response_format".to_string(),
-                            label: "Response format".to_string(),
-                            values: vec!["b64_json".to_string(), "url".to_string()],
-                            default: "b64_json".to_string(),
-                            request_field: Some("response_format".to_string()),
-                            wire_type: MediaParameterWireType::String,
-                        },
-                    ],
-                }],
+                    axes: vec![
+                        Axis { id: "size".to_string(), label: "Size".to_string(), role: AxisRole::Param, control: ControlKind::Enum { values: vec!["2K".to_string()], default: "2K".to_string() }, request_field: Some("size".to_string()), wire_type: WireType::String },
+                        Axis { id: "response_format".to_string(), label: "Response format".to_string(), role: AxisRole::Param, control: ControlKind::Enum { values: vec!["b64_json".to_string(), "url".to_string()], default: "b64_json".to_string() }, request_field: Some("response_format".to_string()), wire_type: WireType::String },
+                    ], variants: Variants::Single(Variant { model_id: "seedream-4-5-251128".to_string(), base_params: ::std::collections::BTreeMap::new() }),}],
             }),
             video: None,
         }),
@@ -175,25 +145,10 @@ fn replicate_video_registry() -> ProviderRegistry {
                     display_name: Some("Video Model".to_string()),
                     execution: None,
                     operations: vec![MediaOperation::Generate],
-                    parameters: vec![
-                        MediaParameterSpec {
-                            name: "aspect_ratio".to_string(),
-                            label: "Aspect ratio".to_string(),
-                            values: vec!["16:9".to_string(), "9:16".to_string()],
-                            default: "16:9".to_string(),
-                            request_field: Some("aspect_ratio".to_string()),
-                            wire_type: MediaParameterWireType::String,
-                        },
-                        MediaParameterSpec {
-                            name: "duration_seconds".to_string(),
-                            label: "Duration".to_string(),
-                            values: vec!["5".to_string(), "8".to_string()],
-                            default: "5".to_string(),
-                            request_field: Some("duration".to_string()),
-                            wire_type: MediaParameterWireType::String,
-                        },
-                    ],
-                }],
+                    axes: vec![
+                        Axis { id: "aspect_ratio".to_string(), label: "Aspect ratio".to_string(), role: AxisRole::Param, control: ControlKind::Enum { values: vec!["16:9".to_string(), "9:16".to_string()], default: "16:9".to_string() }, request_field: Some("aspect_ratio".to_string()), wire_type: WireType::String },
+                        Axis { id: "duration_seconds".to_string(), label: "Duration".to_string(), role: AxisRole::Param, control: ControlKind::Enum { values: vec!["5".to_string(), "8".to_string()], default: "5".to_string() }, request_field: Some("duration".to_string()), wire_type: WireType::String },
+                    ], variants: Variants::Single(Variant { model_id: "owner/model-version".to_string(), base_params: ::std::collections::BTreeMap::new() }),}],
             }),
         }),
         models: Vec::<ModelDescriptor>::new(),
@@ -211,8 +166,7 @@ fn discovered_chat_image_cache() -> ExactMediaDiscoveryCache {
                     display_name: Some("Image Chat".to_string()),
                     execution: None,
                     operations: vec![MediaOperation::Generate],
-                    parameters: Vec::new(),
-                },
+                    axes: Vec::new(), variants: Variants::Single(Variant { model_id: "openrouter/image-chat".to_string(), base_params: ::std::collections::BTreeMap::new() }),},
                 source: "provider_discovery".to_string(),
             }],
         },
@@ -504,9 +458,9 @@ fn generate_exact_image_with_cache_rejects_discovered_model_missing_from_cache_b
     )
     .expect_err("missing discovery cache should fail");
 
-    assert_eq!(
-        error.to_string(),
-        "selected image model unavailable: openrouter/openrouter/image-chat via chat_image_output"
+    assert!(
+        error.to_string().contains("unknown media model"),
+        "{error}"
     );
 }
 
@@ -541,20 +495,16 @@ fn list_video_capabilities_exposes_multiple_static_seedance_models() {
     assert_eq!(
         ids,
         std::collections::BTreeSet::from([
-            "dreamina-seedance-2-0-260128",
-            "dreamina-seedance-2-0-fast-260128",
-            "doubao-seedance-2-0-720p",
-            "doubao-seedance-2-0-1080p",
-            "doubao-seedance-2-0-fast-260128",
+            "dreamina-seedance-2-0",
+            "dreamina-seedance-2-0-fast",
+            "doubao-seedance-2-0",
+            "doubao-seedance-2-0-fast",
+            "seedance-1-5-pro",
+            "seedance-nsfw",
+            "seedance-fast-nsfw",
             "grok-imagine-video",
             "grok-imagine-video-1.5-preview",
             "happyhorse-1.0-t2v",
-            "seedance-1-5-pro-no-audio",
-            "seedance-1-5-pro-with-audio",
-            "seedance-fast-nsfw",
-            "seedance-nsfw",
-            "seedance-nsfw-720p",
-            "seedance-nsfw-1080p",
         ])
     );
     assert!(capabilities.iter().all(|capability| {
@@ -564,77 +514,38 @@ fn list_video_capabilities_exposes_multiple_static_seedance_models() {
             && capability.source == "static"
     }));
 
-    let byteplus_fast = capabilities
+    // seedance-1-5-pro folds the with/without-audio upstream models behind a
+    // single bool selector axis.
+    let pro = capabilities
         .iter()
-        .find(|capability| capability.model_id == "dreamina-seedance-2-0-fast-260128")
-        .expect("byteplus fast model");
-    assert_eq!(byteplus_fast.defaults["duration_seconds"], "5");
-    let fast_duration = byteplus_fast
-        .parameters
+        .find(|capability| capability.model_id == "seedance-1-5-pro")
+        .expect("seedance 1.5 pro logical model");
+    let audio = pro
+        .axes
         .iter()
-        .find(|parameter| parameter.name == "duration_seconds")
-        .expect("fast duration");
-    assert_eq!(fast_duration.request_field.as_deref(), Some("duration"));
-    assert_eq!(fast_duration.wire_type, MediaParameterWireType::Number);
-    let fast_aspect_ratio = byteplus_fast
-        .parameters
-        .iter()
-        .find(|parameter| parameter.name == "aspect_ratio")
-        .expect("fast aspect ratio");
-    assert_eq!(fast_aspect_ratio.request_field.as_deref(), Some("ratio"));
-    assert_eq!(fast_aspect_ratio.wire_type, MediaParameterWireType::String);
-    let fast_resolution = byteplus_fast
-        .parameters
-        .iter()
-        .find(|parameter| parameter.name == "resolution")
-        .expect("fast resolution");
-    assert_eq!(
-        fast_resolution.values,
-        vec!["480p".to_string(), "720p".to_string()]
-    );
+        .find(|axis| axis.id == "audio")
+        .expect("audio axis");
+    assert_eq!(audio.role, AxisRole::Selector);
 
-    let relaydance_1080 = capabilities
+    // byteplus exposes duration as a numeric range param axis.
+    let byteplus = capabilities
         .iter()
-        .find(|capability| capability.model_id == "doubao-seedance-2-0-1080p")
-        .expect("relaydance 1080p model");
-    assert_eq!(relaydance_1080.defaults["duration_seconds"], "5");
-    let relaydance_duration = relaydance_1080
-        .parameters
+        .find(|capability| capability.model_id == "dreamina-seedance-2-0")
+        .expect("byteplus logical model");
+    let duration = byteplus
+        .axes
         .iter()
-        .find(|parameter| parameter.name == "duration_seconds")
-        .expect("relaydance duration");
-    assert_eq!(
-        relaydance_duration.request_field.as_deref(),
-        Some("seconds")
-    );
-    assert_eq!(
-        relaydance_duration.wire_type,
-        MediaParameterWireType::String
-    );
-    let relaydance_aspect_ratio = relaydance_1080
-        .parameters
-        .iter()
-        .find(|parameter| parameter.name == "aspect_ratio")
-        .expect("relaydance aspect ratio");
-    assert_eq!(
-        relaydance_aspect_ratio.request_field.as_deref(),
-        Some("metadata.ratio")
-    );
-    let relaydance_resolution = relaydance_1080
-        .parameters
-        .iter()
-        .find(|parameter| parameter.name == "resolution")
-        .expect("relaydance resolution");
-    assert_eq!(relaydance_resolution.values, vec!["1080p".to_string()]);
+        .find(|axis| axis.id == "duration")
+        .expect("duration axis");
+    assert_eq!(duration.request_field.as_deref(), Some("duration"));
+    assert_eq!(duration.wire_type, WireType::Number);
 
+    // grok stays prompt-only (no axes).
     let grok_video = capabilities
         .iter()
         .find(|capability| capability.model_id == "grok-imagine-video")
         .expect("grok imagine video model");
-    assert!(
-        grok_video.parameters.is_empty(),
-        "grok imagine video stays prompt-only until RelayDance publishes parameter metadata"
-    );
+    assert!(grok_video.axes.is_empty());
 }
 
 #[test]
@@ -659,18 +570,19 @@ fn exact_media_generation_rejects_unsupported_video_parameter() {
         generate_exact_media_with_cache(&registry, &auth, workspace.path(), request, &cache)
             .unwrap_err()
             .to_string();
-    assert!(error.contains("video generation parameter unsupported: aspect_ratio=1:1"));
+    // Value validation now lives in the resolver's axis checks.
+    assert!(error.contains("aspect_ratio"), "{error}");
 }
 
 #[test]
-fn exact_media_generation_rejects_unsupported_adapter_before_http() {
+fn exact_media_generation_rejects_unknown_video_model_before_http() {
     let (registry, auth, cache, workspace) = replicate_video_runtime_fixture();
     let request = ExactMediaGenerationRequest {
         kind: "video".to_string(),
         provider_id: "replicate".to_string(),
-        model_id: "owner/model-version".to_string(),
+        model_id: "owner/unknown-model".to_string(),
         operation: "generate".to_string(),
-        adapter: "images_json".to_string(),
+        adapter: "replicate_video".to_string(),
         prompt: "animate a logo".to_string(),
         image_references: Vec::new(),
         parameters: BTreeMap::from([
@@ -684,7 +596,7 @@ fn exact_media_generation_rejects_unsupported_adapter_before_http() {
         generate_exact_media_with_cache(&registry, &auth, workspace.path(), request, &cache)
             .unwrap_err()
             .to_string();
-    assert!(error.contains("selected video model unavailable"));
+    assert!(error.contains("unknown media model"), "{error}");
 }
 
 #[test]

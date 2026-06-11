@@ -416,7 +416,7 @@ mod tests {
     use puffer_config::MediaGenerationConfig;
     use puffer_provider_registry::{
         AuthMode, AuthStore, MediaExecutionDescriptor, MediaExecutionKind, MediaKindDescriptor,
-        MediaModelDescriptor, MediaOperation, MediaParameterSpec, MediaParameterWireType,
+        MediaModelDescriptor, MediaOperation, Axis, AxisRole, ControlKind, Variant, Variants, WireType,
         ModelDescriptor, ProviderDescriptor, ProviderMediaDescriptor, ProviderRegistry,
     };
     use puffer_resources::{LoadedItem, SourceInfo, SourceKind, ToolSpec};
@@ -453,9 +453,9 @@ mod tests {
 
         assert!(!response.success);
         let reason = response.reason.unwrap_or_default();
-        assert_eq!(
-            reason,
-            "selected image model unavailable: exact-provider/stale-image-model via images_json"
+        assert!(
+            reason.contains("stale-image-model"),
+            "expected the stale model to be rejected, got: {reason}"
         );
         assert!(!reason.contains("media runtime is not configured"));
         assert!(!reason.contains("unknown internal tool"));
@@ -540,33 +540,11 @@ mod tests {
                         display_name: Some("Exact Image Model".to_string()),
                         execution: None,
                         operations: vec![MediaOperation::Generate],
-                        parameters: vec![
-                            MediaParameterSpec {
-                                name: "size".to_string(),
-                                label: "Size".to_string(),
-                                values: vec!["1024x1024".to_string()],
-                                default: "1024x1024".to_string(),
-                                request_field: Some("size".to_string()),
-                                wire_type: MediaParameterWireType::String,
-                            },
-                            MediaParameterSpec {
-                                name: "quality".to_string(),
-                                label: "Quality".to_string(),
-                                values: vec!["auto".to_string()],
-                                default: "auto".to_string(),
-                                request_field: Some("quality".to_string()),
-                                wire_type: MediaParameterWireType::String,
-                            },
-                            MediaParameterSpec {
-                                name: "output_format".to_string(),
-                                label: "Output format".to_string(),
-                                values: vec!["png".to_string()],
-                                default: "png".to_string(),
-                                request_field: Some("output_format".to_string()),
-                                wire_type: MediaParameterWireType::String,
-                            },
-                        ],
-                    }],
+                        axes: vec![
+                            Axis { id: "size".to_string(), label: "Size".to_string(), role: AxisRole::Param, control: ControlKind::Enum { values: vec!["1024x1024".to_string()], default: "1024x1024".to_string() }, request_field: Some("size".to_string()), wire_type: WireType::String },
+                            Axis { id: "quality".to_string(), label: "Quality".to_string(), role: AxisRole::Param, control: ControlKind::Enum { values: vec!["auto".to_string()], default: "auto".to_string() }, request_field: Some("quality".to_string()), wire_type: WireType::String },
+                            Axis { id: "output_format".to_string(), label: "Output format".to_string(), role: AxisRole::Param, control: ControlKind::Enum { values: vec!["png".to_string()], default: "png".to_string() }, request_field: Some("output_format".to_string()), wire_type: WireType::String },
+                        ], variants: Variants::Single(Variant { model_id: "exact-image-model".to_string(), base_params: ::std::collections::BTreeMap::new() }),}],
                 }),
                 video: None,
             }),

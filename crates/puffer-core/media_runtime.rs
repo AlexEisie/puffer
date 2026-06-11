@@ -4,14 +4,14 @@ use crate::runtime::media::chat_image_output::{
 use crate::runtime::media::discovery::TrustedImageDiscoveryClient;
 use crate::runtime::media::images_json::{ImagesJsonAdapter, ImagesJsonGenerationRequest};
 use crate::runtime::media::minimax_image::{MinimaxImageAdapter, MinimaxImageGenerationRequest};
-use crate::runtime::media::resolver::{resolve_media_capabilities, MediaDiscoveryCache};
+use crate::runtime::media::resolver::{
+    resolve_media_capabilities, resolve_media_request, MediaDiscoveryCache,
+};
 use crate::runtime::media::{
     MediaArtifact, MediaGenerationService, MediaJob, MediaJobStatus, MediaKind,
 };
 use anyhow::{bail, Context, Result};
-use puffer_provider_registry::{
-    AuthStore, MediaOperation, MediaParameterWireType, ProviderRegistry,
-};
+use puffer_provider_registry::{Axis, AuthStore, MediaOperation, ProviderRegistry};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -42,7 +42,10 @@ use media_runtime_video::generate_exact_video_from_media_request;
 pub const MEDIA_DISCOVERY_TTL_MS: u64 = 5 * 60 * 1_000;
 
 /// Describes one exact media capability suitable for client display.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Carries the typed user-facing `axes`; derives only `PartialEq` because
+/// `Axis` → `ControlKind::Range` holds `f64`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaCapabilityView {
     pub provider_id: String,
@@ -52,24 +55,11 @@ pub struct MediaCapabilityView {
     pub kind: String,
     pub operation: String,
     pub adapter: String,
-    pub parameters: Vec<MediaCapabilityParameterView>,
-    pub defaults: BTreeMap<String, String>,
+    pub axes: Vec<Axis>,
     pub status: String,
     pub source: String,
     pub reason: Option<String>,
     pub checked_at_ms: u64,
-}
-
-/// Describes one select parameter suitable for client rendering.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MediaCapabilityParameterView {
-    pub name: String,
-    pub label: String,
-    pub values: Vec<String>,
-    pub default: String,
-    pub request_field: Option<String>,
-    pub wire_type: MediaParameterWireType,
 }
 
 /// Carries an exact image generation request from UI or tool configuration.
@@ -228,25 +218,31 @@ pub fn generate_exact_image_with_cache(
 ) -> Result<ExactImageGenerationResult> {
     let count = validate_image_count(request.count)?;
     request.count = count;
-    request.parameters = resolved_exact_image_parameters_with_cache(
+    // `request.model_id` is the logical model id and `request.parameters` are
+    // the user's axis selections; resolve them into the concrete upstream model
+    // id, adapter, and request-field-keyed parameters before dispatch.
+    let resolved = resolve_media_request(
         registry,
         auth_store,
-        &request,
-        discovery_cache,
+        &request.provider_id,
+        &request.model_id,
+        MediaKind::Image,
+        &request.parameters,
+        &discovery_cache.inner,
     )?;
     let service = MediaGenerationService::new(workspace_root);
-    match request.adapter.as_str() {
+    match resolved.adapter.as_str() {
         "images_json" => {
             let result = ImagesJsonAdapter::new()?.execute(
                 registry,
                 auth_store,
                 &service,
                 ImagesJsonGenerationRequest {
-                    provider_id: request.provider_id,
-                    model_id: request.model_id,
-                    adapter: request.adapter,
+                    provider_id: resolved.provider_id,
+                    model_id: resolved.model_id,
+                    adapter: resolved.adapter,
                     prompt: request.prompt,
-                    parameters: request.parameters,
+                    parameters: resolved.parameters,
                     count: request.count,
                 },
             )?;
@@ -258,11 +254,11 @@ pub fn generate_exact_image_with_cache(
                 auth_store,
                 &service,
                 MinimaxImageGenerationRequest {
-                    provider_id: request.provider_id,
-                    model_id: request.model_id,
-                    adapter: request.adapter,
+                    provider_id: resolved.provider_id,
+                    model_id: resolved.model_id,
+                    adapter: resolved.adapter,
                     prompt: request.prompt,
-                    parameters: request.parameters,
+                    parameters: resolved.parameters,
                     count: request.count,
                 },
             )?;
@@ -274,11 +270,11 @@ pub fn generate_exact_image_with_cache(
                 auth_store,
                 &service,
                 ChatImageOutputGenerationRequest {
-                    provider_id: request.provider_id,
-                    model_id: request.model_id,
-                    adapter: request.adapter,
+                    provider_id: resolved.provider_id,
+                    model_id: resolved.model_id,
+                    adapter: resolved.adapter,
                     prompt: request.prompt,
-                    parameters: request.parameters,
+                    parameters: resolved.parameters,
                     count: request.count,
                 },
                 &discovery_cache.inner,
@@ -364,28 +360,27 @@ fn parse_media_operation(operation: &str) -> Result<MediaOperation> {
     }
 }
 
-/// Resolves exact image parameters against the current capability defaults.
+/// Resolves a logical image selection into concrete upstream request
+/// parameters (keyed by upstream request field, defaults applied).
 pub fn resolved_exact_image_parameters_with_cache(
     registry: &ProviderRegistry,
     auth_store: &AuthStore,
     selection: &ExactImageGenerationRequest,
     discovery_cache: &ExactMediaDiscoveryCache,
 ) -> Result<BTreeMap<String, String>> {
-    let capability = exact_image_capability(registry, auth_store, selection, discovery_cache)?;
-    Ok(capability
-        .parameters
-        .iter()
-        .map(|parameter| {
-            let value = selection
-                .parameters
-                .get(&parameter.name)
-                .cloned()
-                .unwrap_or_else(|| parameter.default.clone());
-            (parameter.name.clone(), value)
-        })
-        .collect())
+    let resolved = resolve_media_request(
+        registry,
+        auth_store,
+        &selection.provider_id,
+        &selection.model_id,
+        MediaKind::Image,
+        &selection.parameters,
+        &discovery_cache.inner,
+    )?;
+    Ok(resolved.parameters)
 }
 
+#[allow(dead_code)]
 fn exact_image_capability(
     registry: &ProviderRegistry,
     auth_store: &AuthStore,
@@ -489,31 +484,11 @@ impl From<crate::runtime::media::capabilities::MediaCapability> for MediaCapabil
             kind: media_kind_name(capability.kind).to_string(),
             operation: capability.operation,
             adapter: capability.adapter,
-            parameters: capability
-                .parameters
-                .into_iter()
-                .map(MediaCapabilityParameterView::from)
-                .collect(),
-            defaults: capability.defaults,
+            axes: capability.axes,
             status: capability.status,
             source: capability.source,
             reason: capability.reason,
             checked_at_ms: capability.checked_at_ms,
-        }
-    }
-}
-
-impl From<crate::runtime::media::capabilities::MediaCapabilityParameter>
-    for MediaCapabilityParameterView
-{
-    fn from(parameter: crate::runtime::media::capabilities::MediaCapabilityParameter) -> Self {
-        Self {
-            name: parameter.name,
-            label: parameter.label,
-            values: parameter.values,
-            default: parameter.default,
-            request_field: parameter.request_field,
-            wire_type: parameter.wire_type,
         }
     }
 }

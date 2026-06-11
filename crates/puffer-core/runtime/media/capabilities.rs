@@ -1,7 +1,5 @@
+use puffer_provider_registry::{Axis, Variants};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-
-use puffer_provider_registry::MediaParameterWireType;
 
 /// Identifies the broad media asset type a capability or job handles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -11,8 +9,13 @@ pub(crate) enum MediaKind {
     Video,
 }
 
-/// Describes one provider/model media generation capability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Describes one provider/logical-model media generation capability.
+///
+/// Carries the typed user-facing `axes` plus the `variants` table that maps a
+/// selector axis's value (or a single upstream model) to a concrete upstream
+/// `model_id` + `base_params`. `MediaCapability` derives only `PartialEq`
+/// because `Axis` → `ControlKind::Range` holds `f64`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MediaCapability {
     pub(crate) provider_id: String,
@@ -22,22 +25,10 @@ pub(crate) struct MediaCapability {
     pub(crate) kind: MediaKind,
     pub(crate) operation: String,
     pub(crate) adapter: String,
-    pub(crate) parameters: Vec<MediaCapabilityParameter>,
-    pub(crate) defaults: BTreeMap<String, String>,
+    pub(crate) axes: Vec<Axis>,
+    pub(crate) variants: Variants,
     pub(crate) status: String,
     pub(crate) source: String,
     pub(crate) reason: Option<String>,
     pub(crate) checked_at_ms: u64,
-}
-
-/// Describes one select parameter exposed by a media capability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct MediaCapabilityParameter {
-    pub(crate) name: String,
-    pub(crate) label: String,
-    pub(crate) values: Vec<String>,
-    pub(crate) default: String,
-    pub(crate) request_field: Option<String>,
-    pub(crate) wire_type: MediaParameterWireType,
 }

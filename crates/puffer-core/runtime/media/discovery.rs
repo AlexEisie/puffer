@@ -2,7 +2,7 @@ use super::resolver::{CachedImageMediaModel, MediaDiscoveryCache};
 use anyhow::{anyhow, Context, Result};
 use puffer_provider_registry::{
     AuthStore, MediaDiscoveryKind, MediaExecutionKind, MediaModelDescriptor, MediaOperation,
-    ProviderDescriptor, ProviderRegistry, StoredCredential,
+    ProviderDescriptor, ProviderRegistry, StoredCredential, Variant, Variants,
 };
 use reqwest::blocking::{Client, RequestBuilder};
 use serde_json::Value;
@@ -221,7 +221,11 @@ fn trusted_image_model(
             display_name: Some(display_name.to_string()),
             execution: None,
             operations: vec![MediaOperation::Generate],
-            parameters: Vec::new(),
+            axes: Vec::new(),
+            variants: Variants::Single(Variant {
+                model_id: id.to_string(),
+                base_params: std::collections::BTreeMap::new(),
+            }),
         },
         source: "provider_discovery".to_string(),
     })

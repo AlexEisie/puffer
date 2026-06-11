@@ -5,10 +5,7 @@ use super::http_support::{
 };
 use super::jobs::{MediaJob, MediaJobStatus};
 use super::planner::{plan_image_generation, ImageGenerationPlan};
-use super::resolver::{
-    resolve_image_execution_descriptor, validate_image_generate_selection,
-    ImageGenerationSelection, MediaDiscoveryCache,
-};
+use super::resolver::{resolve_image_execution_descriptor, MediaDiscoveryCache};
 use super::{MediaGenerationService, MediaKind};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -120,18 +117,6 @@ impl ImagesJsonAdapter {
         service: &MediaGenerationService,
         request: ImagesJsonGenerationRequest,
     ) -> Result<ImagesJsonGenerationResult> {
-        let capability = validate_image_generate_selection(
-            registry,
-            auth_store,
-            &ImageGenerationSelection {
-                provider_id: &request.provider_id,
-                model_id: &request.model_id,
-                adapter: &request.adapter,
-                parameters: &request.parameters,
-            },
-            now_ms(),
-            &MediaDiscoveryCache::default(),
-        )?;
         let discovery_cache = MediaDiscoveryCache::default();
         let (provider, execution) = resolve_image_execution_descriptor(
             registry,
@@ -141,8 +126,9 @@ impl ImagesJsonAdapter {
             &discovery_cache,
         )?;
         let plan = plan_image_generation(request.count, &execution.batch)?;
-        let request_parameters =
-            selected_parameters_with_defaults(&capability, &request.parameters)?;
+        // `request.parameters` are already resolved and keyed by upstream
+        // request field; validate them against the adapter's allowlist.
+        let request_parameters = validated_request_fields(&request.parameters)?;
 
         let job_id = Uuid::new_v4().to_string();
         let created_at_ms = now_ms();
@@ -297,26 +283,15 @@ struct ImageOutput {
     remote_source_url: Option<String>,
 }
 
-fn selected_parameters_with_defaults(
-    capability: &crate::runtime::media::capabilities::MediaCapability,
-    selected: &BTreeMap<String, String>,
+fn validated_request_fields(
+    parameters: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>> {
-    let mut request_parameters = BTreeMap::new();
-    for parameter in &capability.parameters {
-        let request_field = parameter
-            .request_field
-            .as_deref()
-            .unwrap_or(parameter.name.as_str());
-        if !IMAGES_JSON_ALLOWED_REQUEST_FIELDS.contains(&request_field) {
+    for request_field in parameters.keys() {
+        if !IMAGES_JSON_ALLOWED_REQUEST_FIELDS.contains(&request_field.as_str()) {
             bail!("image generation request field unsupported: {request_field}");
         }
-        let value = selected
-            .get(&parameter.name)
-            .cloned()
-            .unwrap_or_else(|| parameter.default.clone());
-        request_parameters.insert(request_field.to_string(), value);
     }
-    Ok(request_parameters)
+    Ok(parameters.clone())
 }
 
 fn image_outputs_from_response(

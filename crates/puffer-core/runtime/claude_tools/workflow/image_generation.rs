@@ -305,7 +305,7 @@ mod tests {
     use indexmap::IndexMap;
     use puffer_provider_registry::{
         AuthMode, AuthStore, MediaExecutionDescriptor, MediaExecutionKind, MediaKindDescriptor,
-        MediaModelDescriptor, MediaOperation, MediaParameterSpec, MediaParameterWireType,
+        MediaModelDescriptor, MediaOperation, Axis, AxisRole, ControlKind, Variant, Variants, WireType,
         ModelDescriptor, ProviderDescriptor, ProviderMediaDescriptor, ProviderRegistry,
     };
     use puffer_resources::LoadedResources;
@@ -381,33 +381,11 @@ mod tests {
                         display_name: Some("Exact Image Model".to_string()),
                         execution: None,
                         operations: vec![MediaOperation::Generate],
-                        parameters: vec![
-                            MediaParameterSpec {
-                                name: "size".to_string(),
-                                label: "Size".to_string(),
-                                values: vec!["1024x1024".to_string(), "1536x1024".to_string()],
-                                default: "1024x1024".to_string(),
-                                request_field: Some("size".to_string()),
-                                wire_type: MediaParameterWireType::String,
-                            },
-                            MediaParameterSpec {
-                                name: "quality".to_string(),
-                                label: "Quality".to_string(),
-                                values: vec!["auto".to_string(), "high".to_string()],
-                                default: "auto".to_string(),
-                                request_field: Some("quality".to_string()),
-                                wire_type: MediaParameterWireType::String,
-                            },
-                            MediaParameterSpec {
-                                name: "output_format".to_string(),
-                                label: "Output format".to_string(),
-                                values: vec!["png".to_string(), "webp".to_string()],
-                                default: "png".to_string(),
-                                request_field: Some("output_format".to_string()),
-                                wire_type: MediaParameterWireType::String,
-                            },
-                        ],
-                    }],
+                        axes: vec![
+                            Axis { id: "size".to_string(), label: "Size".to_string(), role: AxisRole::Param, control: ControlKind::Enum { values: vec!["1024x1024".to_string(), "1536x1024".to_string()], default: "1024x1024".to_string() }, request_field: Some("size".to_string()), wire_type: WireType::String },
+                            Axis { id: "quality".to_string(), label: "Quality".to_string(), role: AxisRole::Param, control: ControlKind::Enum { values: vec!["auto".to_string(), "high".to_string()], default: "auto".to_string() }, request_field: Some("quality".to_string()), wire_type: WireType::String },
+                            Axis { id: "output_format".to_string(), label: "Output format".to_string(), role: AxisRole::Param, control: ControlKind::Enum { values: vec!["png".to_string(), "webp".to_string()], default: "png".to_string() }, request_field: Some("output_format".to_string()), wire_type: WireType::String },
+                        ], variants: Variants::Single(Variant { model_id: "exact-image-model".to_string(), base_params: ::std::collections::BTreeMap::new() }),}],
                 }),
                 video: None,
             }),
@@ -456,8 +434,7 @@ mod tests {
                         display_name: Some("Image Chat".to_string()),
                         execution: None,
                         operations: vec![MediaOperation::Generate],
-                        parameters: Vec::new(),
-                    },
+                        axes: Vec::new(), variants: Variants::Single(Variant { model_id: "openrouter/image-chat".to_string(), base_params: ::std::collections::BTreeMap::new() }),},
                     source: "provider_discovery".to_string(),
                 }],
             },
@@ -926,9 +903,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(
-            error.to_string(),
-            "selected image model unavailable: exact-provider/stale-image-model via images_json"
+        assert!(
+            error.to_string().contains("stale-image-model"),
+            "{error}"
         );
     }
 

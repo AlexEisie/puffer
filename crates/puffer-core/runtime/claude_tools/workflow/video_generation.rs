@@ -263,7 +263,7 @@ mod tests {
     use puffer_config::MediaGenerationConfig;
     use puffer_provider_registry::{
         AuthMode, AuthStore, MediaExecutionDescriptor, MediaExecutionKind, MediaKindDescriptor,
-        MediaModelDescriptor, MediaOperation, MediaParameterSpec, MediaParameterWireType,
+        MediaModelDescriptor, MediaOperation, Axis, AxisRole, ControlKind, Variant, Variants, WireType,
         ModelDescriptor, ProviderDescriptor, ProviderMediaDescriptor, ProviderRegistry,
     };
     use puffer_resources::LoadedResources;
@@ -343,11 +343,8 @@ mod tests {
                         display_name: Some("Seedance 2.0".to_string()),
                         execution: None,
                         operations: vec![MediaOperation::Generate],
-                        parameters: vec![
-                            MediaParameterSpec {
-                                name: "duration_seconds".to_string(),
-                                label: "Duration".to_string(),
-                                values: vec![
+                        axes: vec![
+                            Axis { id: "duration_seconds".to_string(), label: "Duration".to_string(), role: AxisRole::Param, control: ControlKind::Enum { values: vec![
                                     "4".to_string(),
                                     "5".to_string(),
                                     "6".to_string(),
@@ -360,27 +357,13 @@ mod tests {
                                     "13".to_string(),
                                     "14".to_string(),
                                     "15".to_string(),
-                                ],
-                                default: "5".to_string(),
-                                request_field: Some("seconds".to_string()),
-                                wire_type: MediaParameterWireType::String,
-                            },
-                            MediaParameterSpec {
-                                name: "resolution".to_string(),
-                                label: "Resolution".to_string(),
-                                values: vec![
+                                ], default: "5".to_string() }, request_field: Some("seconds".to_string()), wire_type: WireType::String },
+                            Axis { id: "resolution".to_string(), label: "Resolution".to_string(), role: AxisRole::Param, control: ControlKind::Enum { values: vec![
                                     "480p".to_string(),
                                     "720p".to_string(),
                                     "1080p".to_string(),
-                                ],
-                                default: "720p".to_string(),
-                                request_field: Some("metadata.resolution".to_string()),
-                                wire_type: MediaParameterWireType::String,
-                            },
-                            MediaParameterSpec {
-                                name: "aspect_ratio".to_string(),
-                                label: "Aspect ratio".to_string(),
-                                values: vec![
+                                ], default: "720p".to_string() }, request_field: Some("metadata.resolution".to_string()), wire_type: WireType::String },
+                            Axis { id: "aspect_ratio".to_string(), label: "Aspect ratio".to_string(), role: AxisRole::Param, control: ControlKind::Enum { values: vec![
                                     "16:9".to_string(),
                                     "4:3".to_string(),
                                     "1:1".to_string(),
@@ -388,13 +371,8 @@ mod tests {
                                     "9:16".to_string(),
                                     "21:9".to_string(),
                                     "adaptive".to_string(),
-                                ],
-                                default: "16:9".to_string(),
-                                request_field: Some("metadata.ratio".to_string()),
-                                wire_type: MediaParameterWireType::String,
-                            },
-                        ],
-                    }],
+                                ], default: "16:9".to_string() }, request_field: Some("metadata.ratio".to_string()), wire_type: WireType::String },
+                        ], variants: Variants::Single(Variant { model_id: "doubao-seedance-2-0-720p".to_string(), base_params: ::std::collections::BTreeMap::new() }),}],
                 }),
             }),
             models: Vec::<ModelDescriptor>::new(),

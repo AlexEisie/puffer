@@ -5,10 +5,7 @@ use super::http_support::{
 };
 use super::jobs::{MediaJob, MediaJobStatus};
 use super::planner::plan_image_generation;
-use super::resolver::{
-    resolve_image_execution_descriptor, validate_image_generate_selection,
-    ImageGenerationSelection, MediaDiscoveryCache,
-};
+use super::resolver::{resolve_image_execution_descriptor, MediaDiscoveryCache};
 use super::{MediaGenerationService, MediaKind};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -95,19 +92,6 @@ impl ChatImageOutputAdapter {
         request: ChatImageOutputGenerationRequest,
         discovery_cache: &MediaDiscoveryCache,
     ) -> Result<ChatImageOutputGenerationResult> {
-        validate_image_generate_selection(
-            registry,
-            auth_store,
-            &ImageGenerationSelection {
-                provider_id: &request.provider_id,
-                model_id: &request.model_id,
-                adapter: &request.adapter,
-                parameters: &request.parameters,
-            },
-            now_ms(),
-            discovery_cache,
-        )?;
-
         let (provider, execution) = resolve_image_execution_descriptor(
             registry,
             &request.provider_id,
@@ -417,7 +401,7 @@ mod tests {
     use puffer_provider_registry::{
         AuthMode, AuthStore, MediaExecutionDescriptor, MediaExecutionKind, MediaKindDescriptor,
         MediaModelDescriptor, MediaOperation, ModelDescriptor, ProviderDescriptor,
-        ProviderMediaDescriptor, ProviderRegistry,
+        ProviderMediaDescriptor, ProviderRegistry, Variant, Variants,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -452,7 +436,11 @@ mod tests {
                         display_name: Some("Image Chat".to_string()),
                         execution: None,
                         operations: vec![MediaOperation::Generate],
-                        parameters: Vec::new(),
+                        axes: Vec::new(),
+                        variants: Variants::Single(Variant {
+                            model_id: "openrouter/image-chat".to_string(),
+                            base_params: BTreeMap::new(),
+                        }),
                     }],
                 }),
                 video: None,
