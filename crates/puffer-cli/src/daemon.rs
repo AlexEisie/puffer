@@ -6998,10 +6998,28 @@ models: []
             handle_list_media_capabilities(&state, &json!({"kind": "video"})).expect("response");
         let capabilities = response["capabilities"].as_array().expect("capabilities");
 
-        assert!(capabilities.iter().any(|capability| {
-            capability["providerId"] == "replicate"
-                && capability["adapter"] == "replicate_video"
-                && capability["status"] == "available"
+        let capability = capabilities
+            .iter()
+            .find(|capability| capability["providerId"] == "replicate")
+            .expect("replicate video capability");
+
+        assert_eq!(capability["adapter"], "replicate_video");
+        assert_eq!(capability["status"], "available");
+        assert!(capability.get("parameters").is_none());
+        assert!(capability.get("defaults").is_none());
+
+        let axes = capability["axes"].as_array().expect("axes");
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "aspect_ratio"
+                && axis["role"] == "param"
+                && axis["requestField"] == "aspect_ratio"
+                && axis["wireType"] == "string"
+                && axis["control"]["enum"]["default"] == "16:9"
+        }));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "duration_seconds"
+                && axis["requestField"] == "duration"
+                && axis["control"]["enum"]["default"] == "5"
         }));
     }
 
@@ -7013,10 +7031,18 @@ models: []
             handle_list_media_capabilities(&state, &json!({"kind": "video"})).expect("response");
         let capabilities = response["capabilities"].as_array().expect("capabilities");
 
-        assert!(capabilities.iter().any(|capability| {
-            capability["providerId"] == "relaydance"
-                && capability["adapter"] == "relaydance_video"
-                && capability["status"] == "available"
+        let capability = capabilities
+            .iter()
+            .find(|capability| capability["providerId"] == "relaydance")
+            .expect("relaydance video capability");
+        assert!(capability.get("parameters").is_none());
+        assert!(capability.get("defaults").is_none());
+        assert!(capability["axes"].as_array().is_some_and(|axes| {
+            axes.iter().any(|axis| {
+                axis["id"] == "resolution"
+                    && axis["control"]["enum"]["default"] == "720p"
+                    && axis["requestField"] == "metadata.resolution"
+            })
         }));
     }
 
