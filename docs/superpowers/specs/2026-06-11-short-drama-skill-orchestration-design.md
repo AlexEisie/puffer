@@ -24,6 +24,16 @@
 - 但底层 sidecar 元数据里**已存** provider 返回的 hosted 图地址
   `remoteSourceUrl`（`artifacts.rs:228-232` 有读取 helper；MiniMax 在
   `minimax_image.rs:278-282` 写入）。
+- **`videogen` 输出本就透出 `remoteSourceUrl`**（`video_generation.rs:184-186`，仅
+  Some 时带）——只有 `imagegen` 没透。所以 §4 的桥本质是"让 imagegen 与 videogen
+  行为一致"，有现成先例、风险低。
+- **`videogen` 阻塞到终态**：runtime `video.rs:92` 调 `poll_until_terminal(...)` 内部
+  轮询 provider 至 succeeded/failed 才返回并落盘。**一次 `videogen` 调用 = 一个成品片段**，
+  skill 无需自写轮询。
+- **BytePlus 接受任意 https 图参考**：`byteplus_video.rs:507-522` 测试证明
+  `https://…/person.png` 被直接放入请求体 `image_url.url`，不限于自家 approved asset。
+  → 跨 provider 喂图（MiniMax 图 URL → BytePlus 生视频）**格式上可行**。
+- `videogen` 输出含片段 `path`（`video_generation.rs:180`），agent 可直接喂给 ffmpeg。
 - 产物落盘路径由工具硬编码（`artifacts.rs:557-575`）：
   图 `→ .puffer/media/images/`，视频 `→ .puffer/media/videos/<artifactId>/`，
   sidecar `→ .puffer/media/artifact-sidecars/<artifactId>.json`。
@@ -53,6 +63,8 @@
 - ❌ 不改 artifact 落盘路径、不改 provider、不碰权限路径。
 - ❌ 不做上传/暂存 tool（曾作为"方案 C"，本设计**明确不采用**）。
 - ❌ **增量 1 不为生视频去生成人物图**——无桥时生成的图喂不进视频，是纯浪费。
+- ❌ **不在 skill 里建轮询/并发引擎**——胖 tool 那套"polling waves + 计算超时预算"
+  是工具职责；`videogen` 已阻塞到终态，skill 只需顺序逐镜调用 + 单次足够 Bash 超时。
 
 ## 3. 编排模型：五阶段 + 按需门控
 
@@ -64,7 +76,7 @@
 | 1. 剧本 | prompt 已含剧本 / 指向剧本文件？ | agent 原生写剧本 → 存 `script.md` |
 | 2. 分镜 | prompt 已含分镜表？ | agent 原生拆分镜（每镜：画面/对白/时长/所需人物）→ 存 `storyboard.md` |
 | 3. 人物图 | **prompt 已含 `https://` / `asset://` 图地址？** | 有 → 直接当 `--image-reference`（**今天即可用**）；无 → 见下方分增量 |
-| 4. 分镜视频 | —（始终生成） | 逐镜 `videogen`；有图参考则带 `--image-reference`，否则文生视频 |
+| 4. 分镜视频 | —（始终生成） | 逐镜 `videogen`（**单次阻塞到出片**，给足 Bash 超时）；有图参考则带 `--image-reference`，否则文生视频 |
 | 5. 合成 | —（始终合成） | skill 指导 agent 用 Bash 跑 ffmpeg 拼接 → `final.mp4` |
 
 **关键门控规则**：
@@ -78,7 +90,7 @@
 "我已有人物图 URL + 分镜，只帮我生视频 + 合成"。
 
 **桥只为"生成的人物图"而存在**：prompt 自带图 URL 的路径今天就通；只有当
-**agent 需要自己生人物图再喂给视频**时，才需要 §4 的 `referenceUrl` 桥（增量 2）。
+**agent 需要自己生人物图再喂给视频**时，才需要 §4 的 `remoteSourceUrl` 桥（增量 2）。
 
 **资源整理中枢（轻量）**：agent 在 `.puffer/media/drama/<id>/manifest.json` 维护
 有序镜头清单（镜头序号 → prompt → 引用图 URL → 产出 video artifactId/path），
@@ -86,12 +98,14 @@
 的正式产物**，字段够用即可，勿过度结构化。`<id>` 取自短剧标题的短 slug，勿自造复杂
 生成规则。
 
-## 4. 最小桥：透出 `referenceUrl`（增量 2）
+## 4. 最小桥：让 imagegen 输出 `remoteSourceUrl`（增量 2）
 
-**值已就位**：runtime 层的 `ExactGeneratedArtifact`（`runtime.rs:88-95`）**本身就带
+**值已就位 + 有先例**：runtime 层的 `ExactGeneratedArtifact`（`runtime.rs:88-95`）**本身就带
 `remote_source_url: Option<String>`**（line 94，由 provider 经 `images_json.rs` 填入，
-MiniMax 已填）。image_generation.rs 在 `image_generation.rs:106-112` 迭代该类型时**当前丢弃了
-这个字段**。所以改动是把它接上，三处、同一文件 `image_generation.rs`：
+MiniMax 已填）；`videogen` 输出**已经**用 `remoteSourceUrl` 把它透出（`video_generation.rs:184-186`）。
+只有 imagegen 在 `image_generation.rs:106-112` 迭代时**丢弃了**它。改动 = 让 imagegen
+镜像 videogen 的既有写法，三处、同一文件 `image_generation.rs`，**字段名沿用
+`remoteSourceUrl`**（图/视频 artifact 同名，agent 认一个键即可）：
 
 ```diff
 // 1) struct ImageGenerationArtifactResult (≈line 52)
@@ -102,15 +116,17 @@ MiniMax 已填）。image_generation.rs 在 `image_generation.rs:106-112` 迭代
    byte_count: artifact.byte_count,
 +  remote_source_url: artifact.remote_source_url,
 
-// 3) JSON 输出 image_generation_output (≈line 164-170)
-   "path": artifact.path,
-+  "referenceUrl": artifact.remote_source_url,   // 可能为 null
-   "mimeType": artifact.mime_type,
+// 3) JSON 输出 image_generation_output (≈line 164-170)，镜像 video 的"仅 Some 时带":
+   let mut value = json!({ ...既有字段... });
++  if let Some(url) = &artifact.remote_source_url {
++      value["remoteSourceUrl"] = json!(url);
++  }
 ```
 
 **不碰 media 层、provider、落盘、权限路径、sidecar**——值在 runtime 结果里现成。
 
-agent 阶段 4 直接拿 `referenceUrl` 当 `videogen --image-reference`。
+agent 阶段 4 直接拿图 artifact 的 `remoteSourceUrl` 当 `videogen --image-reference`。
+**BytePlus 接受任意 https**（`byteplus_video.rs:507-522`），格式不是问题。
 
 ### 落盘约定
 
@@ -121,7 +137,7 @@ agent 阶段 4 直接拿 `referenceUrl` 当 `videogen --image-reference`。
 
 ## 5. 失败契约（写进 skill，杜绝静默降级）
 
-1. 阶段 3 需要人物图，但 imagegen 返回的 `referenceUrl` 为 `null`
+1. 阶段 3 需要人物图，但 imagegen 输出缺 `remoteSourceUrl`
    （provider 不产出 hosted URL）→ agent **明确报错**
    "当前图像 provider 不产出可引用 URL，无法图生视频"，
    **不得**偷偷退回文生视频。
@@ -145,11 +161,11 @@ agent 阶段 4 直接拿 `referenceUrl` 当 `videogen --image-reference`。
 
 **增量 2 — 让"生成的人物图"也能喂视频（方案 B 的桥）**
 
-- **前置 spike（go/no-go 闸门，~1h）**：手动用 MiniMax 生一张图 → 取 runtime 结果里的
-  `remote_source_url` → 喂给 `videogen --image-reference` 走一次 BytePlus 图生视频。
-  验证 (a) URL 未即时过期；(b) 跨 provider 可被拉取。
+- **前置 spike（go/no-go 闸门，~1h）**：手动用 MiniMax 生一张图 → 从 sidecar 取
+  `remoteSourceUrl` → 喂给 `videogen --image-reference` 走一次 BytePlus 图生视频。
+  格式接受已由 `byteplus_video.rs:507` 证明，**spike 只需验证 URL 公开可达 + 出片时未过期**。
 - **通过** → 落 §4 三行改动，skill 阶段 3 增加"无图则 imagegen 生人物图 → 拿
-  `referenceUrl` → 图生视频"分支，保人物一致性。
+  `remoteSourceUrl` → 图生视频"分支，保人物一致性。
 - **不通过** → **停下来如实汇报**，不引入上传/暂存 tool；是否另启替代方案为单独决策。
 
 ## 7. 受影响文件
@@ -159,9 +175,9 @@ agent 阶段 4 直接拿 `referenceUrl` 当 `videogen --image-reference`。
   **仅此一个文件**——skill 靠资源加载器自动发现，无需改 `internal_tools.rs`。
 
 **增量 2**
-- `crates/puffer-core/runtime/claude_tools/workflow/image_generation.rs`：§4 的三行
-  （struct 加字段 + 构建处透传 + 输出加 `referenceUrl`）。
-- 同文件测试补一条断言：artifact 输出含 `referenceUrl`。
+- `crates/puffer-core/runtime/claude_tools/workflow/image_generation.rs`：§4 的三处
+  （struct 加字段 + 构建处透传 + 输出镜像 video 的 `remoteSourceUrl`，仅 Some 时带）。
+- 同文件测试补一条断言：mock provider 返回远程 URL 时，artifact 输出含 `remoteSourceUrl`。
 
 ## 8. 开放问题
 

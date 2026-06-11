@@ -4,7 +4,7 @@
 
 **Goal:** 用一份 `short-drama` SKILL.md 指导 agent 自主编排「剧本→分镜→（人物图）→分镜视频→ffmpeg 合成」，不建胖 internal tool；增量 2 用三行后端改动透出生成图的可引用 URL，打通"生成人物图→图生视频"。
 
-**Architecture:** 薄 skill 驱动——skill 只是给 agent 的编排指导，真正的媒体生成仍由既有 `imagegen`/`videogen` internal tool 经权限路径执行，合成由 agent 用 Bash 跑 ffmpeg。增量 1 零后端改动且独立可交付；增量 2 在 `image_generation.rs` 把 runtime 已携带的 `remote_source_url` 透到工具输出 `referenceUrl`。
+**Architecture:** 薄 skill 驱动——skill 只是给 agent 的编排指导，真正的媒体生成仍由既有 `imagegen`/`videogen` internal tool 经权限路径执行，合成由 agent 用 Bash 跑 ffmpeg。增量 1 零后端改动且独立可交付；增量 2 在 `image_generation.rs` 把 runtime 已携带的 `remote_source_url` 透到工具输出 `remoteSourceUrl`（与 videogen 输出同名）。
 
 **Tech Stack:** Rust（puffer-core workflow tool）、resources/skills 资源加载、ffmpeg（Bash 外调）。
 
@@ -15,7 +15,7 @@
 ## File Structure
 
 - `resources/skills/short-drama/SKILL.md` — **新增**。短剧编排 skill：frontmatter + 五阶段编排指导 + 按需门控 + manifest 约定 + ffmpeg 模板 + 失败契约。（增量 1 唯一交付物。）
-- `crates/puffer-core/runtime/claude_tools/workflow/image_generation.rs` — **增量 2 修改**。`ImageGenerationArtifactResult` 加 `remote_source_url` 字段、构建处透传、`image_generation_output` 输出 `referenceUrl`，并补一条测试断言。
+- `crates/puffer-core/runtime/claude_tools/workflow/image_generation.rs` — **增量 2 修改**。`ImageGenerationArtifactResult` 加 `remote_source_url` 字段、构建处透传、`image_generation_output` 输出 `remoteSourceUrl`（镜像 video，仅 Some 时带），并补一条测试断言。
 
 无 `internal_tools.rs` 改动（短剧是编排 skill，非 CLI 内部工具；靠资源加载器自动发现）。
 
@@ -98,8 +98,10 @@ to `.puffer/media/images|videos/` — you only reference them, never relocate th
    - `videogen --prompt "<shot visual + action>"`
    - Add `--image-reference <url>` once per `https://`/`asset://` reference the shot uses;
      keep order stable and refer to them as image 1, image 2, … in the prompt.
-   - Set an explicit long Bash timeout within the current Bash cap before running.
-   - Record each result's video artifact path into the manifest (see below).
+   - Each `videogen` call blocks until that clip is finished (the tool polls the provider
+     to completion), so set an explicit long Bash timeout within the current Bash cap —
+     budget per shot, not for the whole drama. One call → one finished clip.
+   - Read `path` from the tool result and record it into the manifest (see below).
 
 5. **Compose.** Stitch the successful shot clips in storyboard order with ffmpeg. First
    probe ffmpeg: `command -v ffmpeg`. If missing, stop and report — do not fake a file.
@@ -209,42 +211,65 @@ Expected: 拿到一个 `https://` URL（MiniMax 应有；若为空/null → 见 
 
 Run: `videogen --prompt "she smiles and waves" --image-reference "<上一步的 https URL>"`
 （确保选中支持图参考的视频 provider，如 BytePlus。）
+格式接受已由 `byteplus_video.rs:507` 证明，此步真正验证的是 **URL 公开可达 + 出片时未过期**。
 Expected: 成功产出视频 artifact → **桥成立，继续 Task 5**。
 
 - [ ] **Step 3: go/no-go 判定**
 
-- URL 可被消费、视频生成成功 → GO，进入 Task 5。
-- URL 为空、已过期、或跨 provider 拉取失败 → **NO-GO：停止，向用户如实汇报 spike 结论**，
-  不引入上传/暂存 tool（方案 C 不在本计划内）。后续 Task 5/6 不执行。
+- 视频生成成功 → GO，进入 Task 5。
+- URL 为空 / 已过期 / provider 拉取失败（403/404/超时）→ **NO-GO：停止，向用户如实
+  汇报 spike 结论**，不引入上传/暂存 tool（方案 C 不在本计划内）。后续 Task 5/6 不执行。
 
-### Task 5: 透出 `referenceUrl`（TDD）
+### Task 5: 让 imagegen 输出 `remoteSourceUrl`（TDD）
+
+镜像 `video_generation.rs:184-186` 的既有写法（图/视频 artifact 同名 `remoteSourceUrl`，
+仅 Some 时带）。测试**直接打 `image_generation_output`**，不依赖 HTTP mock 内部行为。
 
 **Files:**
 - Modify: `crates/puffer-core/runtime/claude_tools/workflow/image_generation.rs`（struct ≈52、构建处 ≈106-112、输出 ≈160-178）
-- Test: 同文件 `#[cfg(test)]` 内（既有图生成测试旁，约 line 830-890）
+- Test: 同文件 `#[cfg(test)]` 内
 
 - [ ] **Step 1: 写失败测试**
 
-在该文件测试模块里，找到已断言 artifact 输出字段的测试（含 `artifact["artifactId"]`
-的那个，约 line 877-887），在其断言区追加：
+在该文件测试模块里新增（`image_generation_output`/`ImageGenerationResult`/
+`ImageGenerationArtifactResult` 同模块可见，可直接构造）：
 
 ```rust
-        // referenceUrl is surfaced from the runtime artifact's remote_source_url.
-        assert!(
-            artifact.get("referenceUrl").is_some(),
-            "image artifact output must include a referenceUrl key (null allowed)"
-        );
+    #[test]
+    fn image_output_surfaces_remote_source_url_when_present() {
+        let out = image_generation_output(&ImageGenerationResult {
+            job_id: "job-1".into(),
+            requested_count: 1,
+            artifacts: vec![ImageGenerationArtifactResult {
+                artifact_id: "a1".into(),
+                index: 0,
+                path: None,
+                mime_type: "image/png".into(),
+                byte_count: 3,
+                remote_source_url: Some("https://img.example/p.png".into()),
+            }],
+            provider: "minimax".into(),
+            model: "m".into(),
+            status: "succeeded".into(),
+            parameters: Default::default(),
+            purpose: None,
+            retry_from_error: None,
+        })
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["artifacts"][0]["remoteSourceUrl"], "https://img.example/p.png");
+    }
 ```
 
-若该测试用的 mock provider 会返回远程 URL，则进一步断言其为字符串：
-```rust
-        assert!(artifact["referenceUrl"].is_string() || artifact["referenceUrl"].is_null());
-```
+字段以文件现状为准：若 `ImageGenerationResult` 的字段名/类型与上面不符，照实改字段，
+保留对 `remote_source_url` → `remoteSourceUrl` 的断言。`path: None` 若该字段非
+`Option` 则按现状给值。
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cargo test -p puffer-core image_generation 2>&1 | tail -20`
-Expected: FAIL —— `referenceUrl` 键不存在（当前输出无此字段）。
+Run: `cargo test -p puffer-core image_output_surfaces_remote_source_url 2>&1 | tail -20`
+Expected: 编译失败（`ImageGenerationArtifactResult` 无 `remote_source_url` 字段）——
+这是预期的红，下一步补字段后转绿。
 
 - [ ] **Step 3: 实现三处改动**
 
@@ -275,34 +300,40 @@ struct ImageGenerationArtifactResult {
         })
 ```
 
-(c) 输出 `image_generation_output`（≈line 164-170）加键：
+(c) 输出 `image_generation_output`（≈line 160-178）镜像 video 的"仅 Some 时带"。把
+原来的 `json!({...})` 改为可变 value 再条件插入：
 
 ```rust
-        "artifacts": result.artifacts.iter().map(|artifact| json!({
-            "artifactId": artifact.artifact_id,
-            "index": artifact.index,
-            "path": artifact.path,
-            "referenceUrl": artifact.remote_source_url,
-            "mimeType": artifact.mime_type,
-            "size": artifact.byte_count
-        })).collect::<Vec<_>>(),
+        "artifacts": result.artifacts.iter().map(|artifact| {
+            let mut value = json!({
+                "artifactId": artifact.artifact_id,
+                "index": artifact.index,
+                "path": artifact.path,
+                "mimeType": artifact.mime_type,
+                "size": artifact.byte_count
+            });
+            if let Some(url) = &artifact.remote_source_url {
+                value["remoteSourceUrl"] = json!(url);
+            }
+            value
+        }).collect::<Vec<_>>(),
 ```
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cargo test -p puffer-core image_generation 2>&1 | tail -20`
+Run: `cargo test -p puffer-core image_output_surfaces_remote_source_url 2>&1 | tail -20`
 Expected: PASS。
 
-- [ ] **Step 5: 全包构建 + clippy**
+- [ ] **Step 5: 全包构建 + clippy + 既有测试**
 
-Run: `cargo build -p puffer-core 2>&1 | tail -5 && cargo clippy -p puffer-core 2>&1 | tail -5`
-Expected: 无 error。
+Run: `cargo test -p puffer-core image_generation 2>&1 | tail -10 && cargo clippy -p puffer-core 2>&1 | tail -5`
+Expected: 既有图生成测试不回归，clippy 无 error。
 
 - [ ] **Step 6: 提交**
 
 ```bash
 git add crates/puffer-core/runtime/claude_tools/workflow/image_generation.rs
-git commit -m "feat(media): surface generated image referenceUrl for image-to-video"
+git commit -m "feat(media): surface generated image remoteSourceUrl for image-to-video"
 ```
 
 ### Task 6: skill 增加"生成人物图 → 图生视频"分支
@@ -317,11 +348,11 @@ git commit -m "feat(media): surface generated image referenceUrl for image-to-vi
 ```markdown
    - If absent and the user wants character-consistent shots, generate each character
      once with `imagegen --prompt "<character sheet>" --count 1`. Read the tool result's
-     `referenceUrl` for that artifact:
-       - If `referenceUrl` is a URL, use it as `--image-reference` in stage 4.
-       - If `referenceUrl` is null, stop and report that the configured image provider
-         does not produce a referenceable URL, so image-to-video is unavailable. Do NOT
-         silently fall back to text-to-video.
+     `remoteSourceUrl` for that artifact (same key the video tool already uses):
+       - If `remoteSourceUrl` is present, use it as `--image-reference` in stage 4.
+       - If `remoteSourceUrl` is absent, stop and report that the configured image
+         provider does not produce a referenceable URL, so image-to-video is unavailable.
+         Do NOT silently fall back to text-to-video.
    - If absent and consistency is not required, run text-to-video in stage 4.
 ```
 
@@ -329,13 +360,13 @@ git commit -m "feat(media): surface generated image referenceUrl for image-to-vi
 
 ```bash
 git add -f resources/skills/short-drama/SKILL.md
-git commit -m "feat(skill): short-drama generates character images and feeds referenceUrl to video"
+git commit -m "feat(skill): short-drama generates character images and feeds remoteSourceUrl to video"
 ```
 
 - [ ] **Step 3: 端到端验收**
 
 让 agent 跑一个"无图 + 要求人物一致"的短剧。
-Expected: imagegen 生人物图 → 取 `referenceUrl` → videogen 图生视频 → ffmpeg 合成；
+Expected: imagegen 生人物图 → 取 `remoteSourceUrl` → videogen 图生视频 → ffmpeg 合成；
 若 provider 不回 URL，按失败契约明确报错而非降级。
 
 ---
@@ -344,4 +375,4 @@ Expected: imagegen 生人物图 → 取 `referenceUrl` → videogen 图生视频
 
 - **Spec 覆盖**：§3 五阶段门控 → Task 2/6；§4 三行桥 → Task 5；§5 失败契约 → Task 2(skill body)+Task 6；§6 两增量 → 增量 1（Task 1-3）/增量 2（Task 4-6）；§7 受影响文件 → File Structure；§8 开放问题（ffmpeg 探测/skill 发现/spike）→ Task 1、Task 2 Step1、Task 4。无遗漏。
 - **无占位符**：SKILL.md、测试、三处改动均给出完整内容/命令/期望输出。
-- **类型一致**：`referenceUrl`（输出 JSON 键）/`remote_source_url`（Rust 字段）全程一致；runtime 源字段 `ExactGeneratedArtifact.remote_source_url`（`runtime.rs:94`）与构建处透传名一致。
+- **类型/命名一致**：输出 JSON 键 `remoteSourceUrl`（与 `video_generation.rs:184-186` 同名）/ Rust 字段 `remote_source_url` 全程一致；runtime 源字段 `ExactGeneratedArtifact.remote_source_url`（`runtime.rs:94`）与构建处透传名一致；增量 2 仅 Task 5 触碰 `image_generation.rs`，无其它文件。
