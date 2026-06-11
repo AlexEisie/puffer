@@ -110,8 +110,8 @@ use crate::daemon_ui_state::{
 };
 use crate::desktop_api;
 use crate::desktop_api_types::{
-    ExternalCredentialDto, FolderGroupDto, McpServerDto, MediaCapabilityInfoDto,
-    MediaCapabilityParameterDto, ModelDescriptorDto, ProxyEndpointInputDto, ProxyTestResultDto,
+    ExternalCredentialDto, FolderGroupDto, McpServerDto, MediaCapabilityAxisDto,
+    MediaCapabilityInfoDto, ModelDescriptorDto, ProxyEndpointInputDto, ProxyTestResultDto,
     RepoActionResultDto, RepoStatusDto, SaveProxySettingsParams, SessionDetailDto,
     SettingsSnapshotDto, ThinkingOptionDto,
 };
@@ -2550,18 +2550,24 @@ fn media_capability_info_dto(capability: MediaCapabilityView) -> MediaCapability
         kind: capability.kind,
         operation: capability.operation,
         adapter: capability.adapter,
-        parameters: capability
-            .parameters
+        axes: capability
+            .axes
             .into_iter()
-            .map(|parameter| MediaCapabilityParameterDto {
-                name: parameter.name,
-                label: parameter.label,
-                values: parameter.values,
-                default: parameter.default,
-                request_field: parameter.request_field,
+            .map(|axis| MediaCapabilityAxisDto {
+                id: axis.id,
+                label: axis.label,
+                role: serde_json::to_value(axis.role)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_default(),
+                control: serde_json::to_value(axis.control).unwrap_or(Value::Null),
+                request_field: axis.request_field,
+                wire_type: serde_json::to_value(axis.wire_type)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_default(),
             })
             .collect(),
-        defaults: capability.defaults,
         status: capability.status,
         source: capability.source,
         reason: capability.reason,
@@ -6867,15 +6873,14 @@ models: []
                 && capability["status"] == "available"
         }));
         assert!(capabilities.iter().any(|capability| {
-            capability["parameters"]
-                .as_array()
-                .is_some_and(|parameters| {
-                    parameters.iter().any(|parameter| {
-                        parameter["name"] == "size"
-                            && parameter["requestField"] == "size"
-                            && parameter["default"] == "auto"
-                    })
+            capability["axes"].as_array().is_some_and(|axes| {
+                axes.iter().any(|axis| {
+                    axis["id"] == "size"
+                        && axis["requestField"] == "size"
+                        && axis["role"] == "param"
+                        && axis["control"]["enum"]["default"] == "auto"
                 })
+            })
         }));
     }
 
