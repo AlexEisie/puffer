@@ -73,3 +73,21 @@ fn relaydance_folds_resolution_and_audio_into_logical_models() {
         _ => panic!("expected BySelector"),
     }
 }
+
+#[test]
+fn all_providers_parse_after_axis_migration() {
+    for file in [
+        "openai",
+        "zhipu",
+        "xai",
+        "minimax",
+        "minimax-cn",
+        "vercel-ai-gateway",
+        "worldrouter",
+        "openrouter",
+        "byteplus",
+        "relaydance",
+    ] {
+        let _ = provider(file); // panics on parse failure
+    }
+}

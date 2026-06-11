@@ -24,62 +24,34 @@ media:
         display_name: GLM Image
         operations:
           - generate
-        parameters:
-          - name: size
-            label: Size
-            values: [1280x1280, 1568x1056, 1056x1568, 1472x1088, 1088x1472, 1728x960, 960x1728]
-            default: 1280x1280
-            request_field: size
-          - name: quality
-            label: Quality
-            values: [hd]
-            default: hd
-            request_field: quality
+        axes:
+          - { id: size, label: "Size", role: param, control: !enum { values: ["1280x1280", "1568x1056", "1056x1568", "1472x1088", "1088x1472", "1728x960", "960x1728"], default: "1280x1280" }, request_field: size }
+          - { id: quality, label: "Quality", role: param, control: !enum { values: ["hd"], default: "hd" }, request_field: quality }
+        variants: { model_id: glm-image }
       - id: cogview-4-250304
         display_name: CogView 4 250304
         operations:
           - generate
-        parameters:
-          - name: size
-            label: Size
-            values: [1024x1024, 768x1344, 864x1152, 1344x768, 1152x864, 1440x720, 720x1440]
-            default: 1024x1024
-            request_field: size
-          - name: quality
-            label: Quality
-            values: [standard, hd]
-            default: standard
-            request_field: quality
+        axes:
+          - { id: size, label: "Size", role: param, control: !enum { values: ["1024x1024", "768x1344", "864x1152", "1344x768", "1152x864", "1440x720", "720x1440"], default: "1024x1024" }, request_field: size }
+          - { id: quality, label: "Quality", role: param, control: !enum { values: ["standard", "hd"], default: "standard" }, request_field: quality }
+        variants: { model_id: cogview-4-250304 }
       - id: cogview-4
         display_name: CogView 4
         operations:
           - generate
-        parameters:
-          - name: size
-            label: Size
-            values: [1024x1024, 768x1344, 864x1152, 1344x768, 1152x864, 1440x720, 720x1440]
-            default: 1024x1024
-            request_field: size
-          - name: quality
-            label: Quality
-            values: [standard, hd]
-            default: standard
-            request_field: quality
+        axes:
+          - { id: size, label: "Size", role: param, control: !enum { values: ["1024x1024", "768x1344", "864x1152", "1344x768", "1152x864", "1440x720", "720x1440"], default: "1024x1024" }, request_field: size }
+          - { id: quality, label: "Quality", role: param, control: !enum { values: ["standard", "hd"], default: "standard" }, request_field: quality }
+        variants: { model_id: cogview-4 }
       - id: cogview-3-flash
         display_name: CogView 3 Flash
         operations:
           - generate
-        parameters:
-          - name: size
-            label: Size
-            values: [1024x1024, 768x1344, 864x1152, 1344x768, 1152x864, 1440x720, 720x1440]
-            default: 1024x1024
-            request_field: size
-          - name: quality
-            label: Quality
-            values: [standard, hd]
-            default: standard
-            request_field: quality
+        axes:
+          - { id: size, label: "Size", role: param, control: !enum { values: ["1024x1024", "768x1344", "864x1152", "1344x768", "1152x864", "1440x720", "720x1440"], default: "1024x1024" }, request_field: size }
+          - { id: quality, label: "Quality", role: param, control: !enum { values: ["standard", "hd"], default: "standard" }, request_field: quality }
+        variants: { model_id: cogview-3-flash }
 models:
   - id: glm-4.6
     display_name: GLM-4.6
