@@ -257,7 +257,7 @@ test("task monitor configuration uses the design primary add button", async ({ p
         auth_failure_notified: false,
         can_trigger_workflow: true,
         connect_command: "/connect lark-login lark-user",
-        monitor_command: "/monitor lark-user"
+        monitor_command: null
       }
     ],
     workflow_bindings: [],
@@ -289,6 +289,54 @@ test("task monitor configuration uses the design primary add button", async ({ p
     backgroundColor: "rgb(17, 17, 17)",
     color: "rgb(255, 255, 255)"
   });
+  const addButton = dialog.getByRole("button", { name: "Add" });
+  await expect(addButton).toBeEnabled();
+  await addButton.click();
+  const request = await daemon.waitForRequest("task_monitor_create");
+  expect(request.params).toEqual({
+    connection_slug: "lark-user",
+    model: null,
+    contact_ids: []
+  });
+});
+
+test("task monitor configuration reconnects a degraded selected account", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setWorkflowSnapshot({
+    workflows: [],
+    runs: [],
+    connections: [
+      {
+        slug: "telegram-user",
+        connector_slug: "telegram-login",
+        description: "Personal Telegram",
+        state: "degraded",
+        has_consumer: false,
+        auth_failure_notified: true,
+        can_trigger_workflow: true,
+        connect_command: "/connect telegram-login telegram-user",
+        monitor_command: "/monitor telegram-user"
+      }
+    ],
+    workflow_bindings: [],
+    monitor_tasks: []
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openTasks(page);
+  await page.getByRole("button", { name: "Configure" }).click();
+  await daemon.waitForRequest("contacts_list");
+
+  const dialog = page.getByRole("dialog", { name: "Task settings" });
+  await expect(dialog).toContainText("telegram-user needs auth repair");
+  const reconnectButton = dialog.getByRole("button", { name: "Reconnect" });
+  await expect(reconnectButton).toBeEnabled();
+  await reconnectButton.click();
+
+  const request = await daemon.waitForRequest("run_agent_turn");
+  expect(request.params.message).toBe("/connect telegram-login telegram-user");
+  expect(daemon.requests.some((item) => item.method === "task_monitor_create")).toBe(false);
 });
 
 test("task monitor rules uses compact keyword rows", async ({ page }) => {
