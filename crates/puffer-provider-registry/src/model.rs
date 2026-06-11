@@ -1,8 +1,13 @@
 use crate::auth::AuthMode;
+use crate::CANONICAL_MEDIA_RATIOS;
 use anyhow::{bail, Context, Result};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+const MAX_MEDIA_OUTPUTS: u8 = 9;
+const RESERVED_MODE_AXIS_ID: &str = "mode";
+const RESERVED_RATIO_AXIS_ID: &str = "ratio";
 
 /// Describes the response format used by a provider's model discovery endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -385,6 +390,8 @@ pub struct MediaModelDescriptor {
     pub id: String,
     #[serde(default)]
     pub display_name: Option<String>,
+    #[serde(default)]
+    pub max_outputs: Option<u8>,
     /// Adapter source, inherently shared by this model's variants.
     #[serde(default)]
     pub execution: Option<MediaExecutionDescriptor>,
@@ -392,6 +399,8 @@ pub struct MediaModelDescriptor {
     pub operations: Vec<MediaOperation>,
     #[serde(default)]
     pub axes: Vec<crate::Axis>,
+    #[serde(default)]
+    pub media_map: Option<crate::MediaMap>,
     pub variants: crate::Variants,
 }
 
@@ -543,6 +552,15 @@ impl MediaModelDescriptor {
             ));
         }
 
+        if self
+            .max_outputs
+            .is_some_and(|max| max == 0 || max > MAX_MEDIA_OUTPUTS)
+        {
+            errors.push(format!(
+                "{location}.max_outputs must be between 1 and {MAX_MEDIA_OUTPUTS}"
+            ));
+        }
+
         if let Some(execution) = &self.execution {
             execution.validate(&format!("{location}.execution"), errors);
         }
@@ -567,12 +585,18 @@ fn validate_one_media_model(model: &MediaModelDescriptor) -> Result<()> {
         bail!("media model {} has more than one selector axis", model.id);
     }
     for axis in &model.axes {
-        if axis.role == AxisRole::Param && axis.request_field.is_none() {
+        if axis.role == AxisRole::Param
+            && axis.request_field.is_none()
+            && !canonical_axis_is_covered_by_media_map(axis, model.media_map.as_ref())
+        {
             bail!(
                 "media model {} param axis {} needs a request_field",
                 model.id,
                 axis.id
             );
+        }
+        if axis.id == RESERVED_RATIO_AXIS_ID {
+            validate_ratio_axis_values(&model.id, axis)?;
         }
         if let ControlKind::Range {
             min,
@@ -590,6 +614,7 @@ fn validate_one_media_model(model: &MediaModelDescriptor) -> Result<()> {
             }
         }
     }
+    validate_media_map(&model.id, &model.axes, model.media_map.as_ref())?;
     if let Variants::BySelector { selector, map } = &model.variants {
         let axis = selectors
             .first()
@@ -646,6 +671,127 @@ fn validate_one_media_model(model: &MediaModelDescriptor) -> Result<()> {
             "media model {} has a selector axis but a Single variant",
             model.id
         );
+    }
+    Ok(())
+}
+
+fn canonical_axis_is_covered_by_media_map(
+    axis: &crate::Axis,
+    media_map: Option<&crate::MediaMap>,
+) -> bool {
+    let Some(media_map) = media_map else {
+        return false;
+    };
+    match axis.id.as_str() {
+        RESERVED_MODE_AXIS_ID => media_map.size.is_some(),
+        RESERVED_RATIO_AXIS_ID => media_map.ratio.is_some() || media_map.size.is_some(),
+        _ => false,
+    }
+}
+
+fn validate_ratio_axis_values(model_id: &str, axis: &crate::Axis) -> Result<()> {
+    let crate::ControlKind::Enum { values, .. } = &axis.control else {
+        return Ok(());
+    };
+    for value in values {
+        validate_canonical_ratio(model_id, value)?;
+    }
+    Ok(())
+}
+
+fn validate_media_map(
+    model_id: &str,
+    axes: &[crate::Axis],
+    media_map: Option<&crate::MediaMap>,
+) -> Result<()> {
+    let Some(media_map) = media_map else {
+        return Ok(());
+    };
+    if let Some(ratio_map) = &media_map.ratio {
+        let ratio_values =
+            require_enum_axis_values(model_id, axes, RESERVED_RATIO_AXIS_ID, "media_map.ratio")?;
+        validate_media_map_field(model_id, "ratio", &ratio_map.field)?;
+        if ratio_map.values.is_empty() {
+            bail!("media model {model_id} media_map.ratio needs at least one value");
+        }
+        for ratio in ratio_map.values.keys() {
+            validate_canonical_ratio(model_id, ratio)?;
+            validate_axis_contains_value(model_id, "ratio", ratio, ratio_values)?;
+        }
+    }
+    if let Some(size_map) = &media_map.size {
+        let mode_values =
+            require_enum_axis_values(model_id, axes, RESERVED_MODE_AXIS_ID, "media_map.size")?;
+        let ratio_values =
+            require_enum_axis_values(model_id, axes, RESERVED_RATIO_AXIS_ID, "media_map.size")?;
+        validate_media_map_field(model_id, "size", &size_map.field)?;
+        if size_map.values.is_empty() {
+            bail!("media model {model_id} media_map.size needs at least one mode");
+        }
+        for (mode, ratios) in &size_map.values {
+            if mode.trim().is_empty() {
+                bail!("media model {model_id} media_map.size mode must not be empty");
+            }
+            validate_axis_contains_value(model_id, "mode", mode, mode_values)?;
+            if ratios.is_empty() {
+                bail!("media model {model_id} media_map.size mode {mode} needs ratios");
+            }
+            for ratio in ratios.keys() {
+                validate_canonical_ratio(model_id, ratio)?;
+                validate_axis_contains_value(model_id, "ratio", ratio, ratio_values)?;
+            }
+        }
+        if size_map.common_ratios().is_empty() {
+            bail!(
+                "media model {model_id} media_map.size needs at least one common ratio across modes"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn require_enum_axis_values<'a>(
+    model_id: &str,
+    axes: &'a [crate::Axis],
+    axis_id: &str,
+    map_name: &str,
+) -> Result<&'a Vec<String>> {
+    enum_axis_values(axes, axis_id).ok_or_else(|| {
+        anyhow::anyhow!("media model {model_id} {map_name} requires an enum {axis_id} axis")
+    })
+}
+
+fn validate_media_map_field(model_id: &str, map_name: &str, field: &str) -> Result<()> {
+    if field.trim().is_empty() {
+        bail!("media model {model_id} media_map.{map_name}.field must not be empty");
+    }
+    Ok(())
+}
+
+fn enum_axis_values<'a>(axes: &'a [crate::Axis], axis_id: &str) -> Option<&'a Vec<String>> {
+    axes.iter()
+        .find(|axis| axis.id == axis_id)
+        .and_then(|axis| match &axis.control {
+            crate::ControlKind::Enum { values, .. } => Some(values),
+            _ => None,
+        })
+}
+
+fn validate_axis_contains_value(
+    model_id: &str,
+    axis_id: &str,
+    value: &str,
+    axis_values: &[String],
+) -> Result<()> {
+    if !axis_values.iter().any(|axis_value| axis_value == value) {
+        bail!("media model {model_id} media_map {axis_id} value {value} is not declared");
+    }
+    Ok(())
+}
+
+fn validate_canonical_ratio(model_id: &str, ratio: &str) -> Result<()> {
+    if !CANONICAL_MEDIA_RATIOS.contains(&ratio) {
+        bail!("media model {model_id} ratio {ratio} is not a canonical ratio");
     }
     Ok(())
 }

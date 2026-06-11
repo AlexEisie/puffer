@@ -2,16 +2,19 @@ use super::capabilities::{MediaCapability, MediaKind};
 use anyhow::{bail, Context, Result};
 use puffer_provider_registry::{
     canonical_provider_id, AuthStore, Axis, AxisRole, ControlKind, MediaExecutionDescriptor,
-    MediaExecutionKind, MediaModelDescriptor, MediaOperation, ProviderDescriptor, ProviderRegistry,
-    Variants,
+    MediaExecutionKind, MediaMap, MediaModelDescriptor, MediaOperation, ProviderDescriptor,
+    ProviderRegistry, Variants, WireType,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const CAPABILITY_STATUS_AVAILABLE: &str = "available";
 const CAPABILITY_STATUS_UNAVAILABLE: &str = "unavailable";
 const CAPABILITY_REASON_ADAPTER_UNAVAILABLE: &str = "adapter_unavailable";
 const CAPABILITY_REASON_MISSING_AUTH: &str = "missing_auth";
 const CAPABILITY_SOURCE_STATIC: &str = "static";
+const MODE_AXIS_ID: &str = "mode";
+const RATIO_AXIS_ID: &str = "ratio";
+const OUTPUT_AXIS_ID: &str = "output";
 
 /// Carries cached dynamic media discovery records into capability resolution.
 #[derive(Debug, Clone, Default)]
@@ -29,14 +32,14 @@ pub(crate) struct CachedImageMediaModel {
 
 /// Describes a concrete upstream media request resolved from a logical model and
 /// the user's axis selections: the upstream `model_id` to call, the execution
-/// `adapter`, and the request `parameters` keyed by each param axis's
-/// `request_field` (merged with the chosen variant's `base_params`).
+/// `adapter`, provider request `parameters`, and the runtime output `count`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedMediaRequest {
     pub(crate) provider_id: String,
     pub(crate) model_id: String,
     pub(crate) adapter: String,
     pub(crate) parameters: BTreeMap<String, String>,
+    pub(crate) count: u8,
 }
 
 /// Resolves selectable exact media capabilities from provider descriptors.
@@ -136,9 +139,13 @@ pub(crate) fn resolve_media_request(
         }
     };
 
-    // 3. Merge base_params with Param-axis selections.
+    // 3. Merge base_params with ordinary Param-axis selections.
     let mut parameters = variant.base_params.clone();
-    for axis in cap.axes.iter().filter(|a| a.role == AxisRole::Param) {
+    for axis in cap.axes.iter().filter(|a| {
+        a.role == AxisRole::Param
+            && !runtime_only_axis(&a.id)
+            && !mapped_reserved_axis(&a.id, cap.media_map.as_ref())
+    }) {
         if let Some(field) = &axis.request_field {
             let v = selections
                 .get(&axis.id)
@@ -147,12 +154,120 @@ pub(crate) fn resolve_media_request(
             parameters.insert(field.clone(), v);
         }
     }
+    apply_ratio_media_map(
+        &mut parameters,
+        cap.media_map.as_ref(),
+        &cap.axes,
+        selections,
+    )?;
+    apply_size_media_map(
+        &mut parameters,
+        cap.media_map.as_ref(),
+        &cap.axes,
+        selections,
+    )?;
+    let count = resolved_count(kind, &cap.axes, selections, cap.max_outputs)?;
 
     Ok(ResolvedMediaRequest {
         provider_id: cap.provider_id,
         model_id: variant.model_id,
         adapter: cap.adapter,
         parameters,
+        count,
+    })
+}
+
+fn runtime_only_axis(axis_id: &str) -> bool {
+    axis_id == OUTPUT_AXIS_ID
+}
+
+fn mapped_reserved_axis(axis_id: &str, media_map: Option<&MediaMap>) -> bool {
+    let Some(media_map) = media_map else {
+        return false;
+    };
+    match axis_id {
+        MODE_AXIS_ID => media_map.size.is_some(),
+        RATIO_AXIS_ID => media_map.ratio.is_some() || media_map.size.is_some(),
+        _ => false,
+    }
+}
+
+fn apply_ratio_media_map(
+    parameters: &mut BTreeMap<String, String>,
+    media_map: Option<&MediaMap>,
+    axes: &[Axis],
+    selections: &BTreeMap<String, String>,
+) -> Result<()> {
+    let Some(ratio_map) = media_map.and_then(|map| map.ratio.as_ref()) else {
+        return Ok(());
+    };
+    let ratio = selected_axis_value(axes, selections, RATIO_AXIS_ID)
+        .context("media_map.ratio requires a ratio axis")?;
+    let mapped = ratio_map
+        .values
+        .get(&ratio)
+        .with_context(|| format!("ratio {ratio} is not mapped"))?;
+    if let Some(value) = mapped {
+        parameters.insert(ratio_map.field.clone(), value.clone());
+    }
+    Ok(())
+}
+
+fn apply_size_media_map(
+    parameters: &mut BTreeMap<String, String>,
+    media_map: Option<&MediaMap>,
+    axes: &[Axis],
+    selections: &BTreeMap<String, String>,
+) -> Result<()> {
+    let Some(size_map) = media_map.and_then(|map| map.size.as_ref()) else {
+        return Ok(());
+    };
+    let mode = selected_axis_value(axes, selections, MODE_AXIS_ID)
+        .context("media_map.size requires a mode axis")?;
+    let ratio = selected_axis_value(axes, selections, RATIO_AXIS_ID)
+        .context("media_map.size requires a ratio axis")?;
+    let ratios = size_map
+        .values
+        .get(&mode)
+        .with_context(|| format!("mode {mode} is not mapped"))?;
+    let mapped = ratios
+        .get(&ratio)
+        .with_context(|| format!("mode {mode} ratio {ratio} is not mapped"))?;
+    if let Some(value) = mapped {
+        parameters.insert(size_map.field.clone(), value.clone());
+    }
+    Ok(())
+}
+
+fn resolved_count(
+    kind: MediaKind,
+    axes: &[Axis],
+    selections: &BTreeMap<String, String>,
+    max_outputs: Option<u8>,
+) -> Result<u8> {
+    if kind == MediaKind::Video {
+        return Ok(1);
+    }
+    let value =
+        selected_axis_value(axes, selections, OUTPUT_AXIS_ID).unwrap_or_else(|| "1".to_string());
+    let count = value.parse::<u8>().context("axis output must be numeric")?;
+    let max_outputs = max_outputs.unwrap_or(1).min(9);
+    if count == 0 || count > max_outputs {
+        bail!("axis output value {value} is out of range");
+    }
+    Ok(count)
+}
+
+fn selected_axis_value(
+    axes: &[Axis],
+    selections: &BTreeMap<String, String>,
+    axis_id: &str,
+) -> Option<String> {
+    axes.iter().find(|axis| axis.id == axis_id).map(|_| {
+        selections
+            .get(axis_id)
+            .cloned()
+            .unwrap_or_else(|| default_for_axis(axes, axis_id))
     })
 }
 
@@ -296,8 +411,10 @@ fn resolve_image_capabilities(
                 kind: MediaKind::Image,
                 operation: operation_wire_name(operation).to_string(),
                 adapter: adapter_id(execution.adapter).to_string(),
-                axes: model.axes.clone(),
+                axes: normalized_image_axes(model),
                 variants: model.variants.clone(),
+                max_outputs: model.max_outputs,
+                media_map: model.media_map.clone(),
                 status: CAPABILITY_STATUS_AVAILABLE.to_string(),
                 source: source.to_string(),
                 reason: None,
@@ -345,8 +462,10 @@ fn resolve_video_capabilities(
                 kind: MediaKind::Video,
                 operation: operation_wire_name(operation).to_string(),
                 adapter: adapter_id(execution.adapter).to_string(),
-                axes: model.axes.clone(),
+                axes: normalized_video_axes(model),
                 variants: model.variants.clone(),
+                max_outputs: model.max_outputs,
+                media_map: model.media_map.clone(),
                 status: status.to_string(),
                 source: CAPABILITY_SOURCE_STATIC.to_string(),
                 reason: reason.map(str::to_string),
@@ -355,6 +474,104 @@ fn resolve_video_capabilities(
         }
     }
     capabilities
+}
+
+fn normalized_image_axes(model: &MediaModelDescriptor) -> Vec<Axis> {
+    let ratio_values = exact_ratio_values_from_media_map(model.media_map.as_ref());
+    let mut axes = model
+        .axes
+        .iter()
+        .filter(|axis| axis.id != OUTPUT_AXIS_ID)
+        .filter_map(|axis| normalize_image_axis(axis, ratio_values.as_ref()))
+        .collect::<Vec<_>>();
+    axes.push(output_axis(model.max_outputs));
+    axes
+}
+
+fn normalize_image_axis(axis: &Axis, ratio_values: Option<&BTreeSet<String>>) -> Option<Axis> {
+    if axis.id != RATIO_AXIS_ID {
+        return Some(axis.clone());
+    }
+    let Some(ratio_values) = ratio_values else {
+        return Some(axis.clone());
+    };
+    let ControlKind::Enum { values, default } = &axis.control else {
+        return Some(axis.clone());
+    };
+    let filtered = values
+        .iter()
+        .filter(|value| ratio_values.contains(*value))
+        .cloned()
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        return None;
+    }
+    let default = if filtered.contains(default) {
+        default.clone()
+    } else {
+        filtered[0].clone()
+    };
+    let mut axis = axis.clone();
+    axis.control = ControlKind::Enum {
+        values: filtered,
+        default,
+    };
+    Some(axis)
+}
+
+fn exact_ratio_values_from_media_map(media_map: Option<&MediaMap>) -> Option<BTreeSet<String>> {
+    let media_map = media_map?;
+    let mut values = None;
+    if let Some(ratio_map) = &media_map.ratio {
+        values = Some(ratio_map.values.keys().cloned().collect::<BTreeSet<_>>());
+    }
+    if let Some(size_map) = &media_map.size {
+        let size_values = size_map.common_ratios();
+        values = Some(match values {
+            Some(mut existing) => {
+                existing.retain(|ratio| size_values.contains(ratio));
+                existing
+            }
+            None => size_values,
+        });
+    }
+    values
+}
+
+fn output_axis(max_outputs: Option<u8>) -> Axis {
+    let max = max_outputs.unwrap_or(1).clamp(1, 9) as f64;
+    Axis {
+        id: OUTPUT_AXIS_ID.to_string(),
+        label: "Output".to_string(),
+        role: AxisRole::Param,
+        control: ControlKind::Range {
+            min: 1.0,
+            max,
+            step: 1.0,
+            default: 1.0,
+        },
+        request_field: None,
+        wire_type: WireType::Number,
+    }
+}
+
+fn normalized_video_axes(model: &MediaModelDescriptor) -> Vec<Axis> {
+    model
+        .axes
+        .iter()
+        .cloned()
+        .map(normalize_video_axis_label)
+        .collect()
+}
+
+fn normalize_video_axis_label(mut axis: Axis) -> Axis {
+    axis.label = match axis.id.as_str() {
+        MODE_AXIS_ID | "resolution" => "Mode".to_string(),
+        RATIO_AXIS_ID | "aspect_ratio" => "Ratio".to_string(),
+        "duration" | "duration_seconds" => "Duration".to_string(),
+        _ => axis.label,
+    };
+    axis
 }
 
 fn video_capability_state(

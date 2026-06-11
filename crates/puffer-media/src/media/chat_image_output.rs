@@ -434,9 +434,11 @@ mod tests {
                     models: vec![MediaModelDescriptor {
                         id: "openrouter/image-chat".to_string(),
                         display_name: Some("Image Chat".to_string()),
+                        max_outputs: None,
                         execution: None,
                         operations: vec![MediaOperation::Generate],
                         axes: Vec::new(),
+                        media_map: None,
                         variants: Variants::Single(Variant {
                             model_id: "openrouter/image-chat".to_string(),
                             base_params: BTreeMap::new(),

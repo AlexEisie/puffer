@@ -1,4 +1,4 @@
-use puffer_provider_registry::{Axis, Variants};
+use puffer_provider_registry::{Axis, MediaMap, Variants};
 use serde::{Deserialize, Serialize};
 
 /// Identifies the broad media asset type a capability or job handles.
@@ -27,6 +27,8 @@ pub(crate) struct MediaCapability {
     pub(crate) adapter: String,
     pub(crate) axes: Vec<Axis>,
     pub(crate) variants: Variants,
+    pub(crate) max_outputs: Option<u8>,
+    pub(crate) media_map: Option<MediaMap>,
     pub(crate) status: String,
     pub(crate) source: String,
     pub(crate) reason: Option<String>,

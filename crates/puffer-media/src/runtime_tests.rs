@@ -2,9 +2,9 @@ use super::*;
 use indexmap::IndexMap;
 use puffer_provider_registry::{
     AuthMode, AuthStore, Axis, AxisRole, ControlKind, MediaExecutionDescriptor, MediaExecutionKind,
-    MediaKindDescriptor, MediaModelDescriptor, MediaOperation, ModelDescriptor,
-    ModelDiscoveryConfig, ProviderDescriptor, ProviderMediaDescriptor, ProviderRegistry, Variant,
-    Variants, WireType,
+    MediaKindDescriptor, MediaMap, MediaModelDescriptor, MediaOperation, MediaSizeMap,
+    ModelDescriptor, ModelDiscoveryConfig, ProviderDescriptor, ProviderMediaDescriptor,
+    ProviderRegistry, Variant, Variants, WireType,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -77,6 +77,7 @@ fn minimax_registry(base_url: String) -> ProviderRegistry {
                 models: vec![MediaModelDescriptor {
                     id: "image-01".to_string(),
                     display_name: Some("Image 01".to_string()),
+                    max_outputs: None,
                     execution: None,
                     operations: vec![MediaOperation::Generate],
                     axes: vec![
@@ -107,6 +108,7 @@ fn minimax_registry(base_url: String) -> ProviderRegistry {
                         model_id: "image-01".to_string(),
                         base_params: ::std::collections::BTreeMap::new(),
                     }),
+                    media_map: None,
                 }],
             }),
             video: None,
@@ -170,35 +172,49 @@ fn byteplus_seedream_registry(base_url: String) -> ProviderRegistry {
                 models: vec![MediaModelDescriptor {
                     id: "seedream-4-5-251128".to_string(),
                     display_name: Some("Seedream 4.5".to_string()),
+                    max_outputs: Some(9),
                     execution: None,
                     operations: vec![MediaOperation::Generate],
                     axes: vec![
                         Axis {
-                            id: "size".to_string(),
-                            label: "Size".to_string(),
+                            id: "mode".to_string(),
+                            label: "Mode".to_string(),
                             role: AxisRole::Param,
                             control: ControlKind::Enum {
-                                values: vec!["2K".to_string()],
-                                default: "2K".to_string(),
+                                values: vec!["2K HD".to_string()],
+                                default: "2K HD".to_string(),
                             },
-                            request_field: Some("size".to_string()),
+                            request_field: None,
                             wire_type: WireType::String,
                         },
                         Axis {
-                            id: "response_format".to_string(),
-                            label: "Response format".to_string(),
+                            id: "ratio".to_string(),
+                            label: "Ratio".to_string(),
                             role: AxisRole::Param,
                             control: ControlKind::Enum {
-                                values: vec!["b64_json".to_string(), "url".to_string()],
-                                default: "b64_json".to_string(),
+                                values: vec!["Auto".to_string()],
+                                default: "Auto".to_string(),
                             },
-                            request_field: Some("response_format".to_string()),
+                            request_field: None,
                             wire_type: WireType::String,
                         },
                     ],
                     variants: Variants::Single(Variant {
                         model_id: "seedream-4-5-251128".to_string(),
-                        base_params: ::std::collections::BTreeMap::new(),
+                        base_params: BTreeMap::from([(
+                            "response_format".to_string(),
+                            "b64_json".to_string(),
+                        )]),
+                    }),
+                    media_map: Some(MediaMap {
+                        ratio: None,
+                        size: Some(MediaSizeMap {
+                            field: "size".to_string(),
+                            values: BTreeMap::from([(
+                                "2K HD".to_string(),
+                                BTreeMap::from([("Auto".to_string(), Some("2K".to_string()))]),
+                            )]),
+                        }),
                     }),
                 }],
             }),
@@ -234,6 +250,7 @@ fn replicate_video_registry() -> ProviderRegistry {
                 models: vec![MediaModelDescriptor {
                     id: "owner/model-version".to_string(),
                     display_name: Some("Video Model".to_string()),
+                    max_outputs: None,
                     execution: None,
                     operations: vec![MediaOperation::Generate],
                     axes: vec![
@@ -264,6 +281,7 @@ fn replicate_video_registry() -> ProviderRegistry {
                         model_id: "owner/model-version".to_string(),
                         base_params: ::std::collections::BTreeMap::new(),
                     }),
+                    media_map: None,
                 }],
             }),
         }),
@@ -280,9 +298,11 @@ fn discovered_chat_image_cache() -> ExactMediaDiscoveryCache {
                 model: MediaModelDescriptor {
                     id: "openrouter/image-chat".to_string(),
                     display_name: Some("Image Chat".to_string()),
+                    max_outputs: None,
                     execution: None,
                     operations: vec![MediaOperation::Generate],
                     axes: Vec::new(),
+                    media_map: None,
                     variants: Variants::Single(Variant {
                         model_id: "openrouter/image-chat".to_string(),
                         base_params: ::std::collections::BTreeMap::new(),
@@ -336,15 +356,45 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> String {
 #[test]
 fn exact_image_generation_rejects_invalid_count() {
     assert!(validate_image_generation_count(1).is_ok());
-    assert!(validate_image_generation_count(4).is_ok());
+    assert!(validate_image_generation_count(9).is_ok());
     assert_eq!(
         validate_image_generation_count(0).unwrap_err().to_string(),
-        "image generation count must be between 1 and 4"
+        "image generation count must be between 1 and 9"
     );
     assert_eq!(
-        validate_image_generation_count(5).unwrap_err().to_string(),
-        "image generation count must be between 1 and 4"
+        validate_image_generation_count(10).unwrap_err().to_string(),
+        "image generation count must be between 1 and 9"
     );
+}
+
+#[test]
+fn image_count_override_replaces_persisted_output_selection() {
+    let parameters = image_parameters_with_count_override(
+        BTreeMap::from([
+            ("mode".to_string(), "1K SD".to_string()),
+            ("ratio".to_string(), "1:1".to_string()),
+            ("output".to_string(), "3".to_string()),
+        ]),
+        Some(2),
+    )
+    .expect("valid count override");
+
+    assert_eq!(parameters["output"], "2");
+}
+
+#[test]
+fn missing_image_count_preserves_persisted_output_selection() {
+    let parameters = image_parameters_with_count_override(
+        BTreeMap::from([
+            ("mode".to_string(), "1K SD".to_string()),
+            ("ratio".to_string(), "1:1".to_string()),
+            ("output".to_string(), "3".to_string()),
+        ]),
+        None,
+    )
+    .expect("missing count is not an override");
+
+    assert_eq!(parameters["output"], "3");
 }
 
 #[test]
@@ -438,7 +488,7 @@ fn generate_exact_image_dispatches_to_minimax_adapter() {
                 ("aspect_ratio".to_string(), "16:9".to_string()),
                 ("response_format".to_string(), "base64".to_string()),
             ]),
-            count: 1,
+            count: Some(1),
         },
         &ExactMediaDiscoveryCache::empty(),
     )
@@ -491,7 +541,7 @@ fn generate_exact_image_with_cache_executes_discovered_chat_image_model() {
             model_id: "openrouter/image-chat".to_string(),
             prompt: "draw a precise icon".to_string(),
             parameters: BTreeMap::new(),
-            count: 1,
+            count: Some(1),
         },
         &cache,
     )
@@ -539,10 +589,12 @@ fn generate_exact_image_prunes_stale_undeclared_parameters_before_http() {
             model_id: "seedream-4-5-251128".to_string(),
             prompt: "draw a precise icon".to_string(),
             parameters: BTreeMap::from([
-                ("size".to_string(), "2K".to_string()),
+                ("mode".to_string(), "2K HD".to_string()),
+                ("ratio".to_string(), "Auto".to_string()),
+                ("output".to_string(), "1".to_string()),
                 ("output_format".to_string(), "png".to_string()),
             ]),
-            count: 1,
+            count: None,
         },
         &ExactMediaDiscoveryCache::empty(),
     )
@@ -568,7 +620,7 @@ fn generate_exact_image_with_cache_rejects_discovered_model_missing_from_cache_b
             model_id: "openrouter/image-chat".to_string(),
             prompt: "draw a precise icon".to_string(),
             parameters: BTreeMap::new(),
-            count: 1,
+            count: Some(1),
         },
         &ExactMediaDiscoveryCache::empty(),
     )
@@ -675,7 +727,7 @@ fn exact_media_generation_rejects_unsupported_video_parameter() {
             ("aspect_ratio".to_string(), "1:1".to_string()),
             ("duration_seconds".to_string(), "5".to_string()),
         ]),
-        count: 1,
+        count: Some(1),
     };
 
     let error =
@@ -700,7 +752,7 @@ fn exact_media_generation_rejects_unknown_video_model_before_http() {
             ("aspect_ratio".to_string(), "16:9".to_string()),
             ("duration_seconds".to_string(), "5".to_string()),
         ]),
-        count: 1,
+        count: Some(1),
     };
 
     let error =

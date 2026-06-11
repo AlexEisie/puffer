@@ -571,7 +571,7 @@ pub(crate) struct MediaCapabilityInfoDto {
 
 /// One user-facing axis of a logical media model. `control` carries the typed
 /// `ControlKind` JSON (`{"enum": {...}}` / `{"range": {...}}` / `{"bool": {...}}`),
-/// `role` is `param`/`selector`, `wireType` is `string`/`number`.
+/// while provider request fields remain backend-only resolver details.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MediaCapabilityAxisDto {
@@ -579,8 +579,6 @@ pub(crate) struct MediaCapabilityAxisDto {
     pub(crate) label: String,
     pub(crate) role: String,
     pub(crate) control: serde_json::Value,
-    pub(crate) request_field: Option<String>,
-    pub(crate) wire_type: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

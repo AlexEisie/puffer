@@ -1,6 +1,9 @@
 use super::*;
 use crate::media::MediaKind;
-use puffer_provider_registry::{AuthStore, MediaOperation, ProviderDescriptor, ProviderRegistry};
+use puffer_provider_registry::{
+    AuthStore, ControlKind, MediaModelDescriptor, MediaOperation, ProviderDescriptor,
+    ProviderRegistry, Variant, Variants,
+};
 
 const RELAYDANCE_YAML: &str = r#"
 id: relaydance
@@ -70,6 +73,79 @@ media:
           - { id: size, label: Size, role: param, control: !enum { values: ["1024x1024", "1536x1024"], default: "1024x1024" }, request_field: size }
           - { id: quality, label: Quality, role: param, control: !enum { values: ["auto", "high"], default: "auto" }, request_field: quality }
         variants: { model_id: gpt-image-1 }
+"#;
+
+const CANONICAL_IMAGE_YAML: &str = r#"
+id: openai
+display_name: OpenAI
+base_url: https://api.openai.com
+default_api: openai-responses
+auth_modes: [api_key]
+media:
+  image:
+    discovery: { adapter: static }
+    execution: { adapter: images_json, path: /v1/images/generations }
+    models:
+      - id: gpt-image-1
+        display_name: GPT Image 1
+        operations: [generate]
+        max_outputs: 4
+        axes:
+          - { id: mode, label: Mode, role: param, control: !enum { values: ["1K SD", "2K HD"], default: "1K SD" } }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto", "1:1", "16:9", "21:9"], default: "Auto" } }
+        media_map:
+          size:
+            field: size
+            values:
+              "1K SD":
+                Auto: null
+                "1:1": "1024x1024"
+                "16:9": "1536x864"
+              "2K HD":
+                Auto: null
+                "1:1": "2048x2048"
+        variants: { model_id: gpt-image-1 }
+"#;
+
+const CANONICAL_RATIO_IMAGE_YAML: &str = r#"
+id: minimax
+display_name: MiniMax
+base_url: https://api.minimax.io
+default_api: anthropic-messages
+auth_modes: [api_key]
+media:
+  image:
+    execution: { adapter: minimax_image, path: /v1/image_generation }
+    models:
+      - id: image-01
+        display_name: Image 01
+        operations: [generate]
+        max_outputs: 4
+        axes:
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto", "1:1", "16:9"], default: "Auto" } }
+        media_map:
+          ratio:
+            field: aspect_ratio
+            values:
+              Auto: null
+              "1:1": "1:1"
+              "16:9": "16:9"
+        variants:
+          model_id: image-01
+          base_params:
+            response_format: base64
+"#;
+
+const DISCOVERED_IMAGE_PROVIDER_YAML: &str = r#"
+id: openrouter
+display_name: OpenRouter
+base_url: https://openrouter.ai/api
+default_api: openai-completions
+auth_modes: [api_key]
+media:
+  image:
+    execution: { adapter: chat_image_output, path: /chat/completions }
+    models: []
 "#;
 
 fn registry_from_yaml(yamls: &[&str]) -> ProviderRegistry {
@@ -150,6 +226,136 @@ fn connected_exact_image_capability_carries_axes() {
 }
 
 #[test]
+fn image_capability_synthesizes_output_and_filters_ratio_values() {
+    let registry = registry_from_yaml(&[CANONICAL_IMAGE_YAML]);
+    let auth = auth_for(&["openai"]);
+    let caps = resolve_media_capabilities(
+        &registry,
+        &auth,
+        MediaKind::Image,
+        MediaOperation::Generate,
+        42,
+        &MediaDiscoveryCache::default(),
+    );
+
+    assert_eq!(caps.len(), 1);
+    let mode = caps[0]
+        .axes
+        .iter()
+        .find(|axis| axis.id == "mode")
+        .expect("mode axis");
+    assert!(matches!(
+        &mode.control,
+        ControlKind::Enum { values, default }
+            if values == &vec!["1K SD".to_string(), "2K HD".to_string()] && default == "1K SD"
+    ));
+    let ratio = caps[0]
+        .axes
+        .iter()
+        .find(|axis| axis.id == "ratio")
+        .expect("ratio axis");
+    assert!(matches!(
+        &ratio.control,
+        ControlKind::Enum { values, default }
+            if values == &vec!["Auto".to_string(), "1:1".to_string()]
+                && default == "Auto"
+    ));
+    let output = caps[0]
+        .axes
+        .iter()
+        .find(|axis| axis.id == "output")
+        .expect("output axis");
+    assert_eq!(output.label, "Output");
+    assert!(output.request_field.is_none());
+    assert!(matches!(
+        output.control,
+        ControlKind::Range { min, max, step, default }
+            if min == 1.0 && max == 4.0 && step == 1.0 && default == 1.0
+    ));
+}
+
+#[test]
+fn video_capability_normalizes_core_axis_labels() {
+    let (registry, auth) = test_video_registry();
+    let caps = resolve_media_capabilities(
+        &registry,
+        &auth,
+        MediaKind::Video,
+        MediaOperation::Generate,
+        0,
+        &MediaDiscoveryCache::default(),
+    );
+    let pro = caps
+        .iter()
+        .find(|c| c.model_id == "seedance-1-5-pro")
+        .expect("logical");
+
+    assert_eq!(
+        pro.axes
+            .iter()
+            .find(|axis| axis.id == "resolution")
+            .map(|axis| axis.label.as_str()),
+        Some("Mode")
+    );
+    assert_eq!(
+        pro.axes
+            .iter()
+            .find(|axis| axis.id == "duration")
+            .map(|axis| axis.label.as_str()),
+        Some("Duration")
+    );
+    assert_eq!(
+        pro.axes
+            .iter()
+            .find(|axis| axis.id == "ratio")
+            .map(|axis| axis.label.as_str()),
+        Some("Ratio")
+    );
+}
+
+#[test]
+fn discovered_image_output_capability_does_not_infer_mode_or_ratio_axes() {
+    let registry = registry_from_yaml(&[DISCOVERED_IMAGE_PROVIDER_YAML]);
+    let auth = auth_for(&["openrouter"]);
+    let discovery_cache = MediaDiscoveryCache {
+        image_models: vec![CachedImageMediaModel {
+            provider_id: "openrouter".to_string(),
+            model: MediaModelDescriptor {
+                id: "openrouter/image-chat".to_string(),
+                display_name: Some("Image Chat".to_string()),
+                max_outputs: None,
+                execution: None,
+                operations: vec![MediaOperation::Generate],
+                axes: Vec::new(),
+                media_map: None,
+                variants: Variants::Single(Variant {
+                    model_id: "openrouter/image-chat".to_string(),
+                    base_params: BTreeMap::new(),
+                }),
+            },
+            source: "provider_discovery".to_string(),
+        }],
+    };
+
+    let caps = resolve_media_capabilities(
+        &registry,
+        &auth,
+        MediaKind::Image,
+        MediaOperation::Generate,
+        42,
+        &discovery_cache,
+    );
+
+    assert_eq!(caps.len(), 1);
+    let axis_ids = caps[0]
+        .axes
+        .iter()
+        .map(|axis| axis.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(axis_ids, vec!["output"]);
+}
+
+#[test]
 fn resolves_audio_selector_to_concrete_model() {
     let (registry, auth) = test_video_registry();
     let r = resolve_media_request(
@@ -227,6 +433,107 @@ fn resolves_image_request_to_request_field_params() {
     assert_eq!(r.adapter, "images_json");
     assert_eq!(r.parameters["size"], "1536x1024");
     assert_eq!(r.parameters["quality"], "auto");
+}
+
+#[test]
+fn resolves_size_media_map_and_output_count() {
+    let registry = registry_from_yaml(&[CANONICAL_IMAGE_YAML]);
+    let auth = auth_for(&["openai"]);
+    let r = resolve_media_request(
+        &registry,
+        &auth,
+        "openai",
+        "gpt-image-1",
+        MediaKind::Image,
+        &btree(&[
+            ("mode", "2K HD"),
+            ("ratio", "1:1"),
+            ("output", "3"),
+            ("output_format", "png"),
+        ]),
+        &MediaDiscoveryCache::default(),
+    )
+    .unwrap();
+
+    assert_eq!(r.model_id, "gpt-image-1");
+    assert_eq!(r.parameters["size"], "2048x2048");
+    assert!(!r.parameters.contains_key("mode"));
+    assert!(!r.parameters.contains_key("ratio"));
+    assert!(!r.parameters.contains_key("output"));
+    assert!(!r.parameters.contains_key("output_format"));
+    assert_eq!(r.count, 3);
+}
+
+#[test]
+fn resolves_ratio_media_map_and_omits_auto_null_field() {
+    let registry = registry_from_yaml(&[CANONICAL_RATIO_IMAGE_YAML]);
+    let auth = auth_for(&["minimax"]);
+    let mapped = resolve_media_request(
+        &registry,
+        &auth,
+        "minimax",
+        "image-01",
+        MediaKind::Image,
+        &btree(&[("ratio", "16:9")]),
+        &MediaDiscoveryCache::default(),
+    )
+    .unwrap();
+    let auto = resolve_media_request(
+        &registry,
+        &auth,
+        "minimax",
+        "image-01",
+        MediaKind::Image,
+        &btree(&[("ratio", "Auto")]),
+        &MediaDiscoveryCache::default(),
+    )
+    .unwrap();
+
+    assert_eq!(mapped.parameters["aspect_ratio"], "16:9");
+    assert_eq!(mapped.parameters["response_format"], "base64");
+    assert!(!auto.parameters.contains_key("aspect_ratio"));
+    assert_eq!(auto.parameters["response_format"], "base64");
+}
+
+#[test]
+fn rejects_invalid_canonical_ratio_mode_and_output_before_dispatch() {
+    let registry = registry_from_yaml(&[CANONICAL_IMAGE_YAML]);
+    let auth = auth_for(&["openai"]);
+
+    let bad_ratio = resolve_media_request(
+        &registry,
+        &auth,
+        "openai",
+        "gpt-image-1",
+        MediaKind::Image,
+        &btree(&[("ratio", "16:9")]),
+        &MediaDiscoveryCache::default(),
+    )
+    .unwrap_err();
+    let bad_mode = resolve_media_request(
+        &registry,
+        &auth,
+        "openai",
+        "gpt-image-1",
+        MediaKind::Image,
+        &btree(&[("mode", "4K UHD")]),
+        &MediaDiscoveryCache::default(),
+    )
+    .unwrap_err();
+    let bad_output = resolve_media_request(
+        &registry,
+        &auth,
+        "openai",
+        "gpt-image-1",
+        MediaKind::Image,
+        &btree(&[("output", "5")]),
+        &MediaDiscoveryCache::default(),
+    )
+    .unwrap_err();
+
+    assert!(bad_ratio.to_string().contains("ratio"), "{bad_ratio}");
+    assert!(bad_mode.to_string().contains("mode"), "{bad_mode}");
+    assert!(bad_output.to_string().contains("output"), "{bad_output}");
 }
 
 #[test]

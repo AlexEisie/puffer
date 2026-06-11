@@ -137,6 +137,274 @@ media:
 }
 
 #[test]
+fn image_media_descriptor_accepts_canonical_media_map() {
+    let yaml = provider_with_media_yaml(
+        r#"
+media:
+  image:
+    execution:
+      adapter: images_json
+      path: /v1/images/generations
+    models:
+      - id: gpt-image-1
+        display_name: GPT Image 1
+        operations: [generate]
+        max_outputs: 4
+        axes:
+          - { id: mode, label: Mode, role: param, control: !enum { values: ["1K SD","2K HD"], default: "1K SD" } }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto","1:1","16:9"], default: "Auto" } }
+        media_map:
+          size:
+            field: size
+            values:
+              "1K SD":
+                Auto: null
+                "1:1": "1024x1024"
+                "16:9": "1536x864"
+              "2K HD":
+                "1:1": "2048x2048"
+                "16:9": "2048x1152"
+        variants: { model_id: gpt-image-1 }
+"#,
+    );
+
+    let provider: ProviderDescriptor = serde_yaml::from_str(&yaml).expect("provider parses");
+
+    provider
+        .validate_media_descriptors()
+        .expect("canonical media map validates");
+    let model = &provider
+        .media
+        .as_ref()
+        .unwrap()
+        .image
+        .as_ref()
+        .unwrap()
+        .models[0];
+    assert_eq!(model.max_outputs, Some(4));
+    let size_map = model.media_map.as_ref().unwrap().size.as_ref().unwrap();
+    assert_eq!(size_map.field, "size");
+    assert_eq!(
+        size_map.values["1K SD"]["1:1"].as_deref(),
+        Some("1024x1024")
+    );
+    assert_eq!(size_map.values["1K SD"]["Auto"], None);
+}
+
+#[test]
+fn validate_rejects_image_max_outputs_above_global_cap() {
+    let yaml = provider_with_media_yaml(
+        r#"
+media:
+  image:
+    execution:
+      adapter: images_json
+      path: /v1/images/generations
+    models:
+      - id: gpt-image-1
+        operations: [generate]
+        max_outputs: 10
+        axes:
+          - { id: size, label: Size, role: param, control: !enum { values: ["1024x1024"], default: "1024x1024" }, request_field: size }
+        variants: { model_id: gpt-image-1 }
+"#,
+    );
+    let provider: ProviderDescriptor = serde_yaml::from_str(&yaml).expect("provider parses");
+
+    let error = provider
+        .validate_media_descriptors()
+        .expect_err("max_outputs above nine is invalid");
+
+    assert!(error.to_string().contains("max_outputs"), "{error}");
+}
+
+#[test]
+fn validate_rejects_noncanonical_ratio_axis_values() {
+    let yaml = provider_with_media_yaml(
+        r#"
+media:
+  image:
+    execution:
+      adapter: images_json
+      path: /v1/images/generations
+    models:
+      - id: gpt-image-1
+        operations: [generate]
+        axes:
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["1:1","5:4"], default: "1:1" }, request_field: aspect_ratio }
+        variants: { model_id: gpt-image-1 }
+"#,
+    );
+    let provider: ProviderDescriptor = serde_yaml::from_str(&yaml).expect("provider parses");
+
+    let error = provider
+        .validate_media_descriptors()
+        .expect_err("ratio values must be canonical");
+
+    assert!(error.to_string().contains("canonical ratio"), "{error}");
+}
+
+#[test]
+fn validate_rejects_unmapped_mode_or_ratio_without_request_field() {
+    let yaml = provider_with_media_yaml(
+        r#"
+media:
+  image:
+    execution:
+      adapter: images_json
+      path: /v1/images/generations
+    models:
+      - id: gpt-image-1
+        operations: [generate]
+        axes:
+          - { id: mode, label: Mode, role: param, control: !enum { values: ["1K SD"], default: "1K SD" } }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["1:1"], default: "1:1" } }
+        variants: { model_id: gpt-image-1 }
+"#,
+    );
+    let provider: ProviderDescriptor = serde_yaml::from_str(&yaml).expect("provider parses");
+
+    let error = provider
+        .validate_media_descriptors()
+        .expect_err("unmapped canonical axes still need request fields");
+
+    assert!(error.to_string().contains("request_field"), "{error}");
+}
+
+#[test]
+fn validate_rejects_media_map_ratio_keys_outside_canonical_list() {
+    let yaml = provider_with_media_yaml(
+        r#"
+media:
+  image:
+    execution:
+      adapter: minimax_image
+      path: /v1/image_generation
+    models:
+      - id: image-01
+        operations: [generate]
+        axes:
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["1:1"], default: "1:1" } }
+        media_map:
+          ratio:
+            field: aspect_ratio
+            values:
+              "1:1": "1:1"
+              "5:4": "5:4"
+        variants: { model_id: image-01 }
+"#,
+    );
+    let provider: ProviderDescriptor = serde_yaml::from_str(&yaml).expect("provider parses");
+
+    let error = provider
+        .validate_media_descriptors()
+        .expect_err("media_map ratio keys must be canonical");
+
+    assert!(error.to_string().contains("canonical ratio"), "{error}");
+}
+
+#[test]
+fn validate_rejects_ratio_media_map_without_ratio_axis() {
+    let yaml = provider_with_media_yaml(
+        r#"
+media:
+  image:
+    execution:
+      adapter: minimax_image
+      path: /v1/image_generation
+    models:
+      - id: image-01
+        operations: [generate]
+        axes:
+          - { id: prompt_style, label: Style, role: param, control: !enum { values: ["default"], default: "default" }, request_field: style }
+        media_map:
+          ratio:
+            field: aspect_ratio
+            values:
+              "1:1": "1:1"
+        variants: { model_id: image-01 }
+"#,
+    );
+    let provider: ProviderDescriptor = serde_yaml::from_str(&yaml).expect("provider parses");
+
+    let error = provider
+        .validate_media_descriptors()
+        .expect_err("ratio map requires a ratio axis");
+
+    assert!(error.to_string().contains("ratio axis"), "{error}");
+}
+
+#[test]
+fn validate_rejects_size_media_map_without_mode_or_ratio_axes() {
+    let yaml = provider_with_media_yaml(
+        r#"
+media:
+  image:
+    execution:
+      adapter: images_json
+      path: /v1/images/generations
+    models:
+      - id: gpt-image-1
+        operations: [generate]
+        axes:
+          - { id: output_format, label: Output format, role: param, control: !enum { values: ["png"], default: "png" }, request_field: output_format }
+        media_map:
+          size:
+            field: size
+            values:
+              "1K SD":
+                "1:1": "1024x1024"
+        variants: { model_id: gpt-image-1 }
+"#,
+    );
+    let provider: ProviderDescriptor = serde_yaml::from_str(&yaml).expect("provider parses");
+
+    let error = provider
+        .validate_media_descriptors()
+        .expect_err("size map requires mode and ratio axes");
+
+    assert!(
+        error.to_string().contains("mode axis") || error.to_string().contains("ratio axis"),
+        "{error}"
+    );
+}
+
+#[test]
+fn validate_rejects_size_media_map_without_common_ratios() {
+    let yaml = provider_with_media_yaml(
+        r#"
+media:
+  image:
+    execution:
+      adapter: images_json
+      path: /v1/images/generations
+    models:
+      - id: gpt-image-1
+        operations: [generate]
+        axes:
+          - { id: mode, label: Mode, role: param, control: !enum { values: ["1K SD", "2K HD"], default: "1K SD" } }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["1:1", "16:9"], default: "1:1" } }
+        media_map:
+          size:
+            field: size
+            values:
+              "1K SD":
+                "1:1": "1024x1024"
+              "2K HD":
+                "16:9": "2048x1152"
+        variants: { model_id: gpt-image-1 }
+"#,
+    );
+    let provider: ProviderDescriptor = serde_yaml::from_str(&yaml).expect("provider parses");
+
+    let error = provider
+        .validate_media_descriptors()
+        .expect_err("independent mode and ratio axes need at least one common ratio");
+
+    assert!(error.to_string().contains("common ratio"), "{error}");
+}
+
+#[test]
 fn provider_media_descriptor_accepts_video_models() {
     let yaml = r#"
 id: replicate

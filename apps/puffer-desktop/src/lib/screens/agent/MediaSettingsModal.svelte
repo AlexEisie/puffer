@@ -226,12 +226,7 @@
   }
 
   function modelLabel(capability: MediaCapabilityInfo): string {
-    const label = capability.modelDisplayName || capability.modelId;
-    return modelOptions.filter((candidate) => candidate.modelId === capability.modelId).length > 1
-      ? capability.adapter
-        ? `${label} (${capability.adapter})`
-        : label
-      : label;
+    return capability.modelDisplayName || capability.modelId;
   }
 
   function axisValue(axisId: string): string {

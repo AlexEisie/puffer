@@ -374,6 +374,7 @@ mod tests {
                     models: vec![MediaModelDescriptor {
                         id: "image-01".to_string(),
                         display_name: Some("Image 01".to_string()),
+                        max_outputs: None,
                         execution: None,
                         operations: vec![MediaOperation::Generate],
                         axes: vec![
@@ -404,6 +405,7 @@ mod tests {
                             model_id: "image-01".to_string(),
                             base_params: ::std::collections::BTreeMap::new(),
                         }),
+                        media_map: None,
                     }],
                 }),
                 video: None,

@@ -388,8 +388,6 @@ export type MediaCapabilityAxisInfo = {
   label: string;
   role: "param" | "selector" | string;
   control: MediaCapabilityControl;
-  requestField: string | null;
-  wireType: "string" | "number" | string;
 };
 
 export type MediaCapabilityInfo = {
@@ -399,7 +397,6 @@ export type MediaCapabilityInfo = {
   modelDisplayName: string;
   kind: MediaKind;
   operation: string;
-  adapter?: string;
   axes: MediaCapabilityAxisInfo[];
   status: "available" | "unavailable" | "unknown" | string;
   source: string;

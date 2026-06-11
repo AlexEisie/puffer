@@ -41,7 +41,7 @@ pub(super) fn generate_exact_video_from_media_request(
 ) -> Result<ExactMediaGenerationResult> {
     reclaim_orphaned_video_jobs(registry, auth_store, workspace_root);
     parse_media_operation(&request.operation)?;
-    validate_video_count(request.count)?;
+    validate_video_count(request.count.unwrap_or(1))?;
     let resolved = resolve_media_request(
         registry,
         auth_store,
@@ -402,7 +402,7 @@ mod tests {
             prompt: "animate image 1".to_string(),
             image_references: vec!["https://example.com/person.png".to_string()],
             parameters: BTreeMap::new(),
-            count: 1,
+            count: Some(1),
         };
 
         let error = generate_relaydance_video(
@@ -415,6 +415,7 @@ mod tests {
                 model_id: "doubao-seedance-2-0-720p".to_string(),
                 adapter: RELAYDANCE_VIDEO_ADAPTER.to_string(),
                 parameters: BTreeMap::new(),
+                count: 1,
             },
         )
         .unwrap_err()
@@ -435,7 +436,7 @@ mod tests {
             prompt: "animate image 1".to_string(),
             image_references: vec!["https://example.com/person.png".to_string()],
             parameters: BTreeMap::new(),
-            count: 1,
+            count: Some(1),
         };
 
         let error = generate_replicate_video(
@@ -448,6 +449,7 @@ mod tests {
                 model_id: "owner/model-version".to_string(),
                 adapter: "replicate_video".to_string(),
                 parameters: BTreeMap::new(),
+                count: 1,
             },
         )
         .unwrap_err()

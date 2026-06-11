@@ -26,8 +26,19 @@ media:
           - generate
         axes:
           - { id: resolution, label: Mode, role: param, control: !enum { values: ["480p", "720p", "1080p"], default: "720p" }, request_field: resolution }
-          - { id: duration, label: Length, role: param, control: !range { min: 4.0, max: 15.0, step: 1.0, default: 5.0 }, request_field: duration, wire_type: number }
-          - { id: ratio, label: Video ratio, role: param, control: !enum { values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"], default: "adaptive" }, request_field: ratio }
+          - { id: duration, label: Duration, role: param, control: !range { min: 4.0, max: 15.0, step: 1.0, default: 5.0 }, request_field: duration, wire_type: number }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"], default: "Auto" } }
+        media_map:
+          ratio:
+            field: ratio
+            values:
+              Auto: adaptive
+              "16:9": "16:9"
+              "4:3": "4:3"
+              "1:1": "1:1"
+              "3:4": "3:4"
+              "9:16": "9:16"
+              "21:9": "21:9"
         variants: { model_id: dreamina-seedance-2-0-260128 }
       - id: dreamina-seedance-2-0-fast
         display_name: Dreamina Seedance 2.0 Fast
@@ -35,8 +46,19 @@ media:
           - generate
         axes:
           - { id: resolution, label: Mode, role: param, control: !enum { values: ["480p", "720p"], default: "720p" }, request_field: resolution }
-          - { id: duration, label: Length, role: param, control: !range { min: 4.0, max: 15.0, step: 1.0, default: 5.0 }, request_field: duration, wire_type: number }
-          - { id: ratio, label: Video ratio, role: param, control: !enum { values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"], default: "adaptive" }, request_field: ratio }
+          - { id: duration, label: Duration, role: param, control: !range { min: 4.0, max: 15.0, step: 1.0, default: 5.0 }, request_field: duration, wire_type: number }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"], default: "Auto" } }
+        media_map:
+          ratio:
+            field: ratio
+            values:
+              Auto: adaptive
+              "16:9": "16:9"
+              "4:3": "4:3"
+              "1:1": "1:1"
+              "3:4": "3:4"
+              "9:16": "9:16"
+              "21:9": "21:9"
         variants: { model_id: dreamina-seedance-2-0-fast-260128 }
   image:
     discovery:
@@ -51,27 +73,44 @@ media:
         display_name: Seedream 5.0 Lite
         operations:
           - generate
+        max_outputs: 9
         axes:
-          - { id: size, label: Size, role: param, control: !enum { values: ["2K"], default: "2K" }, request_field: size }
-          - { id: output_format, label: Output format, role: param, control: !enum { values: ["png", "jpeg"], default: "jpeg" }, request_field: output_format }
-          - { id: response_format, label: Response format, role: param, control: !enum { values: ["b64_json", "url"], default: "b64_json" }, request_field: response_format }
-          - { id: sequential_image_generation, label: Sequential image generation, role: param, control: !enum { values: ["disabled", "auto"], default: "disabled" }, request_field: sequential_image_generation }
-        variants: { model_id: seedream-5-0-260128 }
+          - { id: mode, label: Mode, role: param, control: !enum { values: ["2K HD"], default: "2K HD" } }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto"], default: "Auto" } }
+        media_map:
+          size:
+            field: size
+            values:
+              "2K HD":
+                Auto: "2K"
+        variants: { model_id: seedream-5-0-260128, base_params: { output_format: jpeg, response_format: b64_json, sequential_image_generation: disabled } }
       - id: seedream-4-5-251128
         display_name: Seedream 4.5
         operations:
           - generate
+        max_outputs: 9
         axes:
-          - { id: size, label: Size, role: param, control: !enum { values: ["2K"], default: "2K" }, request_field: size }
-          - { id: response_format, label: Response format, role: param, control: !enum { values: ["b64_json", "url"], default: "b64_json" }, request_field: response_format }
-          - { id: sequential_image_generation, label: Sequential image generation, role: param, control: !enum { values: ["disabled", "auto"], default: "disabled" }, request_field: sequential_image_generation }
-        variants: { model_id: seedream-4-5-251128 }
+          - { id: mode, label: Mode, role: param, control: !enum { values: ["2K HD"], default: "2K HD" } }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto"], default: "Auto" } }
+        media_map:
+          size:
+            field: size
+            values:
+              "2K HD":
+                Auto: "2K"
+        variants: { model_id: seedream-4-5-251128, base_params: { response_format: b64_json, sequential_image_generation: disabled } }
       - id: seedream-4-0-250828
         display_name: Seedream 4.0
         operations:
           - generate
+        max_outputs: 9
         axes:
-          - { id: size, label: Size, role: param, control: !enum { values: ["2K"], default: "2K" }, request_field: size }
-          - { id: response_format, label: Response format, role: param, control: !enum { values: ["b64_json", "url"], default: "b64_json" }, request_field: response_format }
-          - { id: sequential_image_generation, label: Sequential image generation, role: param, control: !enum { values: ["disabled", "auto"], default: "disabled" }, request_field: sequential_image_generation }
-        variants: { model_id: seedream-4-0-250828 }
+          - { id: mode, label: Mode, role: param, control: !enum { values: ["2K HD"], default: "2K HD" } }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto"], default: "Auto" } }
+        media_map:
+          size:
+            field: size
+            values:
+              "2K HD":
+                Auto: "2K"
+        variants: { model_id: seedream-4-0-250828, base_params: { response_format: b64_json, sequential_image_generation: disabled } }

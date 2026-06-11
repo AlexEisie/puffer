@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Canonical product-level ratio labels accepted by media descriptors.
+pub const CANONICAL_MEDIA_RATIOS: &[&str] = &[
+    "Auto", "9:16", "2:3", "3:4", "1:1", "4:3", "3:2", "16:9", "21:9",
+];
 
 /// One user-facing control kind. Exactly three; no generic engine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,6 +75,49 @@ pub struct Axis {
     pub request_field: Option<String>,
     #[serde(default)]
     pub wire_type: WireType,
+}
+
+/// Static provider mapping for reserved media axes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaMap {
+    #[serde(default)]
+    pub ratio: Option<MediaRatioMap>,
+    #[serde(default)]
+    pub size: Option<MediaSizeMap>,
+}
+
+/// One-dimensional ratio-to-provider-field mapping.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaRatioMap {
+    pub field: String,
+    #[serde(default)]
+    pub values: BTreeMap<String, Option<String>>,
+}
+
+/// Two-dimensional mode-and-ratio-to-provider-size mapping.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaSizeMap {
+    pub field: String,
+    #[serde(default)]
+    pub values: BTreeMap<String, BTreeMap<String, Option<String>>>,
+}
+
+impl MediaSizeMap {
+    /// Returns ratio keys supported by every declared mode in this size map.
+    pub fn common_ratios(&self) -> BTreeSet<String> {
+        let mut modes = self.values.values();
+        let Some(first) = modes.next() else {
+            return BTreeSet::new();
+        };
+        let mut common = first.keys().cloned().collect::<BTreeSet<_>>();
+        for ratios in modes {
+            common.retain(|ratio| ratios.contains_key(ratio));
+        }
+        common
+    }
 }
 
 /// One concrete upstream model variant + the params it implies.

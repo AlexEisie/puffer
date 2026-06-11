@@ -214,9 +214,11 @@ fn trusted_image_model(
         model: MediaModelDescriptor {
             id: id.to_string(),
             display_name: Some(display_name.to_string()),
+            max_outputs: None,
             execution: None,
             operations: vec![MediaOperation::Generate],
             axes: Vec::new(),
+            media_map: None,
             variants: Variants::Single(Variant {
                 model_id: id.to_string(),
                 base_params: std::collections::BTreeMap::new(),

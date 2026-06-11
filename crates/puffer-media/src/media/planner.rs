@@ -15,8 +15,8 @@ pub(crate) struct ImageCallPlan {
 
 /// Validates the supported workflow image generation count range.
 pub fn validate_image_generation_count(requested_count: u8) -> Result<()> {
-    if requested_count == 0 || requested_count > 4 {
-        bail!("image generation count must be between 1 and 4");
+    if requested_count == 0 || requested_count > 9 {
+        bail!("image generation count must be between 1 and 9");
     }
     Ok(())
 }
@@ -113,15 +113,15 @@ mod tests {
     #[test]
     fn rejects_requested_count_outside_supported_range() {
         let zero = plan_image_generation(0, &per_image_batch()).unwrap_err();
-        let too_many = plan_image_generation(5, &per_image_batch()).unwrap_err();
+        let too_many = plan_image_generation(10, &per_image_batch()).unwrap_err();
 
         assert_eq!(
             zero.to_string(),
-            "image generation count must be between 1 and 4"
+            "image generation count must be between 1 and 9"
         );
         assert_eq!(
             too_many.to_string(),
-            "image generation count must be between 1 and 4"
+            "image generation count must be between 1 and 9"
         );
     }
 }

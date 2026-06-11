@@ -130,7 +130,7 @@ fn exact_media_request(request: &VideoRequest) -> ExactMediaGenerationRequest {
         prompt: request.prompt.clone(),
         image_references: request.image_references.clone(),
         parameters: request.parameters.clone(),
-        count: 1,
+        count: None,
     }
 }
 
@@ -327,6 +327,7 @@ mod tests {
                     models: vec![MediaModelDescriptor {
                         id: "doubao-seedance-2-0-720p".to_string(),
                         display_name: Some("Seedance 2.0".to_string()),
+                        max_outputs: None,
                         execution: None,
                         operations: vec![MediaOperation::Generate],
                         axes: vec![
@@ -393,6 +394,7 @@ mod tests {
                             model_id: "doubao-seedance-2-0-720p".to_string(),
                             base_params: ::std::collections::BTreeMap::new(),
                         }),
+                        media_map: None,
                     }],
                 }),
             }),

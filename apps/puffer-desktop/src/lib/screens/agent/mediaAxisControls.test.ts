@@ -12,28 +12,65 @@ const enumAxis = {
   id: "aspect_ratio",
   label: "Aspect ratio",
   role: "param",
-  control: { enum: { values: ["16:9", "9:16"], default: "16:9" } },
-  requestField: "metadata.ratio",
-  wireType: "string"
+  control: { enum: { values: ["16:9", "9:16"], default: "16:9" } }
 };
 
 const rangeAxis = {
   id: "duration_seconds",
   label: "Duration",
   role: "param",
-  control: { range: { min: 4, max: 12, step: 2, default: 6 } },
-  requestField: "seconds",
-  wireType: "number"
+  control: { range: { min: 4, max: 12, step: 2, default: 6 } }
 };
 
 const boolAxis = {
   id: "audio",
   label: "Native audio",
   role: "selector",
-  control: { bool: { default: true } },
-  requestField: null,
-  wireType: "string"
+  control: { bool: { default: true } }
 };
+
+const canonicalImageAxes = [
+  {
+    id: "mode",
+    label: "Mode",
+    role: "param",
+    control: { enum: { values: ["1K SD", "2K HD"], default: "1K SD" } }
+  },
+  {
+    id: "ratio",
+    label: "Ratio",
+    role: "param",
+    control: { enum: { values: ["Auto", "1:1", "16:9"], default: "Auto" } }
+  },
+  {
+    id: "output",
+    label: "Output",
+    role: "param",
+    control: { range: { min: 1, max: 9, step: 1, default: 1 } }
+  }
+];
+
+const canonicalVideoAxes = [
+  {
+    id: "resolution",
+    label: "Mode",
+    role: "param",
+    control: { enum: { values: ["720p", "1080p"], default: "1080p" } }
+  },
+  {
+    id: "ratio",
+    label: "Ratio",
+    role: "param",
+    control: { enum: { values: ["Auto", "16:9", "9:16"], default: "Auto" } }
+  },
+  {
+    id: "duration",
+    label: "Duration",
+    role: "param",
+    control: { range: { min: 4, max: 12, step: 1, default: 5 } }
+  },
+  boolAxis
+];
 
 test("axis helpers expose enum metadata", () => {
   expect(axisControlKind(enumAxis)).toBe("enum");
@@ -68,14 +105,66 @@ test("normalizeAxisSelections keeps valid saved values and drops stale keys", ()
   });
 });
 
+test("canonical image axes expose mode ratio and output only", () => {
+  expect(canonicalImageAxes.map((axis) => axis.label)).toEqual(["Mode", "Ratio", "Output"]);
+  expect(canonicalImageAxes.map((axis) => axis.id)).not.toContain("size");
+  expect(canonicalImageAxes.map((axis) => axis.id)).not.toContain("quality");
+  expect(canonicalImageAxes.map((axis) => axis.id)).not.toContain("output_format");
+
+  expect(
+    normalizeAxisSelections(canonicalImageAxes, {
+      mode: "2K HD",
+      ratio: "16:9",
+      output: "4",
+      size: "1024x1024"
+    })
+  ).toEqual({
+    mode: "2K HD",
+    ratio: "16:9",
+    output: "4"
+  });
+});
+
+test("switching image models refreshes stale output max", () => {
+  const lowerOutputAxes = canonicalImageAxes.map((axis) =>
+    axis.id === "output"
+      ? {
+          ...axis,
+          control: { range: { min: 1, max: 4, step: 1, default: 1 } }
+        }
+      : axis
+  );
+
+  expect(
+    normalizeAxisSelections(lowerOutputAxes, {
+      mode: "1K SD",
+      ratio: "1:1",
+      output: "9"
+    })
+  ).toEqual({
+    mode: "1K SD",
+    ratio: "1:1",
+    output: "1"
+  });
+});
+
+test("canonical video axes use Mode Ratio and Duration labels", () => {
+  expect(canonicalVideoAxes.map((axis) => axis.label)).toEqual([
+    "Mode",
+    "Ratio",
+    "Duration",
+    "Native audio"
+  ]);
+  expect(canonicalVideoAxes.map((axis) => axis.label)).not.toContain("Video ratio");
+  expect(canonicalVideoAxes.map((axis) => axis.label)).not.toContain("Length");
+});
+
 test("malformed controls are invalid so the modal can block saving", () => {
   const malformedAxis = {
     id: "resolution",
     label: "Resolution",
     role: "param",
-    control: { enum: { values: [], default: "" } },
-    requestField: "metadata.resolution",
-    wireType: "string"
+    control: { enum: { values: [], default: "" } }
   };
 
   expect(axisControlKind(malformedAxis)).toBe("invalid");
@@ -89,9 +178,7 @@ test("malformed axis collections do not crash normalization", () => {
     id: "duration_seconds",
     label: "Duration",
     role: "param",
-    control: { range: { min: 4, max: 12, step: 2, default: 5 } },
-    requestField: "seconds",
-    wireType: "number"
+    control: { range: { min: 4, max: 12, step: 2, default: 5 } }
   };
 
   expect(capabilityAxesError(null)).toBe("Capability axes are malformed.");

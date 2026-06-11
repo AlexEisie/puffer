@@ -63,9 +63,11 @@ fn registry_with_provider_parameters_and_batch(
                 models: vec![MediaModelDescriptor {
                     id: "exact-image-model".to_string(),
                     display_name: Some("Exact Image Model".to_string()),
+                    max_outputs: None,
                     execution: None,
                     operations: vec![MediaOperation::Generate],
                     axes: parameters,
+                    media_map: None,
                     variants: Variants::Single(Variant {
                         model_id: "exact-image-model".to_string(),
                         base_params: ::std::collections::BTreeMap::new(),
@@ -853,7 +855,7 @@ fn resolver_rejects_unsupported_image_value() {
         model_id: "exact-image-model".to_string(),
         prompt: "draw a precise icon".to_string(),
         parameters: BTreeMap::from([("size".to_string(), "2048x2048".to_string())]),
-        count: 1,
+        count: Some(1),
     };
 
     let error = crate::runtime::resolved_exact_image_parameters_with_cache(

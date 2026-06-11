@@ -538,6 +538,7 @@ mod tests {
                     models: vec![MediaModelDescriptor {
                         id: "exact-image-model".to_string(),
                         display_name: Some("Exact Image Model".to_string()),
+                        max_outputs: None,
                         execution: None,
                         operations: vec![MediaOperation::Generate],
                         axes: vec![
@@ -579,6 +580,7 @@ mod tests {
                             model_id: "exact-image-model".to_string(),
                             base_params: ::std::collections::BTreeMap::new(),
                         }),
+                        media_map: None,
                     }],
                 }),
                 video: None,

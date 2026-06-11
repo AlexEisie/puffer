@@ -137,12 +137,8 @@ pub(crate) struct Handshake {
 struct GenerateMediaParams {
     kind: String,
     prompt: String,
-    #[serde(default = "default_generate_media_count")]
-    count: u8,
-}
-
-fn default_generate_media_count() -> u8 {
-    1
+    #[serde(default)]
+    count: Option<u8>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2561,8 +2557,6 @@ fn media_capability_info_dto(capability: MediaCapabilityView) -> MediaCapability
                 label: axis.label,
                 role: axis.role.as_str().to_string(),
                 control: serde_json::to_value(axis.control).unwrap_or(Value::Null),
-                request_field: axis.request_field,
-                wire_type: axis.wire_type.as_str().to_string(),
             })
             .collect(),
         status: capability.status,
@@ -2587,7 +2581,12 @@ fn handle_generate_media(state: &DaemonState, params: &Value) -> Result<Value> {
     generate_media_job(state, &kind, prompt, count)
 }
 
-fn generate_media_job(state: &DaemonState, kind: &str, prompt: String, count: u8) -> Result<Value> {
+fn generate_media_job(
+    state: &DaemonState,
+    kind: &str,
+    prompt: String,
+    count: Option<u8>,
+) -> Result<Value> {
     let config = state.config_snapshot();
     let selection = media_selection_for_kind(config.media, kind)?;
     let inputs = state.build_runtime_inputs_without_discovery()?;
@@ -2636,7 +2635,7 @@ fn media_selection_for_kind(media: MediaConfig, kind: &str) -> Result<MediaGener
 fn exact_media_generation_request(
     kind: &str,
     prompt: String,
-    count: u8,
+    count: Option<u8>,
     selection: MediaGenerationConfig,
 ) -> Result<ExactMediaGenerationRequest> {
     let missing_context = format!("{kind} media provider/model is not configured");
@@ -6852,15 +6851,30 @@ models: []
                 && capability["adapter"] == "images_json"
                 && capability["status"] == "available"
         }));
-        assert!(capabilities.iter().any(|capability| {
-            capability["axes"].as_array().is_some_and(|axes| {
-                axes.iter().any(|axis| {
-                    axis["id"] == "size"
-                        && axis["requestField"] == "size"
-                        && axis["role"] == "param"
-                        && axis["control"]["enum"]["default"] == "auto"
-                })
-            })
+        let gpt_image = capabilities
+            .iter()
+            .find(|capability| capability["modelId"] == "gpt-image-1")
+            .expect("gpt-image-1 capability");
+        let axes = gpt_image["axes"].as_array().expect("axes");
+        assert!(axes
+            .iter()
+            .all(|axis| axis.get("requestField").is_none() && axis.get("wireType").is_none()));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "mode"
+                && axis["label"] == "Mode"
+                && axis["role"] == "param"
+                && axis["control"]["enum"]["default"] == "1K SD"
+        }));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "ratio"
+                && axis["label"] == "Ratio"
+                && axis["control"]["enum"]["default"] == "Auto"
+        }));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "output"
+                && axis["label"] == "Output"
+                && axis["control"]["range"]["min"] == 1.0
+                && axis["control"]["range"]["max"] == 9.0
         }));
     }
 
@@ -7009,16 +7023,18 @@ models: []
         assert!(capability.get("defaults").is_none());
 
         let axes = capability["axes"].as_array().expect("axes");
+        assert!(axes
+            .iter()
+            .all(|axis| axis.get("requestField").is_none() && axis.get("wireType").is_none()));
         assert!(axes.iter().any(|axis| {
             axis["id"] == "aspect_ratio"
+                && axis["label"] == "Ratio"
                 && axis["role"] == "param"
-                && axis["requestField"] == "aspect_ratio"
-                && axis["wireType"] == "string"
                 && axis["control"]["enum"]["default"] == "16:9"
         }));
         assert!(axes.iter().any(|axis| {
             axis["id"] == "duration_seconds"
-                && axis["requestField"] == "duration"
+                && axis["label"] == "Duration"
                 && axis["control"]["enum"]["default"] == "5"
         }));
     }
@@ -7037,17 +7053,24 @@ models: []
             .expect("relaydance video capability");
         assert!(capability.get("parameters").is_none());
         assert!(capability.get("defaults").is_none());
-        assert!(capability["axes"].as_array().is_some_and(|axes| {
-            axes.iter().any(|axis| {
-                axis["id"] == "resolution"
-                    && axis["control"]["enum"]["default"] == "720p"
-                    && axis["requestField"] == "metadata.resolution"
-            })
+        let axes = capability["axes"].as_array().expect("axes");
+        assert!(axes
+            .iter()
+            .all(|axis| axis.get("requestField").is_none() && axis.get("wireType").is_none()));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "resolution"
+                && axis["label"] == "Mode"
+                && axis["control"]["enum"]["default"] == "720p"
+        }));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "aspect_ratio"
+                && axis["label"] == "Ratio"
+                && axis["control"]["enum"]["default"] == "16:9"
         }));
     }
 
     #[test]
-    fn daemon_generate_media_requires_video_adapter_setting() {
+    fn daemon_generate_media_requires_available_video_model_setting() {
         let (_home_guard, _temp, state) = daemon_state_with_replicate_video_capability();
         {
             let mut config = state.config.lock().unwrap();
@@ -7138,9 +7161,9 @@ models: []
                 provider_id: "openai".to_string(),
                 logical_model_id: "gpt-image-1".to_string(),
                 selections: BTreeMap::from([
-                    ("size".to_string(), "1024x1024".to_string()),
-                    ("quality".to_string(), "auto".to_string()),
-                    ("output_format".to_string(), "png".to_string()),
+                    ("mode".to_string(), "1K SD".to_string()),
+                    ("ratio".to_string(), "1:1".to_string()),
+                    ("output".to_string(), "1".to_string()),
                 ]),
             });
         }
@@ -7720,9 +7743,9 @@ models: []
                         "providerId": "openai",
                         "logicalModelId": "gpt-image-1",
                         "selections": {
-                            "size": "1536x1024",
-                            "quality": "high",
-                            "output_format": "webp"
+                            "mode": "1K SD",
+                            "ratio": "3:2",
+                            "output": "2"
                         }
                     },
                     "video": null
@@ -7738,9 +7761,9 @@ models: []
                     "providerId": "openai",
                     "logicalModelId": "gpt-image-1",
                     "selections": {
-                        "size": "1536x1024",
-                        "quality": "high",
-                        "output_format": "webp"
+                        "mode": "1K SD",
+                        "ratio": "3:2",
+                        "output": "2"
                     }
                 },
                 "video": null

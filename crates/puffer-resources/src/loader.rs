@@ -1335,7 +1335,8 @@ media:
     }
 
     #[test]
-    fn bundled_image_generation_internal_tool_requires_count_and_describes_multi_image_use() {
+    fn bundled_image_generation_internal_tool_accepts_optional_count_and_describes_multi_image_use()
+    {
         let temp = tempdir().unwrap();
         let root = temp.path().join("workspace");
         fs::create_dir_all(&root).unwrap();
@@ -1369,7 +1370,8 @@ media:
             .and_then(serde_json::Value::as_array)
             .expect("required array");
         assert!(required.iter().any(|value| value == "prompt"));
-        assert!(required.iter().any(|value| value == "count"));
+        assert!(!required.iter().any(|value| value == "count"));
+        assert_eq!(schema["properties"]["count"]["maximum"], 9);
     }
 
     #[test]

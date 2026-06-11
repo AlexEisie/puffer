@@ -72,12 +72,8 @@ struct DeleteSecretParams {
 struct GenerateMediaParams {
     kind: String,
     prompt: String,
-    #[serde(default = "default_generate_media_count")]
-    count: u8,
-}
-
-fn default_generate_media_count() -> u8 {
-    1
+    #[serde(default)]
+    count: Option<u8>,
 }
 
 #[derive(Debug, Serialize)]
@@ -794,7 +790,7 @@ impl BackendState {
         &self,
         kind: &str,
         prompt: String,
-        count: u8,
+        count: Option<u8>,
     ) -> Result<GenerateMediaResult> {
         let config = self.load_config()?;
         let selection = stored_media_selection_for_kind(config.media, kind)?;
@@ -2563,13 +2559,11 @@ mod tests {
                 "media": {
                     "image": {
                         "providerId": "openai",
-                        "modelId": "gpt-image-1",
-                        "operation": "generate",
-                        "adapter": "images_json",
-                        "parameters": {
-                            "size": "1024x1024",
-                            "quality": "high",
-                            "output_format": "png"
+                        "logicalModelId": "gpt-image-1",
+                        "selections": {
+                            "mode": "1K SD",
+                            "ratio": "1:1",
+                            "output": "2"
                         }
                     },
                     "video": null
@@ -2585,13 +2579,11 @@ mod tests {
             json!({
                 "image": {
                     "providerId": "openai",
-                    "modelId": "gpt-image-1",
-                    "operation": "generate",
-                    "adapter": "images_json",
-                    "parameters": {
-                        "size": "1024x1024",
-                        "quality": "high",
-                        "output_format": "png"
+                    "logicalModelId": "gpt-image-1",
+                    "selections": {
+                        "mode": "1K SD",
+                        "ratio": "1:1",
+                        "output": "2"
                     }
                 },
                 "video": null
@@ -2690,13 +2682,15 @@ mod tests {
         }));
         assert!(capabilities.iter().any(|capability| {
             capability["providerId"] == "kling"
-                && capability["parameters"]
+                && capability["axes"]
                     .as_array()
-                    .map(|parameters| {
-                        parameters.iter().any(|parameter| {
-                            parameter["name"] == "ratio"
-                                && parameter["default"] == "16:9"
-                                && parameter["wireType"] == "string"
+                    .map(|axes| {
+                        axes.iter().any(|axis| {
+                            axis["id"] == "ratio"
+                                && axis["label"] == "Ratio"
+                                && axis["control"]["enum"]["default"] == "16:9"
+                                && axis.get("requestField").is_none()
+                                && axis.get("wireType").is_none()
                         })
                     })
                     .unwrap_or(false)
@@ -2751,7 +2745,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("image media provider/model/adapter is not configured"));
+            .contains("image media provider/model is not configured"));
     }
 
     #[test]
@@ -2770,10 +2764,8 @@ mod tests {
                 media: StoredMediaConfig {
                     image: Some(StoredMediaGenerationConfig {
                         provider_id: "openai".to_string(),
-                        model_id: "missing-image-model".to_string(),
-                        operation: "generate".to_string(),
-                        adapter: "images_json".to_string(),
-                        parameters: BTreeMap::new(),
+                        logical_model_id: "missing-image-model".to_string(),
+                        selections: BTreeMap::new(),
                     }),
                     video: None,
                 },
@@ -2791,8 +2783,52 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "selected image model unavailable: openai/missing-image-model via images_json"
+            "unknown media model openai/missing-image-model"
         );
+    }
+
+    #[test]
+    fn exact_media_request_omits_count_when_image_count_is_absent() {
+        let request = exact_media_generation_request_from_stored(
+            "image",
+            "draw a ship".to_string(),
+            None,
+            StoredMediaGenerationConfig {
+                provider_id: "openai".to_string(),
+                logical_model_id: "gpt-image-1".to_string(),
+                selections: BTreeMap::from([
+                    ("mode".to_string(), "1K SD".to_string()),
+                    ("ratio".to_string(), "1:1".to_string()),
+                    ("output".to_string(), "3".to_string()),
+                ]),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(request.count, None);
+        assert_eq!(request.parameters["output"], "3");
+    }
+
+    #[test]
+    fn exact_media_request_preserves_explicit_image_count_override() {
+        let request = exact_media_generation_request_from_stored(
+            "image",
+            "draw a ship".to_string(),
+            Some(2),
+            StoredMediaGenerationConfig {
+                provider_id: "openai".to_string(),
+                logical_model_id: "gpt-image-1".to_string(),
+                selections: BTreeMap::from([
+                    ("mode".to_string(), "1K SD".to_string()),
+                    ("ratio".to_string(), "1:1".to_string()),
+                    ("output".to_string(), "3".to_string()),
+                ]),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(request.count, Some(2));
+        assert_eq!(request.parameters["output"], "3");
     }
 
     #[test]
@@ -2812,7 +2848,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("video media provider/model/adapter is not configured"));
+            .contains("video media provider/model is not configured"));
     }
 
     #[test]
@@ -3910,13 +3946,13 @@ fn stored_media_selection_for_kind(
         "video" => media.video,
         _ => bail!("unsupported media kind `{kind}`"),
     }
-    .ok_or_else(|| anyhow!("{kind} media provider/model/adapter is not configured"))
+    .ok_or_else(|| anyhow!("{kind} media provider/model is not configured"))
 }
 
 fn exact_media_generation_request_from_stored(
     kind: &str,
     prompt: String,
-    count: u8,
+    count: Option<u8>,
     selection: StoredMediaGenerationConfig,
 ) -> Result<ExactMediaGenerationRequest> {
     let missing_context = format!("{kind} media provider/model is not configured");
@@ -3924,13 +3960,12 @@ fn exact_media_generation_request_from_stored(
         kind: kind.to_string(),
         provider_id: non_empty_media_field(&selection.provider_id, "provider_id")
             .context(missing_context.clone())?,
-        model_id: non_empty_media_field(&selection.model_id, "model_id")
+        model_id: non_empty_media_field(&selection.logical_model_id, "logical_model_id")
             .context(missing_context.clone())?,
-        operation: non_empty_media_field(&selection.operation, "operation")
-            .context(missing_context.clone())?,
+        operation: "generate".to_string(),
         prompt,
         image_references: Vec::new(),
-        parameters: selection.parameters,
+        parameters: selection.selections,
         count,
     })
 }
@@ -3949,10 +3984,8 @@ fn media_selection_dto(
         .as_ref()
         .map(|selection| MediaGenerationSettingsDto {
             provider_id: selection.provider_id.clone(),
-            model_id: selection.model_id.clone(),
-            operation: selection.operation.clone(),
-            adapter: selection.adapter.clone(),
-            parameters: selection.parameters.clone(),
+            logical_model_id: selection.logical_model_id.clone(),
+            selections: selection.selections.clone(),
         })
 }
 
@@ -4001,16 +4034,9 @@ impl Default for StoredMediaConfig {
 #[serde(rename_all = "camelCase")]
 struct StoredMediaGenerationConfig {
     provider_id: String,
-    model_id: String,
-    #[serde(default = "default_media_operation")]
-    operation: String,
-    adapter: String,
+    logical_model_id: String,
     #[serde(default)]
-    parameters: BTreeMap<String, String>,
-}
-
-fn default_media_operation() -> String {
-    "generate".to_string()
+    selections: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

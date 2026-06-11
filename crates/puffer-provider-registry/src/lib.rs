@@ -11,7 +11,10 @@ pub use discovery::{merge_discovered_models, ModelDiscoveryClient};
 pub use import::{
     detect_import_candidates, ExternalImportCandidate, ExternalImportFamily, ExternalImportSource,
 };
-pub use media_capability::{Axis, AxisRole, ControlKind, Variant, Variants, WireType};
+pub use media_capability::{
+    Axis, AxisRole, ControlKind, MediaMap, MediaRatioMap, MediaSizeMap, Variant, Variants,
+    WireType, CANONICAL_MEDIA_RATIOS,
+};
 pub use model::{
     AnthropicMessagesCompat, MediaBatchDescriptor, MediaBatchMode, MediaDiscoveryDescriptor,
     MediaDiscoveryKind, MediaExecutionDescriptor, MediaExecutionKind, MediaKindDescriptor,

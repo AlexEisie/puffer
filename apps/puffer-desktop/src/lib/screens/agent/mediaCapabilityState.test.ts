@@ -13,15 +13,12 @@ function capability(overrides: Partial<MediaCapabilityInfo> = {}): MediaCapabili
     modelDisplayName: "Seedance 2.0 (720p)",
     kind: "video",
     operation: "generate",
-    adapter: "relaydance_video",
     axes: [
       {
         id: "resolution",
-        label: "Resolution",
+        label: "Mode",
         role: "param",
-        control: { enum: { values: ["720p"], default: "720p" } },
-        requestField: "metadata.resolution",
-        wireType: "string"
+        control: { enum: { values: ["720p"], default: "720p" } }
       }
     ],
     status: "unavailable",

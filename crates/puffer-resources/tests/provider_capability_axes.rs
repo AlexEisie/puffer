@@ -29,6 +29,31 @@ fn byteplus_seedance_declares_param_axes_and_single_variant() {
     assert!(
         matches!(&res.control, ControlKind::Enum { values, .. } if values.contains(&"1080p".to_string()))
     );
+    let duration = m
+        .axes
+        .iter()
+        .find(|a| a.id == "duration")
+        .expect("duration");
+    assert_eq!(duration.label, "Duration");
+    let ratio = m.axes.iter().find(|a| a.id == "ratio").expect("ratio");
+    assert_eq!(ratio.label, "Ratio");
+    assert_eq!(ratio.request_field, None);
+    assert!(
+        matches!(&ratio.control, ControlKind::Enum { values, default } if default == "Auto" && values.contains(&"Auto".to_string()) && !values.contains(&"adaptive".to_string()))
+    );
+    let ratio_map = m
+        .media_map
+        .as_ref()
+        .and_then(|media_map| media_map.ratio.as_ref())
+        .expect("ratio map");
+    assert_eq!(ratio_map.field, "ratio");
+    assert_eq!(
+        ratio_map
+            .values
+            .get("Auto")
+            .and_then(|value| value.as_deref()),
+        Some("adaptive")
+    );
     assert!(matches!(m.variants, Variants::Single(_)));
 }
 
@@ -48,6 +73,31 @@ fn relaydance_folds_resolution_and_audio_into_logical_models() {
         .find(|a| a.id == "resolution")
         .expect("resolution");
     assert_eq!(res.role, AxisRole::Selector);
+    let duration = doubao
+        .axes
+        .iter()
+        .find(|a| a.id == "duration")
+        .expect("duration");
+    assert_eq!(duration.label, "Duration");
+    let ratio = doubao.axes.iter().find(|a| a.id == "ratio").expect("ratio");
+    assert_eq!(ratio.label, "Ratio");
+    assert_eq!(ratio.request_field, None);
+    assert!(
+        matches!(&ratio.control, ControlKind::Enum { values, .. } if values.contains(&"Auto".to_string()) && !values.contains(&"adaptive".to_string()))
+    );
+    let ratio_map = doubao
+        .media_map
+        .as_ref()
+        .and_then(|media_map| media_map.ratio.as_ref())
+        .expect("ratio map");
+    assert_eq!(ratio_map.field, "metadata.ratio");
+    assert_eq!(
+        ratio_map
+            .values
+            .get("Auto")
+            .and_then(|value| value.as_deref()),
+        Some("adaptive")
+    );
     match &doubao.variants {
         Variants::BySelector { selector, map } => {
             assert_eq!(selector, "resolution");
@@ -104,10 +154,17 @@ fn kling_uses_tier_selector_and_discrete_duration() {
         .expect("kling-2-1");
     let tier = m.axes.iter().find(|a| a.id == "tier").expect("tier");
     assert_eq!(tier.role, AxisRole::Selector);
-    let dur = m.axes.iter().find(|a| a.id == "duration").expect("duration");
+    let dur = m
+        .axes
+        .iter()
+        .find(|a| a.id == "duration")
+        .expect("duration");
+    assert_eq!(dur.label, "Duration");
     assert!(
         matches!(&dur.control, ControlKind::Enum { values, .. } if values == &vec!["5".to_string(), "10".to_string()])
     );
+    let ratio = m.axes.iter().find(|a| a.id == "ratio").expect("ratio");
+    assert_eq!(ratio.label, "Ratio");
     match &m.variants {
         Variants::BySelector { map, .. } => {
             assert_eq!(map["pro"].base_params["resolution"], "1080p")

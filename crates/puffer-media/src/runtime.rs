@@ -63,7 +63,7 @@ pub struct ExactImageGenerationRequest {
     pub prompt: String,
     /// Per-axis selections; resolved to request parameters at use time.
     pub parameters: BTreeMap<String, String>,
-    pub count: u8,
+    pub count: Option<u8>,
 }
 
 /// Carries an exact media generation request from UI or tool configuration.
@@ -79,7 +79,7 @@ pub struct ExactMediaGenerationRequest {
     pub image_references: Vec<String>,
     /// Per-axis selections; resolved to request parameters at use time.
     pub parameters: BTreeMap<String, String>,
-    pub count: u8,
+    pub count: Option<u8>,
 }
 
 /// Carries one persisted generated image artifact.
@@ -209,19 +209,20 @@ pub fn generate_exact_image_with_cache(
     request: ExactImageGenerationRequest,
     discovery_cache: &ExactMediaDiscoveryCache,
 ) -> Result<ExactImageGenerationResult> {
-    validate_image_generation_count(request.count)?;
     // `request.model_id` is the logical model id and `request.parameters` are
     // the user's axis selections; resolve them into the concrete upstream model
     // id, adapter, and request-field-keyed parameters before dispatch.
+    let parameters = image_parameters_with_count_override(request.parameters, request.count)?;
     let resolved = resolve_media_request(
         registry,
         auth_store,
         &request.provider_id,
         &request.model_id,
         MediaKind::Image,
-        &request.parameters,
+        &parameters,
         &discovery_cache.inner,
     )?;
+    validate_image_generation_count(resolved.count)?;
     let service = MediaGenerationService::new(workspace_root);
     match resolved.adapter.as_str() {
         "images_json" => {
@@ -235,7 +236,7 @@ pub fn generate_exact_image_with_cache(
                     adapter: resolved.adapter,
                     prompt: request.prompt,
                     parameters: resolved.parameters,
-                    count: request.count,
+                    count: resolved.count,
                 },
             )?;
             Ok(exact_generation_result(result.job, result.artifacts))
@@ -251,7 +252,7 @@ pub fn generate_exact_image_with_cache(
                     adapter: resolved.adapter,
                     prompt: request.prompt,
                     parameters: resolved.parameters,
-                    count: request.count,
+                    count: resolved.count,
                 },
             )?;
             Ok(exact_generation_result(result.job, result.artifacts))
@@ -267,7 +268,7 @@ pub fn generate_exact_image_with_cache(
                     adapter: resolved.adapter,
                     prompt: request.prompt,
                     parameters: resolved.parameters,
-                    count: request.count,
+                    count: resolved.count,
                 },
                 &discovery_cache.inner,
             )?;
@@ -336,6 +337,17 @@ fn generate_exact_image_from_media_request(
     })
 }
 
+fn image_parameters_with_count_override(
+    mut parameters: BTreeMap<String, String>,
+    count: Option<u8>,
+) -> Result<BTreeMap<String, String>> {
+    if let Some(count) = count {
+        validate_image_generation_count(count)?;
+        parameters.insert("output".to_string(), count.to_string());
+    }
+    Ok(parameters)
+}
+
 pub(crate) fn parse_media_operation(operation: &str) -> Result<MediaOperation> {
     match operation.trim() {
         "generate" => Ok(MediaOperation::Generate),
@@ -351,13 +363,15 @@ pub fn resolved_exact_image_parameters_with_cache(
     selection: &ExactImageGenerationRequest,
     discovery_cache: &ExactMediaDiscoveryCache,
 ) -> Result<BTreeMap<String, String>> {
+    let parameters =
+        image_parameters_with_count_override(selection.parameters.clone(), selection.count)?;
     let resolved = resolve_media_request(
         registry,
         auth_store,
         &selection.provider_id,
         &selection.model_id,
         MediaKind::Image,
-        &selection.parameters,
+        &parameters,
         &discovery_cache.inner,
     )?;
     Ok(resolved.parameters)

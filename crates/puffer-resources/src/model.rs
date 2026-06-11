@@ -648,23 +648,54 @@ mod tests {
                 .map(|execution| execution.path.as_str()),
             Some("/v1/images/generations")
         );
-        assert!(image.models.iter().any(|model| {
-            model.id == "gpt-image-1"
-                && model
-                    .operations
-                    .contains(&puffer_provider_registry::MediaOperation::Generate)
-                && enum_axis_values(model, "size").contains(&"1024x1024".to_string())
-                && enum_axis_values(model, "quality").contains(&"auto".to_string())
-                && enum_axis_values(model, "output_format").contains(&"png".to_string())
-        }));
+        let gpt_image_1 = image
+            .models
+            .iter()
+            .find(|model| model.id == "gpt-image-1")
+            .expect("OpenAI should include GPT Image 1");
+        assert!(gpt_image_1
+            .operations
+            .contains(&puffer_provider_registry::MediaOperation::Generate));
+        assert_eq!(gpt_image_1.max_outputs, Some(9));
+        assert!(enum_axis_values(gpt_image_1, "mode").contains(&"1K SD".to_string()));
+        assert!(enum_axis_values(gpt_image_1, "ratio").contains(&"2:3".to_string()));
+        let gpt_image_1_size_map = gpt_image_1
+            .media_map
+            .as_ref()
+            .and_then(|media_map| media_map.size.as_ref())
+            .expect("gpt-image-1 should map canonical selections to size");
+        assert_eq!(gpt_image_1_size_map.field, "size");
+        assert_eq!(
+            gpt_image_1_size_map.values["1K SD"]["1:1"].as_deref(),
+            Some("1024x1024")
+        );
+        match &gpt_image_1.variants {
+            puffer_provider_registry::Variants::Single(variant) => {
+                assert_eq!(
+                    variant.base_params.get("quality").map(String::as_str),
+                    Some("auto")
+                );
+                assert_eq!(
+                    variant.base_params.get("output_format").map(String::as_str),
+                    Some("png")
+                );
+            }
+            other => panic!("gpt-image-1 should use one variant, got {other:?}"),
+        }
         let gpt_image_2 = image
             .models
             .iter()
             .find(|model| model.id == "gpt-image-2")
             .expect("OpenAI should include the current GPT Image 2 model");
-        let size_values = enum_axis_values(gpt_image_2, "size");
-        assert!(size_values.contains(&"2048x2048".to_string()));
-        assert!(size_values.contains(&"3840x2160".to_string()));
+        let gpt_image_2_size_map = gpt_image_2
+            .media_map
+            .as_ref()
+            .and_then(|media_map| media_map.size.as_ref())
+            .expect("gpt-image-2 should map canonical selections to size");
+        assert_eq!(
+            gpt_image_2_size_map.values["2K HD"]["1:1"].as_deref(),
+            Some("2048x2048")
+        );
         assert!(!image.models.iter().any(|model| model.id == "auto"));
     }
 
