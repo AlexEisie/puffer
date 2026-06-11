@@ -1,6 +1,7 @@
 mod auth;
 mod discovery;
 mod import;
+mod media_capability;
 mod model;
 mod registry;
 mod secure_oauth;
@@ -10,6 +11,7 @@ pub use discovery::{merge_discovered_models, ModelDiscoveryClient};
 pub use import::{
     detect_import_candidates, ExternalImportCandidate, ExternalImportFamily, ExternalImportSource,
 };
+pub use media_capability::{Axis, AxisRole, ControlKind, Variant, Variants, WireType};
 pub use model::{
     AnthropicMessagesCompat, MediaBatchDescriptor, MediaBatchMode, MediaDiscoveryDescriptor,
     MediaDiscoveryKind, MediaExecutionDescriptor, MediaExecutionKind, MediaKindDescriptor,

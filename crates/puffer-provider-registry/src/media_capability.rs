@@ -1,0 +1,109 @@
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// One user-facing control kind. Exactly three; no generic engine.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlKind {
+    Enum { values: Vec<String>, default: String },
+    Range { min: f64, max: f64, step: f64, default: f64 },
+    Bool { default: bool },
+}
+
+/// Whether an axis maps to a request parameter or selects an upstream model id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AxisRole {
+    Param,
+    Selector,
+}
+
+/// How a Param axis value is encoded into provider JSON. No Bool: no param axis
+/// is boolean today (audio is a selector, carrying no wire value).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireType {
+    #[default]
+    String,
+    Number,
+}
+
+/// One user-facing dimension of a logical model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Axis {
+    pub id: String,
+    pub label: String,
+    pub role: AxisRole,
+    pub control: ControlKind,
+    #[serde(default)]
+    pub request_field: Option<String>,
+    #[serde(default)]
+    pub wire_type: WireType,
+}
+
+/// One concrete upstream model variant + the params it implies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Variant {
+    pub model_id: String,
+    #[serde(default)]
+    pub base_params: BTreeMap<String, String>,
+}
+
+/// At most ONE selector axis per logical model. `Single` = no selector; the
+/// untagged enum reads a `{ model_id, .. }` object as `Single` and a
+/// `{ selector, map }` object as `BySelector`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Variants {
+    Single(Variant),
+    BySelector {
+        selector: String,
+        map: BTreeMap<String, Variant>,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Deserialize)]
+    struct Wrap {
+        axes: Vec<Axis>,
+        variants: Variants,
+    }
+
+    #[test]
+    fn deserializes_by_selector_logical_model() {
+        let yaml = r#"
+axes:
+  - { id: audio, label: Native audio, role: selector, control: !bool { default: true } }
+  - { id: duration, label: Length, role: param, control: !range { min: 4.0, max: 12.0, step: 1.0, default: 5.0 }, request_field: seconds, wire_type: number }
+variants:
+  selector: audio
+  map:
+    "true": { model_id: pro-with-audio }
+    "false": { model_id: pro-no-audio }
+"#;
+        let w: Wrap = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(w.axes[0].role, AxisRole::Selector);
+        match w.variants {
+            Variants::BySelector { selector, map } => {
+                assert_eq!(selector, "audio");
+                assert_eq!(map["false"].model_id, "pro-no-audio");
+            }
+            _ => panic!("expected BySelector"),
+        }
+    }
+
+    #[test]
+    fn deserializes_single_variant() {
+        let yaml = r#"
+axes: []
+variants: { model_id: dreamina-seedance-2-0-260128 }
+"#;
+        let w: Wrap = serde_yaml::from_str(yaml).expect("parse");
+        assert!(matches!(w.variants, Variants::Single(v) if v.model_id == "dreamina-seedance-2-0-260128"));
+    }
+}
