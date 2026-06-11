@@ -37,6 +37,11 @@ This is a protocol split between the desktop UI and the daemon.
 - Do not add a shared API crate in this fix.
 - Do not redesign the full media-generation runtime.
 - Do not introduce provider-specific form components.
+- Do not make Tauri backend DTO convergence part of this fix unless the
+  desktop execution path or touched tests require it.
+- Do not add a new backend validation project that hard-rejects historical
+  persisted config shapes. The desktop must stop sending the old shape; existing
+  config loading may continue to treat malformed historical selections as absent.
 
 ## Selected Approach
 
@@ -82,6 +87,7 @@ type MediaCapabilityInfo = {
   modelDisplayName: string;
   kind: "image" | "video";
   operation: string;
+  adapter?: string;
   axes: MediaCapabilityAxisInfo[];
   status: string;
   source: string;
@@ -100,11 +106,21 @@ type MediaCapabilityAxisInfo = {
   id: string;
   label: string;
   role: "param" | "selector" | string;
-  control: unknown;
+  control: AxisControl;
   requestField: string | null;
   wireType: "string" | "number" | string;
 };
+
+type AxisControl =
+  | { enum: { values: string[]; default: string } }
+  | { range: { min: number; max: number; step: number; default: number } }
+  | { bool: { default: boolean } };
 ```
+
+These three control shapes are enough for the current provider registry. The
+desktop implementation should parse only enum, range, and bool. Unknown or
+malformed controls are capability contract errors for the selected capability,
+not extension points for a generic form engine.
 
 ### Settings
 
@@ -146,12 +162,18 @@ Keep the renderer generic and minimal:
 - Enum controls render as a select. A single option renders read-only.
 - Bool controls render as a checkbox.
 - Range controls render as a bounded number input using min, max, and step.
-- Unknown control shapes render read-only with the selected/default value, and
-  the modal reports the malformed capability in an error state if a save would
-  be unsafe.
+- Unknown or malformed control shapes render an error state and keep Save
+  disabled for that capability.
 
 Do not expand large ranges into option arrays. This avoids UI stalls if a
 provider declares a wide numeric range.
+
+Range controls must have finite min, max, default, and a positive step.
+
+Render axes in the order provided by the daemon. Do not add provider-specific
+special cases for "core" video fields such as duration, aspect ratio, or audio;
+those are regular axes in this contract. Helper extraction is acceptable only
+where it keeps `MediaSettingsModal.svelte` readable.
 
 ## Selection Normalization
 
@@ -159,7 +181,12 @@ For each axis:
 
 1. Prefer a saved selection if it is valid for the axis control.
 2. Otherwise use the axis default.
-3. Otherwise use the first enum value, `false` for bool, or the range minimum.
+3. If the axis has no valid default, treat the selected capability as malformed
+   and keep Save disabled.
+
+Persist every normalized value as a string. For bool controls use `"true"` or
+`"false"`; for range controls use the canonical decimal string accepted by the
+range validator.
 
 Drop selections for axes that no longer exist. Do not preserve unknown saved
 selection keys.
@@ -176,12 +203,19 @@ selection keys.
 
 ## Backend Alignment
 
-The CLI daemon and Tauri backend should both expose axis-native capabilities.
-There should be no desktop-specific `parameters/defaults` capability DTO.
+The active desktop path talks to the CLI daemon over the daemon protocol. For
+this fix, the required backend contract is therefore the CLI daemon response:
+`list_media_capabilities` must return `axes` and must not return
+`parameters/defaults`.
 
-The daemon's `update_config` path should accept only logical media selections.
-If the desktop sends the old concrete shape, it should fail as an invalid API
-request rather than silently accepting or translating it.
+Do not force a broad Tauri backend rewrite in this change. Touch Tauri backend
+DTOs or tests only if the implementation discovers that the local desktop path
+still emits the old capability shape.
+
+The desktop save path must send only logical media selections. Test this at the
+fake-daemon/request boundary by asserting the outgoing `update_config` payload
+uses `{ providerId, logicalModelId, selections }` and does not include
+`modelId`, `adapter`, or `parameters`.
 
 ## Testing
 
@@ -189,14 +223,14 @@ Add focused tests:
 
 - CLI daemon unit test: `list_media_capabilities` returns `axes` and does not
   return `parameters` or `defaults`.
-- Tauri backend unit test: `list_media_capabilities` returns the same
-  axis-native contract.
 - TypeScript unit tests for axis default extraction and saved selection
   normalization.
 - Playwright test: fake daemon returns only `axes`; opening video generation
   settings does not crash and can save logical media settings.
 - Playwright test: stale logical selections are reported as unavailable and do
   not save until the user chooses an available model.
+- Fake-daemon/request assertion: saving media settings sends the logical
+  settings shape and never sends old runtime fields.
 
 ## Implementation Notes
 
@@ -208,7 +242,8 @@ Keep the edit scope narrow:
   validation need adjustment
 - `apps/puffer-desktop/tests/support/fakeDaemon.ts`
 - focused tests in existing desktop and daemon test files
-- backend DTO/tests only where they currently emit or assert old fields
+- Tauri backend DTO/tests only where the desktop execution path or touched tests
+  currently emit or assert old fields
 
 Avoid introducing a large form abstraction. A small helper for axis defaults and
 validation is enough if the logic would otherwise clutter the modal.
