@@ -9,8 +9,10 @@ mod dtos;
 mod events;
 mod files;
 mod fs_watch;
+mod image_actions;
 mod local_model;
 mod lsp;
+mod media_capabilities;
 mod mini_window;
 mod pty;
 mod qwen35;
@@ -23,7 +25,7 @@ use daemon_launcher::DaemonLauncher;
 use events::EventEmitter;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, Builder, State};
 
@@ -52,10 +54,14 @@ const REGISTERED_TAURI_COMMANDS: &[&str] = &[
     "start_ssh_daemon",
     "stage_chat_attachment",
     "read_chat_attachment_preview",
+    "open_containing_folder",
+    "download_image_from_url",
     "run_agent_turn",
     "resolve_permission",
     "resolve_user_question",
     "cancel_turn",
+    "open_image_dir",
+    "open_video_dir",
     "summon_mini_window",
     "qwen35_recommend",
     "qwen35_install",
@@ -422,6 +428,42 @@ fn cancel_turn(
     backend_call(app, state, "cancel_turn", json!({ "turnId": turn_id })).map(|_| ())
 }
 
+#[tauri::command]
+fn open_image_dir(app: AppHandle, cwd: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let dir = image_dir_for_cwd(Path::new(&cwd))?;
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    app.opener()
+        .open_path(dir.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|error| error.to_string())
+}
+
+fn image_dir_for_cwd(cwd: &Path) -> Result<PathBuf, String> {
+    if !cwd.is_absolute() {
+        return Err("cwd must be absolute".to_string());
+    }
+    Ok(cwd.join(".puffer").join("media").join("images"))
+}
+
+#[tauri::command]
+fn open_video_dir(app: AppHandle, cwd: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let dir = video_dir_for_cwd(Path::new(&cwd))?;
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    app.opener()
+        .open_path(dir.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|error| error.to_string())
+}
+
+fn video_dir_for_cwd(cwd: &Path) -> Result<PathBuf, String> {
+    if !cwd.is_absolute() {
+        return Err("cwd must be absolute".to_string());
+    }
+    Ok(cwd.join(".puffer").join("media").join("videos"))
+}
+
 #[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
 fn spawn_cef_native_warmup(app_handle: AppHandle, smoke_url: Option<String>, prewarm_targets: usize) {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -483,6 +525,7 @@ pub fn run() {
 
     Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(
             // Register the shortcut in setup() (below) instead of here so an OS
             // registration failure (e.g. another app owns the chord) doesn't
@@ -536,10 +579,14 @@ pub fn run() {
             start_ssh_daemon,
             chat_attachments::stage_chat_attachment,
             chat_attachments::read_chat_attachment_preview,
+            image_actions::open_containing_folder,
+            image_actions::download_image_from_url,
             run_agent_turn,
             resolve_permission,
             resolve_user_question,
             cancel_turn,
+            open_image_dir,
+            open_video_dir,
             mini_window::summon_mini_window,
             qwen35::qwen35_recommend,
             qwen35::qwen35_install,
@@ -601,6 +648,9 @@ mod tests {
         invoked.extend(direct_invoke_commands(include_str!(
             "../../src/lib/api/daemonClient.ts"
         )));
+        invoked.extend(direct_invoke_commands(include_str!(
+            "../../src/lib/screens/agent/MediaSettingsModal.svelte"
+        )));
         let registered = REGISTERED_TAURI_COMMANDS
             .iter()
             .copied()
@@ -625,6 +675,26 @@ mod tests {
 
         assert!(registered.contains("stage_chat_attachment"));
         assert!(registered.contains("read_chat_attachment_preview"));
+    }
+
+    #[test]
+    fn image_dir_for_cwd_uses_media_images_directory() {
+        let dir = super::image_dir_for_cwd(std::path::Path::new("/tmp/puffer")).unwrap();
+
+        assert_eq!(
+            dir,
+            std::path::PathBuf::from("/tmp/puffer/.puffer/media/images")
+        );
+    }
+
+    #[test]
+    fn video_dir_for_cwd_uses_media_videos_directory() {
+        let dir = super::video_dir_for_cwd(std::path::Path::new("/tmp/puffer")).unwrap();
+
+        assert_eq!(
+            dir,
+            std::path::PathBuf::from("/tmp/puffer/.puffer/media/videos")
+        );
     }
 
     #[test]

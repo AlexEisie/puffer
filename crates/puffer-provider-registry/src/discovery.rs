@@ -428,6 +428,7 @@ mod tests {
             headers: IndexMap::new(),
             query_params: IndexMap::new(),
             discovery: Some(discovery),
+            media: None,
             models: Vec::new(),
             chat_completions_path: None,
         }
@@ -681,6 +682,7 @@ mod tests {
                 display_name_field: None,
                 headers: IndexMap::new(),
             }),
+            media: None,
             models: Vec::new(),
             chat_completions_path: None,
         };
@@ -789,6 +791,7 @@ mod tests {
             headers: IndexMap::new(),
             query_params: IndexMap::new(),
             discovery: None,
+            media: None,
             models: Vec::new(),
             chat_completions_path: None,
         };
@@ -845,6 +848,7 @@ mod tests {
                 display_name_field: None,
                 headers: IndexMap::new(),
             }),
+            media: None,
             models: Vec::new(),
             chat_completions_path: None,
         };

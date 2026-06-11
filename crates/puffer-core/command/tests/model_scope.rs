@@ -14,6 +14,7 @@ fn provider(id: &str, models: &[&str]) -> puffer_provider_registry::ProviderDesc
         headers: Default::default(),
         query_params: Default::default(),
         discovery: None,
+        media: None,
         models: models
             .iter()
             .map(|model_id| puffer_provider_registry::ModelDescriptor {

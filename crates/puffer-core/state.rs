@@ -1,3 +1,4 @@
+use crate::media_runtime::ExactMediaDiscoveryCache;
 use crate::memory::ProjectMemoryContext;
 use crate::permissions::browser_action::browser_permission_value_for_tool_call;
 use crate::permissions::browser_grants::BrowserGrantScopeKind;
@@ -298,6 +299,8 @@ pub struct AppState {
     pub(crate) masked_secrets: Arc<Mutex<HashMap<String, String>>>,
     /// Session-scoped approvals for persistent encrypted secrets.
     pub(crate) secret_access_state: SecretAccessState,
+    /// Trusted exact media discovery entries available to workflow tools.
+    pub(crate) exact_media_discovery_cache: Option<ExactMediaDiscoveryCache>,
 }
 
 impl AppState {
@@ -394,6 +397,7 @@ impl AppState {
             secret_values: Arc::new(Mutex::new(HashMap::new())),
             masked_secrets: Arc::new(Mutex::new(HashMap::new())),
             secret_access_state: SecretAccessState::default(),
+            exact_media_discovery_cache: None,
         }
     }
 
@@ -403,6 +407,11 @@ impl AppState {
     pub fn with_tool_runner(mut self, runner: Arc<dyn ToolRunner>) -> Self {
         self.tool_runner = runner;
         self
+    }
+
+    /// Sets trusted exact media discovery entries for workflow tool execution.
+    pub fn set_exact_media_discovery_cache(&mut self, cache: ExactMediaDiscoveryCache) {
+        self.exact_media_discovery_cache = Some(cache);
     }
 
     /// Returns true and clears both the command-driven flag and the

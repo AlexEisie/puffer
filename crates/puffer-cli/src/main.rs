@@ -1,3 +1,4 @@
+mod attachment_bridge;
 mod auth_credentials;
 mod auth_provider;
 mod authflow;
@@ -41,6 +42,7 @@ mod gmail_browser_log;
 mod heartbeat;
 mod internal_tools;
 mod lark_connector;
+mod media_internal_tools;
 mod non_interactive;
 mod project_metadata;
 mod resource_fs;

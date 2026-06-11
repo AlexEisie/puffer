@@ -48,6 +48,8 @@
     recoverStaleAgentTurn,
     runRemoteBash,
     writeRemoteFile,
+    generateMedia,
+    readGeneratedMediaPreview,
     runAgentTurn,
     stageChatAttachment,
     resolvePermission as resolveTurnPermission,
@@ -58,7 +60,9 @@
     loadDesktopPins,
     setDesktopPin,
     updateConfig,
-    type AgentTurnSubmitOptions
+    type AgentTurnSubmitOptions,
+    type GeneratedMediaArtifactResult,
+    type GenerateMediaResult
   } from "./lib/api/desktop";
   import {
     subscribeSessionEvents,
@@ -67,6 +71,7 @@
   import {
     currentDaemonClient,
     ensureLocalDaemonClient,
+    reacquireLocalDaemonClient,
     type DaemonClient,
     type ConnectionState
   } from "./lib/api/daemonClient";
@@ -116,6 +121,7 @@
   type CreatedSessionResult = Awaited<ReturnType<typeof createSession>>;
 
   const STALE_TURN_RETRY_AFTER_MS = 120_000;
+  const GENERATED_MEDIA_PREVIEW_ID_PREFIX = "live-generated-image-";
 
   type StreamAttemptSnapshot = {
     liveStreamItems: TimelineItem[];
@@ -260,7 +266,7 @@
   let settingsLoading = $state(false);
   let settingsRefreshGeneration = 0;
   let groupsRefreshGeneration = 0;
-  const GROUPS_PAGE_SIZE = 30;
+  const GROUPS_PAGE_SIZE = 100;
   let authBusyProviderId = $state<string | null>(null);
   let authError = $state<string | null>(null);
   let apiKeyConnectionFingerprints = $state<string[]>([]);
@@ -973,7 +979,7 @@
       rememberFallbackSession(detail.session);
       sessionDetail = detail;
       rememberSession(detail.session.id);
-      resetLiveTurnState();
+      resetLiveTurnState({ revokePreviews: false });
       statusMessage = `Loaded ${detail.timeline.length} conversation items.`;
       openAgentSessionId = detail.session.id;
     } catch {
@@ -1121,9 +1127,9 @@
     reconnectBusy = true;
     reconnectError = null;
     try {
-      const client = await ensureLocalDaemonClient();
+      clearDaemonClientListeners();
+      const client = await reacquireLocalDaemonClient();
       attachDaemonClient(client);
-      await client.connect();
     } catch (error) {
       reconnectError = `Reconnect failed: ${reconnectFailureMessage(error)}`;
       connectionState = "closed";
@@ -1270,6 +1276,10 @@
         settingsLoading = false;
       }
     }
+  }
+
+  function handleMediaSettingsSaved(snapshot: SettingsSnapshot) {
+    settingsSnapshot = snapshot;
   }
 
   async function handleImportExternal(providerId: string, source: "claude" | "codex") {
@@ -1677,7 +1687,23 @@
     setStreamAttemptSnapshot(currentLiveStreamSnapshot());
   }
 
-  function resetLiveTurnState() {
+  function isGeneratedMediaPreviewItem(item: TimelineItem): boolean {
+    return item.id.startsWith(GENERATED_MEDIA_PREVIEW_ID_PREFIX);
+  }
+
+  function discardGeneratedMediaPreviewItems(items: TimelineItem[]): TimelineItem[] {
+    const kept = items.filter((item) => !isGeneratedMediaPreviewItem(item));
+    if (kept.length === items.length) return items;
+    revokeTimelineAttachmentPreviews(items.filter(isGeneratedMediaPreviewItem));
+    return kept;
+  }
+
+  function resetLiveTurnState(options: { revokePreviews?: boolean } = {}) {
+    if (options.revokePreviews ?? true) {
+      revokeTimelineAttachmentPreviews(submittedMessages);
+      revokeTimelineAttachmentPreviews(liveStreamItems);
+      revokeTimelineAttachmentPreviews(streamAttemptLiveItems);
+    }
     submittedMessages = [];
     submittedMessageBaselineIds = {};
     liveStreamItems = [];
@@ -1695,11 +1721,16 @@
   }
 
   function captureTransientConversationState(): TransientConversationState {
+    const cachedLiveStreamItems = discardGeneratedMediaPreviewItems(liveStreamItems);
+    const cachedStreamAttempt = {
+      ...captureStreamAttemptSnapshot(),
+      liveStreamItems: discardGeneratedMediaPreviewItems(streamAttemptLiveItems)
+    };
     return {
       submittedMessages,
       submittedMessageBaselineIds: { ...submittedMessageBaselineIds },
-      liveStreamItems,
-      streamAttempt: captureStreamAttemptSnapshot(),
+      liveStreamItems: cachedLiveStreamItems,
+      streamAttempt: cachedStreamAttempt,
       replayTextByTurn: { ...replayTextByTurn },
       turnPermissionLookup: { ...turnPermissionLookup },
       turnQuestionLookup: { ...turnQuestionLookup },
@@ -1745,6 +1776,12 @@
     );
   }
 
+  function revokeTransientConversationStatePreviews(state: TransientConversationState): void {
+    revokeTimelineAttachmentPreviews(state.submittedMessages);
+    revokeTimelineAttachmentPreviews(state.liveStreamItems);
+    revokeTimelineAttachmentPreviews(state.streamAttempt.liveStreamItems);
+  }
+
   function setTransientConversationState(
     sessionId: string,
     state: TransientConversationState | null
@@ -1754,6 +1791,7 @@
       return;
     }
     if (transientConversationStates[sessionId]) {
+      revokeTransientConversationStatePreviews(transientConversationStates[sessionId]);
       const { [sessionId]: _drop, ...rest } = transientConversationStates;
       transientConversationStates = rest;
     }
@@ -1761,7 +1799,10 @@
 
   function saveCurrentTransientConversationState(sessionId: string | null | undefined) {
     if (!sessionId) return;
-    setTransientConversationState(sessionId, captureTransientConversationState());
+    const state = captureTransientConversationState();
+    liveStreamItems = state.liveStreamItems;
+    setStreamAttemptSnapshot(state.streamAttempt);
+    setTransientConversationState(sessionId, state);
   }
 
   function pendingSubmittedMessageKey(sessionId: string): string {
@@ -2327,7 +2368,7 @@
   function restoreTransientConversationState(sessionId: string) {
     const cached = transientConversationStates[sessionId];
     if (!cached) {
-      resetLiveTurnState();
+      resetLiveTurnState({ revokePreviews: false });
       return;
     }
     submittedMessages = cached.submittedMessages;
@@ -2706,6 +2747,12 @@
 
   function resetDaemonScopedSessionState() {
     cancelRecapBlurTimer();
+    revokeTimelineAttachmentPreviews(submittedMessages);
+    revokeTimelineAttachmentPreviews(liveStreamItems);
+    revokeTimelineAttachmentPreviews(streamAttemptLiveItems);
+    for (const state of Object.values(transientConversationStates)) {
+      revokeTransientConversationStatePreviews(state);
+    }
     selectedSession = null;
     groups = [];
     groupsLoading = false;
@@ -2992,6 +3039,10 @@
       statusMessage = "Wait for the current turn to finish before sending another message.";
       return false;
     }
+    const mediaSlash = parseMediaSlash(message);
+    if (mediaSlash) {
+      return submitMediaSlash(submitSessionId, mediaSlash, options);
+    }
     const requestedProviderId =
       options.providerId ?? sessionAtSubmit.providerId ?? settingsSnapshot?.config.defaultProvider;
     if (
@@ -3126,6 +3177,229 @@
       return false;
     } finally {
       setSubmitMessageInFlight(submitSessionId, false);
+    }
+  }
+
+  type MediaSlashRequest = {
+    kind: "image" | "video";
+    prompt: string;
+  };
+
+  function parseMediaSlash(message: string): MediaSlashRequest | null {
+    const match = message.trim().match(/^\/(image|video)(?:\s+(.+))?$/is);
+    if (!match) return null;
+    return {
+      kind: match[1].toLowerCase() as "image" | "video",
+      prompt: (match[2] ?? "").trim()
+    };
+  }
+
+  function generatedImageStatusMessage(status: string): string {
+    const normalized = status.trim();
+    return normalized ? `Image generation ${normalized}.` : "Image generation finished.";
+  }
+
+  function generatedImageExtension(mimeType: string): string {
+    switch (mimeType.toLowerCase()) {
+      case "image/png":
+        return "PNG";
+      case "image/jpeg":
+        return "JPEG";
+      case "image/webp":
+        return "WEBP";
+      default:
+        return "IMAGE";
+    }
+  }
+
+  function generatedImageAttachmentId(artifactId: string): string {
+    return `generated-image:${artifactId}`;
+  }
+
+  function generatedVideoExtension(mimeType: string): string {
+    switch (mimeType.toLowerCase()) {
+      case "video/mp4":
+        return "MP4";
+      case "video/webm":
+        return "WEBM";
+      default:
+        return "VIDEO";
+    }
+  }
+
+  function generatedVideoAttachmentId(artifactId: string): string {
+    return `generated-video:${artifactId}`;
+  }
+
+  function revokeAttachmentPreviews(attachments: MessageAttachment[]): void {
+    attachments.forEach((attachment) => {
+      if (attachment.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(attachment.previewUrl);
+    });
+  }
+
+  function missingGeneratedImageAttachment(
+    jobId: string,
+    artifact: GeneratedMediaArtifactResult
+  ): MessageAttachment {
+    return {
+      id: generatedImageAttachmentId(artifact.artifactId),
+      name: "Generated image",
+      mimeType: artifact.mimeType || "image/*",
+      size: artifact.size || 0,
+      extension: generatedImageExtension(artifact.mimeType || "image/*"),
+      kind: "image",
+      state: "missing",
+      source: {
+        kind: "generated_media",
+        jobId,
+        artifactId: artifact.artifactId,
+        index: artifact.index,
+        ...(artifact.path ? { localPath: artifact.path } : {}),
+        ...(artifact.remoteSourceUrl ? { remoteSourceUrl: artifact.remoteSourceUrl } : {})
+      },
+      previewUrl: null
+    };
+  }
+
+  async function generatedImageAttachment(
+    sessionId: string,
+    jobId: string,
+    artifact: GeneratedMediaArtifactResult
+  ): Promise<MessageAttachment> {
+    const preview = await readGeneratedMediaPreview(sessionId, artifact.artifactId).catch(() => ({
+      state: "missing" as const
+    }));
+    if (preview.state !== "available") return missingGeneratedImageAttachment(jobId, artifact);
+
+    const bytes = new Uint8Array(preview.bytes);
+    return {
+      id: generatedImageAttachmentId(artifact.artifactId),
+      name: "Generated image",
+      mimeType: preview.mimeType,
+      size: bytes.byteLength,
+      extension: generatedImageExtension(preview.mimeType),
+      kind: "image",
+      state: "available",
+      source: {
+        kind: "generated_media",
+        jobId,
+        artifactId: artifact.artifactId,
+        index: artifact.index,
+        ...(artifact.path ? { localPath: artifact.path } : {}),
+        ...(artifact.remoteSourceUrl ? { remoteSourceUrl: artifact.remoteSourceUrl } : {})
+      },
+      previewUrl: URL.createObjectURL(new Blob([bytes], { type: preview.mimeType }))
+    };
+  }
+
+  function generatedVideoAttachment(
+    jobId: string,
+    artifact: GeneratedMediaArtifactResult
+  ): MessageAttachment {
+    return {
+      id: generatedVideoAttachmentId(artifact.artifactId),
+      name: "Generated video",
+      mimeType: artifact.mimeType || "video/*",
+      size: artifact.size || 0,
+      extension: generatedVideoExtension(artifact.mimeType || "video/*"),
+      kind: "video",
+      state: artifact.path ? "available" : "missing",
+      source: {
+        kind: "generated_media",
+        jobId,
+        artifactId: artifact.artifactId,
+        index: artifact.index,
+        ...(artifact.path ? { localPath: artifact.path } : {}),
+        ...(artifact.remoteSourceUrl ? { remoteSourceUrl: artifact.remoteSourceUrl } : {})
+      }
+    };
+  }
+
+  async function appendGeneratedImagePreview(
+    sessionId: string,
+    result: GenerateMediaResult
+  ): Promise<void> {
+    const artifacts = result.artifacts ?? [];
+    if (artifacts.length === 0) return;
+    const attachments = await Promise.all(
+      artifacts.map((artifact) => generatedImageAttachment(sessionId, result.jobId, artifact))
+    );
+    if (selectedSession?.id !== sessionId) {
+      revokeAttachmentPreviews(attachments);
+      return;
+    }
+    appendLive({
+      id: `${GENERATED_MEDIA_PREVIEW_ID_PREFIX}${result.jobId}`,
+      kind: "assistant",
+      title: "Assistant",
+      summary: artifacts.length === 1 ? "Generated image" : `Generated ${artifacts.length} images`,
+      body: "",
+      meta: [],
+      status: result.status,
+      attachments
+    });
+  }
+
+  async function appendGeneratedVideoPreview(
+    sessionId: string,
+    result: GenerateMediaResult
+  ): Promise<void> {
+    const artifacts = result.artifacts ?? [];
+    if (artifacts.length === 0) return;
+    const attachments = artifacts.map((artifact) =>
+      generatedVideoAttachment(result.jobId, artifact)
+    );
+    if (selectedSession?.id !== sessionId) return;
+    appendLive({
+      id: `${GENERATED_MEDIA_PREVIEW_ID_PREFIX}video-${result.jobId}`,
+      kind: "assistant",
+      title: "Assistant",
+      summary: artifacts.length === 1 ? "Generated video" : `Generated ${artifacts.length} videos`,
+      body: "",
+      meta: [],
+      status: result.status,
+      attachments
+    });
+  }
+
+  async function submitMediaSlash(
+    sessionId: string,
+    request: MediaSlashRequest,
+    options: AgentTurnSubmitOptions
+  ): Promise<boolean> {
+    if (!request.prompt) {
+      const detail = `/${request.kind} requires a prompt.`;
+      statusMessage = detail;
+      appendAgentError("Media generation failed", detail, "media-generation-empty");
+      return false;
+    }
+    if ((options.displayAttachments?.length ?? 0) > 0) {
+      const detail = "Media generation does not accept chat attachments.";
+      statusMessage = detail;
+      appendAgentError("Media generation failed", detail, "media-generation-attachments");
+      return false;
+    }
+    setSubmitMessageInFlight(sessionId, true);
+    try {
+      const result = await generateMedia({
+        kind: request.kind,
+        prompt: request.prompt
+      });
+      if (request.kind === "image") {
+        await appendGeneratedImagePreview(sessionId, result);
+        statusMessage = generatedImageStatusMessage(result.status);
+      } else {
+        await appendGeneratedVideoPreview(sessionId, result);
+        statusMessage = `Video generation ${result.status}.`;
+      }
+      return true;
+    } catch (error) {
+      const detail = errorText(error);
+      statusMessage = `Media generation failed: ${detail}`;
+      appendAgentError("Media generation failed", detail, "media-generation-error");
+      return false;
+    } finally {
+      setSubmitMessageInFlight(sessionId, false);
     }
   }
 
@@ -3276,6 +3550,7 @@
       existingIdx >= 0 ? liveStreamItems[existingIdx] : undefined
     );
     if (existingIdx >= 0) {
+      revokeTimelineAttachmentPreviews([liveStreamItems[existingIdx]]);
       liveStreamItems = [
         ...liveStreamItems.slice(0, existingIdx),
         stamped,
@@ -3520,7 +3795,8 @@
   }
 
   function stillMissingFromPersisted(items: TimelineItem[], pending: TimelineItem[]): TimelineItem[] {
-    return pending.filter((item) => !timelineHasTransientMatch(items, item));
+    return discardGeneratedMediaPreviewItems(pending)
+      .filter((item) => !timelineHasTransientMatch(items, item));
   }
 
   function isTransientOrderingAnchor(item: TimelineItem): boolean {
@@ -3583,6 +3859,7 @@
     persisted: TimelineItem[],
     pending: TimelineItem[]
   ): TimelineItem[] {
+    pending = discardGeneratedMediaPreviewItems(pending);
     let searchStart = 0;
     let pendingUnmatched: TimelineItem[] = [];
     let anchored: TimelineItem[] = [];
@@ -4362,6 +4639,7 @@
                 onResolvePermission={resolvePermission}
                 onResolveUserQuestion={resolveUserQuestion}
                 onCancelTurn={() => void cancelCurrentTurn()}
+                onMediaSettingsSaved={handleMediaSettingsSaved}
                 onDraftChange={(hasDraft) => (composerHasDraft = hasDraft)}
                 onRenameTitle={renameSelectedSession}
               />

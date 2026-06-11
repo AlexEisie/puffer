@@ -31,7 +31,6 @@ IMPORTANT: You must NEVER generate or guess URLs for the user unless you are con
  - Don't add error handling, fallbacks, or validation for scenarios that can't happen. Trust internal code and framework guarantees. Only validate at system boundaries (user input, external APIs). Don't use feature flags or backwards-compatibility shims when you can just change the code.
  - Don't create helpers, utilities, or abstractions for one-time operations. Don't design for hypothetical future requirements. The right amount of complexity is what the task actually requires—no speculative abstractions, but no half-finished implementations either. Three similar lines of code is better than a premature abstraction.
  - Avoid backwards-compatibility hacks like renaming unused _vars, re-exporting types, adding // removed comments for removed code, etc. If you are certain that something is unused, you can delete it completely.
-
 # Executing actions with care
 Carefully consider the reversibility and blast radius of actions. Generally you can freely take local, reversible actions like editing files or running tests. But for actions that are hard to reverse, affect shared systems beyond your local environment, or could otherwise be risky or destructive, check with the user before proceeding. The cost of pausing to confirm is low, while the cost of an unwanted action (lost work, unintended messages sent, deleted branches) can be very high. For actions like these, consider the context, the action, and user instructions, and by default transparently communicate the action and ask for confirmation before proceeding. This default can be changed by user instructions - if explicitly asked to operate more autonomously, then you may proceed without confirmation, but still attend to the risks and consequences when taking actions. A user approving an action (like a git push) once does NOT mean that they approve it in all contexts, so unless actions are authorized in advance in durable instructions like CLAUDE.md files, always confirm first. Authorization stands for the scope specified, not beyond. Match the scope of your actions to what was actually requested.
 
@@ -731,6 +730,50 @@ mod tests {
         assert!(!prompt.contains("prompt-only-verified"));
         assert!(!prompt.contains("broken-host-verified"));
         assert!(!prompt.contains("Do not show this one"));
+    }
+
+    #[test]
+    fn runtime_system_prompt_lists_media_generation_skills_when_skill_tool_is_enabled() {
+        let state = state();
+        let enabled_tools = BTreeSet::from(["Skill".to_string()]);
+        let resources = LoadedResources {
+            skills: vec![
+                LoadedItem {
+                    value: SkillSpec {
+                        name: "image-generation".to_string(),
+                        description: "Use when the user asks to create images".to_string(),
+                        disable_model_invocation: false,
+                        ..SkillSpec::default()
+                    },
+                    source_info: SourceInfo {
+                        path: PathBuf::from("resources/skills/image-generation/SKILL.md"),
+                        kind: SourceKind::Builtin,
+                    },
+                },
+                LoadedItem {
+                    value: SkillSpec {
+                        name: "video-generation".to_string(),
+                        description: "Use when the user asks to create text-to-video clips"
+                            .to_string(),
+                        disable_model_invocation: false,
+                        ..SkillSpec::default()
+                    },
+                    source_info: SourceInfo {
+                        path: PathBuf::from("resources/skills/video-generation/SKILL.md"),
+                        kind: SourceKind::Builtin,
+                    },
+                },
+            ],
+            ..LoadedResources::default()
+        };
+
+        let prompt =
+            render_runtime_system_prompt(&state, &resources, "gpt-5", &enabled_tools).unwrap();
+
+        assert!(prompt.contains("Available model-invocable skills"));
+        assert!(prompt.contains("- image-generation: Use when the user asks to create images"));
+        assert!(prompt
+            .contains("- video-generation: Use when the user asks to create text-to-video clips"));
     }
 
     #[test]

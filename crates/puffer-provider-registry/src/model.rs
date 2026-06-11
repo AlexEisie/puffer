@@ -1,6 +1,8 @@
 use crate::auth::AuthMode;
+use anyhow::{bail, Result};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Describes the response format used by a provider's model discovery endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -305,6 +307,144 @@ impl ModelCompat {
     }
 }
 
+/// Describes provider-scoped media capabilities.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderMediaDescriptor {
+    #[serde(default)]
+    pub image: Option<MediaKindDescriptor>,
+    #[serde(default)]
+    pub video: Option<MediaKindDescriptor>,
+}
+
+/// Describes media-generation capability metadata for one provider/kind.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MediaKindDescriptor {
+    #[serde(default)]
+    pub discovery: Option<MediaDiscoveryDescriptor>,
+    #[serde(default)]
+    pub execution: Option<MediaExecutionDescriptor>,
+    #[serde(default)]
+    pub models: Vec<MediaModelDescriptor>,
+}
+
+/// Describes how image model candidates may be discovered.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MediaDiscoveryDescriptor {
+    #[serde(default = "default_media_discovery_kind")]
+    pub adapter: MediaDiscoveryKind,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub query: BTreeMap<String, String>,
+}
+
+/// Describes the API-shape adapter used for image execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MediaExecutionDescriptor {
+    pub adapter: MediaExecutionKind,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    pub path: String,
+    /// Describes how requested image counts are split into provider calls.
+    #[serde(default)]
+    pub batch: MediaBatchDescriptor,
+}
+
+/// Describes how an image execution endpoint handles multi-image requests.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MediaBatchDescriptor {
+    #[serde(default = "default_media_batch_mode")]
+    pub mode: MediaBatchMode,
+    #[serde(default)]
+    pub max_images_per_call: Option<u8>,
+}
+
+impl Default for MediaBatchDescriptor {
+    fn default() -> Self {
+        Self {
+            mode: MediaBatchMode::PerImage,
+            max_images_per_call: None,
+        }
+    }
+}
+
+/// Describes supported image batch execution policies.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaBatchMode {
+    PerImage,
+    Exact,
+}
+
+/// Describes one concrete image model and its supported operations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MediaModelDescriptor {
+    pub id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub execution: Option<MediaExecutionDescriptor>,
+    #[serde(default)]
+    pub operations: Vec<MediaOperation>,
+    #[serde(default)]
+    pub parameters: Vec<MediaParameterSpec>,
+}
+
+/// Describes how a media parameter value is encoded into provider JSON.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaParameterWireType {
+    /// Encode the selected value as a JSON string.
+    #[default]
+    String,
+    /// Parse the selected value and encode it as a JSON number.
+    Number,
+}
+
+/// Describes one select-only image generation parameter.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MediaParameterSpec {
+    pub name: String,
+    pub label: String,
+    pub values: Vec<String>,
+    pub default: String,
+    #[serde(default)]
+    pub request_field: Option<String>,
+    #[serde(default)]
+    pub wire_type: MediaParameterWireType,
+}
+
+/// Describes currently implemented media discovery adapters.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaDiscoveryKind {
+    Static,
+    TrustedImageOutput,
+}
+
+/// Describes currently implemented media execution adapters.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaExecutionKind {
+    ImagesJson,
+    ChatImageOutput,
+    MinimaxImage,
+    ReplicateVideo,
+    RelaydanceVideo,
+    #[serde(rename = "byteplus_video")]
+    BytePlusVideo,
+}
+
+/// Describes image media operations.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaOperation {
+    Generate,
+}
+
 /// Describes one model provider and the models it exposes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderDescriptor {
@@ -334,7 +474,145 @@ pub struct ProviderDescriptor {
     #[serde(default)]
     pub discovery: Option<ModelDiscoveryConfig>,
     #[serde(default)]
+    pub media: Option<ProviderMediaDescriptor>,
+    #[serde(default)]
     pub models: Vec<ModelDescriptor>,
+}
+
+impl ProviderDescriptor {
+    /// Validates declared provider media descriptors without requiring execution availability.
+    pub fn validate_media_descriptors(&self) -> Result<()> {
+        let Some(media) = &self.media else {
+            return Ok(());
+        };
+
+        let mut errors = Vec::new();
+        if let Some(image) = &media.image {
+            validate_media_kind_descriptor("media.image", image, &mut errors);
+        }
+        if let Some(video) = &media.video {
+            validate_media_kind_descriptor("media.video", video, &mut errors);
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            bail!("{}", errors.join("; "))
+        }
+    }
+}
+
+fn validate_media_kind_descriptor(
+    location: &str,
+    descriptor: &MediaKindDescriptor,
+    errors: &mut Vec<String>,
+) {
+    if let Some(execution) = &descriptor.execution {
+        execution.validate(&format!("{location}.execution"), errors);
+    }
+    for (index, model) in descriptor.models.iter().enumerate() {
+        let model_location = format!("{location}.models[{index}]");
+        model.validate(&model_location, errors);
+    }
+}
+
+impl MediaExecutionDescriptor {
+    fn validate(&self, location: &str, errors: &mut Vec<String>) {
+        if self
+            .base_url
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            errors.push(format!("{location}.base_url must not be empty"));
+        }
+        if self.path.trim().is_empty() {
+            errors.push(format!("{location}.path must not be empty"));
+        }
+        match self.batch.mode {
+            MediaBatchMode::PerImage => {
+                if self.batch.max_images_per_call.is_some() {
+                    errors.push(format!(
+                        "{location}.batch.max_images_per_call is only valid when batch.mode is exact"
+                    ));
+                }
+            }
+            MediaBatchMode::Exact => match self.batch.max_images_per_call {
+                Some(limit) if limit >= 2 => {}
+                _ => errors.push(format!(
+                    "{location}.batch.max_images_per_call must be at least 2 when batch.mode is exact"
+                )),
+            },
+        }
+    }
+}
+
+impl MediaModelDescriptor {
+    fn validate(&self, location: &str, errors: &mut Vec<String>) {
+        let id = self.id.trim();
+        if id.is_empty() {
+            errors.push(format!("{location}.id must not be empty"));
+        } else if id.eq_ignore_ascii_case("auto") {
+            errors.push(format!("{location}.id must be a concrete image model id"));
+        } else if has_wildcard_or_regex_marker(id) {
+            errors.push(format!(
+                "{location}.id must not contain wildcard or regex markers"
+            ));
+        }
+
+        if self.operations.is_empty() {
+            errors.push(format!(
+                "{location}.operations must include at least one operation"
+            ));
+        }
+
+        if let Some(execution) = &self.execution {
+            execution.validate(&format!("{location}.execution"), errors);
+        }
+
+        for (index, parameter) in self.parameters.iter().enumerate() {
+            parameter.validate(&format!("{location}.parameters[{index}]"), errors);
+        }
+    }
+}
+
+impl MediaParameterSpec {
+    fn validate(&self, location: &str, errors: &mut Vec<String>) {
+        if self.name.trim().is_empty() {
+            errors.push(format!("{location}.name must not be empty"));
+        }
+        if self.label.trim().is_empty() {
+            errors.push(format!("{location}.label must not be empty"));
+        }
+        if self.values.is_empty() {
+            errors.push(format!("{location}.values must not be empty"));
+        }
+        if self.values.iter().any(|value| value.trim().is_empty()) {
+            errors.push(format!("{location}.values must not contain empty values"));
+        }
+        if self.default.trim().is_empty() {
+            errors.push(format!("{location}.default must not be empty"));
+        } else if !self.values.iter().any(|value| value == &self.default) {
+            errors.push(format!(
+                "{location}.default must be one of the declared values"
+            ));
+        }
+        if self
+            .request_field
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            errors.push(format!("{location}.request_field must not be empty"));
+        }
+    }
+}
+
+fn has_wildcard_or_regex_marker(value: &str) -> bool {
+    value.chars().any(|ch| {
+        matches!(
+            ch,
+            '*' | '?' | '[' | ']' | '(' | ')' | '{' | '}' | '|' | '^' | '$' | '\\'
+        )
+    })
 }
 
 /// Stores one provider plus its provenance.
@@ -351,3 +629,15 @@ fn default_items_field() -> String {
 fn default_id_field() -> String {
     "id".to_string()
 }
+
+fn default_media_discovery_kind() -> MediaDiscoveryKind {
+    MediaDiscoveryKind::Static
+}
+
+fn default_media_batch_mode() -> MediaBatchMode {
+    MediaBatchMode::PerImage
+}
+
+#[cfg(test)]
+#[path = "model_tests.rs"]
+mod tests;

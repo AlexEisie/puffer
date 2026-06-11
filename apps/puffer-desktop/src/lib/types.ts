@@ -32,10 +32,14 @@ export type MessageActor = {
   parentSessionId?: string | null;
 };
 
-export type AgentTurnAttachmentKind = "image" | "file";
+export type AgentTurnAttachmentKind = "image" | "file" | "video";
 export type AttachmentState = "available" | "missing";
 export type AttachmentPreviewResult =
   | { state: "available"; mimeType: string; bytes: number[] }
+  | { state: "missing" }
+  | { state: "unsupported" };
+export type GeneratedVideoAccessResult =
+  | { state: "available"; url: string; mimeType: string; size: number; expiresAtMs: number }
   | { state: "missing" }
   | { state: "unsupported" };
 
@@ -48,10 +52,28 @@ export type AgentTurnAttachment = {
   kind: AgentTurnAttachmentKind;
 };
 
+export type AttachmentPreviewSource =
+  | { kind: "local_file"; path: string }
+  | { kind: "remote_url"; url: string }
+  | {
+      kind: "generated_media";
+      jobId: string;
+      artifactId: string;
+      index: number;
+      localPath?: string | null;
+      remoteSourceUrl?: string | null;
+    };
+
 export type MessageAttachment = AgentTurnAttachment & {
   state?: AttachmentState;
-  file?: File;
+  source: AttachmentPreviewSource;
   previewUrl?: string | null;
+};
+
+export type ChatAttachmentUpload = AgentTurnAttachment & {
+  file: File;
+  previewUrl?: string | null;
+  state?: AttachmentState;
 };
 
 export type FolderGroup = {
@@ -309,11 +331,78 @@ export type SettingsConfig = {
   defaultModel: string | null;
   openaiBaseUrl: string | null;
   theme: string;
+  media: MediaSettings;
   mascotId: string;
   mascotDisplayName: string;
   mascotEnabled: boolean;
   uiNoAltScreen: boolean;
   uiTmuxGoldenMode: boolean;
+};
+
+export type MediaSettings = {
+  image: MediaGenerationSettings | null;
+  video: MediaGenerationSettings | null;
+};
+
+export type MediaGenerationSettings = {
+  providerId: string;
+  modelId: string;
+  operation: "generate";
+  adapter: string;
+  parameters: Record<string, string>;
+};
+
+export type MediaKind = "image" | "video";
+
+export type GenerateMediaInput = {
+  kind: MediaKind;
+  prompt: string;
+  count?: number;
+};
+
+export type GeneratedMediaArtifactResult = {
+  artifactId: string;
+  index: number;
+  path: string;
+  mimeType: string;
+  size: number;
+  remoteSourceUrl?: string | null;
+};
+
+export type GenerateMediaResult = {
+  jobId: string;
+  requestedCount: number;
+  artifacts: GeneratedMediaArtifactResult[];
+  kind: MediaKind;
+  providerId: string;
+  modelId: string;
+  status: string;
+  prompt: string;
+};
+
+export type MediaCapabilityInfo = {
+  providerId: string;
+  providerDisplayName: string;
+  modelId: string;
+  modelDisplayName: string;
+  kind: MediaKind;
+  operation: string;
+  adapter: string;
+  parameters: MediaCapabilityParameterInfo[];
+  defaults: Record<string, string>;
+  status: "available" | "unavailable" | "unknown" | string;
+  source: string;
+  reason: string | null;
+  checkedAtMs: number;
+};
+
+export type MediaCapabilityParameterInfo = {
+  name: string;
+  label: string;
+  values: string[];
+  default: string;
+  requestField: string | null;
+  wireType: "string" | "number";
 };
 
 export type ResourceCounts = {

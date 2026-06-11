@@ -6,6 +6,7 @@ import type {
   AuthProviderStatus,
   AskUserQuestionItem,
   BrowserRenderer,
+  ChatAttachmentUpload,
   DesktopPinState,
   ContactContextItem,
   ContactProposal,
@@ -14,6 +15,9 @@ import type {
   DraftProxyEndpoint,
   ExternalCredential,
   FolderGroup,
+  GenerateMediaInput,
+  GenerateMediaResult,
+  GeneratedVideoAccessResult,
   ProviderSummary,
   ProxyTestResult,
   PullRequest,
@@ -29,6 +33,9 @@ import type {
   SessionGroupsPage,
   SessionListItem,
   SettingsSnapshot,
+  MediaSettings,
+  MediaCapabilityInfo,
+  MediaKind,
   MessageActor,
   MessageAttachment,
   OpenAIRealtimeClientSecret,
@@ -146,6 +153,18 @@ type BackendActorFields = {
   subject?: MessageActor | null;
 };
 
+type BackendChatAttachmentSource =
+  | { kind: "local_file"; path: string }
+  | { kind: "remote_url"; url: string }
+  | {
+      kind: "generated_media";
+      jobId: string;
+      artifactId: string;
+      index: number;
+      localPath?: string | null;
+      remoteSourceUrl?: string | null;
+    };
+
 type BackendTurnFields = {
   turnId?: string | null;
   turn_id?: string | null;
@@ -157,9 +176,16 @@ type BackendChatAttachment = {
   mimeType: string;
   size: number;
   extension: string;
-  kind: "image" | "file";
+  kind: "image" | "file" | "video";
   state?: AttachmentState;
+  source: BackendChatAttachmentSource;
+  previewUrl?: string | null;
 };
+
+type BackendGeneratedVideoAccessResult =
+  | { state: "available"; path: string; mimeType: string; size: number; expiresAtMs: number }
+  | { state: "missing" }
+  | { state: "unsupported" };
 
 type BackendTimelineItem =
   | ({
@@ -174,6 +200,7 @@ type BackendTimelineItem =
       id: string;
       text: string;
       createdAtMs?: number | null;
+      attachments?: BackendChatAttachment[];
     } & BackendActorFields & BackendTurnFields)
   | ({
       kind: "system_message";
@@ -299,7 +326,7 @@ type BackendRemoteOperation = RemoteOperation;
 
 type StageChatAttachmentHook = (
   sessionId: string,
-  attachment: MessageAttachment
+  attachment: ChatAttachmentUpload
 ) => Promise<MessageAttachment> | MessageAttachment;
 
 type ReadChatAttachmentPreviewHook = (
@@ -377,6 +404,9 @@ function normalizeDiff(value: BackendDiff): DiffSnapshot {
 }
 
 function normalizeMessageAttachment(value: BackendChatAttachment): MessageAttachment {
+  const previewUrl =
+    value.previewUrl ??
+    (value.kind === "image" && value.source.kind === "remote_url" ? value.source.url : undefined);
   return {
     id: value.id,
     name: value.name,
@@ -384,7 +414,9 @@ function normalizeMessageAttachment(value: BackendChatAttachment): MessageAttach
     size: value.size,
     extension: value.extension,
     kind: value.kind,
-    state: value.state
+    state: value.state,
+    source: value.source,
+    ...(previewUrl !== undefined ? { previewUrl } : {})
   };
 }
 
@@ -523,7 +555,8 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         actor: value.actor ?? null
       };
     }
-    case "assistant_message":
+    case "assistant_message": {
+      const attachments = (value.attachments ?? []).map(normalizeMessageAttachment);
       return {
         id: value.id,
         kind: "assistant",
@@ -533,8 +566,10 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         summary: preview(value.text),
         body: value.text,
         meta: [],
+        ...(attachments.length > 0 ? { attachments } : {}),
         actor: value.actor ?? null
       };
+    }
     case "system_message":
       const systemText = value.text;
       const isVerifiedSkillGate = systemText.trim().startsWith("Verified Skill Gate");
@@ -1626,7 +1661,7 @@ export type AgentTurnOptions = {
   attachmentIds?: string[];
 };
 export type AgentTurnSubmitOptions = AgentTurnOptions & {
-  displayAttachments?: MessageAttachment[];
+  displayAttachments?: ChatAttachmentUpload[];
 };
 export type StaleTurnRecoveryResult =
   | { recovery: "retry_started"; turnId: string }
@@ -1635,7 +1670,7 @@ export type StaleTurnRecoveryResult =
 
 export async function stageChatAttachment(
   sessionId: string,
-  attachment: MessageAttachment
+  attachment: ChatAttachmentUpload
 ): Promise<MessageAttachment> {
   const hook = devStageChatAttachmentHook();
   if (hook) return hook(sessionId, attachment);
@@ -2608,7 +2643,116 @@ export type ConfigPatch = {
   defaultModel?: string | null;
   theme?: string;
   openaiBaseUrl?: string | null;
+  media?: MediaSettings;
 };
+
+type MediaCapabilitiesResponse = {
+  capabilities: MediaCapabilityInfo[];
+};
+
+export type {
+  GenerateMediaInput,
+  GeneratedMediaArtifactResult,
+  GenerateMediaResult
+} from "../types";
+
+export async function listMediaCapabilities(kind?: MediaKind): Promise<MediaCapabilityInfo[]> {
+  const client = await ensureLocalDaemonClient();
+  const result = await client.request<MediaCapabilitiesResponse>(
+    "list_media_capabilities",
+    kind ? { kind } : {}
+  );
+  return result.capabilities;
+}
+
+export async function generateMedia(input: GenerateMediaInput): Promise<GenerateMediaResult> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<GenerateMediaResult>("generate_media", input);
+}
+
+export async function readGeneratedMediaPreview(
+  sessionId: string,
+  artifactId: string
+): Promise<AttachmentPreviewResult> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<AttachmentPreviewResult>("read_generated_media_preview", {
+    sessionId,
+    artifactId
+  });
+}
+
+/** Issue a media-access RPC and rewrite the daemon's ticket path into an HTTP
+ *  URL. Shared by every media-access endpoint: they return the same shape and
+ *  differ only by method name and params. */
+async function requestMediaAccess(
+  method: string,
+  params: Record<string, unknown>
+): Promise<GeneratedVideoAccessResult> {
+  const client = await ensureLocalDaemonClient();
+  const result = await client.request<BackendGeneratedVideoAccessResult>(method, params);
+  if (result.state !== "available") return result;
+  return {
+    state: "available",
+    url: client.httpUrl(result.path),
+    mimeType: result.mimeType,
+    size: result.size,
+    expiresAtMs: result.expiresAtMs
+  };
+}
+
+export async function createGeneratedVideoAccess(
+  sessionId: string,
+  artifactId: string
+): Promise<GeneratedVideoAccessResult> {
+  return requestMediaAccess("create_generated_video_access", { sessionId, artifactId });
+}
+
+export type FileMediaAccessResult = GeneratedVideoAccessResult;
+
+/** Mint a streaming access URL for an in-workspace media file (e.g. video).
+ *  The daemon validates the path against its allowed roots and serves the file
+ *  with HTTP Range support, so the <video> element can seek without loading the
+ *  whole file. */
+export async function createFileMediaAccess(path: string): Promise<FileMediaAccessResult> {
+  return requestMediaAccess("create_file_media_access", { path });
+}
+
+export async function readMessageAttachmentPreview(
+  sessionId: string,
+  attachment: MessageAttachment
+): Promise<AttachmentPreviewResult> {
+  if (attachment.source.kind === "generated_media") {
+    return readGeneratedMediaPreview(sessionId, attachment.source.artifactId);
+  }
+  if (attachment.source.kind === "remote_url") {
+    return { state: "unsupported" };
+  }
+  return readChatAttachmentPreview(sessionId, attachment.id);
+}
+
+export type DownloadImageFromUrlResult = {
+  path: string;
+};
+
+export async function openContainingFolder(path: string): Promise<void> {
+  if (!canInvokeTauri()) {
+    throw new Error("Opening a folder requires the Tauri desktop shell.");
+  }
+  await invoke("open_containing_folder", { path });
+}
+
+export async function downloadImageFromUrl(
+  url: string,
+  suggestedName?: string
+): Promise<DownloadImageFromUrlResult> {
+  if (!canInvokeTauri()) {
+    throw new Error("Downloading an image requires the Tauri desktop shell.");
+  }
+  return invoke<DownloadImageFromUrlResult>("download_image_from_url", {
+    url,
+    suggestedName
+  });
+}
 
 export async function localModelStatus(modelId = "qwen35"): Promise<LocalModelStatus> {
   const client = await ensureLocalDaemonClient();

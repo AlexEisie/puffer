@@ -1,10 +1,305 @@
-import { expect, type Page, test } from "@playwright/test";
-import { FakeDaemon } from "./support/fakeDaemon";
+import { expect, type Locator, type Page, test } from "@playwright/test";
+import {
+  defaultFakeMediaCapabilities,
+  FakeDaemon,
+  ONE_PIXEL_JPEG_BASE64,
+  type FakeMediaCapability
+} from "./support/fakeDaemon";
+import type { MediaSettings, MessageAttachment } from "../src/lib/types";
 
 const baseTime = Date.now();
+const onePixelPngBytes = Array.from(
+  Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==",
+    "base64"
+  )
+);
+const onePixelJpegBytes = Array.from(Buffer.from(ONE_PIXEL_JPEG_BASE64, "base64"));
+
+const configuredImageMedia: MediaSettings = {
+  image: {
+    providerId: "openai",
+    modelId: "gpt-image-1",
+    operation: "generate",
+    adapter: "images_json",
+    parameters: {
+      size: "1024x1024",
+      quality: "auto",
+      output_format: "png"
+    }
+  },
+  video: null
+};
+
+type FakeMediaCapabilityParameter = FakeMediaCapability["parameters"][number];
+
+function mediaParameter(input: {
+  name: string;
+  label: string;
+  values: string[];
+  defaultValue: string;
+  requestField?: string | null;
+  wireType?: "string" | "number";
+}): FakeMediaCapabilityParameter {
+  return {
+    name: input.name,
+    label: input.label,
+    values: input.values,
+    default: input.defaultValue,
+    requestField: input.requestField === undefined ? input.name : input.requestField,
+    wireType: input.wireType ?? "string"
+  };
+}
+
+function imageCapability(input: {
+  providerId: string;
+  providerDisplayName: string;
+  modelId: string;
+  modelDisplayName: string;
+  parameters: FakeMediaCapabilityParameter[];
+}): FakeMediaCapability {
+  return {
+    providerId: input.providerId,
+    providerDisplayName: input.providerDisplayName,
+    modelId: input.modelId,
+    modelDisplayName: input.modelDisplayName,
+    kind: "image",
+    operation: "generate",
+    adapter: "images_json",
+    parameters: input.parameters,
+    defaults: Object.fromEntries(
+      input.parameters.map((parameter) => [parameter.name, parameter.default])
+    ),
+    status: "available",
+    source: "fake-daemon",
+    reason: null,
+    checkedAtMs: baseTime
+  };
+}
+
+function videoCapability(input: {
+  providerId: string;
+  providerDisplayName: string;
+  modelId: string;
+  modelDisplayName: string;
+  adapter: string;
+  parameters: FakeMediaCapabilityParameter[];
+}): FakeMediaCapability {
+  return {
+    providerId: input.providerId,
+    providerDisplayName: input.providerDisplayName,
+    modelId: input.modelId,
+    modelDisplayName: input.modelDisplayName,
+    kind: "video",
+    operation: "generate",
+    adapter: input.adapter,
+    parameters: input.parameters,
+    defaults: Object.fromEntries(
+      input.parameters.map((parameter) => [parameter.name, parameter.default])
+    ),
+    status: "available",
+    source: "fake-daemon",
+    reason: null,
+    checkedAtMs: baseTime
+  };
+}
+
+function singleOptionImageCapability(): FakeMediaCapability {
+  return imageCapability({
+    providerId: "openai",
+    providerDisplayName: "OpenAI",
+    modelId: "gpt-image-1",
+    modelDisplayName: "GPT Image 1",
+    parameters: [
+      mediaParameter({
+        name: "size",
+        label: "Size",
+        values: ["1024x1024"],
+        defaultValue: "1024x1024"
+      }),
+      mediaParameter({
+        name: "quality",
+        label: "Quality",
+        values: [],
+        defaultValue: "auto"
+      })
+    ]
+  });
+}
+
+function singleOptionVideoCapability(): FakeMediaCapability {
+  const parameters = [
+    mediaParameter({
+      name: "aspect_ratio",
+      label: "Aspect ratio",
+      values: ["16:9"],
+      defaultValue: "16:9",
+      requestField: "metadata.ratio"
+    }),
+    mediaParameter({
+      name: "duration_seconds",
+      label: "Duration",
+      values: ["8"],
+      defaultValue: "8",
+      requestField: "seconds"
+    })
+  ];
+  return videoCapability({
+    providerId: "runway",
+    providerDisplayName: "Runway",
+    modelId: "gen-4",
+    modelDisplayName: "Gen-4",
+    adapter: "replicate_video",
+    parameters
+  });
+}
+
+function configurableVideoCapability(): FakeMediaCapability {
+  const parameters = [
+    mediaParameter({
+      name: "aspect_ratio",
+      label: "Aspect ratio",
+      values: ["16:9", "9:16"],
+      defaultValue: "16:9",
+      requestField: "metadata.ratio"
+    }),
+    mediaParameter({
+      name: "duration_seconds",
+      label: "Duration",
+      values: ["5", "8", "12"],
+      defaultValue: "8",
+      requestField: "seconds"
+    })
+  ];
+  return videoCapability({
+    providerId: "runway",
+    providerDisplayName: "Runway",
+    modelId: "gen-4",
+    modelDisplayName: "Gen-4",
+    adapter: "replicate_video",
+    parameters
+  });
+}
+
+function configurableVideoCapabilityWithProviderOptions(): FakeMediaCapability {
+  const parameters = [
+    mediaParameter({
+      name: "aspect_ratio",
+      label: "Aspect ratio",
+      values: ["16:9", "9:16", "1:1"],
+      defaultValue: "16:9",
+      requestField: "ratio"
+    }),
+    mediaParameter({
+      name: "duration_seconds",
+      label: "Duration",
+      values: ["5", "8", "12"],
+      defaultValue: "5",
+      requestField: "duration",
+      wireType: "number"
+    }),
+    mediaParameter({
+      name: "resolution",
+      label: "Resolution",
+      values: ["480p", "720p", "1080p"],
+      defaultValue: "720p",
+      requestField: "resolution"
+    })
+  ];
+  return videoCapability({
+    providerId: "byteplus",
+    providerDisplayName: "BytePlus",
+    modelId: "dreamina-seedance-2-0-260128",
+    modelDisplayName: "Dreamina Seedance 2.0",
+    adapter: "byteplus_video",
+    parameters
+  });
+}
+
+function relaydanceVideoCapability(input: {
+  modelId: string;
+  modelDisplayName: string;
+  resolution: string;
+}): FakeMediaCapability {
+  const parameters = [
+    mediaParameter({
+      name: "duration_seconds",
+      label: "Duration",
+      values: ["5", "8"],
+      defaultValue: "5",
+      requestField: "seconds"
+    }),
+    mediaParameter({
+      name: "resolution",
+      label: "Resolution",
+      values: [input.resolution],
+      defaultValue: input.resolution,
+      requestField: "metadata.resolution"
+    }),
+    mediaParameter({
+      name: "aspect_ratio",
+      label: "Aspect ratio",
+      values: ["16:9", "9:16"],
+      defaultValue: "16:9",
+      requestField: "metadata.ratio"
+    })
+  ];
+  return videoCapability({
+    providerId: "relaydance",
+    providerDisplayName: "Relaydance",
+    modelId: input.modelId,
+    modelDisplayName: input.modelDisplayName,
+    adapter: "relaydance_video",
+    parameters
+  });
+}
+
+function generatedAttachment(jobId: string, artifactId: string, index: number): MessageAttachment {
+  return {
+    id: `generated-image:${artifactId}`,
+    name: "Generated image",
+    mimeType: "image/png",
+    size: 8,
+    extension: "PNG",
+    kind: "image",
+    state: "available",
+    source: { kind: "generated_media", jobId, artifactId, index }
+  };
+}
+
+async function expectReadOnlyField(dialog: Locator, label: string, value: string): Promise<void> {
+  const field = dialog
+    .locator(".pf-media-field")
+    .filter({ hasText: label })
+    .filter({ hasText: value });
+  await expect(field).toHaveCount(1);
+  await expect(field).toBeVisible();
+  await expect(field.locator("select")).toHaveCount(0);
+  await expect(field.getByText(label, { exact: true })).toBeVisible();
+  await expect(field.getByText(value, { exact: true })).toBeVisible();
+}
 
 async function openSession(page: Page, name: RegExp): Promise<void> {
   await page.getByRole("button", { name }).first().click();
+}
+
+async function expectOverlayActionBeforeClose(
+  actionButton: Locator,
+  closeButton: Locator
+): Promise<void> {
+  const closeHandle = await closeButton.elementHandle();
+  if (!closeHandle) throw new Error("close button handle was unavailable");
+  try {
+    expect(
+      await actionButton.evaluate(
+        (action, close) =>
+          Boolean(action.compareDocumentPosition(close) & Node.DOCUMENT_POSITION_FOLLOWING),
+        closeHandle
+      )
+    ).toBe(true);
+  } finally {
+    await closeHandle.dispose();
+  }
 }
 
 async function reconnectBackend(page: Page, daemon: FakeDaemon): Promise<void> {
@@ -55,7 +350,11 @@ async function installAttachmentStageHook(page: Page): Promise<void> {
       return {
         ...rest,
         id: `staged-${String(attachment.id)}`,
-        state: "available"
+        state: "available",
+        source: {
+          kind: "local_file",
+          path: `/tmp/puffer/attachments/staged-${String(attachment.id)}`
+        }
       };
     };
   });
@@ -202,7 +501,8 @@ test("composer add content menu attaches image and file drafts", async ({ page }
           kind: "image",
           extension: "PNG",
           size: imageBuffer.length,
-          state: "available"
+          state: "available",
+          source: { kind: "local_file", path: "/tmp/puffer/attachments/sample.png" }
         },
         {
           id: attachmentIds[1],
@@ -211,7 +511,8 @@ test("composer add content menu attaches image and file drafts", async ({ page }
           kind: "file",
           extension: "PDF",
           size: pdfBuffer.length,
-          state: "available"
+          state: "available",
+          source: { kind: "local_file", path: "/tmp/puffer/attachments/report.pdf" }
         }
       ]
     },
@@ -252,11 +553,1860 @@ test("composer add content menu attaches image and file drafts", async ({ page }
   await expect(refreshedPreview.getByAltText("sample.png")).toBeVisible();
 });
 
-test("message attachments open image preview and file details", async ({ page }) => {
-  const imageBuffer = Buffer.from(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==",
-    "base64"
+test("composer image generation settings modal saves media config from daemon capabilities", async ({ page }) => {
+  const imageCapabilities: FakeMediaCapability[] = [
+    ...defaultFakeMediaCapabilities(),
+    imageCapability({
+      providerId: "openai",
+      providerDisplayName: "OpenAI",
+      modelId: "gpt-image-2",
+      modelDisplayName: "GPT Image 2",
+      parameters: [
+        mediaParameter({
+          name: "size",
+          label: "Size",
+          values: ["1024x1024", "1024x1536", "1536x1024"],
+          defaultValue: "1024x1024"
+        }),
+        mediaParameter({
+          name: "quality",
+          label: "Quality",
+          values: ["auto", "high"],
+          defaultValue: "auto"
+        }),
+        mediaParameter({
+          name: "output_format",
+          label: "Output format",
+          values: ["png", "webp"],
+          defaultValue: "png"
+        })
+      ]
+    }),
+    imageCapability({
+      providerId: "byteplus",
+      providerDisplayName: "BytePlus",
+      modelId: "seedream-3",
+      modelDisplayName: "Seedream 3",
+      parameters: [
+        mediaParameter({
+          name: "size",
+          label: "Size",
+          values: ["1024x1024", "1280x720", "720x1280"],
+          defaultValue: "1024x1024"
+        }),
+        mediaParameter({
+          name: "quality",
+          label: "Quality",
+          values: ["standard", "high"],
+          defaultValue: "standard"
+        }),
+        mediaParameter({
+          name: "output_format",
+          label: "Output format",
+          values: ["png", "webp"],
+          defaultValue: "png"
+        })
+      ]
+    }),
+    imageCapability({
+      providerId: "byteplus",
+      providerDisplayName: "BytePlus",
+      modelId: "seedream-4",
+      modelDisplayName: "Seedream 4",
+      parameters: [
+        mediaParameter({
+          name: "size",
+          label: "Size",
+          values: ["1024x1024", "1280x720", "720x1280"],
+          defaultValue: "1024x1024"
+        }),
+        mediaParameter({
+          name: "quality",
+          label: "Quality",
+          values: ["standard", "high"],
+          defaultValue: "standard"
+        }),
+        mediaParameter({
+          name: "output_format",
+          label: "Output format",
+          values: ["png", "webp"],
+          defaultValue: "png"
+        })
+      ]
+    })
+  ];
+  const daemon = new FakeDaemon({
+    mediaCapabilities: imageCapabilities,
+    sessions: [
+      {
+        sessionId: "session-image-settings",
+        displayName: "Image generation settings session",
+        title: "Image generation settings session",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "image-settings-seed",
+            text: "Tune image defaults here.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.setSettingsConfig({
+    media: {
+      image: null,
+      video: null
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Image generation settings session/);
+
+  await page.getByRole("button", { name: "Add content" }).click();
+  await expect(page.getByRole("menuitem", { name: "Add images and files" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Image generation settings" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Image generation settings" });
+  await expect(dialog).toBeVisible();
+  await daemon.waitForRequest(
+    "list_media_capabilities",
+    (request) => request.params.kind === "image"
   );
+  await expect(dialog.getByLabel("Provider")).toHaveValue("openai");
+  await expect(dialog.getByLabel("Model")).toHaveValue(
+    ["openai", "gpt-image-1", "images_json"].join("\u0000")
+  );
+  await expect(dialog.getByRole("combobox", { name: "Provider" })).toBeVisible();
+  await expect(dialog.getByRole("combobox", { name: "Model" })).toBeVisible();
+  const imageFolder = dialog.getByLabel("Image folder");
+  await expect(imageFolder).toHaveValue("/tmp/puffer/.puffer/media/images");
+  await expect(imageFolder).toHaveJSProperty("readOnly", true);
+  const openFolderButton = dialog.getByRole("button", { name: "Open folder" });
+  await expect(openFolderButton).toBeVisible();
+  await expect(openFolderButton).toHaveAttribute("data-variant", "outline");
+  const imageFolderBox = await imageFolder.boundingBox();
+  const openFolderButtonBox = await openFolderButton.boundingBox();
+  expect(imageFolderBox).not.toBeNull();
+  expect(openFolderButtonBox).not.toBeNull();
+  expect(openFolderButtonBox!.height).toBe(imageFolderBox!.height);
+  const sizeOptions = await dialog.getByLabel("Size").locator("option").evaluateAll((options) =>
+    options.map((option) => (option as HTMLOptionElement).value)
+  );
+  expect(sizeOptions).toEqual(["1024x1024", "1024x1536", "1536x1024"]);
+
+  await dialog.getByLabel("Provider").selectOption("byteplus");
+  await dialog
+    .getByLabel("Model")
+    .selectOption(["byteplus", "seedream-3", "images_json"].join("\u0000"));
+  await dialog.getByLabel("Size").selectOption("1280x720");
+  await dialog.getByRole("button", { name: "Save" }).click();
+
+  const update = await daemon.waitForRequest("update_config", (request) => "media" in request.params);
+  expect(update.params).toEqual({
+    media: {
+      image: {
+        providerId: "byteplus",
+        modelId: "seedream-3",
+        operation: "generate",
+        adapter: "images_json",
+        parameters: {
+          size: "1280x720",
+          quality: "standard",
+          output_format: "png"
+        }
+      },
+      video: null
+    }
+  });
+  await expect(dialog).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Add content" }).click();
+  await page.getByRole("menuitem", { name: "Image generation settings" }).click();
+
+  const reopenedDialog = page.getByRole("dialog", { name: "Image generation settings" });
+  await expect(reopenedDialog).toBeVisible();
+  await daemon.waitForRequest(
+    "list_media_capabilities",
+    (request) => request.params.kind === "image"
+  );
+  await expect(reopenedDialog.getByLabel("Provider")).toHaveValue("byteplus");
+  await expect(reopenedDialog.getByLabel("Model")).toHaveValue(
+    ["byteplus", "seedream-3", "images_json"].join("\u0000")
+  );
+  await expect(reopenedDialog.getByLabel("Size")).toHaveValue("1280x720");
+  await expect(reopenedDialog.getByLabel("Quality")).toHaveValue("standard");
+  await expect(reopenedDialog.getByLabel("Output format")).toHaveValue("png");
+  expect(daemon.requests.filter((request) => request.method === "update_config")).toHaveLength(1);
+});
+
+test("composer image generation settings shows capability loading status", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-image-settings-loading",
+        displayName: "Image settings loading",
+        title: "Image settings loading",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "image-settings-loading-seed",
+            text: "Open image settings while capabilities load.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "list_media_capabilities",
+    (request) => request.params.kind === "image",
+    500
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Image settings loading/);
+
+  await page.getByRole("button", { name: "Add content" }).click();
+  await page.getByRole("menuitem", { name: "Image generation settings" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Image generation settings" });
+  await expect(dialog).toBeVisible();
+  await page.waitForTimeout(100);
+  await expect(dialog.getByRole("status")).toContainText("Loading image capabilities...");
+  await expect(dialog.getByText("Checking available image generation models.")).toBeVisible();
+  await expect(dialog.locator(".pf-media-loading-spinner")).toBeVisible();
+  await expect(dialog.locator(".pf-media-loading")).toHaveCSS("border-top-width", "0px");
+
+  await daemon.waitForRequest(
+    "list_media_capabilities",
+    (request) => request.params.kind === "image"
+  );
+  await expect(dialog.getByRole("status")).toHaveCount(0);
+  await expect(dialog.getByText("Image folder", { exact: true })).toBeVisible();
+});
+
+test("composer image generation settings renders single choices as read-only values", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    mediaCapabilities: [singleOptionImageCapability()],
+    sessions: [
+      {
+        sessionId: "session-image-settings-single-option",
+        displayName: "Single-option image settings",
+        title: "Single-option image settings",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "image-settings-single-option-seed",
+            text: "Open single-option image settings.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Single-option image settings/);
+
+  await page.getByRole("button", { name: "Add content" }).click();
+  await page.getByRole("menuitem", { name: "Image generation settings" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Image generation settings" });
+  await expect(dialog).toBeVisible();
+  await daemon.waitForRequest(
+    "list_media_capabilities",
+    (request) => request.params.kind === "image"
+  );
+  await expect(dialog.getByRole("combobox")).toHaveCount(0);
+  await expectReadOnlyField(dialog, "Provider", "OpenAI");
+  await expectReadOnlyField(dialog, "Model", "GPT Image 1");
+  await expectReadOnlyField(dialog, "Size", "1024x1024");
+  await expectReadOnlyField(dialog, "Quality", "auto");
+});
+
+test("composer image generation settings clamps unsupported saved parameters", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-image-settings-unsupported-params",
+        displayName: "Unsupported image parameters",
+        title: "Unsupported image parameters",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "image-settings-unsupported-params-seed",
+            text: "Tune unsupported image defaults here.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.setSettingsConfig({
+    media: {
+      image: {
+        providerId: "openai",
+        modelId: "gpt-image-1",
+        operation: "generate",
+        adapter: "images_json",
+        parameters: {
+          size: "2048x2048",
+          quality: "ultra",
+          output_format: "gif"
+        }
+      },
+      video: null
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Unsupported image parameters/);
+
+  await page.getByRole("button", { name: "Add content" }).click();
+  await page.getByRole("menuitem", { name: "Image generation settings" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Image generation settings" });
+  await expect(dialog).toBeVisible();
+  await daemon.waitForRequest(
+    "list_media_capabilities",
+    (request) => request.params.kind === "image"
+  );
+  await dialog.getByRole("button", { name: "Save" }).click();
+
+  const update = await daemon.waitForRequest(
+    "update_config",
+    (request) => "media" in request.params
+  );
+  expect(update.params).toMatchObject({
+    media: {
+      image: {
+        providerId: "openai",
+        modelId: "gpt-image-1",
+        operation: "generate",
+        adapter: "images_json",
+        parameters: {
+          size: "1024x1024",
+          quality: "auto",
+          output_format: "png"
+        }
+      }
+    }
+  });
+});
+
+test("composer video generation settings modal remains reachable without capabilities", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    mediaCapabilities: [],
+    sessions: [
+      {
+        sessionId: "session-video-settings",
+        displayName: "Video generation settings session",
+        title: "Video generation settings session",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "video-settings-seed",
+            text: "Tune video defaults here.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Video generation settings session/);
+
+  await page.getByRole("button", { name: "Add content" }).click();
+  await expect(page.getByRole("menuitem", { name: "Video generation settings" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Video generation settings" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Video generation settings" });
+  await expect(dialog).toBeVisible();
+  await daemon.waitForRequest(
+    "list_media_capabilities",
+    (request) => request.params.kind === "video"
+  );
+  const emptyState = dialog.getByText("No video capabilities available.");
+  await expect(emptyState).toBeVisible();
+  await expect(emptyState).not.toHaveClass(/pf-media-state/);
+  await expect(emptyState).toHaveCSS("border-top-width", "0px");
+  await expect(dialog.getByRole("button", { name: "Save" })).toBeDisabled();
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+});
+
+test("composer video generation settings shows capability loading status", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    mediaCapabilities: [configurableVideoCapability()],
+    sessions: [
+      {
+        sessionId: "session-video-settings-loading",
+        displayName: "Video settings loading",
+        title: "Video settings loading",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "video-settings-loading-seed",
+            text: "Open video settings while capabilities load.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "list_media_capabilities",
+    (request) => request.params.kind === "video",
+    500
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Video settings loading/);
+
+  await page.getByRole("button", { name: "Add content" }).click();
+  await page.getByRole("menuitem", { name: "Video generation settings" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Video generation settings" });
+  await expect(dialog).toBeVisible();
+  await page.waitForTimeout(100);
+  await expect(dialog.getByRole("status")).toContainText("Loading video capabilities...");
+  await expect(dialog.getByText("Checking available video generation models.")).toBeVisible();
+  await expect(dialog.locator(".pf-media-loading-spinner")).toBeVisible();
+  await expect(dialog.locator(".pf-media-loading")).toHaveCSS("border-top-width", "0px");
+
+  await daemon.waitForRequest(
+    "list_media_capabilities",
+    (request) => request.params.kind === "video"
+  );
+  await expect(dialog.getByRole("status")).toHaveCount(0);
+  await expect(dialog.getByLabel("Aspect ratio")).toHaveValue("16:9");
+});
+
+test("composer video generation settings renders saved single choices as read-only values", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    mediaCapabilities: [singleOptionVideoCapability()],
+    sessions: [
+      {
+        sessionId: "session-video-settings-single-option",
+        displayName: "Single-option video settings",
+        title: "Single-option video settings",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "video-settings-single-option-seed",
+            text: "Open single-option video settings.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.setSettingsConfig({
+    media: {
+      image: null,
+      video: {
+        providerId: "runway",
+        modelId: "gen-4",
+        operation: "generate",
+        adapter: "replicate_video",
+        parameters: {
+          aspect_ratio: "16:9",
+          duration_seconds: "8"
+        }
+      }
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Single-option video settings/);
+
+  await page.getByRole("button", { name: "Add content" }).click();
+  await page.getByRole("menuitem", { name: "Video generation settings" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Video generation settings" });
+  await expect(dialog).toBeVisible();
+  await daemon.waitForRequest(
+    "list_media_capabilities",
+    (request) => request.params.kind === "video"
+  );
+  await expect(dialog.getByText("Saved model is no longer available.")).toHaveCount(0);
+  await expect(dialog.getByRole("combobox")).toHaveCount(0);
+  await expectReadOnlyField(dialog, "Provider", "Runway");
+  await expectReadOnlyField(dialog, "Model", "Gen-4");
+  await expectReadOnlyField(dialog, "Aspect ratio", "16:9");
+  await expectReadOnlyField(dialog, "Duration", "8s");
+
+  await dialog.getByRole("button", { name: "Save" }).click();
+  const update = await daemon.waitForRequest(
+    "update_config",
+    (request) => "media" in request.params
+  );
+  expect(update.params).toEqual({
+    media: {
+      image: null,
+      video: {
+        providerId: "runway",
+        modelId: "gen-4",
+        operation: "generate",
+        adapter: "replicate_video",
+        parameters: {
+          aspect_ratio: "16:9",
+          duration_seconds: "8"
+        }
+      }
+    }
+  });
+});
+
+test("composer video generation settings shows multiple models for one provider", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    mediaCapabilities: [
+      relaydanceVideoCapability({
+        modelId: "doubao-seedance-2-0-720p",
+        modelDisplayName: "Seedance 2.0 720p",
+        resolution: "720p"
+      }),
+      relaydanceVideoCapability({
+        modelId: "doubao-seedance-2-0-1080p",
+        modelDisplayName: "Seedance 2.0 1080p",
+        resolution: "1080p"
+      })
+    ],
+    sessions: [
+      {
+        sessionId: "session-video-settings-multi-model",
+        displayName: "Multi-model video settings",
+        title: "Multi-model video settings",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "video-settings-multi-model-seed",
+            text: "Open video settings with multiple models.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Multi-model video settings/);
+
+  await page.getByRole("button", { name: "Add content" }).click();
+  await page.getByRole("menuitem", { name: "Video generation settings" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Video generation settings" });
+  await expect(dialog).toBeVisible();
+  await daemon.waitForRequest(
+    "list_media_capabilities",
+    (request) => request.params.kind === "video"
+  );
+  await expectReadOnlyField(dialog, "Provider", "Relaydance");
+  await expect(dialog.getByLabel("Model")).toBeVisible();
+  await expect(dialog.getByRole("combobox")).toHaveCount(3);
+  await expectReadOnlyField(dialog, "Resolution", "720p");
+
+  await dialog.getByLabel("Model").selectOption({ label: "Seedance 2.0 1080p" });
+  await expectReadOnlyField(dialog, "Resolution", "1080p");
+
+  await dialog.getByRole("button", { name: "Save" }).click();
+  const update = await daemon.waitForRequest(
+    "update_config",
+    (request) => "media" in request.params
+  );
+  expect(update.params).toEqual({
+    media: {
+      image: null,
+      video: {
+        providerId: "relaydance",
+        modelId: "doubao-seedance-2-0-1080p",
+        operation: "generate",
+        adapter: "relaydance_video",
+        parameters: {
+          duration_seconds: "5",
+          resolution: "1080p",
+          aspect_ratio: "16:9"
+        }
+      }
+    }
+  });
+});
+
+test("composer video generation settings saves configurable video defaults", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    mediaCapabilities: [configurableVideoCapability()],
+    sessions: [
+      {
+        sessionId: "session-video-settings-configurable",
+        displayName: "Configurable video settings",
+        title: "Configurable video settings",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "video-settings-configurable-seed",
+            text: "Tune configurable video settings.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Configurable video settings/);
+
+  await page.getByRole("button", { name: "Add content" }).click();
+  await page.getByRole("menuitem", { name: "Video generation settings" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Video generation settings" });
+  await expect(dialog).toBeVisible();
+  await daemon.waitForRequest(
+    "list_media_capabilities",
+    (request) => request.params.kind === "video"
+  );
+  await expect(dialog.getByRole("combobox")).toHaveCount(2);
+  const videoFolder = dialog.getByLabel("Video folder");
+  await expect(videoFolder).toHaveValue("/tmp/puffer/.puffer/media/videos");
+  await expect(videoFolder).toHaveJSProperty("readOnly", true);
+  const openFolderButton = dialog.getByRole("button", { name: "Open folder" });
+  await expect(openFolderButton).toBeVisible();
+  await expect(openFolderButton).toHaveAttribute("data-variant", "outline");
+  const videoFolderBox = await videoFolder.boundingBox();
+  const openFolderButtonBox = await openFolderButton.boundingBox();
+  expect(videoFolderBox).not.toBeNull();
+  expect(openFolderButtonBox).not.toBeNull();
+  expect(openFolderButtonBox!.height).toBe(videoFolderBox!.height);
+  await dialog.getByLabel("Aspect ratio").selectOption("9:16");
+  await dialog.getByLabel("Duration").selectOption("12");
+
+  await dialog.getByRole("button", { name: "Save" }).click();
+  const update = await daemon.waitForRequest(
+    "update_config",
+    (request) => "media" in request.params
+  );
+  expect(update.params).toEqual({
+    media: {
+      image: null,
+      video: {
+        providerId: "runway",
+        modelId: "gen-4",
+        operation: "generate",
+        adapter: "replicate_video",
+        parameters: {
+          aspect_ratio: "9:16",
+          duration_seconds: "12"
+        }
+      }
+    }
+  });
+});
+
+test("composer video generation settings saves additional provider options", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    mediaCapabilities: [configurableVideoCapabilityWithProviderOptions()],
+    sessions: [
+      {
+        sessionId: "session-video-settings-resolution",
+        displayName: "Video settings resolution",
+        title: "Video settings resolution",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "video-settings-resolution-seed",
+            text: "Open video settings with resolution.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Video settings resolution/);
+
+  await page.getByRole("button", { name: "Add content" }).click();
+  await page.getByRole("menuitem", { name: "Video generation settings" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Video generation settings" });
+  await expect(dialog).toBeVisible();
+  await daemon.waitForRequest(
+    "list_media_capabilities",
+    (request) => request.params.kind === "video"
+  );
+  await expect(dialog.getByLabel("Resolution")).toHaveValue("720p");
+
+  await dialog.getByLabel("Aspect ratio").selectOption("1:1");
+  await dialog.getByLabel("Duration").selectOption("12");
+  await dialog.getByLabel("Resolution").selectOption("1080p");
+
+  await dialog.getByRole("button", { name: "Save" }).click();
+  const update = await daemon.waitForRequest(
+    "update_config",
+    (request) => "media" in request.params
+  );
+  expect(update.params).toEqual({
+    media: {
+      image: null,
+      video: {
+        providerId: "byteplus",
+        modelId: "dreamina-seedance-2-0-260128",
+        operation: "generate",
+        adapter: "byteplus_video",
+        parameters: {
+          aspect_ratio: "1:1",
+          duration_seconds: "12",
+          resolution: "1080p"
+        }
+      }
+    }
+  });
+});
+
+test("composer video generation settings normalizes stale provider options", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    mediaCapabilities: [configurableVideoCapabilityWithProviderOptions()],
+    sessions: [
+      {
+        sessionId: "session-video-settings-stale-provider-options",
+        displayName: "Video settings stale provider options",
+        title: "Video settings stale provider options",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "video-settings-stale-provider-options-seed",
+            text: "Open video settings with stale provider options.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.setSettingsConfig({
+    media: {
+      image: null,
+      video: {
+        providerId: "byteplus",
+        modelId: "dreamina-seedance-2-0-260128",
+        operation: "generate",
+        adapter: "byteplus_video",
+        parameters: {
+          aspect_ratio: "2:1",
+          duration_seconds: "30",
+          resolution: "4k",
+          stale_video_option: "remove-me"
+        }
+      }
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Video settings stale provider options/);
+
+  await page.getByRole("button", { name: "Add content" }).click();
+  await page.getByRole("menuitem", { name: "Video generation settings" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Video generation settings" });
+  await expect(dialog).toBeVisible();
+  await daemon.waitForRequest(
+    "list_media_capabilities",
+    (request) => request.params.kind === "video"
+  );
+  await expect(dialog.getByLabel("Aspect ratio")).toHaveValue("16:9");
+  await expect(dialog.getByLabel("Duration")).toHaveValue("5");
+  await expect(dialog.getByLabel("Resolution")).toHaveValue("720p");
+
+  await dialog.getByRole("button", { name: "Save" }).click();
+  const update = await daemon.waitForRequest(
+    "update_config",
+    (request) => "media" in request.params
+  );
+  expect(update.params).toEqual({
+    media: {
+      image: null,
+      video: {
+        providerId: "byteplus",
+        modelId: "dreamina-seedance-2-0-260128",
+        operation: "generate",
+        adapter: "byteplus_video",
+        parameters: {
+          aspect_ratio: "16:9",
+          duration_seconds: "5",
+          resolution: "720p"
+        }
+      }
+    }
+  });
+});
+
+test("composer media generation settings marks stale saved image model invalid", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-stale-media-settings",
+        displayName: "Stale media settings",
+        title: "Stale media settings",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "stale-media-settings-seed",
+            text: "Check stale media defaults here.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.setSettingsConfig({
+    media: {
+      image: {
+        providerId: "openai",
+        modelId: "old-image-model",
+        operation: "generate",
+        adapter: "images_json",
+        parameters: {
+          size: "1024x1024",
+          quality: "auto",
+          output_format: "png"
+        }
+      },
+      video: null
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Stale media settings/);
+
+  await page.getByRole("button", { name: "Add content" }).click();
+  await page.getByRole("menuitem", { name: "Image generation settings" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Image generation settings" });
+  await expect(dialog.getByText("Saved model is no longer available.")).toBeVisible();
+  await expect(
+    dialog.locator(".pf-media-field").filter({ hasText: "Model" }).locator("select")
+  ).toHaveCount(1);
+  await expect(dialog.getByLabel("Model")).toHaveValue(
+    ["openai", "old-image-model", "images_json"].join("\u0000")
+  );
+  await expect(dialog.getByRole("button", { name: "Save" })).toBeDisabled();
+});
+
+test("explicit image slash trigger routes to media generation", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-image-trigger",
+        displayName: "Image trigger session",
+        title: "Image trigger session",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "image-trigger-seed",
+            text: "Send image slash triggers here.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.setSettingsConfig({ media: configuredImageMedia });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Image trigger session/);
+
+  await page.locator(".pf-composer textarea").fill("/image draw a compact icon");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const request = await daemon.waitForRequest("generate_media");
+  expect(request.params).toMatchObject({
+    kind: "image",
+    prompt: "draw a compact icon"
+  });
+  expect(daemon.requests.filter((candidate) => candidate.method === "run_agent_turn")).toHaveLength(0);
+});
+
+test("persisted media Bash results render as assistant image attachments", async ({ page }) => {
+  const mediaOutput = {
+    jobId: "job-generated-1",
+    requestedCount: 1,
+    artifacts: [
+      {
+        artifactId: "artifact-generated-1",
+        index: 0,
+        path: "/tmp/puffer/.puffer/media/images/artifact-generated-1.png",
+        mimeType: "image/png",
+        size: onePixelPngBytes.length
+      }
+    ],
+    status: "succeeded"
+  };
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-generated-media",
+        displayName: "Generated media",
+        title: "Generated media",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 2,
+        timeline: [
+          {
+            kind: "tool_call",
+            id: "tool-image",
+            toolId: "Bash",
+            status: "ok",
+            inputText: JSON.stringify({
+              command: "puffer internal-tool image-generation --prompt 'draw an icon' --count 1",
+              timeout: 600000
+            }),
+            outputText: JSON.stringify({
+              stdout: JSON.stringify(mediaOutput),
+              stderr: "",
+              interrupted: false
+            }),
+            createdAtMs: baseTime - 20_000
+          },
+          {
+            kind: "assistant_message",
+            id: "assistant-image",
+            text: "Done",
+            createdAtMs: baseTime - 10_000,
+            attachments: [
+              {
+                id: "generated-image:artifact-generated-1",
+                name: "Generated image",
+                mimeType: "image/png",
+                size: onePixelPngBytes.length,
+                extension: "PNG",
+                kind: "image",
+                state: "available",
+                source: {
+                  kind: "generated_media",
+                  jobId: "job-generated-1",
+                  artifactId: "artifact-generated-1",
+                  index: 0
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  });
+  daemon.seedGeneratedMediaPreview("session-generated-media", "artifact-generated-1", {
+    state: "available",
+    mimeType: "image/png",
+    bytes: onePixelPngBytes
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Generated media/);
+
+  const thumbnail = page.getByRole("button", { name: "Open image attachment Generated image" });
+  await expect(thumbnail).toBeVisible();
+  await expect(thumbnail.getByAltText("Generated image")).toBeVisible();
+  await expect(page.getByText("/tmp/puffer/.puffer/media/images")).toHaveCount(0);
+  await thumbnail.click();
+  await expect(page.getByTestId("attachment-overlay")).toBeVisible();
+});
+
+test("generated video attachment overlay renders a playable card with folder action", async ({
+  page
+}) => {
+  const sessionId = "session-generated-video-card";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId,
+        displayName: "Generated video card",
+        title: "Generated video card",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "generated-video-message",
+            text: "Generated a video.",
+            createdAtMs: baseTime - 30_000,
+            attachments: [
+              {
+                id: "generated-video:artifact-video-card",
+                name: "Generated video",
+                mimeType: "video/mp4",
+                size: 9,
+                extension: "MP4",
+                kind: "video",
+                state: "available",
+                source: {
+                  kind: "generated_media",
+                  jobId: "job-video-card",
+                  artifactId: "artifact-video-card",
+                  index: 0,
+                  localPath: "/tmp/puffer/.puffer/media/videos/artifact-video-card/generated.mp4"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  });
+  daemon.seedGeneratedVideoAccess(sessionId, "artifact-video-card", {
+    state: "available",
+    path: "/media/generated-video/fake-video-card",
+    mimeType: "video/mp4",
+    size: 9,
+    expiresAtMs: baseTime + 60_000,
+    bytes: Buffer.from("mp4-bytes")
+  });
+  daemon.seedGeneratedMediaPreview(sessionId, "artifact-video-card", {
+    state: "available",
+    mimeType: "image/jpeg",
+    bytes: onePixelJpegBytes
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Generated video card/);
+
+  await daemon.waitForRequest(
+    "read_generated_media_preview",
+    (request) =>
+      request.params.sessionId === sessionId &&
+      request.params.artifactId === "artifact-video-card"
+  );
+  expect(daemon.requests.filter((request) => request.method === "create_generated_video_access"))
+    .toHaveLength(0);
+  const card = page.getByRole("button", { name: "Open video attachment Generated video" });
+  await expect(card).toBeVisible();
+  await expect(card.getByRole("img", { name: "Generated video" })).toBeVisible();
+  await expect(card.locator("video")).toHaveCount(0);
+  await expect(card.locator('[data-testid="video-play-indicator"]')).toBeVisible();
+  await expect(page.locator(".pf-msg").filter({ has: card })).not.toContainText("/tmp/puffer");
+
+  await card.click();
+  await daemon.waitForRequest(
+    "create_generated_video_access",
+    (request) =>
+      request.params.sessionId === sessionId &&
+      request.params.artifactId === "artifact-video-card"
+  );
+  const dialog = page.getByRole("dialog", { name: "Generated video" });
+  await expect(dialog).toBeVisible();
+  const actions = dialog.locator(".pf-attachment-dialog-actions");
+  const folderButton = actions.getByRole("button", { name: "Open containing folder" });
+  const closeButton = actions.getByRole("button", { name: "Close attachment preview" });
+  await expect(folderButton).toBeVisible();
+  await expectOverlayActionBeforeClose(folderButton, closeButton);
+  const video = dialog.locator("video");
+  await expect(video).toBeVisible();
+  await expect(video).toHaveAttribute("controls", "");
+  await expect(video).toHaveAttribute("autoplay", "");
+});
+
+test("missing generated video access falls back without exposing local paths", async ({ page }) => {
+  const sessionId = "session-generated-video-missing-access";
+  const localPath = "/tmp/puffer/.puffer/media/videos/artifact-video-missing/generated.mp4";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId,
+        displayName: "Missing generated video access",
+        title: "Missing generated video access",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "generated-video-missing-message",
+            text: "Generated a video that is unavailable.",
+            createdAtMs: baseTime - 30_000,
+            attachments: [
+              {
+                id: "generated-video:artifact-video-missing",
+                name: "Missing video",
+                mimeType: "video/mp4",
+                size: 9,
+                extension: "MP4",
+                kind: "video",
+                state: "available",
+                source: {
+                  kind: "generated_media",
+                  jobId: "job-video-missing",
+                  artifactId: "artifact-video-missing",
+                  index: 0,
+                  localPath
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  });
+  daemon.seedGeneratedVideoAccess(sessionId, "artifact-video-missing", { state: "missing" });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Missing generated video access/);
+
+  await daemon.waitForRequest(
+    "read_generated_media_preview",
+    (request) =>
+      request.params.sessionId === sessionId &&
+      request.params.artifactId === "artifact-video-missing"
+  );
+  expect(daemon.requests.filter((request) => request.method === "create_generated_video_access"))
+    .toHaveLength(0);
+  const card = page.getByRole("button", { name: "Open video attachment Missing video" });
+  await expect(card).toBeVisible();
+  await expect(card.getByRole("img")).toHaveCount(0);
+  await expect(card.locator("video")).toHaveCount(0);
+  await expect(card.locator('[data-testid="video-play-indicator"]')).toHaveCount(0);
+  const messageRow = page.locator(".pf-msg").filter({ has: card });
+  await expect(messageRow).not.toContainText(localPath);
+
+  await card.click();
+  await daemon.waitForRequest(
+    "create_generated_video_access",
+    (request) =>
+      request.params.sessionId === sessionId &&
+      request.params.artifactId === "artifact-video-missing"
+  );
+  const dialog = page.getByRole("dialog", { name: "Missing video" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("Preview unavailable for this attachment.")).toBeVisible();
+});
+
+test("shows two generated image attachments from one image generation result", async ({ page }) => {
+  const sessionId = "session-generated-two";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId,
+        displayName: "Generated images",
+        title: "Generated images",
+        cwd: "/workspace/generated",
+        folderPath: "/workspace/generated",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "assistant-generated-two",
+            text: "",
+            summary: "Generated 2 images",
+            createdAtMs: baseTime - 10_000,
+            attachments: [
+              generatedAttachment("job-1", "artifact-1", 0),
+              generatedAttachment("job-1", "artifact-2", 1)
+            ]
+          }
+        ]
+      }
+    ]
+  });
+  daemon.seedGeneratedMediaPreview(sessionId, "artifact-1", {
+    state: "available",
+    mimeType: "image/png",
+    bytes: onePixelPngBytes
+  });
+  daemon.seedGeneratedMediaPreview(sessionId, "artifact-2", {
+    state: "available",
+    mimeType: "image/png",
+    bytes: onePixelPngBytes
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Generated images/);
+
+  await expect(page.getByRole("img", { name: /Generated image/i })).toHaveCount(2);
+});
+
+test("assistant generated image paths render as links before generated thumbnails", async ({ page }) => {
+  const sessionId = "session-generated-links";
+  const firstPath = "/tmp/puffer/.puffer/media/images/generated-local-link-1.png";
+  const secondPath = "/tmp/puffer/.puffer/media/images/generated-local-link-2.png";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId,
+        displayName: "Generated image links",
+        title: "Generated image links",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "assistant-generated-links",
+            text: `Generated images:\n${firstPath}\n${secondPath}`,
+            createdAtMs: baseTime - 10_000,
+            attachments: [
+              generatedAttachment("job-links", "artifact-link-1", 0),
+              generatedAttachment("job-links", "artifact-link-2", 1)
+            ]
+          }
+        ]
+      }
+    ]
+  });
+  daemon.seedGeneratedMediaPreview(sessionId, "artifact-link-1", {
+    state: "available",
+    mimeType: "image/png",
+    bytes: onePixelPngBytes
+  });
+  daemon.seedGeneratedMediaPreview(sessionId, "artifact-link-2", {
+    state: "available",
+    mimeType: "image/png",
+    bytes: onePixelPngBytes
+  });
+  daemon.seedFile(firstPath, "first generated image bytes\n");
+  daemon.seedFile(secondPath, "second generated image bytes\n");
+
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Generated image links/);
+
+  const firstPathLink = page.getByRole("link", { name: firstPath });
+  const secondPathLink = page.getByRole("link", { name: secondPath });
+  await expect(firstPathLink).toBeVisible();
+  await expect(secondPathLink).toBeVisible();
+
+  const firstThumbnail = page.getByRole("button", { name: "Open image attachment Generated image" }).first();
+  await expect(firstThumbnail).toBeVisible();
+  const thumbnailHandle = await firstThumbnail.elementHandle();
+  expect(thumbnailHandle).not.toBeNull();
+  try {
+    expect(
+      await firstPathLink.evaluate((link, thumbnail) => {
+        return Boolean(link.compareDocumentPosition(thumbnail) & Node.DOCUMENT_POSITION_FOLLOWING);
+      }, thumbnailHandle)
+    ).toBe(true);
+  } finally {
+    await thumbnailHandle?.dispose();
+  }
+
+  await firstPathLink.click();
+  await daemon.waitForRequest("read_file", (request) => request.params.path === firstPath);
+
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Chat", exact: true }).click();
+  await firstThumbnail.click();
+  await expect(page.getByTestId("attachment-overlay")).toBeVisible();
+});
+
+test("inline-code image path opens Files preview while generated image attachment still opens overlay", async ({ page }) => {
+  const sessionId = "session-inline-code-image-path";
+  const imagePath = "/tmp/puffer/.puffer/media/images/artifact-1/image.jpeg";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId,
+        displayName: "Inline-code image path",
+        title: "Inline-code image path",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "assistant-inline-code-image-path",
+            text: `Image: \`${imagePath}\``,
+            createdAtMs: baseTime - 10_000,
+            attachments: [
+              generatedAttachment("job-inline-code", "artifact-inline-code-thumb", 0)
+            ]
+          }
+        ]
+      }
+    ]
+  });
+  daemon.seedGeneratedMediaPreview(sessionId, "artifact-inline-code-thumb", {
+    state: "available",
+    mimeType: "image/png",
+    bytes: onePixelPngBytes
+  });
+  daemon.seedBinaryFile(imagePath, ONE_PIXEL_JPEG_BASE64);
+
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Inline-code image path/);
+
+  const inlinePathLink = page.getByRole("link", { name: imagePath });
+  await expect(inlinePathLink).toBeVisible();
+  await inlinePathLink.click();
+  const readRequest = await daemon.waitForRequest(
+    "read_file",
+    (request) => request.params.path === imagePath
+  );
+  expect(readRequest.params.maxBytes).toBe(24 * 1024 * 1024);
+  await expect(page.getByRole("button", { name: "Files" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".viewer").getByRole("img", { name: "image.jpeg" })).toBeVisible();
+
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Chat", exact: true }).click();
+  await page.getByRole("button", { name: "Open image attachment Generated image" }).click();
+  await expect(page.getByTestId("attachment-overlay")).toBeVisible();
+});
+
+test("image slash success renders generated thumbnail without media metadata", async ({ page }) => {
+  const generatedPath = "/tmp/puffer/.puffer/media/images/generated-icon.png";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-image-preview",
+        displayName: "Image preview session",
+        title: "Image preview session",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "image-preview-seed",
+            text: "Generate image previews here.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.setSettingsConfig({ media: configuredImageMedia });
+  daemon.setGeneratedMediaResult({
+    jobId: "media-job-preview-success",
+    requestedCount: 1,
+    artifacts: [
+      {
+        artifactId: "artifact-preview-success",
+        index: 0,
+        path: generatedPath,
+        mimeType: "image/png",
+        size: onePixelPngBytes.length
+      }
+    ],
+    status: "succeeded"
+  });
+  daemon.seedGeneratedMediaPreview("session-image-preview", "artifact-preview-success", {
+    state: "available",
+    mimeType: "image/png",
+    bytes: onePixelPngBytes
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Image preview session/);
+
+  await page.locator(".pf-composer textarea").fill("/image draw a compact icon");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await daemon.waitForRequest(
+    "read_generated_media_preview",
+    (request) =>
+      request.params.sessionId === "session-image-preview" &&
+      request.params.artifactId === "artifact-preview-success"
+  );
+  const thumbnail = page.getByRole("button", { name: "Open image attachment Generated image" });
+  await expect(thumbnail).toBeVisible();
+  await expect(thumbnail.getByAltText("Generated image")).toBeVisible();
+
+  const generatedRow = page.locator(".pf-msg").filter({ has: thumbnail });
+  await expect(generatedRow).not.toContainText(generatedPath);
+  await expect(generatedRow).not.toContainText("generated-icon.png");
+  await expect(generatedRow).not.toContainText("media-job-preview-success");
+  await expect(generatedRow).not.toContainText("artifact-preview-success");
+  await expect(generatedRow).not.toContainText("openai");
+  await expect(generatedRow).not.toContainText("gpt-image-1");
+
+  await thumbnail.click();
+  const previewDialog = page.getByRole("dialog", { name: "Generated image" });
+  await expect(previewDialog).toBeVisible();
+  await expect(previewDialog.getByAltText("Generated image")).toBeVisible();
+  await expect(previewDialog).toContainText("PNG");
+});
+
+test("missing generated image preview shows unavailable thumbnail without path fallback", async ({ page }) => {
+  const generatedPath = "/tmp/puffer/.puffer/media/images/missing-generated.png";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-image-preview-missing",
+        displayName: "Missing image preview",
+        title: "Missing image preview",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "missing-image-preview-seed",
+            text: "Generate missing previews here.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.setSettingsConfig({ media: configuredImageMedia });
+  daemon.setGeneratedMediaResult({
+    jobId: "media-job-preview-missing",
+    requestedCount: 1,
+    artifacts: [
+      {
+        artifactId: "artifact-preview-missing",
+        index: 0,
+        path: generatedPath,
+        mimeType: "image/png",
+        size: onePixelPngBytes.length
+      }
+    ],
+    status: "succeeded"
+  });
+  daemon.seedGeneratedMediaPreview("session-image-preview-missing", "artifact-preview-missing", {
+    state: "missing"
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Missing image preview/);
+
+  await page.locator(".pf-composer textarea").fill("/image draw a compact icon");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await daemon.waitForRequest(
+    "read_generated_media_preview",
+    (request) =>
+      request.params.sessionId === "session-image-preview-missing" &&
+      request.params.artifactId === "artifact-preview-missing"
+  );
+  const thumbnail = page.getByRole("button", { name: "Open image attachment Generated image" });
+  await expect(thumbnail).toBeVisible();
+  const generatedRow = page.locator(".pf-msg").filter({ has: thumbnail });
+  await expect(generatedRow.locator('.pf-attachment-thumb[data-state="missing"]')).toBeVisible();
+  await expect(generatedRow.locator(".pf-attachment-file-card")).toHaveCount(0);
+  await expect(generatedRow).not.toContainText(generatedPath);
+  await expect(generatedRow).not.toContainText("missing-generated.png");
+  await expect(generatedRow).not.toContainText("media-job-preview-missing");
+});
+
+test("image slash success without preview shows unavailable thumbnail", async ({ page }) => {
+  const generatedPath = "/tmp/puffer/.puffer/media/images/no-preview-generated.png";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-image-preview-no-path",
+        displayName: "No path image preview",
+        title: "No path image preview",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "no-path-image-preview-seed",
+            text: "Generate no-path previews here.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.setSettingsConfig({ media: configuredImageMedia });
+  daemon.setGeneratedMediaResult({
+    jobId: "media-job-preview-no-path",
+    requestedCount: 1,
+    artifacts: [
+      {
+        artifactId: "artifact-preview-no-path",
+        index: 0,
+        path: generatedPath,
+        mimeType: "image/png",
+        size: onePixelPngBytes.length
+      }
+    ],
+    status: "succeeded"
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /No path image preview/);
+
+  await page.locator(".pf-composer textarea").fill("/image draw a compact icon");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await daemon.waitForRequest(
+    "read_generated_media_preview",
+    (request) =>
+      request.params.sessionId === "session-image-preview-no-path" &&
+      request.params.artifactId === "artifact-preview-no-path"
+  );
+  const thumbnail = page.getByRole("button", { name: "Open image attachment Generated image" });
+  await expect(thumbnail).toBeVisible();
+  const generatedRow = page.locator(".pf-msg").filter({ has: thumbnail });
+  await expect(generatedRow.locator('.pf-attachment-thumb[data-state="missing"]')).toBeVisible();
+  await expect(generatedRow.locator(".pf-attachment-file-card")).toHaveCount(0);
+  await expect(generatedRow).not.toContainText("media-job-preview-no-path");
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === "read_generated_media_preview" &&
+        request.params.path !== undefined
+    )
+  ).toHaveLength(0);
+});
+
+test("generated image preview is not restored after session switch", async ({ page }) => {
+  const generatedPath = "/tmp/puffer/.puffer/media/images/transient-generated.png";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-image-preview-transient",
+        displayName: "Transient image preview",
+        title: "Transient image preview",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "transient-image-preview-seed",
+            text: "Generate transient previews here.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      },
+      {
+        sessionId: "session-image-preview-other",
+        displayName: "Other image preview session",
+        title: "Other image preview session",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 70_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "other-image-preview-seed",
+            text: "Another session.",
+            createdAtMs: baseTime - 40_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.setSettingsConfig({ media: configuredImageMedia });
+  daemon.setGeneratedMediaResult({
+    jobId: "media-job-preview-transient",
+    requestedCount: 1,
+    artifacts: [
+      {
+        artifactId: "artifact-preview-transient",
+        index: 0,
+        path: generatedPath,
+        mimeType: "image/png",
+        size: onePixelPngBytes.length
+      }
+    ],
+    status: "succeeded"
+  });
+  daemon.seedGeneratedMediaPreview("session-image-preview-transient", "artifact-preview-transient", {
+    state: "available",
+    mimeType: "image/png",
+    bytes: onePixelPngBytes
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Transient image preview/);
+
+  await page.locator(".pf-composer textarea").fill("/image draw a compact icon");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await daemon.waitForRequest(
+    "read_generated_media_preview",
+    (request) =>
+      request.params.sessionId === "session-image-preview-transient" &&
+      request.params.artifactId === "artifact-preview-transient"
+  );
+  const thumbnail = page.getByRole("button", { name: "Open image attachment Generated image" });
+  await expect(thumbnail).toBeVisible();
+
+  await openSession(page, /Other image preview session/);
+  await expect(page.getByText("Another session.")).toBeVisible();
+  await expect(thumbnail).toHaveCount(0);
+
+  await openSession(page, /Transient image preview/);
+  await expect(page.getByText("Generate transient previews here.")).toBeVisible();
+  await expect(thumbnail).toHaveCount(0);
+});
+
+test("normal image text still routes to chat", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-normal-image-text",
+        displayName: "Normal image text",
+        title: "Normal image text",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "normal-image-text-seed",
+            text: "Send normal chat here.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Normal image text/);
+
+  await page.locator(".pf-composer textarea").fill("please make an image of the plan");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const request = await daemon.waitForRequest("run_agent_turn");
+  expect(request.params.message).toBe("please make an image of the plan");
+  expect(daemon.requests.filter((candidate) => candidate.method === "generate_media")).toHaveLength(0);
+});
+
+test("video slash success appends a generated video attachment", async ({ page }) => {
+  const sessionId = "session-video-preview-success";
+  const daemon = new FakeDaemon({
+    mediaCapabilities: [singleOptionVideoCapability()],
+    sessions: [
+      {
+        sessionId,
+        displayName: "Video preview success",
+        title: "Video preview success",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "video-preview-seed",
+            text: "Generate videos here.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.setSettingsConfig({
+    media: {
+      image: null,
+      video: {
+        providerId: "runway",
+        modelId: "gen-4",
+        operation: "generate",
+        adapter: "replicate_video",
+        parameters: { duration_seconds: "8", aspect_ratio: "16:9" }
+      }
+    }
+  });
+  daemon.setGeneratedMediaResult({
+    jobId: "media-job-video-success",
+    requestedCount: 1,
+    kind: "video",
+    artifacts: [
+      {
+        artifactId: "artifact-video-live",
+        index: 0,
+        path: "/tmp/puffer/.puffer/media/videos/artifact-video-live/generated.mp4",
+        mimeType: "video/mp4",
+        size: 9
+      }
+    ],
+    status: "succeeded"
+  });
+  daemon.seedGeneratedVideoAccess(sessionId, "artifact-video-live", {
+    state: "available",
+    path: "/media/generated-video/fake-video-live",
+    mimeType: "video/mp4",
+    size: 9,
+    expiresAtMs: baseTime + 60_000,
+    bytes: Buffer.from("mp4-bytes")
+  });
+  daemon.seedGeneratedMediaPreview(sessionId, "artifact-video-live", {
+    state: "available",
+    mimeType: "image/jpeg",
+    bytes: onePixelJpegBytes
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Video preview success/);
+
+  await page.locator(".pf-composer textarea").fill("/video animate this logo");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const card = page.getByRole("button", { name: "Open video attachment Generated video" });
+  await expect(card).toBeVisible();
+  await daemon.waitForRequest(
+    "read_generated_media_preview",
+    (request) =>
+      request.params.sessionId === sessionId &&
+      request.params.artifactId === "artifact-video-live"
+  );
+  await expect(card.getByRole("img", { name: "Generated video" })).toBeVisible();
+  await expect(card.locator("video")).toHaveCount(0);
+  await expect(card.locator('[data-testid="video-play-indicator"]')).toBeVisible();
+  expect(daemon.requests.filter((request) => request.method === "create_generated_video_access"))
+    .toHaveLength(0);
+  await expect(page.locator(".pf-msg").filter({ has: card })).not.toContainText("media-job-video-success");
+
+  await card.click();
+  await daemon.waitForRequest(
+    "create_generated_video_access",
+    (request) =>
+      request.params.sessionId === sessionId &&
+      request.params.artifactId === "artifact-video-live"
+  );
+  const dialog = page.getByRole("dialog", { name: "Generated video" });
+  await expect(dialog.locator("video")).toBeVisible();
+});
+
+test("explicit video slash trigger fails clearly without capability", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    mediaCapabilities: [],
+    sessions: [
+      {
+        sessionId: "session-video-trigger",
+        displayName: "Video trigger session",
+        title: "Video trigger session",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "video-trigger-seed",
+            text: "Send video slash triggers here.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Video trigger session/);
+
+  await page.locator(".pf-composer textarea").fill("/video animate this logo");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const request = await daemon.waitForRequest("generate_media");
+  expect(request.params).toMatchObject({
+    kind: "video",
+    prompt: "animate this logo"
+  });
+  await expect(page.getByText("No video capabilities available.")).toBeVisible();
+});
+
+test("message attachments open image preview and file details", async ({ page }) => {
+  const imageBuffer = Buffer.from(onePixelPngBytes);
   const daemon = new FakeDaemon({
     sessions: [
       {
@@ -327,6 +2477,215 @@ test("message attachments open image preview and file details", async ({ page })
   await expect(page.getByRole("button", { name: "Files" })).toHaveAttribute("aria-pressed", "false");
 });
 
+test("attachment overlay hides folder action for uploaded staged local image source", async ({ page }) => {
+  const sessionId = "session-uploaded-local-image-overlay-action";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId,
+        displayName: "Uploaded local image overlay action",
+        title: "Uploaded local image overlay action",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "uploaded-local-image-overlay-action-message",
+            text: "Uploaded staged local image attachment.",
+            createdAtMs: baseTime - 30_000,
+            attachments: [
+              {
+                id: "uploaded-local-image-overlay-action",
+                name: "uploaded-action.png",
+                mimeType: "image/png",
+                size: onePixelPngBytes.length,
+                extension: "PNG",
+                kind: "image",
+                state: "available",
+                source: {
+                  kind: "local_file",
+                  path: "/tmp/puffer/attachments/uploaded-action.png"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  });
+  daemon.seedAttachmentPreview(sessionId, "uploaded-local-image-overlay-action", {
+    state: "available",
+    mimeType: "image/png",
+    bytes: onePixelPngBytes
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Uploaded local image overlay action/);
+
+  const thumbnail = page.getByRole("button", { name: "Open image attachment uploaded-action.png" });
+  await expect(thumbnail).toBeVisible();
+  await thumbnail.click();
+
+  const overlay = page.getByTestId("attachment-overlay");
+  await expect(overlay).toBeVisible();
+  await expect(overlay.getByAltText("uploaded-action.png")).toBeVisible();
+  await expect(overlay).toContainText("PNG");
+  await expect(overlay).toContainText("image/png");
+  const actions = overlay.locator(".pf-attachment-dialog-actions");
+  const closeButton = actions.getByRole("button", { name: "Close attachment preview" });
+  await expect(closeButton).toBeVisible();
+  await expect(actions.getByRole("button", { name: "Open containing folder" })).toHaveCount(0);
+  await expect(actions.getByRole("button")).toHaveCount(1);
+
+  await page.keyboard.press("Escape");
+  await expect(overlay).toHaveCount(0);
+  await expect(thumbnail).toBeFocused();
+});
+
+test("attachment overlay shows folder action for generated media local path", async ({ page }) => {
+  const sessionId = "session-generated-media-overlay-action";
+  const artifactId = "artifact-generated-overlay-action";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId,
+        displayName: "Generated media overlay action",
+        title: "Generated media overlay action",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "generated-media-overlay-action-message",
+            text: "Generated media attachment.",
+            createdAtMs: baseTime - 30_000,
+            attachments: [
+              {
+                id: `generated-image:${artifactId}`,
+                name: "Generated image",
+                mimeType: "image/png",
+                size: onePixelPngBytes.length,
+                extension: "PNG",
+                kind: "image",
+                state: "available",
+                source: {
+                  kind: "generated_media",
+                  jobId: "job-generated-overlay-action",
+                  artifactId,
+                  index: 0,
+                  localPath: "/tmp/puffer/.puffer/media/images/artifact-generated-overlay-action.png"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  });
+  daemon.seedGeneratedMediaPreview(sessionId, artifactId, {
+    state: "available",
+    mimeType: "image/png",
+    bytes: onePixelPngBytes
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Generated media overlay action/);
+
+  const thumbnail = page.getByRole("button", { name: "Open image attachment Generated image" });
+  await expect(thumbnail).toBeVisible();
+  await thumbnail.click();
+
+  const overlay = page.getByTestId("attachment-overlay");
+  await expect(overlay).toBeVisible();
+  await expect(overlay.getByAltText("Generated image")).toBeVisible();
+  const actions = overlay.locator(".pf-attachment-dialog-actions");
+  const folderButton = actions.getByRole("button", { name: "Open containing folder" });
+  const closeButton = actions.getByRole("button", { name: "Close attachment preview" });
+  await expect(folderButton).toBeVisible();
+  await expectOverlayActionBeforeClose(folderButton, closeButton);
+
+  await page.keyboard.press("Escape");
+  await expect(overlay).toHaveCount(0);
+  await expect(thumbnail).toBeFocused();
+});
+
+test("attachment overlay shows download action for remote URL image source", async ({ page }) => {
+  const sessionId = "session-remote-image-overlay-action";
+  const remoteUrl = "https://images.example.test/remote-action.png";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId,
+        displayName: "Remote image overlay action",
+        title: "Remote image overlay action",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "remote-image-overlay-action-message",
+            text: "Remote image attachment.",
+            createdAtMs: baseTime - 30_000,
+            attachments: [
+              {
+                id: "remote-image-overlay-action",
+                name: "remote-action.png",
+                mimeType: "image/png",
+                size: onePixelPngBytes.length,
+                extension: "PNG",
+                kind: "image",
+                state: "available",
+                source: {
+                  kind: "remote_url",
+                  url: remoteUrl
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+  await openSession(page, /Remote image overlay action/);
+
+  const thumbnail = page.getByRole("button", { name: "Open image attachment remote-action.png" });
+  await expect(thumbnail).toBeVisible();
+  await thumbnail.click();
+
+  const overlay = page.getByTestId("attachment-overlay");
+  await expect(overlay).toBeVisible();
+  const actions = overlay.locator(".pf-attachment-dialog-actions");
+  const downloadButton = actions.getByRole("button", { name: "Download image" });
+  const closeButton = actions.getByRole("button", { name: "Close attachment preview" });
+  await expect(downloadButton).toBeVisible();
+  await expectOverlayActionBeforeClose(downloadButton, closeButton);
+  expect(
+    daemon.requests.some(
+      (request) =>
+        request.method === "read_chat_attachment_preview" &&
+        request.params.attachmentId === "remote-image-overlay-action"
+    )
+  ).toBe(false);
+
+  await page.keyboard.press("Escape");
+  await expect(overlay).toHaveCount(0);
+  await expect(thumbnail).toBeFocused();
+});
+
 test("restored pending attachment without preview opens unavailable detail", async ({ page }) => {
   const sessionId = "session-restored-attachment";
   await page.addInitScript(
@@ -350,7 +2709,8 @@ test("restored pending attachment without preview opens unavailable detail", asy
                 mimeType: "image/png",
                 size: 68,
                 extension: "PNG",
-                kind: "image"
+                kind: "image",
+                source: { kind: "local_file", path: "/tmp/puffer/attachments/stale.png" }
               }
             ]
           }
@@ -418,7 +2778,8 @@ test("missing persisted image attachment opens unavailable detail", async ({ pag
                 size: 68,
                 extension: "PNG",
                 kind: "image",
-                state: "missing"
+                state: "missing",
+                source: { kind: "local_file", path: "/tmp/puffer/attachments/lost.png" }
               }
             ]
           }
@@ -2104,6 +4465,71 @@ test("transcript reload replaces pending live tool card when invocation event is
 
   await expect(page.locator(".pf-tool").filter({ hasText: "Read" })).toHaveCount(1);
   await expect(page.locator(".pf-tool").filter({ hasText: "running" })).toHaveCount(0);
+});
+
+test("pending media Bash activity uses the standard command surface", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-pending-image-activity",
+        displayName: "Pending image activity",
+        title: "Pending image activity",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 3,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: [
+          {
+            kind: "user_message",
+            id: "pending-image-user",
+            text: "Generate a small catalog image.",
+            createdAtMs: baseTime - 30_000
+          },
+          {
+            kind: "tool_call",
+            id: "pending-image-tool",
+            toolId: "Bash",
+            status: "running",
+            inputText: JSON.stringify({
+              command:
+                "puffer internal-tool image-generation --prompt 'A compact UI catalog card' --count 1",
+              timeout: 600000
+            }),
+            inputJson: {
+              command:
+                "puffer internal-tool image-generation --prompt 'A compact UI catalog card' --count 1",
+              timeout: 600000
+            },
+            outputText: "",
+            createdAtMs: baseTime - 20_000
+          },
+          {
+            kind: "assistant_message",
+            id: "pending-image-assistant",
+            text: "I am generating the image.",
+            createdAtMs: baseTime - 10_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Pending image activity/);
+  const activityGroup = page.locator(".activity-group").filter({ hasText: "Ran 1 command" });
+  await expect(activityGroup).toBeVisible();
+  await activityGroup.getByRole("button", { name: /Agent activity/ }).click();
+  const shellAction = activityGroup.getByRole("button", { name: /Shell/ });
+  await expect(shellAction).toContainText("running");
+  await shellAction.click();
+  await expect(
+    activityGroup.getByText("puffer internal-tool image-generation").first()
+  ).toBeVisible();
+  await expect(activityGroup.getByText("(no output)")).toBeVisible();
 });
 
 test("transcript reload dedupes completed live tools by stable input signature", async ({

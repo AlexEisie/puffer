@@ -122,7 +122,15 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
         let _guard = self.lock.lock().unwrap();
         let cwd = self.paths.workspace_root.clone();
         let mut state = self.new_app_state(cwd.clone(), None)?;
-        let result = execute_tool_action_once(&mut state, &self.resources, &cwd, tool_id, input)?;
+        let result = execute_tool_action_once(
+            &mut state,
+            &self.resources,
+            &self.providers,
+            &self.auth_store,
+            &cwd,
+            tool_id,
+            input,
+        )?;
         if result.success {
             return Ok(WorkflowActionOutput::new(result.output.stdout));
         }
@@ -587,6 +595,7 @@ mod tests {
             query_params: Default::default(),
             chat_completions_path: None,
             discovery: None,
+            media: None,
             models: model_ids
                 .iter()
                 .map(|model_id| ModelDescriptor {

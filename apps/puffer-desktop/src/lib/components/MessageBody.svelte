@@ -407,7 +407,18 @@
 {#snippet inline(text: string)}
   {#each parseInline(text) as segment}
     {#if segment.kind === "code"}
-      <code>{segment.text}</code>
+      {@const localFile = chatFileTarget(segment.text)}
+      {#if localFile}
+        <a
+          href={segment.text}
+          class="local-file inline-code-link"
+          onclick={(event) => openFileLink(event, segment.text)}
+        >
+          {segment.text}
+        </a>
+      {:else}
+        <code>{segment.text}</code>
+      {/if}
     {:else if segment.href && urlPattern.test(segment.href)}
       {@const localFile = chatFileTarget(segment.href)}
       <a
@@ -567,7 +578,8 @@
     white-space: pre-wrap;
   }
 
-  code {
+  code,
+  a.inline-code-link {
     font-family: var(--font-mono);
     font-size: 0.9em;
     padding: 0.08rem 0.32rem;

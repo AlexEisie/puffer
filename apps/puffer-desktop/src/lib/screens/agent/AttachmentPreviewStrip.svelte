@@ -1,8 +1,9 @@
 <script lang="ts" module>
   import type { MessageAttachment } from "../../types";
+  import type { ComposerAttachmentDraft } from "./attachments";
 
   export type AttachmentPreviewVariant = "composer" | "message";
-  export type AttachmentPreviewItem = MessageAttachment;
+  export type AttachmentPreviewItem = ComposerAttachmentDraft | MessageAttachment;
 </script>
 
 <script lang="ts">
@@ -30,7 +31,27 @@
   function attachmentOpenLabel(attachment: AttachmentPreviewItem): string {
     return attachment.kind === "image"
       ? `Open image attachment ${attachment.name}`
+      : attachment.kind === "video"
+        ? `Open video attachment ${attachment.name}`
       : `Open attachment details for ${attachment.name}`;
+  }
+
+  function isMessageAttachment(attachment: AttachmentPreviewItem): attachment is MessageAttachment {
+    return "source" in attachment;
+  }
+
+  function openMessageAttachment(attachment: AttachmentPreviewItem): void {
+    if (!isMessageAttachment(attachment)) return;
+    onOpenChatIntent?.(attachmentOpenIntent(attachment));
+  }
+
+  function isMissingImageAttachment(attachment: AttachmentPreviewItem): boolean {
+    return (
+      attachment.kind === "image" &&
+      isMessageAttachment(attachment) &&
+      attachment.state === "missing" &&
+      attachment.previewUrl === null
+    );
   }
 </script>
 
@@ -38,6 +59,17 @@
   {#if attachment.previewUrl && attachment.kind === "image"}
     <div class="pf-attachment-thumb">
       <img src={attachment.previewUrl} alt={attachment.name} draggable="false" />
+    </div>
+  {:else if attachment.previewUrl && attachment.kind === "video"}
+    <div class="pf-attachment-video-thumb">
+      <img src={attachment.previewUrl} alt={attachment.name} draggable="false" />
+      <span class="pf-attachment-video-play" data-testid="video-play-indicator" aria-hidden="true">
+        <Icon name="play" size={18} />
+      </span>
+    </div>
+  {:else if isMissingImageAttachment(attachment)}
+    <div class="pf-attachment-thumb" data-state="missing" aria-hidden="true">
+      <Icon name="image" size={20} />
     </div>
   {:else}
     <div class="pf-attachment-file-card" data-kind={attachment.kind}>
@@ -65,7 +97,7 @@
           class="pf-attachment-preview pf-attachment-preview-action"
           aria-label={attachmentOpenLabel(attachment)}
           title={attachment.name}
-          onclick={() => onOpenChatIntent?.(attachmentOpenIntent(attachment))}
+          onclick={() => openMessageAttachment(attachment)}
         >
           {@render attachmentPreviewContent(attachment)}
         </button>
@@ -98,7 +130,7 @@
     padding: 2px 24px 8px 2px;
   }
   .pf-attachment-preview-strip[data-variant="message"] {
-    padding: 2px 2px 8px;
+    padding: 8px 2px;
   }
   .pf-attachment-preview {
     position: relative;
@@ -113,6 +145,7 @@
     cursor: pointer;
   }
   .pf-attachment-preview-action:hover .pf-attachment-thumb,
+  .pf-attachment-preview-action:hover .pf-attachment-video-thumb,
   .pf-attachment-preview-action:hover .pf-attachment-file-card {
     border-color: color-mix(in oklab, var(--primary) 58%, var(--border));
   }
@@ -129,11 +162,43 @@
     border-radius: 8px;
     background: var(--muted);
   }
+  .pf-attachment-thumb[data-state="missing"] {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-style: dashed;
+    color: var(--muted-foreground);
+    background: color-mix(in oklab, var(--muted) 42%, var(--background));
+  }
   .pf-attachment-thumb img {
     width: 100%;
     height: 100%;
     display: block;
     object-fit: cover;
+  }
+  .pf-attachment-video-thumb {
+    position: relative;
+    width: 112px;
+    height: 64px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--muted);
+  }
+  .pf-attachment-video-thumb img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
+  }
+  .pf-attachment-video-play {
+    position: absolute;
+    inset: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    background: color-mix(in oklab, black 24%, transparent);
   }
   .pf-attachment-file-card {
     width: 224px;

@@ -1,28 +1,37 @@
+use crate::runtime::media::planner::validate_image_generation_count;
 use crate::AppState;
+use crate::{
+    generate_exact_image_with_cache, resolved_exact_image_parameters_with_cache,
+    ExactImageGenerationRequest, ExactMediaDiscoveryCache,
+};
 use anyhow::{bail, Context, Result};
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use base64::Engine as _;
-use reqwest::blocking::Client;
+use puffer_config::MediaGenerationConfig;
+use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const DEFAULT_MODEL: &str = "gpt-image-1";
-const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 const MAX_PROMPT_CHARS: usize = 20_000;
 
+/// Carries exact media runtime context into the ImageGeneration workflow tool.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ImageGenerationMediaContext<'a> {
+    pub(crate) providers: &'a ProviderRegistry,
+    pub(crate) auth_store: &'a AuthStore,
+    pub(crate) discovery_cache: &'a ExactMediaDiscoveryCache,
+}
+
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ImageGenerationInput {
     prompt: String,
     #[serde(default)]
     prompt_reference: Option<String>,
     #[serde(default)]
     aspect: Option<String>,
-    #[serde(default)]
-    output_path: Option<String>,
+    count: u8,
     #[serde(default)]
     purpose: Option<String>,
     #[serde(default)]
@@ -31,76 +40,159 @@ struct ImageGenerationInput {
 
 #[derive(Debug, PartialEq, Eq)]
 struct ImageRequest {
+    provider: String,
     model: String,
+    adapter: String,
     prompt: String,
-    size: String,
-    output_path: PathBuf,
+    parameters: BTreeMap<String, String>,
+    count: u8,
     purpose: Option<String>,
     retry_from_error: Option<Value>,
 }
 
-/// Generates an image through OpenAI's image API and writes it into the workspace.
-pub fn execute_image_generation(_state: &mut AppState, cwd: &Path, input: Value) -> Result<String> {
-    let parsed: ImageGenerationInput =
-        serde_json::from_value(input).context("invalid ImageGeneration input")?;
-    let request = build_image_request(cwd, parsed)?;
-    let api_key = openai_api_key()?;
-    let client = Client::builder()
-        .timeout(Duration::from_millis(DEFAULT_TIMEOUT_MS))
-        .build()
-        .context("build image generation HTTP client")?;
-    let response = client
-        .post("https://api.openai.com/v1/images/generations")
-        .bearer_auth(api_key)
-        .json(&json!({
-            "model": request.model,
-            "prompt": request.prompt,
-            "size": request.size,
-            "n": 1
-        }))
-        .send()
-        .context("send image generation request")?;
-    let status = response.status();
-    let body = response.text().context("read image generation response")?;
-    if !status.is_success() {
-        bail!(
-            "image generation failed with status {}: {}",
-            status.as_u16(),
-            body
-        );
-    }
-    let value: Value = serde_json::from_str(&body).context("parse image generation response")?;
-    let image_bytes = image_bytes_from_response(&client, &value)?;
-    if let Some(parent) = request.output_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create image output directory {}", parent.display()))?;
-    }
-    fs::write(&request.output_path, &image_bytes)
-        .with_context(|| format!("write image output {}", request.output_path.display()))?;
-    Ok(serde_json::to_string_pretty(&json!({
-        "path": request.output_path,
-        "size": request.size,
-        "model": request.model,
-        "purpose": request.purpose,
-        "retryFromError": request.retry_from_error.is_some()
-    }))?)
+#[derive(Debug, PartialEq, Eq)]
+struct ImageGenerationArtifactResult {
+    artifact_id: String,
+    index: usize,
+    path: PathBuf,
+    mime_type: String,
+    byte_count: u64,
 }
 
-fn build_image_request(cwd: &Path, input: ImageGenerationInput) -> Result<ImageRequest> {
+#[derive(Debug, PartialEq, Eq)]
+struct ImageGenerationResult {
+    job_id: String,
+    requested_count: u8,
+    artifacts: Vec<ImageGenerationArtifactResult>,
+    provider: String,
+    model: String,
+    status: String,
+    parameters: BTreeMap<String, String>,
+    purpose: Option<String>,
+    retry_from_error: bool,
+}
+
+/// Generates an image through the exact media runtime and returns artifact metadata.
+pub fn execute_image_generation(
+    state: &mut AppState,
+    cwd: &Path,
+    input: Value,
+    media_context: Option<ImageGenerationMediaContext<'_>>,
+) -> Result<String> {
+    let parsed: ImageGenerationInput =
+        serde_json::from_value(input).context("invalid ImageGeneration input")?;
+    let settings = state
+        .config
+        .media
+        .image
+        .as_ref()
+        .context("image media provider/model/adapter is not configured")?;
+    let mut request = build_image_request(cwd, parsed, settings)?;
+    let media_context = media_context.context("ImageGeneration media runtime is not configured")?;
+    request.parameters = resolved_exact_image_parameters_with_cache(
+        media_context.providers,
+        media_context.auth_store,
+        &ExactImageGenerationRequest {
+            provider_id: request.provider.clone(),
+            model_id: request.model.clone(),
+            adapter: request.adapter.clone(),
+            prompt: request.prompt.clone(),
+            parameters: request.parameters.clone(),
+            count: request.count,
+        },
+        media_context.discovery_cache,
+    )?;
+    let generated = generate_exact_image_with_cache(
+        media_context.providers,
+        media_context.auth_store,
+        cwd,
+        ExactImageGenerationRequest {
+            provider_id: request.provider.clone(),
+            model_id: request.model.clone(),
+            adapter: request.adapter.clone(),
+            prompt: request.prompt.clone(),
+            parameters: request.parameters.clone(),
+            count: request.count,
+        },
+        media_context.discovery_cache,
+    )?;
+    let artifacts = generated
+        .artifacts
+        .into_iter()
+        .map(|artifact| ImageGenerationArtifactResult {
+            artifact_id: artifact.artifact_id,
+            index: artifact.index,
+            path: artifact.path,
+            mime_type: artifact.mime_type,
+            byte_count: artifact.byte_count,
+        })
+        .collect();
+
+    image_generation_output(&ImageGenerationResult {
+        job_id: generated.job_id,
+        requested_count: generated.requested_count,
+        artifacts,
+        provider: generated.provider_id,
+        model: generated.model_id,
+        status: generated.status,
+        parameters: request.parameters,
+        purpose: request.purpose,
+        retry_from_error: request.retry_from_error.is_some(),
+    })
+}
+
+fn build_image_request(
+    cwd: &Path,
+    input: ImageGenerationInput,
+    settings: &MediaGenerationConfig,
+) -> Result<ImageRequest> {
+    validate_image_generation_count(input.count)?;
     let prompt = prompt_text(cwd, &input.prompt, input.prompt_reference.as_deref())?;
-    let model = std::env::var("PUFFER_IMAGE_MODEL")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let (provider, model, adapter) = required_provider_model_adapter(settings)?;
+    let mut parameters = settings.parameters.clone();
+    apply_aspect_parameter(&mut parameters, input.aspect.as_deref())?;
     Ok(ImageRequest {
+        provider,
         model,
+        adapter,
         prompt,
-        size: image_size(input.aspect.as_deref())?.to_string(),
-        output_path: resolve_output_path(cwd, input.output_path.as_deref())?,
+        parameters,
+        count: input.count,
         purpose: input.purpose,
         retry_from_error: input.retry_from_error,
     })
+}
+
+fn required_provider_model_adapter(
+    settings: &MediaGenerationConfig,
+) -> Result<(String, String, String)> {
+    let provider = settings.provider_id.trim();
+    let model = settings.model_id.trim();
+    let adapter = settings.adapter.trim();
+    if provider.is_empty() || model.is_empty() || adapter.is_empty() {
+        bail!("image media provider/model/adapter is not configured");
+    }
+    Ok((provider.to_string(), model.to_string(), adapter.to_string()))
+}
+
+fn image_generation_output(result: &ImageGenerationResult) -> Result<String> {
+    Ok(serde_json::to_string_pretty(&json!({
+        "jobId": result.job_id,
+        "requestedCount": result.requested_count,
+        "artifacts": result.artifacts.iter().map(|artifact| json!({
+            "artifactId": artifact.artifact_id,
+            "index": artifact.index,
+            "path": artifact.path,
+            "mimeType": artifact.mime_type,
+            "size": artifact.byte_count
+        })).collect::<Vec<_>>(),
+        "provider": result.provider,
+        "model": result.model,
+        "status": result.status,
+        "parameters": result.parameters,
+        "purpose": result.purpose,
+        "retryFromError": result.retry_from_error
+    }))?)
 }
 
 fn prompt_text(cwd: &Path, value: &str, reference: Option<&str>) -> Result<String> {
@@ -151,24 +243,49 @@ fn image_size(aspect: Option<&str>) -> Result<&'static str> {
     }
 }
 
-fn resolve_output_path(cwd: &Path, value: Option<&str>) -> Result<PathBuf> {
-    let relative = value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(default_output_name);
-    if !safe_relative_path(&relative) {
-        bail!("ImageGeneration outputPath must be a safe relative path");
+fn image_aspect_ratio(aspect: &str) -> Result<&'static str> {
+    match aspect.trim().to_ascii_lowercase().as_str() {
+        "square" | "1:1" | "1024x1024" => Ok("1:1"),
+        "landscape" | "wide" | "horizontal" | "16:9" | "1536x1024" => Ok("16:9"),
+        "portrait" | "vertical" | "9:16" | "1024x1536" => Ok("9:16"),
+        "3:2" => Ok("3:2"),
+        "2:3" => Ok("2:3"),
+        "4:3" => Ok("4:3"),
+        "3:4" => Ok("3:4"),
+        "21:9" => Ok("21:9"),
+        "auto" => Ok("auto"),
+        other => bail!("unsupported ImageGeneration aspect `{other}`"),
     }
-    Ok(cwd.join(relative))
 }
 
-fn default_output_name() -> String {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    format!(".puffer/workflows/images/generated-{stamp}.png")
+fn is_dimension_size(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1024x1024" | "1536x1024" | "1024x1536" | "auto"
+    )
+}
+
+fn apply_aspect_parameter(
+    parameters: &mut BTreeMap<String, String>,
+    aspect: Option<&str>,
+) -> Result<()> {
+    let Some(aspect) = aspect.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    if parameters.contains_key("aspect_ratio") {
+        parameters.insert(
+            "aspect_ratio".to_string(),
+            image_aspect_ratio(aspect)?.to_string(),
+        );
+        return Ok(());
+    }
+    if let Some(current_size) = parameters.get("size") {
+        if is_dimension_size(current_size) {
+            parameters.insert("size".to_string(), image_size(Some(aspect))?.to_string());
+        }
+        return Ok(());
+    }
+    bail!("selected image model does not support ImageGeneration aspect")
 }
 
 fn safe_relative_path(value: &str) -> bool {
@@ -179,59 +296,269 @@ fn safe_relative_path(value: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
 }
 
-fn image_bytes_from_response(client: &Client, value: &Value) -> Result<Vec<u8>> {
-    let first = value
-        .get("data")
-        .and_then(Value::as_array)
-        .and_then(|items| items.first())
-        .context("image generation response missing data[0]")?;
-    if let Some(encoded) = first.get("b64_json").and_then(Value::as_str) {
-        return BASE64_STANDARD
-            .decode(encoded.trim())
-            .context("decode image b64_json");
-    }
-    if let Some(url) = first.get("url").and_then(Value::as_str) {
-        return download_image_url(client, url);
-    }
-    bail!("image generation response missing b64_json or url")
-}
-
-fn download_image_url(client: &Client, url: &str) -> Result<Vec<u8>> {
-    let parsed = reqwest::Url::parse(url).context("image response URL must be absolute")?;
-    match parsed.scheme() {
-        "https" => {}
-        other => bail!("unsupported image response URL scheme `{other}`"),
-    }
-    let response = client
-        .get(parsed)
-        .send()
-        .context("download generated image")?;
-    let status = response.status();
-    if !status.is_success() {
-        bail!(
-            "download generated image failed with status {}",
-            status.as_u16()
-        );
-    }
-    Ok(response
-        .bytes()
-        .context("read generated image bytes")?
-        .to_vec())
-}
-
-fn openai_api_key() -> Result<String> {
-    std::env::var("OPENAI_API_KEY")
-        .or_else(|_| std::env::var("PUFFER_OPENAI_API_KEY"))
-        .map(|value| value.trim().to_string())
-        .ok()
-        .filter(|value| !value.is_empty())
-        .context("ImageGeneration requires OPENAI_API_KEY or PUFFER_OPENAI_API_KEY")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permissions::profile::{EffectiveApprovalPolicy, EffectiveSandboxMode};
+    use crate::permissions::FilesystemPermissionPolicy;
+    use crate::runtime::claude_tools::{execute_tool, ProviderToolContext};
+    use indexmap::IndexMap;
+    use puffer_provider_registry::{
+        AuthMode, AuthStore, MediaExecutionDescriptor, MediaExecutionKind, MediaKindDescriptor,
+        MediaModelDescriptor, MediaOperation, MediaParameterSpec, MediaParameterWireType,
+        ModelDescriptor, ProviderDescriptor, ProviderMediaDescriptor, ProviderRegistry,
+    };
+    use puffer_resources::LoadedResources;
+    use puffer_session_store::SessionMetadata;
+    use puffer_tools::{
+        ToolDefinition, ToolDisplayHints, ToolInputSchema, ToolKind, ToolMetadata, ToolPolicyHints,
+        ToolRegistry,
+    };
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
     use tempfile::tempdir;
+    use uuid::Uuid;
+
+    fn image_settings() -> MediaGenerationConfig {
+        MediaGenerationConfig {
+            provider_id: "openai".to_string(),
+            model_id: "gpt-image-1".to_string(),
+            operation: "generate".to_string(),
+            adapter: "images_json".to_string(),
+            parameters: BTreeMap::from([
+                ("size".to_string(), "1024x1024".to_string()),
+                ("quality".to_string(), "auto".to_string()),
+                ("output_format".to_string(), "png".to_string()),
+            ]),
+        }
+    }
+
+    fn test_state(settings: MediaGenerationConfig, cwd: &Path) -> AppState {
+        let mut config = puffer_config::PufferConfig::default();
+        config.media.image = Some(settings);
+        AppState::new(
+            config,
+            cwd.to_path_buf(),
+            SessionMetadata {
+                id: Uuid::new_v4(),
+                display_name: None,
+                generated_title: None,
+                cwd: cwd.to_path_buf(),
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                parent_session_id: None,
+                slug: None,
+                tags: Vec::new(),
+                note: None,
+            },
+        )
+    }
+
+    fn registry_with_provider(base_url: String) -> ProviderRegistry {
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderDescriptor {
+            id: "exact-provider".to_string(),
+            display_name: "Exact Provider".to_string(),
+            base_url,
+            default_api: "openai-responses".to_string(),
+            auth_modes: vec![AuthMode::ApiKey],
+            headers: IndexMap::new(),
+            query_params: IndexMap::new(),
+            chat_completions_path: None,
+            discovery: None,
+            media: Some(ProviderMediaDescriptor {
+                image: Some(MediaKindDescriptor {
+                    discovery: None,
+                    execution: Some(MediaExecutionDescriptor {
+                        adapter: MediaExecutionKind::ImagesJson,
+                        base_url: None,
+                        path: "/custom/images".to_string(),
+                        batch: puffer_provider_registry::MediaBatchDescriptor::default(),
+                    }),
+                    models: vec![MediaModelDescriptor {
+                        id: "exact-image-model".to_string(),
+                        display_name: Some("Exact Image Model".to_string()),
+                        execution: None,
+                        operations: vec![MediaOperation::Generate],
+                        parameters: vec![
+                            MediaParameterSpec {
+                                name: "size".to_string(),
+                                label: "Size".to_string(),
+                                values: vec!["1024x1024".to_string(), "1536x1024".to_string()],
+                                default: "1024x1024".to_string(),
+                                request_field: Some("size".to_string()),
+                                wire_type: MediaParameterWireType::String,
+                            },
+                            MediaParameterSpec {
+                                name: "quality".to_string(),
+                                label: "Quality".to_string(),
+                                values: vec!["auto".to_string(), "high".to_string()],
+                                default: "auto".to_string(),
+                                request_field: Some("quality".to_string()),
+                                wire_type: MediaParameterWireType::String,
+                            },
+                            MediaParameterSpec {
+                                name: "output_format".to_string(),
+                                label: "Output format".to_string(),
+                                values: vec!["png".to_string(), "webp".to_string()],
+                                default: "png".to_string(),
+                                request_field: Some("output_format".to_string()),
+                                wire_type: MediaParameterWireType::String,
+                            },
+                        ],
+                    }],
+                }),
+                video: None,
+            }),
+            models: Vec::<ModelDescriptor>::new(),
+        });
+        registry
+    }
+
+    fn chat_router_registry(base_url: String) -> ProviderRegistry {
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderDescriptor {
+            id: "openrouter".to_string(),
+            display_name: "OpenRouter".to_string(),
+            base_url,
+            default_api: "openai-completions".to_string(),
+            auth_modes: vec![AuthMode::ApiKey],
+            headers: IndexMap::new(),
+            query_params: IndexMap::new(),
+            chat_completions_path: None,
+            discovery: None,
+            media: Some(ProviderMediaDescriptor {
+                image: Some(MediaKindDescriptor {
+                    discovery: None,
+                    execution: Some(MediaExecutionDescriptor {
+                        adapter: MediaExecutionKind::ChatImageOutput,
+                        base_url: None,
+                        path: "/chat/completions".to_string(),
+                        batch: puffer_provider_registry::MediaBatchDescriptor::default(),
+                    }),
+                    models: Vec::new(),
+                }),
+                video: None,
+            }),
+            models: Vec::<ModelDescriptor>::new(),
+        });
+        registry
+    }
+
+    fn discovered_chat_image_cache() -> ExactMediaDiscoveryCache {
+        ExactMediaDiscoveryCache::from_inner_for_test(
+            crate::runtime::media::resolver::MediaDiscoveryCache {
+                image_models: vec![crate::runtime::media::resolver::CachedImageMediaModel {
+                    provider_id: "openrouter".to_string(),
+                    model: MediaModelDescriptor {
+                        id: "openrouter/image-chat".to_string(),
+                        display_name: Some("Image Chat".to_string()),
+                        execution: None,
+                        operations: vec![MediaOperation::Generate],
+                        parameters: Vec::new(),
+                    },
+                    source: "provider_discovery".to_string(),
+                }],
+            },
+            1_000,
+        )
+    }
+
+    fn auth_store() -> AuthStore {
+        let mut auth_store = AuthStore::default();
+        auth_store.set_api_key("exact-provider", "sk-test");
+        auth_store
+    }
+
+    fn openrouter_auth_store() -> AuthStore {
+        let mut auth_store = AuthStore::default();
+        auth_store.set_api_key("openrouter", "sk-test");
+        auth_store
+    }
+
+    fn image_generation_tool_definition() -> ToolDefinition {
+        ToolDefinition {
+            id: "ImageGeneration".to_string(),
+            name: "ImageGeneration".to_string(),
+            description: "Generate an image".to_string(),
+            handler: "runtime:workflow:image_generation".to_string(),
+            aliases: Vec::new(),
+            handler_args: Vec::new(),
+            kind: ToolKind::Custom,
+            input_schema: ToolInputSchema::default(),
+            metadata: ToolMetadata::default(),
+            policy: ToolPolicyHints::default(),
+            shared_lib: None,
+            enabled_if: None,
+            display: ToolDisplayHints::default(),
+        }
+    }
+
+    fn allow_all_filesystem_policy(root: &Path) -> FilesystemPermissionPolicy {
+        FilesystemPermissionPolicy {
+            approval: EffectiveApprovalPolicy::Allow,
+            sandbox_mode: EffectiveSandboxMode::DangerFullAccess,
+            workspace_roots: vec![root.to_path_buf()],
+            session_granted: true,
+            allow_all_paths: true,
+        }
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        let mut buffer = [0_u8; 8192];
+        let size = stream.read(&mut buffer).expect("read request");
+        String::from_utf8_lossy(&buffer[..size]).to_string()
+    }
+
+    fn spawn_image_generation_server() -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let request_text = read_http_request(&mut stream);
+            let body = json!({
+                "data": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("response");
+            request_text
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn spawn_chat_image_generation_server() -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let request_text = read_http_request(&mut stream);
+            let body = json!({
+                "choices": [{
+                    "message": {
+                        "images": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
+                    }
+                }]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("response");
+            request_text
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[path = "image_generation_tool_tests.rs"]
+    mod tool_tests;
 
     #[test]
     fn maps_common_aspects_to_image_sizes() {
@@ -268,7 +595,8 @@ mod tests {
     fn parses_prompt_reference_from_tool_input() {
         let parsed: ImageGenerationInput = serde_json::from_value(json!({
             "prompt": "panel 1 action",
-            "promptReference": "prompts.md"
+            "promptReference": "prompts.md",
+            "count": 1
         }))
         .unwrap();
 
@@ -276,33 +604,68 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsafe_output_paths() {
+    fn parses_explicit_image_generation_count() {
+        let parsed: ImageGenerationInput = serde_json::from_value(json!({
+            "prompt": "panel 1 action",
+            "promptReference": "prompts.md",
+            "count": 2
+        }))
+        .unwrap();
+
+        assert_eq!(parsed.prompt_reference.as_deref(), Some("prompts.md"));
+        assert_eq!(parsed.count, 2);
+    }
+
+    #[test]
+    fn rejects_missing_image_generation_count() {
+        let error = serde_json::from_value::<ImageGenerationInput>(json!({
+            "prompt": "panel 1 action"
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("missing field `count`"));
+    }
+
+    #[test]
+    fn rejects_image_generation_count_outside_supported_range_at_tool_boundary() {
         let dir = tempdir().unwrap();
 
-        assert!(resolve_output_path(dir.path(), Some("../out.png")).is_err());
-        assert!(resolve_output_path(dir.path(), Some("/tmp/out.png")).is_err());
-        assert!(resolve_output_path(dir.path(), Some("images/out.png")).is_ok());
+        for count in [0, 5] {
+            let error = build_image_request(
+                dir.path(),
+                ImageGenerationInput {
+                    prompt: "make a visual summary".to_string(),
+                    prompt_reference: None,
+                    aspect: None,
+                    count,
+                    purpose: None,
+                    retry_from_error: None,
+                },
+                &image_settings(),
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                "image generation count must be between 1 and 4"
+            );
+        }
     }
 
     #[test]
-    fn extracts_base64_image_bytes() {
-        let client = Client::new();
-        let value = json!({
-            "data": [
-                {
-                    "b64_json": "AAECAw=="
-                }
-            ]
-        });
+    fn rejects_unknown_image_generation_fields() {
+        let error = serde_json::from_value::<ImageGenerationInput>(json!({
+            "prompt": "draw a ship",
+            "count": 1,
+            "outputPath": "requested/ship.png"
+        }))
+        .unwrap_err();
 
-        assert_eq!(
-            image_bytes_from_response(&client, &value).unwrap(),
-            vec![0, 1, 2, 3]
-        );
+        assert!(error.to_string().contains("outputPath"));
     }
 
     #[test]
-    fn builds_request_with_prompt_file_and_output() {
+    fn builds_request_with_prompt_file() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("prompt.md"), "make a visual summary").unwrap();
 
@@ -312,15 +675,323 @@ mod tests {
                 prompt: "prompt.md".to_string(),
                 prompt_reference: None,
                 aspect: Some("square".to_string()),
-                output_path: Some("out/image.png".to_string()),
+                count: 1,
                 purpose: Some("test".to_string()),
                 retry_from_error: None,
             },
+            &image_settings(),
         )
         .unwrap();
 
         assert_eq!(request.prompt, "make a visual summary");
-        assert_eq!(request.size, "1024x1024");
-        assert_eq!(request.output_path, dir.path().join("out/image.png"));
+        assert_eq!(request.parameters["size"], "1024x1024");
+    }
+
+    #[test]
+    fn builds_request_maps_aspect_to_aspect_ratio_parameter() {
+        let dir = tempdir().unwrap();
+        let settings = MediaGenerationConfig {
+            provider_id: "minimax".to_string(),
+            model_id: "image-01".to_string(),
+            operation: "generate".to_string(),
+            adapter: "minimax_image".to_string(),
+            parameters: BTreeMap::from([
+                ("aspect_ratio".to_string(), "1:1".to_string()),
+                ("response_format".to_string(), "base64".to_string()),
+            ]),
+        };
+
+        let request = build_image_request(
+            dir.path(),
+            ImageGenerationInput {
+                prompt: "make a visual summary".to_string(),
+                prompt_reference: None,
+                aspect: Some("landscape".to_string()),
+                count: 1,
+                purpose: None,
+                retry_from_error: None,
+            },
+            &settings,
+        )
+        .unwrap();
+
+        assert_eq!(request.parameters["aspect_ratio"], "16:9");
+        assert!(!request.parameters.contains_key("size"));
+    }
+
+    #[test]
+    fn builds_request_preserves_model_specific_size_tokens_for_aspect() {
+        let dir = tempdir().unwrap();
+        let settings = MediaGenerationConfig {
+            provider_id: "byteplus".to_string(),
+            model_id: "seedream-4-5-251128".to_string(),
+            operation: "generate".to_string(),
+            adapter: "images_json".to_string(),
+            parameters: BTreeMap::from([
+                ("size".to_string(), "2K".to_string()),
+                ("output_format".to_string(), "png".to_string()),
+            ]),
+        };
+
+        let request = build_image_request(
+            dir.path(),
+            ImageGenerationInput {
+                prompt: "make a visual summary".to_string(),
+                prompt_reference: None,
+                aspect: Some("portrait".to_string()),
+                count: 1,
+                purpose: None,
+                retry_from_error: None,
+            },
+            &settings,
+        )
+        .unwrap();
+
+        assert_eq!(request.parameters["size"], "2K");
+    }
+
+    #[test]
+    fn builds_request_rejects_aspect_when_selected_model_has_no_aspect_parameter() {
+        let dir = tempdir().unwrap();
+        let settings = MediaGenerationConfig {
+            provider_id: "openrouter".to_string(),
+            model_id: "image-chat".to_string(),
+            operation: "generate".to_string(),
+            adapter: "chat_image_output".to_string(),
+            parameters: BTreeMap::new(),
+        };
+
+        let error = build_image_request(
+            dir.path(),
+            ImageGenerationInput {
+                prompt: "make a visual summary".to_string(),
+                prompt_reference: None,
+                aspect: Some("square".to_string()),
+                count: 1,
+                purpose: None,
+                retry_from_error: None,
+            },
+            &settings,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "selected image model does not support ImageGeneration aspect"
+        );
+    }
+
+    #[test]
+    fn builds_request_from_media_settings_instead_of_env_model() {
+        let dir = tempdir().unwrap();
+        std::env::set_var("PUFFER_IMAGE_MODEL", "legacy-env-model");
+        let settings = MediaGenerationConfig {
+            provider_id: "openai".to_string(),
+            model_id: "configured-image-model".to_string(),
+            operation: "generate".to_string(),
+            adapter: "images_json".to_string(),
+            parameters: BTreeMap::from([
+                ("size".to_string(), "1024x1024".to_string()),
+                ("quality".to_string(), "high".to_string()),
+                ("output_format".to_string(), "webp".to_string()),
+            ]),
+        };
+
+        let request = build_image_request(
+            dir.path(),
+            ImageGenerationInput {
+                prompt: "make a visual summary".to_string(),
+                prompt_reference: None,
+                aspect: None,
+                count: 1,
+                purpose: None,
+                retry_from_error: None,
+            },
+            &settings,
+        )
+        .unwrap();
+
+        assert_eq!(request.provider, "openai");
+        assert_eq!(request.model, "configured-image-model");
+        assert_eq!(request.parameters["quality"], "high");
+        std::env::remove_var("PUFFER_IMAGE_MODEL");
+    }
+
+    #[test]
+    fn builds_request_for_non_openai_exact_provider() {
+        let dir = tempdir().unwrap();
+        let settings = MediaGenerationConfig {
+            provider_id: "exact-provider".to_string(),
+            model_id: "exact-image-model".to_string(),
+            operation: "generate".to_string(),
+            adapter: "images_json".to_string(),
+            parameters: BTreeMap::from([
+                ("size".to_string(), "1024x1024".to_string()),
+                ("quality".to_string(), "auto".to_string()),
+                ("output_format".to_string(), "png".to_string()),
+            ]),
+        };
+
+        let request = build_image_request(
+            dir.path(),
+            ImageGenerationInput {
+                prompt: "make a visual summary".to_string(),
+                prompt_reference: None,
+                aspect: None,
+                count: 1,
+                purpose: None,
+                retry_from_error: None,
+            },
+            &settings,
+        )
+        .unwrap();
+
+        assert_eq!(request.provider, "exact-provider");
+        assert_eq!(request.model, "exact-image-model");
+    }
+
+    #[test]
+    fn execute_rejects_missing_provider_model_config() {
+        let dir = tempdir().unwrap();
+        let registry = registry_with_provider("http://127.0.0.1:9".to_string());
+        let auth_store = auth_store();
+        let discovery_cache = ExactMediaDiscoveryCache::empty();
+        let mut config = puffer_config::PufferConfig::default();
+        config.media.image = None;
+        let mut state = AppState::new(
+            config,
+            dir.path().to_path_buf(),
+            SessionMetadata {
+                id: Uuid::new_v4(),
+                display_name: None,
+                generated_title: None,
+                cwd: dir.path().to_path_buf(),
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                parent_session_id: None,
+                slug: None,
+                tags: Vec::new(),
+                note: None,
+            },
+        );
+
+        let error = execute_image_generation(
+            &mut state,
+            dir.path(),
+            json!({"prompt": "draw a ship", "count": 1}),
+            Some(ImageGenerationMediaContext {
+                providers: &registry,
+                auth_store: &auth_store,
+                discovery_cache: &discovery_cache,
+            }),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "image media provider/model/adapter is not configured"
+        );
+    }
+
+    #[test]
+    fn execute_rejects_stale_exact_model_before_http() {
+        let dir = tempdir().unwrap();
+        let registry = registry_with_provider("http://127.0.0.1:9".to_string());
+        let auth_store = auth_store();
+        let discovery_cache = ExactMediaDiscoveryCache::empty();
+        let mut state = test_state(
+            MediaGenerationConfig {
+                provider_id: "exact-provider".to_string(),
+                model_id: "stale-image-model".to_string(),
+                operation: "generate".to_string(),
+                adapter: "images_json".to_string(),
+                parameters: BTreeMap::from([
+                    ("size".to_string(), "1024x1024".to_string()),
+                    ("quality".to_string(), "auto".to_string()),
+                    ("output_format".to_string(), "png".to_string()),
+                ]),
+            },
+            dir.path(),
+        );
+
+        let error = execute_image_generation(
+            &mut state,
+            dir.path(),
+            json!({"prompt": "draw a ship", "count": 1}),
+            Some(ImageGenerationMediaContext {
+                providers: &registry,
+                auth_store: &auth_store,
+                discovery_cache: &discovery_cache,
+            }),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "selected image model unavailable: exact-provider/stale-image-model via images_json"
+        );
+    }
+
+    #[test]
+    fn execute_uses_descriptor_adapter_and_returns_artifacts_array() {
+        let (base_url, server) = spawn_image_generation_server();
+        let dir = tempdir().unwrap();
+        let registry = registry_with_provider(base_url);
+        let auth_store = auth_store();
+        let discovery_cache = ExactMediaDiscoveryCache::empty();
+        let mut state = test_state(
+            MediaGenerationConfig {
+                provider_id: "exact-provider".to_string(),
+                model_id: "exact-image-model".to_string(),
+                operation: "generate".to_string(),
+                adapter: "images_json".to_string(),
+                parameters: BTreeMap::from([
+                    ("size".to_string(), "1024x1024".to_string()),
+                    ("quality".to_string(), "auto".to_string()),
+                    ("output_format".to_string(), "png".to_string()),
+                ]),
+            },
+            dir.path(),
+        );
+
+        let output = execute_image_generation(
+            &mut state,
+            dir.path(),
+            json!({
+                "prompt": "draw a ship",
+                "count": 1,
+                "purpose": "test"
+            }),
+            Some(ImageGenerationMediaContext {
+                providers: &registry,
+                auth_store: &auth_store,
+                discovery_cache: &discovery_cache,
+            }),
+        )
+        .unwrap();
+
+        let request_text = server.join().expect("server");
+        assert!(request_text.starts_with("POST /custom/images HTTP/1.1"));
+        assert!(request_text.contains("\"model\":\"exact-image-model\""));
+        assert!(dir.path().join(".puffer/media/jobs").is_dir());
+        assert!(dir.path().join(".puffer/media/artifact-sidecars").is_dir());
+
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert!(parsed.get("artifactId").is_none());
+        assert!(parsed.get("path").is_none());
+        assert_eq!(parsed["requestedCount"], 1);
+        let artifact = &parsed["artifacts"][0];
+        let artifact_id = artifact["artifactId"].as_str().unwrap();
+        let artifact_path = PathBuf::from(artifact["path"].as_str().unwrap());
+        assert_eq!(fs::read(&artifact_path).unwrap(), b"image-bytes");
+        assert!(artifact_path.starts_with(dir.path().join(".puffer/media/images")));
+        assert_eq!(
+            artifact_path.parent().and_then(|path| path.file_name()),
+            Some(std::ffi::OsStr::new(artifact_id))
+        );
+        assert_eq!(parsed["provider"], "exact-provider");
+        assert_eq!(parsed["model"], "exact-image-model");
+        assert_eq!(parsed["status"], "succeeded");
+        assert_eq!(parsed["purpose"], "test");
     }
 }
