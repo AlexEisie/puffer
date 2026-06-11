@@ -45,10 +45,14 @@
 **非目标（范围红线）**
 
 - ❌ 不建短剧胖 internal tool（正是要避免的）。
+- ❌ **不在 `internal_tools.rs` 注册 CLI 别名**——短剧是编排型 skill，非 CLI 内部
+  工具；实证有 10 个编排 skill（autodream/reviewer/security/genskill…）零 CLI 条目，
+  只靠 `SKILL.md` 被发现。短剧只需一个 `SKILL.md`。
 - ❌ 不做桌面 workbench UI。
 - ❌ 不做配乐 / TTS / 字幕烧录等高级合成（ffmpeg 仅做片段拼接 + 基础转场）。
 - ❌ 不改 artifact 落盘路径、不改 provider、不碰权限路径。
 - ❌ 不做上传/暂存 tool（曾作为"方案 C"，本设计**明确不采用**）。
+- ❌ **增量 1 不为生视频去生成人物图**——无桥时生成的图喂不进视频，是纯浪费。
 
 ## 3. 编排模型：五阶段 + 按需门控
 
@@ -59,40 +63,52 @@
 |---|---|---|
 | 1. 剧本 | prompt 已含剧本 / 指向剧本文件？ | agent 原生写剧本 → 存 `script.md` |
 | 2. 分镜 | prompt 已含分镜表？ | agent 原生拆分镜（每镜：画面/对白/时长/所需人物）→ 存 `storyboard.md` |
-| 3. 人物图 | **prompt 已含 `https://` / `asset://` 图地址？** | 缺则 `imagegen` 生成 → 取 `referenceUrl`（见 §4） |
-| 4. 分镜视频 | —（始终生成） | 逐镜 `videogen`，把人物图 URL 作 `--image-reference` |
+| 3. 人物图 | **prompt 已含 `https://` / `asset://` 图地址？** | 有 → 直接当 `--image-reference`（**今天即可用**）；无 → 见下方分增量 |
+| 4. 分镜视频 | —（始终生成） | 逐镜 `videogen`；有图参考则带 `--image-reference`，否则文生视频 |
 | 5. 合成 | —（始终合成） | skill 指导 agent 用 Bash 跑 ffmpeg 拼接 → `final.mp4` |
 
 **关键门控规则**：
 
 - 阶段 3 先扫 prompt 中是否已带 `https://` 或 `asset://` 图地址——
-  **有则直接用作 `--image-reference`，不调 imagegen**；无则才生图。
+  **有则直接用作 `--image-reference`**（videogen 本就收 https/asset，**零改动**）；
+  无则按增量决定是否生成人物图。
 - 阶段 1/2 同理：prompt 已给剧本/分镜则不重复创作。
 
 由此同一 skill 既能"一句话生成整部短剧"，也能
-"我已有人物图 + 分镜，只帮我生视频 + 合成"。
+"我已有人物图 URL + 分镜，只帮我生视频 + 合成"。
 
-**资源整理中枢**：agent 在 `.puffer/media/drama/<id>/manifest.json` 维护
-镜头清单（镜头序号 → prompt → 引用图 URL → 产出 video artifactId/path），
-既是跨阶段资源台账，也是 ffmpeg 拼接的顺序依据。
+**桥只为"生成的人物图"而存在**：prompt 自带图 URL 的路径今天就通；只有当
+**agent 需要自己生人物图再喂给视频**时，才需要 §4 的 `referenceUrl` 桥（增量 2）。
 
-## 4. 最小桥：透出 `referenceUrl`
+**资源整理中枢（轻量）**：agent 在 `.puffer/media/drama/<id>/manifest.json` 维护
+有序镜头清单（镜头序号 → prompt → 引用图 URL → 产出 video artifactId/path），
+作为跨阶段工作台账和 ffmpeg 拼接顺序依据。**这是 agent 的工作笔记，不是带 schema
+的正式产物**，字段够用即可，勿过度结构化。`<id>` 取自短剧标题的短 slug，勿自造复杂
+生成规则。
 
-唯一后端改动——`image_generation_output`（`image_generation.rs:160-178`）
-的 artifact JSON 增加一个字段：
+## 4. 最小桥：透出 `referenceUrl`（增量 2）
+
+**值已就位**：runtime 层的 `ExactGeneratedArtifact`（`runtime.rs:88-95`）**本身就带
+`remote_source_url: Option<String>`**（line 94，由 provider 经 `images_json.rs` 填入，
+MiniMax 已填）。image_generation.rs 在 `image_generation.rs:106-112` 迭代该类型时**当前丢弃了
+这个字段**。所以改动是把它接上，三处、同一文件 `image_generation.rs`：
 
 ```diff
-  "artifactId": artifact.artifact_id,
-  "index": artifact.index,
-  "path": artifact.path,
-+ "referenceUrl": artifact.remote_source_url,   // 来自 sidecar 的 remoteSourceUrl，可能为 null
-  "mimeType": artifact.mime_type,
-  "size": artifact.byte_count
+// 1) struct ImageGenerationArtifactResult (≈line 52)
+   byte_count: u64,
++  remote_source_url: Option<String>,
+
+// 2) 构建处 (≈line 106-112)
+   byte_count: artifact.byte_count,
++  remote_source_url: artifact.remote_source_url,
+
+// 3) JSON 输出 image_generation_output (≈line 164-170)
+   "path": artifact.path,
++  "referenceUrl": artifact.remote_source_url,   // 可能为 null
+   "mimeType": artifact.mime_type,
 ```
 
-值复用 `artifacts.rs:228-232` 已有的 `remoteSourceUrl` 读取 helper；
-需把该值从 provider 结果透到 `ImageGenerationResult` 的 artifact 结构再到输出。
-**改动面仅此一处链路**，不碰 provider、落盘、权限路径。
+**不碰 media 层、provider、落盘、权限路径、sidecar**——值在 runtime 结果里现成。
 
 agent 阶段 4 直接拿 `referenceUrl` 当 `videogen --image-reference`。
 
@@ -116,31 +132,40 @@ agent 阶段 4 直接拿 `referenceUrl` 当 `videogen --image-reference`。
 
 ## 6. 增量切分
 
-**增量 1 — 纯 skill 编排循环（零后端改动）**
+**增量 1 — 纯 skill 编排循环（零后端改动，独立可交付）**
 
-新增 `resources/skills/short-drama/SKILL.md` + 注册 skill/CLI 入口。
-跑通：剧本→分镜→imagegen(预览)→videogen(**文生视频**)→ffmpeg 合成→
-`.puffer/media/drama/<id>/final.mp4`，含 manifest 与全部按需门控。
-**目的：先验证 agent 自主编排本身可行**，不依赖桥。
+只新增 `resources/skills/short-drama/SKILL.md`（无 internal_tools.rs 改动）。
+跑通：剧本→分镜→videogen→ffmpeg 合成→`.puffer/media/drama/<id>/final.mp4`，
+含 manifest 与全部按需门控。视频的图参考来源：
+- **prompt 自带 `https://`/`asset://` 图 URL** → 直接传 `--image-reference`（今天就通）；
+- **没有图** → 文生视频。
 
-**增量 2 — 打通图生视频（方案 B 的桥）**
+**增量 1 不调 imagegen 去为视频生人物图**（无桥，喂不进）。**目的：验证 agent
+自主编排本身可行**，且立即产出可用短剧。
 
-- **前置 spike（go/no-go 闸门，~1h）**：手动用 MiniMax 生一张图 → 取
-  `referenceUrl` → 直接喂给 `videogen --image-reference` 走一次 BytePlus
-  图生视频。验证 (a) URL 未即时过期；(b) 跨 provider 可被拉取。
-- **通过** → 加 `referenceUrl` 字段，skill 阶段 3 改为传图参考做图生视频，
-  保人物一致性。
-- **不通过** → **停下来如实汇报**，不在本设计内引入上传/暂存 tool；
-  是否另启替代方案为单独决策。
+**增量 2 — 让"生成的人物图"也能喂视频（方案 B 的桥）**
 
-## 7. 受影响文件（预估）
+- **前置 spike（go/no-go 闸门，~1h）**：手动用 MiniMax 生一张图 → 取 runtime 结果里的
+  `remote_source_url` → 喂给 `videogen --image-reference` 走一次 BytePlus 图生视频。
+  验证 (a) URL 未即时过期；(b) 跨 provider 可被拉取。
+- **通过** → 落 §4 三行改动，skill 阶段 3 增加"无图则 imagegen 生人物图 → 拿
+  `referenceUrl` → 图生视频"分支，保人物一致性。
+- **不通过** → **停下来如实汇报**，不引入上传/暂存 tool；是否另启替代方案为单独决策。
 
+## 7. 受影响文件
+
+**增量 1**
 - 新增 `resources/skills/short-drama/SKILL.md`（编排指导 + 门控 + 失败契约）。
-- skill / CLI 别名注册点（参照 image/video 的 `internal_tools.rs` 注册方式）。
-- 增量 2：`image_generation.rs` 输出加 `referenceUrl` 字段；
-  `ImageGenerationResult` artifact 结构透传 `remote_source_url`。
+  **仅此一个文件**——skill 靠资源加载器自动发现，无需改 `internal_tools.rs`。
+
+**增量 2**
+- `crates/puffer-core/runtime/claude_tools/workflow/image_generation.rs`：§4 的三行
+  （struct 加字段 + 构建处透传 + 输出加 `referenceUrl`）。
+- 同文件测试补一条断言：artifact 输出含 `referenceUrl`。
 
 ## 8. 开放问题
 
 - ffmpeg 在目标运行环境是否默认可用？skill 需先探测并在缺失时按契约 #3 报错。
+- 短剧 skill 需 `user-invocable: true` + `disable-model-invocation: false`；
+  实现首步先确认"仅放 SKILL.md 即可被 agent 发现/触发"（对照 autodream 等既有编排 skill）。
 - 增量 2 spike 的结论将决定桥是否成立（本设计已约定失败即汇报，不降级、不建 C）。
