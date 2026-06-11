@@ -1,5 +1,5 @@
 use crate::auth::AuthMode;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -308,7 +308,7 @@ impl ModelCompat {
 }
 
 /// Describes provider-scoped media capabilities.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ProviderMediaDescriptor {
     #[serde(default)]
     pub image: Option<MediaKindDescriptor>,
@@ -317,7 +317,7 @@ pub struct ProviderMediaDescriptor {
 }
 
 /// Describes media-generation capability metadata for one provider/kind.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct MediaKindDescriptor {
     #[serde(default)]
     pub discovery: Option<MediaDiscoveryDescriptor>,
@@ -378,43 +378,21 @@ pub enum MediaBatchMode {
     Exact,
 }
 
-/// Describes one concrete image model and its supported operations.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Describes one logical media model: its user-facing axes and the concrete
+/// upstream variant(s) those axes resolve to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MediaModelDescriptor {
     pub id: String,
     #[serde(default)]
     pub display_name: Option<String>,
+    /// Adapter source, inherently shared by this model's variants.
     #[serde(default)]
     pub execution: Option<MediaExecutionDescriptor>,
     #[serde(default)]
     pub operations: Vec<MediaOperation>,
     #[serde(default)]
-    pub parameters: Vec<MediaParameterSpec>,
-}
-
-/// Describes how a media parameter value is encoded into provider JSON.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MediaParameterWireType {
-    /// Encode the selected value as a JSON string.
-    #[default]
-    String,
-    /// Parse the selected value and encode it as a JSON number.
-    Number,
-}
-
-/// Describes one select-only image generation parameter.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct MediaParameterSpec {
-    pub name: String,
-    pub label: String,
-    pub values: Vec<String>,
-    pub default: String,
-    #[serde(default)]
-    pub request_field: Option<String>,
-    #[serde(default)]
-    pub wire_type: MediaParameterWireType,
+    pub axes: Vec<crate::Axis>,
+    pub variants: crate::Variants,
 }
 
 /// Describes currently implemented media discovery adapters.
@@ -446,7 +424,7 @@ pub enum MediaOperation {
 }
 
 /// Describes one model provider and the models it exposes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProviderDescriptor {
     pub id: String,
     pub display_name: String,
@@ -569,41 +547,107 @@ impl MediaModelDescriptor {
             execution.validate(&format!("{location}.execution"), errors);
         }
 
-        for (index, parameter) in self.parameters.iter().enumerate() {
-            parameter.validate(&format!("{location}.parameters[{index}]"), errors);
+        if let Err(error) = validate_one_media_model(self) {
+            errors.push(format!("{location}: {error}"));
         }
     }
 }
 
-impl MediaParameterSpec {
-    fn validate(&self, location: &str, errors: &mut Vec<String>) {
-        if self.name.trim().is_empty() {
-            errors.push(format!("{location}.name must not be empty"));
+/// Enforces the typed-axis/variant invariants for a single logical model:
+/// at most one selector axis, param axes carry a `request_field`, ranges are
+/// well-formed, and every selector value maps to exactly one variant.
+fn validate_one_media_model(model: &MediaModelDescriptor) -> Result<()> {
+    use crate::{AxisRole, ControlKind, Variants};
+    let selectors: Vec<&crate::Axis> = model
+        .axes
+        .iter()
+        .filter(|a| a.role == AxisRole::Selector)
+        .collect();
+    if selectors.len() > 1 {
+        bail!("media model {} has more than one selector axis", model.id);
+    }
+    for axis in &model.axes {
+        if axis.role == AxisRole::Param && axis.request_field.is_none() {
+            bail!(
+                "media model {} param axis {} needs a request_field",
+                model.id,
+                axis.id
+            );
         }
-        if self.label.trim().is_empty() {
-            errors.push(format!("{location}.label must not be empty"));
-        }
-        if self.values.is_empty() {
-            errors.push(format!("{location}.values must not be empty"));
-        }
-        if self.values.iter().any(|value| value.trim().is_empty()) {
-            errors.push(format!("{location}.values must not contain empty values"));
-        }
-        if self.default.trim().is_empty() {
-            errors.push(format!("{location}.default must not be empty"));
-        } else if !self.values.iter().any(|value| value == &self.default) {
-            errors.push(format!(
-                "{location}.default must be one of the declared values"
-            ));
-        }
-        if self
-            .request_field
-            .as_deref()
-            .is_some_and(|value| value.trim().is_empty())
+        if let ControlKind::Range {
+            min,
+            max,
+            step,
+            default,
+        } = &axis.control
         {
-            errors.push(format!("{location}.request_field must not be empty"));
+            if !(max > min && *step > 0.0) || default < min || default > max {
+                bail!(
+                    "media model {} axis {} has an invalid range",
+                    model.id,
+                    axis.id
+                );
+            }
         }
     }
+    if let Variants::BySelector { selector, map } = &model.variants {
+        let axis = selectors
+            .first()
+            .filter(|a| &a.id == selector)
+            .with_context(|| {
+                format!(
+                    "media model {} selector {selector} has no matching selector axis",
+                    model.id
+                )
+            })?;
+        match &axis.control {
+            ControlKind::Enum { values, .. } => {
+                for v in values {
+                    if !map.contains_key(v) {
+                        bail!("media model {} selector value {v} has no variant", model.id);
+                    }
+                }
+                for k in map.keys() {
+                    if !values.contains(k) {
+                        bail!(
+                            "media model {} variant key {k} is not a selector value",
+                            model.id
+                        );
+                    }
+                }
+            }
+            ControlKind::Bool { .. } => {
+                for k in map.keys() {
+                    if k != "true" && k != "false" {
+                        bail!(
+                            "media model {} bool selector variant key {k} must be true/false",
+                            model.id
+                        );
+                    }
+                }
+                for expected in ["true", "false"] {
+                    if !map.contains_key(expected) {
+                        bail!(
+                            "media model {} bool selector is missing the {expected} variant",
+                            model.id
+                        );
+                    }
+                }
+            }
+            ControlKind::Range { .. } => {
+                bail!(
+                    "media model {} selector axis {selector} must be enum or bool, not range",
+                    model.id
+                );
+            }
+        }
+    } else if !selectors.is_empty() {
+        bail!(
+            "media model {} has a selector axis but a Single variant",
+            model.id
+        );
+    }
+    Ok(())
 }
 
 fn has_wildcard_or_regex_marker(value: &str) -> bool {
@@ -616,7 +660,7 @@ fn has_wildcard_or_regex_marker(value: &str) -> bool {
 }
 
 /// Stores one provider plus its provenance.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RegisteredProvider {
     pub descriptor: ProviderDescriptor,
     pub source: ProviderSource,

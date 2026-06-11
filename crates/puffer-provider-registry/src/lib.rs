@@ -15,9 +15,9 @@ pub use media_capability::{Axis, AxisRole, ControlKind, Variant, Variants, WireT
 pub use model::{
     AnthropicMessagesCompat, MediaBatchDescriptor, MediaBatchMode, MediaDiscoveryDescriptor,
     MediaDiscoveryKind, MediaExecutionDescriptor, MediaExecutionKind, MediaKindDescriptor,
-    MediaModelDescriptor, MediaOperation, MediaParameterSpec, MediaParameterWireType, Modality,
-    ModelCompat, ModelCost, ModelDescriptor, ModelDiscoveryConfig, ModelDiscoveryFormat,
-    OpenAiCompletionsCompat, OpenAiResponsesCompat, ProviderDescriptor, ProviderMediaDescriptor,
-    ProviderSource, ProviderSourceKind, RegisteredProvider, ResponsesPath, ThinkingFormat,
+    MediaModelDescriptor, MediaOperation, Modality, ModelCompat, ModelCost, ModelDescriptor,
+    ModelDiscoveryConfig, ModelDiscoveryFormat, OpenAiCompletionsCompat, OpenAiResponsesCompat,
+    ProviderDescriptor, ProviderMediaDescriptor, ProviderSource, ProviderSourceKind,
+    RegisteredProvider, ResponsesPath, ThinkingFormat,
 };
 pub use registry::{canonical_provider_id, ProviderRegistry};
