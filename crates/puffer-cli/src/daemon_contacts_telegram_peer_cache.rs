@@ -11,7 +11,17 @@ use puffer_subscriber_telegram_user::{
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::time::Duration;
 use tracing::warn;
+
+const TELEGRAM_PEER_CACHE_HYDRATE_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum TelegramPeerCacheHydrationMode {
+    IfNeeded,
+    Force,
+}
 
 pub(super) fn collect_telegram_peer_cache_candidates(
     account_dir: &Path,
@@ -34,13 +44,24 @@ pub(super) fn collect_telegram_peer_cache_candidates(
 }
 
 pub(super) fn hydrate_telegram_peer_cache_if_needed(paths: &ConfigPaths, account_dir: &Path) {
-    if !telegram_peer_cache_needs_hydration(account_dir) {
+    hydrate_telegram_peer_cache(paths, account_dir, TelegramPeerCacheHydrationMode::IfNeeded);
+}
+
+pub(super) fn hydrate_telegram_peer_cache(
+    paths: &ConfigPaths,
+    account_dir: &Path,
+    mode: TelegramPeerCacheHydrationMode,
+) {
+    if mode == TelegramPeerCacheHydrationMode::IfNeeded
+        && !telegram_peer_cache_needs_hydration(account_dir)
+    {
         return;
     }
     if let Err(error) = hydrate_telegram_peer_cache_from_session_blocking(paths, account_dir) {
         warn!(
             account = %account_dir.display(),
             %error,
+            force = mode == TelegramPeerCacheHydrationMode::Force,
             "failed to hydrate Telegram peer cache for contacts list"
         );
     }
@@ -67,20 +88,48 @@ fn hydrate_telegram_peer_cache_from_session_blocking(
     paths: &ConfigPaths,
     account_dir: &Path,
 ) -> Result<()> {
-    let paths = paths.clone();
-    let account_dir = account_dir.to_path_buf();
+    #[cfg(test)]
+    if let Some(result) = TEST_HYDRATOR.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|hydrator| hydrator(paths, account_dir))
+    }) {
+        return result;
+    }
+
+    let (sender, receiver) = mpsc::channel();
+    let worker_paths = paths.clone();
+    let worker_account_dir = account_dir.to_path_buf();
     std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let result = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .context("build Telegram contact hydrate runtime")?;
-        runtime.block_on(hydrate_telegram_peer_cache_from_session(
-            &paths,
-            &account_dir,
-        ))
-    })
-    .join()
-    .map_err(|_| anyhow::anyhow!("Telegram contact hydrate thread panicked"))?
+            .context("build Telegram contact hydrate runtime")
+            .and_then(|runtime| {
+                runtime.block_on(hydrate_telegram_peer_cache_from_session(
+                    &worker_paths,
+                    &worker_account_dir,
+                ))
+            });
+        let _ = sender.send(result);
+    });
+    wait_for_telegram_peer_cache_hydrate_result(receiver, TELEGRAM_PEER_CACHE_HYDRATE_TIMEOUT)
+}
+
+fn wait_for_telegram_peer_cache_hydrate_result(
+    receiver: Receiver<Result<()>>,
+    timeout: Duration,
+) -> Result<()> {
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => anyhow::bail!(
+            "Telegram contact hydrate timed out after {}s",
+            timeout.as_secs_f32()
+        ),
+        Err(RecvTimeoutError::Disconnected) => {
+            anyhow::bail!("Telegram contact hydrate thread ended without a result")
+        }
+    }
 }
 
 async fn hydrate_telegram_peer_cache_from_session(
@@ -135,5 +184,58 @@ fn telegram_skill_env(paths: &ConfigPaths, account_dir: &Path) -> SkillEnv {
         session_path: account_dir.join("telegram.session"),
         topic,
         workspace_config_dir: Some(paths.workspace_config_dir.clone()),
+    }
+}
+
+#[cfg(test)]
+type TestHydrator = Box<dyn Fn(&ConfigPaths, &Path) -> Result<()> + 'static>;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_HYDRATOR: std::cell::RefCell<Option<TestHydrator>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+struct TestTelegramPeerCacheHydratorGuard;
+
+#[cfg(test)]
+impl Drop for TestTelegramPeerCacheHydratorGuard {
+    fn drop(&mut self) {
+        TEST_HYDRATOR.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+pub(super) fn install_test_telegram_peer_cache_hydrator<F>(hydrator: F) -> impl Drop
+where
+    F: Fn(&ConfigPaths, &Path) -> Result<()> + 'static,
+{
+    TEST_HYDRATOR.with(|cell| {
+        *cell.borrow_mut() = Some(Box::new(hydrator));
+    });
+    TestTelegramPeerCacheHydratorGuard
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn telegram_peer_cache_hydrate_wait_times_out() {
+        let (_sender, receiver) = mpsc::channel::<Result<()>>();
+
+        let error = wait_for_telegram_peer_cache_hydrate_result(receiver, Duration::from_millis(0))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("timed out"),
+            "unexpected timeout error: {error}"
+        );
     }
 }
