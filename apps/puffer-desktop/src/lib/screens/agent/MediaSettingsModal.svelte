@@ -248,7 +248,7 @@
 
   function rangeControl(axis: MediaCapabilityInfo["axes"][number]) {
     if ("range" in axis.control) return axis.control.range;
-    return { min: 0, max: 0, step: 1, default: 0 };
+    return null;
   }
 
   function boolChecked(axisId: string): boolean {
@@ -526,23 +526,29 @@
                 </label>
               {:else if controlKind === "enum"}
                 {@render readOnlyField(axis.label, axisReadOnlyValue(axis.id) || axisDefaultValue(axis) || "")}
-              {:else if controlKind === "range" && rangeControl(axis)}
+              {:else if controlKind === "range"}
                 {@const range = rangeControl(axis)}
-                <label class="pf-media-field">
-                  <span class="pf-field-label">{axis.label}</span>
-                  <input
-                    class="sc-input"
-                    type="number"
-                    min={range.min}
-                    max={range.max}
-                    step={range.step || "any"}
-                    value={axisValue(axis.id)}
-                    onchange={(event) => {
-                      const value = event.currentTarget.value;
-                      setAxisValue(axis.id, selectionIsValid(axis, value) ? value : axisDefaultValue(axis) || "");
-                    }}
-                  />
-                </label>
+                {#if range}
+                  <label class="pf-media-field">
+                    <span class="pf-field-label">{axis.label}</span>
+                    <input
+                      class="sc-input"
+                      type="number"
+                      min={range.min}
+                      max={range.max}
+                      step={range.step || "any"}
+                      value={axisValue(axis.id)}
+                      onchange={(event) => {
+                        const value = event.currentTarget.value;
+                        setAxisValue(axis.id, selectionIsValid(axis, value) ? value : axisDefaultValue(axis) || "");
+                      }}
+                    />
+                  </label>
+                {:else}
+                  <p class="pf-media-state" data-warning="true" role="alert">
+                    Capability axis {axis.id || "(missing id)"} is malformed.
+                  </p>
+                {/if}
               {:else if controlKind === "bool"}
                 <label class="pf-media-field pf-media-checkbox-field">
                   <span class="pf-field-label">{axis.label}</span>

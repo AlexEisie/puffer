@@ -3,6 +3,7 @@ import {
   axisControlKind,
   axisDefaultValue,
   axisOptions,
+  capabilityAxesError,
   normalizeAxisSelections,
   selectionIsValid
 } from "./mediaAxisControls";
@@ -81,4 +82,23 @@ test("malformed controls are invalid so the modal can block saving", () => {
   expect(axisDefaultValue(malformedAxis)).toBeNull();
   expect(axisOptions(malformedAxis)).toEqual([]);
   expect(selectionIsValid(malformedAxis, "720p")).toBe(false);
+});
+
+test("malformed axis collections do not crash normalization", () => {
+  const badDefaultRangeAxis = {
+    id: "duration_seconds",
+    label: "Duration",
+    role: "param",
+    control: { range: { min: 4, max: 12, step: 2, default: 5 } },
+    requestField: "seconds",
+    wireType: "number"
+  };
+
+  expect(capabilityAxesError(null)).toBe("Capability axes are malformed.");
+  expect(normalizeAxisSelections(null, { aspect_ratio: "16:9" })).toEqual({});
+  expect(capabilityAxesError([null])).toBe("Capability axis (missing id) is malformed.");
+  expect(capabilityAxesError([badDefaultRangeAxis])).toBe(
+    "Capability axis duration_seconds is malformed."
+  );
+  expect(normalizeAxisSelections([badDefaultRangeAxis], { duration_seconds: "8" })).toEqual({});
 });

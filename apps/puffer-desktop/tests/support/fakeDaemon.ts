@@ -258,6 +258,7 @@ function normalizeMediaSelection(value: unknown): FakeMediaSelection | null {
     record.modelId !== undefined ||
     record.adapter !== undefined ||
     record.parameters !== undefined ||
+    record.defaults !== undefined ||
     !record.selections ||
     typeof record.selections !== "object" ||
     Array.isArray(record.selections)
