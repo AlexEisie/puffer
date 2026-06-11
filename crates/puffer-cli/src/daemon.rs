@@ -6407,17 +6407,10 @@ media:
         display_name: Video Model
         operations:
           - generate
-        parameters:
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["16:9", "9:16"]
-            default: "16:9"
-            request_field: aspect_ratio
-          - name: duration_seconds
-            label: Duration
-            values: ["5", "8"]
-            default: "5"
-            request_field: duration
+        axes:
+          - { id: aspect_ratio, label: Aspect ratio, role: param, control: !enum { values: ["16:9", "9:16"], default: "16:9" }, request_field: aspect_ratio }
+          - { id: duration_seconds, label: Duration, role: param, control: !enum { values: ["5", "8"], default: "5" }, request_field: duration }
+        variants: { model_id: owner/model-version }
 models: []
 "#,
         )
@@ -6447,22 +6440,11 @@ media:
         display_name: Seedance 2.0
         operations:
           - generate
-        parameters:
-          - name: duration_seconds
-            label: Duration
-            values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
-            default: "5"
-            request_field: seconds
-          - name: resolution
-            label: Resolution
-            values: ["480p", "720p", "1080p"]
-            default: "720p"
-            request_field: metadata.resolution
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
-            default: "16:9"
-            request_field: metadata.ratio
+        axes:
+          - { id: duration_seconds, label: Duration, role: param, control: !enum { values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"], default: "5" }, request_field: seconds }
+          - { id: resolution, label: Resolution, role: param, control: !enum { values: ["480p", "720p", "1080p"], default: "720p" }, request_field: metadata.resolution }
+          - { id: aspect_ratio, label: Aspect ratio, role: param, control: !enum { values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"], default: "16:9" }, request_field: metadata.ratio }
+        variants: { model_id: doubao-seedance-2-0-720p }
 models: []
 "#,
         )
@@ -7047,7 +7029,7 @@ models: []
         let (_home_guard, _temp, state) = daemon_state_with_replicate_video_capability();
         {
             let mut config = state.config.lock().unwrap();
-            config.media.video = Some(MediaGenerationConfig { provider_id: "replicate".to_string(), logical_model_id: "owner/model-version".to_string(), selections: BTreeMap::from([
+            config.media.video = Some(MediaGenerationConfig { provider_id: "replicate".to_string(), logical_model_id: "owner/unknown-model".to_string(), selections: BTreeMap::from([
                     ("aspect_ratio".to_string(), "16:9".to_string()),
                     ("duration_seconds".to_string(), "5".to_string()),
                 ]) });
@@ -7057,7 +7039,7 @@ models: []
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("selected video model unavailable"));
+        assert!(error.contains("unknown media model"), "{error}");
     }
 
     #[test]
@@ -7089,9 +7071,9 @@ models: []
             handle_generate_media(&state, &json!({"kind": "image", "prompt": "draw an icon"}))
                 .expect_err("stale config should fail");
 
-        assert_eq!(
-            error.to_string(),
-            "selected image model unavailable: openai/stale-image via images_json"
+        assert!(
+            error.to_string().contains("stale-image"),
+            "{error}"
         );
     }
 
@@ -7701,10 +7683,8 @@ models: []
                 "media": {
                     "image": {
                         "providerId": "openai",
-                        "modelId": "gpt-image-1",
-                        "operation": "generate",
-                        "adapter": "images_json",
-                        "parameters": {
+                        "logicalModelId": "gpt-image-1",
+                        "selections": {
                             "size": "1536x1024",
                             "quality": "high",
                             "output_format": "webp"
@@ -7721,10 +7701,8 @@ models: []
             json!({
                 "image": {
                     "providerId": "openai",
-                    "modelId": "gpt-image-1",
-                    "operation": "generate",
-                    "adapter": "images_json",
-                    "parameters": {
+                    "logicalModelId": "gpt-image-1",
+                    "selections": {
                         "size": "1536x1024",
                         "quality": "high",
                         "output_format": "webp"
