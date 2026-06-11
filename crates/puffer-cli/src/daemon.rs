@@ -38,17 +38,20 @@ use puffer_config::{
     MediaGenerationConfig, ProxyConfig, ProxyEndpoint, ProxyScheme, PufferConfig,
 };
 use puffer_core::{
-    command_surface, default_effort_level, discover_exact_media_capabilities, dispatch_command,
-    enter_plan_mode, execute_connect_flow, execute_user_turn_streaming_with_permissions_and_cancel,
-    generate_exact_media_with_cache, generated_video_access_metadata_by_artifact,
-    list_exact_media_capabilities_with_cache, provider_preference_family,
-    read_generated_media_preview_by_artifact, supported_effort_levels,
-    with_user_question_prompt_handler, AppState, BrowserPermissionPromptActionSet,
-    BrowserPermissionPromptSource, BrowserPermissionPromptTargetClass, CancelToken,
-    ExactMediaDiscoveryCache, ExactMediaGenerationRequest, GeneratedVideoAccessMetadataResult,
-    MediaCapabilityView, MessageRole, ModelPreferenceFamily, PermissionPromptAction,
-    PermissionPromptRequest, ToolCallRequest, ToolInvocation, TurnStreamEvent,
-    UserQuestionPromptRequest, UserQuestionPromptResponse,
+    command_surface, default_effort_level, dispatch_command, enter_plan_mode, execute_connect_flow,
+    execute_user_turn_streaming_with_permissions_and_cancel, provider_preference_family,
+    supported_effort_levels, with_user_question_prompt_handler, AppState,
+    BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
+    BrowserPermissionPromptTargetClass, CancelToken, MessageRole, ModelPreferenceFamily,
+    PermissionPromptAction, PermissionPromptRequest, ToolCallRequest, ToolInvocation,
+    TurnStreamEvent, UserQuestionPromptRequest, UserQuestionPromptResponse,
+};
+use puffer_media::{
+    discover_exact_media_capabilities, generate_exact_media_with_cache,
+    generated_video_access_metadata_by_artifact, list_exact_media_capabilities_with_cache,
+    read_generated_media_preview_by_artifact, ExactMediaDiscoveryCache,
+    ExactMediaGenerationRequest, GeneratedVideoAccessMetadata, GeneratedVideoAccessMetadataResult,
+    MediaCapabilityView,
 };
 use puffer_provider_openai::{
     build_realtime_client_secret_request,
@@ -517,7 +520,7 @@ impl DaemonState {
 
     fn insert_generated_video_ticket(
         &self,
-        metadata: puffer_core::GeneratedVideoAccessMetadata,
+        metadata: GeneratedVideoAccessMetadata,
     ) -> (String, GeneratedVideoTicket) {
         let now_ms = daemon_now_ms();
         self.prune_expired_generated_video_tickets(now_ms);
@@ -2676,7 +2679,7 @@ fn handle_read_generated_media_preview(state: &DaemonState, params: &Value) -> R
 /// `create_file_media_access` (both mint tickets for the same range handler).
 fn generated_video_ticket_response(
     state: &DaemonState,
-    metadata: puffer_core::GeneratedVideoAccessMetadata,
+    metadata: GeneratedVideoAccessMetadata,
 ) -> Value {
     let (token, ticket) = state.insert_generated_video_ticket(metadata);
     json!({
@@ -2725,7 +2728,7 @@ fn handle_create_file_media_access(state: &DaemonState, params: &Value) -> Resul
     };
     Ok(generated_video_ticket_response(
         state,
-        puffer_core::GeneratedVideoAccessMetadata {
+        GeneratedVideoAccessMetadata {
             path: canonical,
             mime_type: mime_type.to_string(),
             byte_count: metadata.len(),

@@ -1278,11 +1278,16 @@ media:
       - id: exact-image-model
         operations:
           - generate
-        parameters:
-          - name: size
+        axes:
+          - id: size
             label: Size
-            values: []
-            default: 1024x1024
+            role: param
+            control: !enum
+              values:
+                - 1024x1024
+              default: 1024x1024
+        variants:
+          model_id: exact-image-model
 "#,
         )
         .unwrap();
@@ -1292,7 +1297,7 @@ media:
         let message = format!("{error:#}");
 
         assert!(message.contains("invalid media descriptor for provider `bad-media`"));
-        assert!(message.contains("parameters[0].values"));
+        assert!(message.contains("param axis size needs a request_field"));
     }
 
     #[test]
@@ -1368,7 +1373,7 @@ media:
     }
 
     #[test]
-    fn bundled_video_generation_internal_tool_is_text_to_video_only() {
+    fn bundled_video_generation_internal_tool_accepts_prompt_and_remote_image_references() {
         let temp = tempdir().unwrap();
         let root = temp.path().join("workspace");
         fs::create_dir_all(&root).unwrap();
@@ -1390,8 +1395,13 @@ media:
             tool.value.aliases,
             vec!["video-generation".to_string(), "videogen".to_string()]
         );
-        assert!(tool.value.description.contains("text-to-video"));
-        assert!(!tool.value.description.contains("image-to-video"));
+        assert!(tool.value.description.contains("Generate one video clip"));
+        assert!(tool
+            .value
+            .description
+            .contains("public https:// URLs or approved asset:// URLs"));
+        assert!(tool.value.description.contains("Local image"));
+        assert!(tool.value.description.contains("paths are not accepted"));
 
         let schema = tool.value.input_schema.as_ref().expect("input schema");
         let required = schema
@@ -1407,6 +1417,14 @@ media:
             .get("properties")
             .and_then(serde_json::Value::as_object)
             .expect("properties object");
+        let image_references = properties
+            .get("imageReferences")
+            .expect("imageReferences property");
+        let image_references_description = image_references
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .expect("imageReferences description");
+        assert!(image_references_description.contains("base64/data URLs are not supported"));
         assert!(!properties.contains_key("image"));
         assert!(!properties.contains_key("referenceImage"));
         assert!(!properties.contains_key("firstFrame"));

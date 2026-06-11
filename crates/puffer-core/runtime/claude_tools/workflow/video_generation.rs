@@ -1,10 +1,10 @@
 use crate::AppState;
-use crate::{
+use anyhow::{bail, Context, Result};
+use puffer_config::MediaGenerationConfig;
+use puffer_media::{
     generate_exact_media_with_cache, ExactMediaDiscoveryCache, ExactMediaGenerationRequest,
     ExactMediaGenerationResult,
 };
-use anyhow::{bail, Context, Result};
-use puffer_config::MediaGenerationConfig;
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
@@ -528,7 +528,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let registry = ProviderRegistry::new();
         let auth_store = AuthStore::default();
-        let discovery_cache = crate::ExactMediaDiscoveryCache::empty();
+        let discovery_cache = ExactMediaDiscoveryCache::empty();
         let mut state = test_state(None, dir.path());
 
         let error = execute_video_generation(
@@ -714,7 +714,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let registry = video_registry(base_url);
         let auth_store = auth_store();
-        let discovery_cache = crate::ExactMediaDiscoveryCache::empty();
+        let discovery_cache = ExactMediaDiscoveryCache::empty();
         let mut state = test_state(Some(video_settings()), dir.path());
 
         let output = execute_video_generation(

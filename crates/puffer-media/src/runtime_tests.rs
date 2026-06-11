@@ -2,15 +2,56 @@ use super::*;
 use indexmap::IndexMap;
 use puffer_provider_registry::{
     AuthMode, AuthStore, Axis, AxisRole, ControlKind, MediaExecutionDescriptor, MediaExecutionKind,
-    MediaKindDescriptor, MediaModelDescriptor, MediaOperation, ModelDescriptor, ProviderDescriptor,
-    ProviderMediaDescriptor, ProviderRegistry, Variant, Variants, WireType,
+    MediaKindDescriptor, MediaModelDescriptor, MediaOperation, ModelDescriptor,
+    ModelDiscoveryConfig, ProviderDescriptor, ProviderMediaDescriptor, ProviderRegistry, Variant,
+    Variants, WireType,
 };
-use puffer_resources::ProviderPack;
+use serde::Deserialize;
 use serde_json::json;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 use tempfile::tempdir;
+
+#[derive(Debug, Deserialize)]
+struct ProviderPack {
+    id: String,
+    display_name: String,
+    base_url: String,
+    default_api: String,
+    #[serde(default)]
+    auth_modes: Vec<AuthMode>,
+    #[serde(default)]
+    headers: IndexMap<String, String>,
+    #[serde(default)]
+    query_params: IndexMap<String, String>,
+    #[serde(default)]
+    chat_completions_path: Option<String>,
+    #[serde(default)]
+    discovery: Option<ModelDiscoveryConfig>,
+    #[serde(default)]
+    media: Option<ProviderMediaDescriptor>,
+    #[serde(default)]
+    models: Vec<ModelDescriptor>,
+}
+
+impl ProviderPack {
+    fn into_descriptor(self) -> ProviderDescriptor {
+        ProviderDescriptor {
+            id: self.id,
+            display_name: self.display_name,
+            base_url: self.base_url,
+            default_api: self.default_api,
+            auth_modes: self.auth_modes,
+            headers: self.headers,
+            query_params: self.query_params,
+            chat_completions_path: self.chat_completions_path,
+            discovery: self.discovery,
+            media: self.media,
+            models: self.models,
+        }
+    }
+}
 
 fn minimax_registry(base_url: String) -> ProviderRegistry {
     let mut registry = ProviderRegistry::new();
@@ -233,8 +274,8 @@ fn replicate_video_registry() -> ProviderRegistry {
 
 fn discovered_chat_image_cache() -> ExactMediaDiscoveryCache {
     ExactMediaDiscoveryCache::from_inner_for_test(
-        crate::runtime::media::resolver::MediaDiscoveryCache {
-            image_models: vec![crate::runtime::media::resolver::CachedImageMediaModel {
+        crate::media::resolver::MediaDiscoveryCache {
+            image_models: vec![crate::media::resolver::CachedImageMediaModel {
                 provider_id: "openrouter".to_string(),
                 model: MediaModelDescriptor {
                     id: "openrouter/image-chat".to_string(),
@@ -294,14 +335,14 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> String {
 
 #[test]
 fn exact_image_generation_rejects_invalid_count() {
-    assert!(validate_image_count(1).is_ok());
-    assert!(validate_image_count(4).is_ok());
+    assert!(validate_image_generation_count(1).is_ok());
+    assert!(validate_image_generation_count(4).is_ok());
     assert_eq!(
-        validate_image_count(0).unwrap_err().to_string(),
+        validate_image_generation_count(0).unwrap_err().to_string(),
         "image generation count must be between 1 and 4"
     );
     assert_eq!(
-        validate_image_count(5).unwrap_err().to_string(),
+        validate_image_generation_count(5).unwrap_err().to_string(),
         "image generation count must be between 1 and 4"
     );
 }
@@ -320,7 +361,6 @@ fn exact_generation_result_returns_artifacts_in_order() {
         provider_job_id: None,
         remote_status: None,
         remote_get_url: None,
-        remote_cancel_url: None,
         artifact_ids: vec!["artifact-1".to_string(), "artifact-2".to_string()],
         requested_count: 2,
         error: None,
@@ -543,11 +583,11 @@ fn list_video_capabilities_exposes_multiple_static_seedance_models() {
     registry.register_many(vec![
         bundled_provider(
             "byteplus",
-            include_str!("../../resources/providers/byteplus.yaml"),
+            include_str!("../../../resources/providers/byteplus.yaml"),
         ),
         bundled_provider(
             "relaydance",
-            include_str!("../../resources/providers/relaydance.yaml"),
+            include_str!("../../../resources/providers/relaydance.yaml"),
         ),
     ]);
     let mut auth = AuthStore::default();
@@ -673,7 +713,7 @@ fn exact_media_generation_rejects_unknown_video_model_before_http() {
 #[test]
 fn exact_media_discovery_cache_uses_ttl_boundary() {
     let cache = ExactMediaDiscoveryCache::from_inner_for_test(
-        crate::runtime::media::resolver::MediaDiscoveryCache::default(),
+        crate::media::resolver::MediaDiscoveryCache::default(),
         1_000,
     );
 

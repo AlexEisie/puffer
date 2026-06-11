@@ -12,7 +12,8 @@ use crate::permissions::{
     load_runtime_permission_context_with_inputs, RuntimePermissionInputs, ToolPermissionBehavior,
 };
 use crate::tool_names::canonical_tool_name;
-use crate::{AppState, ExactMediaDiscoveryCache};
+use crate::AppState;
+use puffer_media::ExactMediaDiscoveryCache;
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use puffer_tools::internal_permissions::{
@@ -435,7 +436,7 @@ mod tests {
         let providers = image_provider_registry();
         let mut auth_store = AuthStore::default();
         auth_store.set_api_key("exact-provider", "sk-test");
-        let discovery_cache = crate::ExactMediaDiscoveryCache::empty();
+        let discovery_cache = puffer_media::ExactMediaDiscoveryCache::empty();
         let mut state = media_state(dir.path());
 
         let response = execute_internal_tool_request(

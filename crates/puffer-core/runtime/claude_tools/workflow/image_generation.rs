@@ -1,10 +1,10 @@
-use crate::runtime::media::planner::validate_image_generation_count;
 use crate::AppState;
-use crate::{
-    generate_exact_image_with_cache, ExactImageGenerationRequest, ExactMediaDiscoveryCache,
-};
 use anyhow::{bail, Context, Result};
 use puffer_config::MediaGenerationConfig;
+use puffer_media::{
+    generate_exact_image_with_cache, validate_image_generation_count, ExactImageGenerationRequest,
+    ExactMediaDiscoveryCache,
+};
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -410,68 +410,9 @@ mod tests {
         registry
     }
 
-    fn chat_router_registry(base_url: String) -> ProviderRegistry {
-        let mut registry = ProviderRegistry::new();
-        registry.register(ProviderDescriptor {
-            id: "openrouter".to_string(),
-            display_name: "OpenRouter".to_string(),
-            base_url,
-            default_api: "openai-completions".to_string(),
-            auth_modes: vec![AuthMode::ApiKey],
-            headers: IndexMap::new(),
-            query_params: IndexMap::new(),
-            chat_completions_path: None,
-            discovery: None,
-            media: Some(ProviderMediaDescriptor {
-                image: Some(MediaKindDescriptor {
-                    discovery: None,
-                    execution: Some(MediaExecutionDescriptor {
-                        adapter: MediaExecutionKind::ChatImageOutput,
-                        base_url: None,
-                        path: "/chat/completions".to_string(),
-                        batch: puffer_provider_registry::MediaBatchDescriptor::default(),
-                    }),
-                    models: Vec::new(),
-                }),
-                video: None,
-            }),
-            models: Vec::<ModelDescriptor>::new(),
-        });
-        registry
-    }
-
-    fn discovered_chat_image_cache() -> ExactMediaDiscoveryCache {
-        ExactMediaDiscoveryCache::from_inner_for_test(
-            crate::runtime::media::resolver::MediaDiscoveryCache {
-                image_models: vec![crate::runtime::media::resolver::CachedImageMediaModel {
-                    provider_id: "openrouter".to_string(),
-                    model: MediaModelDescriptor {
-                        id: "openrouter/image-chat".to_string(),
-                        display_name: Some("Image Chat".to_string()),
-                        execution: None,
-                        operations: vec![MediaOperation::Generate],
-                        axes: Vec::new(),
-                        variants: Variants::Single(Variant {
-                            model_id: "openrouter/image-chat".to_string(),
-                            base_params: ::std::collections::BTreeMap::new(),
-                        }),
-                    },
-                    source: "provider_discovery".to_string(),
-                }],
-            },
-            1_000,
-        )
-    }
-
     fn auth_store() -> AuthStore {
         let mut auth_store = AuthStore::default();
         auth_store.set_api_key("exact-provider", "sk-test");
-        auth_store
-    }
-
-    fn openrouter_auth_store() -> AuthStore {
-        let mut auth_store = AuthStore::default();
-        auth_store.set_api_key("openrouter", "sk-test");
         auth_store
     }
 
@@ -517,31 +458,6 @@ mod tests {
             let request_text = read_http_request(&mut stream);
             let body = json!({
                 "data": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
-            })
-            .to_string();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream.write_all(response.as_bytes()).expect("response");
-            request_text
-        });
-        (format!("http://{address}"), handle)
-    }
-
-    fn spawn_chat_image_generation_server() -> (String, thread::JoinHandle<String>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-        let address = listener.local_addr().expect("address");
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("request");
-            let request_text = read_http_request(&mut stream);
-            let body = json!({
-                "choices": [{
-                    "message": {
-                        "images": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
-                    }
-                }]
             })
             .to_string();
             let response = format!(

@@ -1,15 +1,12 @@
-use crate::runtime::media::chat_image_output::{
-    ChatImageOutputAdapter, ChatImageOutputGenerationRequest,
-};
-use crate::runtime::media::discovery::TrustedImageDiscoveryClient;
-use crate::runtime::media::images_json::{ImagesJsonAdapter, ImagesJsonGenerationRequest};
-use crate::runtime::media::minimax_image::{MinimaxImageAdapter, MinimaxImageGenerationRequest};
-use crate::runtime::media::resolver::{
+use crate::media::chat_image_output::{ChatImageOutputAdapter, ChatImageOutputGenerationRequest};
+use crate::media::discovery::TrustedImageDiscoveryClient;
+use crate::media::images_json::{ImagesJsonAdapter, ImagesJsonGenerationRequest};
+use crate::media::minimax_image::{MinimaxImageAdapter, MinimaxImageGenerationRequest};
+use crate::media::planner::validate_image_generation_count;
+use crate::media::resolver::{
     resolve_media_capabilities, resolve_media_request, MediaDiscoveryCache,
 };
-use crate::runtime::media::{
-    MediaArtifact, MediaGenerationService, MediaJob, MediaJobStatus, MediaKind,
-};
+use crate::media::{MediaArtifact, MediaGenerationService, MediaJob, MediaJobStatus, MediaKind};
 use anyhow::{bail, Context, Result};
 use puffer_provider_registry::{AuthStore, Axis, MediaOperation, ProviderRegistry};
 use serde::{Deserialize, Serialize};
@@ -17,10 +14,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[path = "media_runtime_artifacts.rs"]
-mod media_runtime_artifacts;
-use media_runtime_artifacts::media_artifact_remote_source_url;
-pub use media_runtime_artifacts::{
+use crate::artifacts::media_artifact_remote_source_url;
+pub use crate::artifacts::{
     generated_media_attachment_metadata, generated_media_attachment_metadata_with_fallback,
     generated_media_timeline_attachments, generated_video_access_metadata_by_artifact,
     read_generated_media_preview_by_artifact, GeneratedMediaAttachmentMetadata,
@@ -28,15 +23,11 @@ pub use media_runtime_artifacts::{
     GeneratedMediaTimelineAttachmentKind, GeneratedVideoAccessMetadata,
     GeneratedVideoAccessMetadataResult,
 };
-#[path = "media_runtime_internal_tools.rs"]
-mod media_runtime_internal_tools;
-pub use media_runtime_internal_tools::{
+pub use crate::internal_tools::{
     generated_media_internal_bash_output, generated_media_internal_command_kind,
     GeneratedMediaInternalCommandKind,
 };
-#[path = "media_runtime_video.rs"]
-mod media_runtime_video;
-use media_runtime_video::generate_exact_video_from_media_request;
+use crate::video::generate_exact_video_from_media_request;
 
 /// Default TTL for trusted media discovery results.
 pub const MEDIA_DISCOVERY_TTL_MS: u64 = 5 * 60 * 1_000;
@@ -131,7 +122,7 @@ pub struct ExactMediaGenerationResult {
 /// Carries trusted media discovery results used by capability resolution.
 #[derive(Debug, Clone)]
 pub struct ExactMediaDiscoveryCache {
-    inner: MediaDiscoveryCache,
+    pub(crate) inner: MediaDiscoveryCache,
     cached_at_ms: u64,
 }
 
@@ -215,11 +206,10 @@ pub fn generate_exact_image_with_cache(
     registry: &ProviderRegistry,
     auth_store: &AuthStore,
     workspace_root: &Path,
-    mut request: ExactImageGenerationRequest,
+    request: ExactImageGenerationRequest,
     discovery_cache: &ExactMediaDiscoveryCache,
 ) -> Result<ExactImageGenerationResult> {
-    let count = validate_image_count(request.count)?;
-    request.count = count;
+    validate_image_generation_count(request.count)?;
     // `request.model_id` is the logical model id and `request.parameters` are
     // the user's axis selections; resolve them into the concrete upstream model
     // id, adapter, and request-field-keyed parameters before dispatch.
@@ -287,14 +277,6 @@ pub fn generate_exact_image_with_cache(
     }
 }
 
-fn validate_image_count(count: u8) -> Result<u8> {
-    if (1..=4).contains(&count) {
-        Ok(count)
-    } else {
-        bail!("image generation count must be between 1 and 4")
-    }
-}
-
 /// Generates exact media using static descriptors plus trusted discovery cache entries.
 pub fn generate_exact_media_with_cache(
     registry: &ProviderRegistry,
@@ -354,7 +336,7 @@ fn generate_exact_image_from_media_request(
     })
 }
 
-fn parse_media_operation(operation: &str) -> Result<MediaOperation> {
+pub(crate) fn parse_media_operation(operation: &str) -> Result<MediaOperation> {
     match operation.trim() {
         "generate" => Ok(MediaOperation::Generate),
         operation => bail!("unsupported media operation `{operation}`"),
@@ -396,7 +378,7 @@ fn exact_generation_result(
     }
 }
 
-fn exact_media_generation_result(
+pub(crate) fn exact_media_generation_result(
     job: MediaJob,
     artifacts: Vec<MediaArtifact>,
 ) -> ExactMediaGenerationResult {
@@ -430,7 +412,7 @@ fn exact_generated_artifacts(artifacts: Vec<MediaArtifact>) -> Vec<ExactGenerate
         .collect()
 }
 
-fn load_media_job_artifacts(
+pub(crate) fn load_media_job_artifacts(
     service: &MediaGenerationService,
     job: &MediaJob,
 ) -> Result<Vec<MediaArtifact>> {
@@ -444,8 +426,8 @@ fn load_media_job_artifacts(
         .collect()
 }
 
-impl From<crate::runtime::media::capabilities::MediaCapability> for MediaCapabilityView {
-    fn from(capability: crate::runtime::media::capabilities::MediaCapability) -> Self {
+impl From<crate::media::capabilities::MediaCapability> for MediaCapabilityView {
+    fn from(capability: crate::media::capabilities::MediaCapability) -> Self {
         Self {
             provider_id: capability.provider_id,
             provider_display_name: capability.provider_display_name,
@@ -489,7 +471,7 @@ fn media_job_status_name(status: MediaJobStatus) -> &'static str {
     }
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
@@ -497,9 +479,9 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(test)]
-#[path = "media_runtime_generated_preview_tests.rs"]
+#[path = "generated_preview_tests.rs"]
 mod generated_preview_tests;
 
 #[cfg(test)]
-#[path = "media_runtime_tests.rs"]
+#[path = "runtime_tests.rs"]
 mod tests;

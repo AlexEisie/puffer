@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use puffer_config::{
     load_config, save_user_config, ConfigPaths, MediaGenerationConfig, PufferConfig,
 };
-use puffer_core::{generated_media_timeline_attachments, GeneratedMediaTimelineAttachment};
+use puffer_media::{generated_media_timeline_attachments, GeneratedMediaTimelineAttachment};
 use puffer_provider_registry::{
     detect_import_candidates, AuthMode, AuthStore, ExternalImportCandidate, ExternalImportFamily,
     ExternalImportSource, ProviderRegistry, StoredCredential,

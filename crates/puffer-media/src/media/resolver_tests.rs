@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::media::MediaKind;
+use crate::media::MediaKind;
 use puffer_provider_registry::{AuthStore, MediaOperation, ProviderDescriptor, ProviderRegistry};
 
 const RELAYDANCE_YAML: &str = r#"

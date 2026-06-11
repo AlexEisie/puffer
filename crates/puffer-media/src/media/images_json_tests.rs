@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::media::MediaGenerationService;
+use crate::media::MediaGenerationService;
 use indexmap::IndexMap;
 use puffer_provider_registry::{
     AuthMode, AuthStore, Axis, AxisRole, ControlKind, MediaBatchDescriptor, MediaBatchMode,
@@ -208,7 +208,7 @@ fn spawn_repeated_image_server_with_body(
     (format!("http://{addr}"), handle)
 }
 
-fn load_single_saved_job(root: &std::path::Path) -> crate::runtime::media::MediaJob {
+fn load_single_saved_job(root: &std::path::Path) -> crate::media::MediaJob {
     let jobs_dir = root.join(".puffer").join("media").join("jobs");
     let paths = std::fs::read_dir(&jobs_dir)
         .expect("jobs dir")
@@ -342,10 +342,7 @@ fn images_json_failed_later_per_image_call_preserves_first_artifact() {
 
     assert_eq!(server.join().unwrap().len(), 2);
     assert_eq!(result.job.requested_count, 2);
-    assert_eq!(
-        result.job.status,
-        crate::runtime::media::MediaJobStatus::Succeeded
-    );
+    assert_eq!(result.job.status, crate::media::MediaJobStatus::Succeeded);
     assert_eq!(result.job.produced_count(), 1);
     assert_eq!(result.artifacts.len(), 1);
     assert_eq!(std::fs::read(&result.artifacts[0].path).unwrap(), b"image");
@@ -438,10 +435,7 @@ fn images_json_exact_batch_underproduction_returns_partial_success() {
     let request_text = server.join().unwrap();
     let saved_job = load_single_saved_job(service_dir.path());
     assert!(request_text.contains("\"n\":2"));
-    assert_eq!(
-        saved_job.status,
-        crate::runtime::media::MediaJobStatus::Succeeded
-    );
+    assert_eq!(saved_job.status, crate::media::MediaJobStatus::Succeeded);
     assert_eq!(saved_job.requested_count, 2);
     assert_eq!(saved_job.artifact_ids.len(), 1);
     assert_eq!(result.artifacts.len(), 1);
@@ -599,10 +593,7 @@ fn images_json_zero_outputs_fails_without_artifacts() {
     let _request_text = server.join().unwrap();
     let saved_job = load_single_saved_job(service_dir.path());
     assert_eq!(error.to_string(), "image generation produced no images");
-    assert_eq!(
-        saved_job.status,
-        crate::runtime::media::MediaJobStatus::Failed
-    );
+    assert_eq!(saved_job.status, crate::media::MediaJobStatus::Failed);
     assert!(saved_job.artifact_ids.is_empty());
     assert!(!service_dir.path().join(".puffer/media/images").exists());
 }
@@ -766,10 +757,7 @@ fn url_response_is_downloaded_before_success() {
         std::fs::read(&result.artifacts[0].path).unwrap(),
         b"downloaded!!"
     );
-    assert_eq!(
-        result.job.status,
-        crate::runtime::media::MediaJobStatus::Succeeded
-    );
+    assert_eq!(result.job.status, crate::media::MediaJobStatus::Succeeded);
     assert_eq!(
         result.artifacts[0].metadata["revisedPrompt"],
         "draw a more precise icon"
@@ -860,7 +848,7 @@ fn unsupported_request_field_in_parameters_fails_before_http_request() {
 fn resolver_rejects_unsupported_image_value() {
     // The resolver validates axis values for a logical image selection.
     let registry = registry_with_provider("http://127.0.0.1:9".to_string());
-    let selection = crate::media_runtime::ExactImageGenerationRequest {
+    let selection = crate::runtime::ExactImageGenerationRequest {
         provider_id: "exact-provider".to_string(),
         model_id: "exact-image-model".to_string(),
         prompt: "draw a precise icon".to_string(),
@@ -868,11 +856,11 @@ fn resolver_rejects_unsupported_image_value() {
         count: 1,
     };
 
-    let error = crate::media_runtime::resolved_exact_image_parameters_with_cache(
+    let error = crate::runtime::resolved_exact_image_parameters_with_cache(
         &registry,
         &auth_store(),
         &selection,
-        &crate::media_runtime::ExactMediaDiscoveryCache::empty(),
+        &crate::runtime::ExactMediaDiscoveryCache::empty(),
     )
     .expect_err("unsupported size value should fail");
 

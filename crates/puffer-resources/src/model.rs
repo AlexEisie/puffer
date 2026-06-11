@@ -558,6 +558,25 @@ pub struct LoadedResources {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use puffer_provider_registry::{ControlKind, MediaModelDescriptor, WireType};
+
+    fn axis<'a>(
+        model: &'a MediaModelDescriptor,
+        axis_id: &str,
+    ) -> &'a puffer_provider_registry::Axis {
+        model
+            .axes
+            .iter()
+            .find(|axis| axis.id == axis_id)
+            .unwrap_or_else(|| panic!("{} should declare axis {axis_id}", model.id))
+    }
+
+    fn enum_axis_values<'a>(model: &'a MediaModelDescriptor, axis_id: &str) -> &'a [String] {
+        match &axis(model, axis_id).control {
+            ControlKind::Enum { values, .. } => values,
+            other => panic!("{} axis {axis_id} should be enum, got {other:?}", model.id),
+        }
+    }
 
     /// Confirms the bundled `zhipu.yaml` parses as a `ProviderPack`
     /// and that `chat_completions_path` flows from yaml through to
@@ -634,29 +653,18 @@ mod tests {
                 && model
                     .operations
                     .contains(&puffer_provider_registry::MediaOperation::Generate)
-                && model.parameters.iter().any(|parameter| {
-                    parameter.name == "size" && parameter.values.contains(&"1024x1024".to_string())
-                })
-                && model.parameters.iter().any(|parameter| {
-                    parameter.name == "quality" && parameter.values.contains(&"auto".to_string())
-                })
-                && model.parameters.iter().any(|parameter| {
-                    parameter.name == "output_format"
-                        && parameter.values.contains(&"png".to_string())
-                })
+                && enum_axis_values(model, "size").contains(&"1024x1024".to_string())
+                && enum_axis_values(model, "quality").contains(&"auto".to_string())
+                && enum_axis_values(model, "output_format").contains(&"png".to_string())
         }));
         let gpt_image_2 = image
             .models
             .iter()
             .find(|model| model.id == "gpt-image-2")
             .expect("OpenAI should include the current GPT Image 2 model");
-        let size = gpt_image_2
-            .parameters
-            .iter()
-            .find(|parameter| parameter.name == "size")
-            .expect("gpt-image-2 size parameter");
-        assert!(size.values.contains(&"2048x2048".to_string()));
-        assert!(size.values.contains(&"3840x2160".to_string()));
+        let size_values = enum_axis_values(gpt_image_2, "size");
+        assert!(size_values.contains(&"2048x2048".to_string()));
+        assert!(size_values.contains(&"3840x2160".to_string()));
         assert!(!image.models.iter().any(|model| model.id == "auto"));
     }
 
@@ -782,24 +790,17 @@ mod tests {
             .and_then(|media| media.video.as_ref())
             .expect("byteplus video media descriptor");
 
-        for model_id in [
-            "dreamina-seedance-2-0-260128",
-            "dreamina-seedance-2-0-fast-260128",
-        ] {
+        for model_id in ["dreamina-seedance-2-0", "dreamina-seedance-2-0-fast"] {
             let model = video
                 .models
                 .iter()
                 .find(|model| model.id == model_id)
                 .unwrap_or_else(|| panic!("byteplus video should include {model_id}"));
-            let duration = model
-                .parameters
-                .iter()
-                .find(|parameter| parameter.name == "duration_seconds")
-                .unwrap_or_else(|| panic!("{model_id} should declare duration_seconds"));
+            let duration = axis(model, "duration");
             assert_eq!(duration.request_field.as_deref(), Some("duration"));
             assert_eq!(
                 duration.wire_type,
-                puffer_provider_registry::MediaParameterWireType::Number,
+                WireType::Number,
                 "{model_id} duration must serialize as a JSON number, not a string",
             );
         }

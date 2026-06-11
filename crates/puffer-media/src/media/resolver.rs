@@ -36,7 +36,6 @@ pub(crate) struct ResolvedMediaRequest {
     pub(crate) provider_id: String,
     pub(crate) model_id: String,
     pub(crate) adapter: String,
-    pub(crate) operation: MediaOperation,
     pub(crate) parameters: BTreeMap<String, String>,
 }
 
@@ -153,7 +152,6 @@ pub(crate) fn resolve_media_request(
         provider_id: cap.provider_id,
         model_id: variant.model_id,
         adapter: cap.adapter,
-        operation: MediaOperation::Generate,
         parameters,
     })
 }

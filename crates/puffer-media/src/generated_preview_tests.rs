@@ -4,15 +4,15 @@ use tempfile::tempdir;
 #[test]
 fn generated_media_preview_by_artifact_uses_sidecar_path() {
     let workspace = tempdir().unwrap();
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     let image_path = service
         .write_image_artifact_bytes("artifact-1", "image.jpeg", &[0xff, 0xd8, 0xff, 0xd9])
         .unwrap();
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-1".to_string(),
             job_id: "job-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Image,
+            kind: crate::media::MediaKind::Image,
             path: image_path,
             mime_type: "image/jpeg".to_string(),
             byte_count: 4,
@@ -47,12 +47,12 @@ fn generated_media_preview_by_artifact_rejects_symlink_escape() {
     #[cfg(windows)]
     std::os::windows::fs::symlink_file(&outside_image, &link).unwrap();
 
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-1".to_string(),
             job_id: "job-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Image,
+            kind: crate::media::MediaKind::Image,
             path: link,
             mime_type: "image/jpeg".to_string(),
             byte_count: 4,
@@ -82,12 +82,12 @@ fn generated_media_attachment_metadata_rejects_symlink_escape() {
     #[cfg(windows)]
     std::os::windows::fs::symlink_file(&outside_image, &link).unwrap();
 
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-1".to_string(),
             job_id: "job-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Image,
+            kind: crate::media::MediaKind::Image,
             path: link,
             mime_type: "image/jpeg".to_string(),
             byte_count: 4,
@@ -135,12 +135,12 @@ fn generated_media_attachment_metadata_fallback_does_not_bypass_unsafe_sidecar()
     #[cfg(windows)]
     std::os::windows::fs::symlink_file(&outside_image, &link).unwrap();
 
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-1".to_string(),
             job_id: "job-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Image,
+            kind: crate::media::MediaKind::Image,
             path: link,
             mime_type: "image/jpeg".to_string(),
             byte_count: 4,
@@ -182,15 +182,15 @@ fn generated_media_attachment_metadata_fallback_does_not_mask_corrupt_sidecar() 
 #[test]
 fn generated_media_preview_by_artifact_sniffs_mime_when_extension_lies() {
     let workspace = tempdir().unwrap();
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     let image_path = service
         .write_image_artifact_bytes("artifact-1", "image.png", &[0xff, 0xd8, 0xff, 0xd9])
         .unwrap();
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-1".to_string(),
             job_id: "job-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Image,
+            kind: crate::media::MediaKind::Image,
             path: image_path,
             mime_type: "image/png".to_string(),
             byte_count: 4,
@@ -211,7 +211,7 @@ fn generated_media_preview_by_artifact_sniffs_mime_when_extension_lies() {
 #[test]
 fn generated_media_preview_by_artifact_reads_video_poster_preview() {
     let workspace = tempdir().unwrap();
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     let video_path = service
         .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
         .unwrap();
@@ -221,19 +221,16 @@ fn generated_media_preview_by_artifact_reads_video_poster_preview() {
     std::fs::create_dir_all(poster_path.parent().unwrap()).unwrap();
     std::fs::write(&poster_path, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-video-1".to_string(),
             job_id: "job-video-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Video,
+            kind: crate::media::MediaKind::Video,
             path: video_path,
             mime_type: "video/mp4".to_string(),
             byte_count: 9,
             metadata: serde_json::json!({}),
             preview: Some(
-                crate::runtime::media::artifacts::MediaArtifactPreview::available_poster(
-                    poster_path,
-                    4,
-                ),
+                crate::media::artifacts::MediaArtifactPreview::available_poster(poster_path, 4),
             ),
             created_at_ms: 1,
         })
@@ -253,15 +250,15 @@ fn generated_media_preview_by_artifact_reads_video_poster_preview() {
 #[test]
 fn generated_media_preview_by_artifact_returns_missing_for_video_without_preview() {
     let workspace = tempdir().unwrap();
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     let video_path = service
         .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
         .unwrap();
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-video-1".to_string(),
             job_id: "job-video-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Video,
+            kind: crate::media::MediaKind::Video,
             path: video_path,
             mime_type: "video/mp4".to_string(),
             byte_count: 9,
@@ -280,21 +277,21 @@ fn generated_media_preview_by_artifact_returns_missing_for_video_without_preview
 #[test]
 fn generated_media_preview_by_artifact_returns_missing_for_failed_video_preview() {
     let workspace = tempdir().unwrap();
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     let video_path = service
         .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
         .unwrap();
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-video-1".to_string(),
             job_id: "job-video-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Video,
+            kind: crate::media::MediaKind::Video,
             path: video_path,
             mime_type: "video/mp4".to_string(),
             byte_count: 9,
             metadata: serde_json::json!({}),
             preview: Some(
-                crate::runtime::media::artifacts::MediaArtifactPreview::missing_poster(
+                crate::media::artifacts::MediaArtifactPreview::missing_poster(
                     "ffmpeg timed out after 10s",
                 ),
             ),
@@ -311,7 +308,7 @@ fn generated_media_preview_by_artifact_returns_missing_for_failed_video_preview(
 #[test]
 fn generated_media_preview_by_artifact_returns_missing_for_absent_video_poster_file() {
     let workspace = tempdir().unwrap();
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     let video_path = service
         .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
         .unwrap();
@@ -319,19 +316,16 @@ fn generated_media_preview_by_artifact_returns_missing_for_absent_video_poster_f
         .poster_artifact_file_path("artifact-video-1")
         .unwrap();
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-video-1".to_string(),
             job_id: "job-video-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Video,
+            kind: crate::media::MediaKind::Video,
             path: video_path,
             mime_type: "video/mp4".to_string(),
             byte_count: 9,
             metadata: serde_json::json!({}),
             preview: Some(
-                crate::runtime::media::artifacts::MediaArtifactPreview::available_poster(
-                    poster_path,
-                    4,
-                ),
+                crate::media::artifacts::MediaArtifactPreview::available_poster(poster_path, 4),
             ),
             created_at_ms: 1,
         })
@@ -346,7 +340,7 @@ fn generated_media_preview_by_artifact_returns_missing_for_absent_video_poster_f
 #[test]
 fn generated_media_preview_by_artifact_rejects_video_poster_bad_mime() {
     let workspace = tempdir().unwrap();
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     let video_path = service
         .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
         .unwrap();
@@ -356,26 +350,23 @@ fn generated_media_preview_by_artifact_rejects_video_poster_bad_mime() {
     std::fs::create_dir_all(poster_path.parent().unwrap()).unwrap();
     std::fs::write(&poster_path, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-video-1".to_string(),
             job_id: "job-video-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Video,
+            kind: crate::media::MediaKind::Video,
             path: video_path,
             mime_type: "video/mp4".to_string(),
             byte_count: 9,
             metadata: serde_json::json!({}),
-            preview: Some(
-                crate::runtime::media::artifacts::MediaArtifactPreview::Poster(
-                    crate::runtime::media::artifacts::MediaPosterPreview {
-                        state:
-                            crate::runtime::media::artifacts::MediaArtifactPreviewState::Available,
-                        path: Some(poster_path),
-                        mime_type: Some("image/png".to_string()),
-                        byte_count: Some(4),
-                        reason: None,
-                    },
-                ),
-            ),
+            preview: Some(crate::media::artifacts::MediaArtifactPreview::Poster(
+                crate::media::artifacts::MediaPosterPreview {
+                    state: crate::media::artifacts::MediaArtifactPreviewState::Available,
+                    path: Some(poster_path),
+                    mime_type: Some("image/png".to_string()),
+                    byte_count: Some(4),
+                    reason: None,
+                },
+            )),
             created_at_ms: 1,
         })
         .unwrap();
@@ -389,7 +380,7 @@ fn generated_media_preview_by_artifact_rejects_video_poster_bad_mime() {
 #[test]
 fn generated_media_preview_by_artifact_rejects_video_poster_non_image_bytes() {
     let workspace = tempdir().unwrap();
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     let video_path = service
         .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
         .unwrap();
@@ -399,19 +390,16 @@ fn generated_media_preview_by_artifact_rejects_video_poster_non_image_bytes() {
     std::fs::create_dir_all(poster_path.parent().unwrap()).unwrap();
     std::fs::write(&poster_path, b"not-image").unwrap();
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-video-1".to_string(),
             job_id: "job-video-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Video,
+            kind: crate::media::MediaKind::Video,
             path: video_path,
             mime_type: "video/mp4".to_string(),
             byte_count: 9,
             metadata: serde_json::json!({}),
             preview: Some(
-                crate::runtime::media::artifacts::MediaArtifactPreview::available_poster(
-                    poster_path,
-                    9,
-                ),
+                crate::media::artifacts::MediaArtifactPreview::available_poster(poster_path, 9),
             ),
             created_at_ms: 1,
         })
@@ -429,24 +417,21 @@ fn generated_media_preview_by_artifact_rejects_video_poster_unsafe_path() {
     let outside = tempdir().unwrap();
     let outside_poster = outside.path().join("poster.jpg");
     std::fs::write(&outside_poster, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     let video_path = service
         .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
         .unwrap();
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-video-1".to_string(),
             job_id: "job-video-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Video,
+            kind: crate::media::MediaKind::Video,
             path: video_path,
             mime_type: "video/mp4".to_string(),
             byte_count: 9,
             metadata: serde_json::json!({}),
             preview: Some(
-                crate::runtime::media::artifacts::MediaArtifactPreview::available_poster(
-                    outside_poster,
-                    4,
-                ),
+                crate::media::artifacts::MediaArtifactPreview::available_poster(outside_poster, 4),
             ),
             created_at_ms: 1,
         })
@@ -464,7 +449,7 @@ fn generated_media_preview_by_artifact_rejects_video_poster_symlink_escape() {
     let outside = tempdir().unwrap();
     let outside_poster = outside.path().join("poster.jpg");
     std::fs::write(&outside_poster, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     let video_path = service
         .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
         .unwrap();
@@ -477,19 +462,16 @@ fn generated_media_preview_by_artifact_rejects_video_poster_symlink_escape() {
     #[cfg(windows)]
     std::os::windows::fs::symlink_file(&outside_poster, &poster_path).unwrap();
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-video-1".to_string(),
             job_id: "job-video-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Video,
+            kind: crate::media::MediaKind::Video,
             path: video_path,
             mime_type: "video/mp4".to_string(),
             byte_count: 9,
             metadata: serde_json::json!({}),
             preview: Some(
-                crate::runtime::media::artifacts::MediaArtifactPreview::available_poster(
-                    poster_path,
-                    4,
-                ),
+                crate::media::artifacts::MediaArtifactPreview::available_poster(poster_path, 4),
             ),
             created_at_ms: 1,
         })
@@ -504,15 +486,15 @@ fn generated_media_preview_by_artifact_rejects_video_poster_symlink_escape() {
 #[test]
 fn generated_video_access_metadata_accepts_video_under_video_root() {
     let workspace = tempdir().unwrap();
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     let video_path = service
         .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
         .unwrap();
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-video-1".to_string(),
             job_id: "job-video-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Video,
+            kind: crate::media::MediaKind::Video,
             path: video_path.clone(),
             mime_type: "video/mp4".to_string(),
             byte_count: 9,
@@ -541,15 +523,15 @@ fn generated_video_access_metadata_accepts_video_under_video_root() {
 #[test]
 fn generated_video_access_metadata_accepts_legacy_video_under_artifact_root() {
     let workspace = tempdir().unwrap();
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     let video_path = service
         .write_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
         .unwrap();
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-video-1".to_string(),
             job_id: "job-video-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Video,
+            kind: crate::media::MediaKind::Video,
             path: video_path.clone(),
             mime_type: "video/mp4".to_string(),
             byte_count: 9,
@@ -574,15 +556,15 @@ fn generated_video_access_metadata_accepts_legacy_video_under_artifact_root() {
 #[test]
 fn generated_video_access_metadata_rejects_non_video_artifact() {
     let workspace = tempdir().unwrap();
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     let image_path = service
         .write_image_artifact_bytes("artifact-image-1", "image.jpeg", &[0xff, 0xd8, 0xff, 0xd9])
         .unwrap();
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-image-1".to_string(),
             job_id: "job-image-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Image,
+            kind: crate::media::MediaKind::Image,
             path: image_path,
             mime_type: "image/jpeg".to_string(),
             byte_count: 4,
@@ -614,12 +596,12 @@ fn generated_video_access_metadata_rejects_symlink_escape() {
     #[cfg(windows)]
     std::os::windows::fs::symlink_file(&outside_video, &link).unwrap();
 
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-video-1".to_string(),
             job_id: "job-video-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Video,
+            kind: crate::media::MediaKind::Video,
             path: link,
             mime_type: "video/mp4".to_string(),
             byte_count: 9,
@@ -724,15 +706,15 @@ fn generated_media_internal_bash_output_rejects_non_bash_tool() {
 #[test]
 fn generated_media_timeline_attachments_extracts_image_metadata() {
     let workspace = tempdir().unwrap();
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     let image_path = service
         .write_image_artifact_bytes("artifact-1", "image.webp", b"RIFFxxxxWEBP")
         .unwrap();
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-1".to_string(),
             job_id: "job-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Image,
+            kind: crate::media::MediaKind::Image,
             path: image_path,
             mime_type: "image/webp".to_string(),
             byte_count: 12,
@@ -784,15 +766,15 @@ fn generated_media_timeline_attachments_extracts_image_metadata() {
 #[test]
 fn generated_media_timeline_attachments_trusts_video_sidecar_path() {
     let workspace = tempdir().unwrap();
-    let service = crate::runtime::media::MediaGenerationService::new(workspace.path());
+    let service = crate::media::MediaGenerationService::new(workspace.path());
     let video_path = service
         .write_video_artifact_bytes("artifact-video-1", "generated.mp4", b"mp4-bytes")
         .unwrap();
     service
-        .save_artifact(&crate::runtime::media::MediaArtifact {
+        .save_artifact(&crate::media::MediaArtifact {
             id: "artifact-video-1".to_string(),
             job_id: "job-video-1".to_string(),
-            kind: crate::runtime::media::MediaKind::Video,
+            kind: crate::media::MediaKind::Video,
             path: video_path.clone(),
             mime_type: "video/mp4".to_string(),
             byte_count: 9,

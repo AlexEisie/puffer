@@ -29,11 +29,6 @@ impl TrustedImageDiscoveryClient {
         Self { client }
     }
 
-    /// Creates a trusted media discovery client from an externally configured client.
-    pub(crate) fn with_client(client: Client) -> Self {
-        Self { client }
-    }
-
     /// Discovers trusted image-output models for eligible connected providers.
     pub(crate) fn discover(
         &self,

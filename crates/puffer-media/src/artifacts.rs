@@ -1,5 +1,7 @@
-use super::{generated_media_internal_bash_output, GeneratedMediaInternalCommandKind};
-use crate::runtime::media::{
+use crate::internal_tools::{
+    generated_media_internal_bash_output, GeneratedMediaInternalCommandKind,
+};
+use crate::media::{
     artifacts::MediaArtifactPreviewState, MediaArtifact, MediaGenerationService, MediaKind,
 };
 use serde::{Deserialize, Serialize};

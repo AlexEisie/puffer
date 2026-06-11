@@ -91,9 +91,6 @@ pub(crate) trait ReplicateVideoTransport {
     /// Polls a Replicate prediction URL and returns its JSON response.
     fn poll_prediction(&self, url: &str, api_token: &str) -> Result<Value>;
 
-    /// Cancels a Replicate prediction and returns its JSON response.
-    fn cancel_prediction(&self, url: &str, api_token: &str) -> Result<Value>;
-
     /// Downloads provider output bytes from a validated remote URL.
     fn download_bytes(&self, url: &str) -> Result<Vec<u8>>;
 }
@@ -133,16 +130,6 @@ impl ReplicateVideoTransport for ReqwestReplicateVideoTransport {
             .send()
             .with_context(|| format!("poll Replicate video prediction {url}"))?;
         json_response(response, "poll Replicate video prediction")
-    }
-
-    fn cancel_prediction(&self, url: &str, api_token: &str) -> Result<Value> {
-        let response = self
-            .client
-            .post(url)
-            .bearer_auth(api_token)
-            .send()
-            .with_context(|| format!("cancel Replicate video prediction {url}"))?;
-        json_response(response, "cancel Replicate video prediction")
     }
 
     fn download_bytes(&self, url: &str) -> Result<Vec<u8>> {
@@ -200,6 +187,7 @@ where
     T: ReplicateVideoTransport,
 {
     /// Creates an adapter with an explicit transport and base URL.
+    #[cfg(test)]
     pub(crate) fn with_transport(
         api_token: impl Into<String>,
         base_url: impl Into<String>,
@@ -265,30 +253,6 @@ where
         let response = self.transport.poll_prediction(&poll_url, &self.api_token)?;
         let prediction = ReplicatePrediction::from_value(response)?;
         self.apply_prediction(service, job, prediction, now_ms)
-    }
-
-    /// Cancels a non-terminal prediction and persists the canceled job state.
-    pub(crate) fn cancel(
-        &self,
-        service: &MediaGenerationService,
-        mut job: MediaJob,
-        now_ms: u64,
-    ) -> Result<MediaJob> {
-        if job.status.is_terminal() {
-            return Ok(job);
-        }
-        let cancel_url = job
-            .remote_cancel_url
-            .clone()
-            .context("Replicate video job is missing a cancel URL")?;
-        let response = self
-            .transport
-            .cancel_prediction(&cancel_url, &self.api_token)?;
-        let prediction = ReplicatePrediction::from_value(response)?;
-        apply_remote_prediction_metadata(&mut job, &prediction);
-        job.transition(MediaJobStatus::Canceled, now_ms)?;
-        service.save_job(&job)?;
-        Ok(job)
     }
 
     /// Polls a job with default sleeping until it reaches a terminal state.
@@ -392,7 +356,6 @@ struct ReplicatePrediction {
     id: String,
     status: String,
     get_url: Option<String>,
-    cancel_url: Option<String>,
     output: Option<Value>,
     error: Option<String>,
 }
@@ -419,10 +382,6 @@ impl ReplicatePrediction {
             status,
             get_url: urls
                 .and_then(|urls| urls.get("get"))
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            cancel_url: urls
-                .and_then(|urls| urls.get("cancel"))
                 .and_then(Value::as_str)
                 .map(str::to_string),
             output: value.get("output").cloned(),
@@ -465,9 +424,6 @@ fn apply_remote_prediction_metadata(job: &mut MediaJob, prediction: &ReplicatePr
     if let Some(get_url) = &prediction.get_url {
         job.remote_get_url = Some(get_url.clone());
     }
-    if let Some(cancel_url) = &prediction.cancel_url {
-        job.remote_cancel_url = Some(cancel_url.clone());
-    }
 }
 
 fn json_response(response: reqwest::blocking::Response, context: &str) -> Result<Value> {
@@ -491,7 +447,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::media::{MediaGenerationService, MediaJobStatus};
+    use crate::media::{MediaGenerationService, MediaJobStatus};
     use anyhow::{anyhow, Context, Result};
     use serde_json::{json, Value};
     use std::collections::{HashMap, VecDeque};
@@ -508,8 +464,6 @@ mod tests {
         submit_body: Option<Value>,
         submit_response: Value,
         poll_responses: VecDeque<Value>,
-        cancel_response: Value,
-        cancel_urls: Vec<String>,
         downloads: HashMap<String, std::result::Result<Vec<u8>, String>>,
     }
 
@@ -528,10 +482,6 @@ mod tests {
                 .push_back(response);
         }
 
-        fn set_cancel_response(&self, response: Value) {
-            self.state.lock().unwrap().cancel_response = response;
-        }
-
         fn set_download(&self, url: &str, bytes: std::result::Result<Vec<u8>, String>) {
             self.state
                 .lock()
@@ -542,10 +492,6 @@ mod tests {
 
         fn submit_body(&self) -> Value {
             self.state.lock().unwrap().submit_body.clone().unwrap()
-        }
-
-        fn cancel_urls(&self) -> Vec<String> {
-            self.state.lock().unwrap().cancel_urls.clone()
         }
     }
 
@@ -568,12 +514,6 @@ mod tests {
                 .poll_responses
                 .pop_front()
                 .context("missing fake poll response")
-        }
-
-        fn cancel_prediction(&self, url: &str, _api_token: &str) -> Result<Value> {
-            let mut state = self.state.lock().unwrap();
-            state.cancel_urls.push(url.to_string());
-            Ok(state.cancel_response.clone())
         }
 
         fn download_bytes(&self, url: &str) -> Result<Vec<u8>> {
@@ -726,29 +666,6 @@ mod tests {
 
         assert_eq!(failed.status, MediaJobStatus::Failed);
         assert_eq!(failed.error.as_deref(), Some("provider render failed"));
-    }
-
-    #[test]
-    fn replicate_video_cancel_is_idempotent_after_terminal_status() {
-        let temp = tempfile::tempdir().unwrap();
-        let service = MediaGenerationService::new(temp.path());
-        let transport = FakeReplicateTransport::with_submit_response(submit_response("processing"));
-        transport.set_cancel_response(submit_response("canceled"));
-        let adapter = ReplicateVideoAdapter::with_transport(
-            "token-1",
-            "https://api.replicate.test",
-            transport.clone(),
-        );
-        let job = adapter.submit(&service, request(), 10).unwrap();
-
-        let canceled = adapter.cancel(&service, job, 11).unwrap();
-        let canceled_again = adapter.cancel(&service, canceled, 12).unwrap();
-
-        assert_eq!(canceled_again.status, MediaJobStatus::Canceled);
-        assert_eq!(
-            transport.cancel_urls(),
-            vec!["https://api.replicate.test/v1/predictions/prediction-1/cancel"]
-        );
     }
 
     #[test]

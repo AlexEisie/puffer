@@ -396,7 +396,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::media::MediaGenerationService;
+    use crate::media::MediaGenerationService;
     use indexmap::IndexMap;
     use puffer_provider_registry::{
         AuthMode, AuthStore, MediaExecutionDescriptor, MediaExecutionKind, MediaKindDescriptor,

@@ -1,6 +1,6 @@
 use puffer_provider_registry::{
-    MediaBatchMode, MediaDiscoveryKind, MediaExecutionKind, MediaModelDescriptor, MediaOperation,
-    MediaParameterWireType, ProviderDescriptor,
+    AxisRole, ControlKind, MediaBatchMode, MediaDiscoveryKind, MediaExecutionKind,
+    MediaModelDescriptor, MediaOperation, ProviderDescriptor, WireType,
 };
 use puffer_resources::ProviderPack;
 use std::{
@@ -74,8 +74,8 @@ const ALL_PROVIDER_YAMLS: &[(&str, &str)] = &[
         include_str!("../../../resources/providers/lmstudio.yaml"),
     ),
     (
-        "minicpm5",
-        include_str!("../../../resources/providers/minicpm5.yaml"),
+        "kling",
+        include_str!("../../../resources/providers/kling.yaml"),
     ),
     (
         "minimax",
@@ -96,6 +96,10 @@ const ALL_PROVIDER_YAMLS: &[(&str, &str)] = &[
     (
         "openrouter",
         include_str!("../../../resources/providers/openrouter.yaml"),
+    ),
+    (
+        "qwen35",
+        include_str!("../../../resources/providers/qwen35.yaml"),
     ),
     (
         "relaydance",
@@ -188,7 +192,7 @@ fn assert_select_parameter(
         values,
         default,
         request_field,
-        MediaParameterWireType::String,
+        WireType::String,
     );
 }
 
@@ -199,25 +203,116 @@ fn assert_select_parameter_with_wire_type(
     values: &[&str],
     default: &str,
     request_field: &str,
-    wire_type: MediaParameterWireType,
+    wire_type: WireType,
 ) {
-    let parameter = model
-        .parameters
-        .iter()
-        .find(|parameter| parameter.name == name)
-        .unwrap_or_else(|| panic!("{} should declare parameter {name}", model.id));
-
-    assert_eq!(parameter.label, label);
-    assert_eq!(
-        parameter.values,
-        values
-            .iter()
-            .map(|value| value.to_string())
-            .collect::<Vec<_>>()
+    assert_enum_axis(
+        model,
+        name,
+        label,
+        values,
+        default,
+        AxisRole::Param,
+        Some(request_field),
+        wire_type,
     );
-    assert_eq!(parameter.default, default);
-    assert_eq!(parameter.request_field.as_deref(), Some(request_field));
-    assert_eq!(parameter.wire_type, wire_type);
+}
+
+fn assert_enum_axis(
+    model: &MediaModelDescriptor,
+    name: &str,
+    label: &str,
+    values: &[&str],
+    default: &str,
+    role: AxisRole,
+    request_field: Option<&str>,
+    wire_type: WireType,
+) {
+    let axis = model
+        .axes
+        .iter()
+        .find(|axis| axis.id == name)
+        .unwrap_or_else(|| panic!("{} should declare axis {name}", model.id));
+
+    assert_eq!(axis.label, label);
+    assert_eq!(axis.role, role);
+    assert_eq!(axis.request_field.as_deref(), request_field);
+    assert_eq!(axis.wire_type, wire_type);
+    match &axis.control {
+        ControlKind::Enum {
+            values: actual,
+            default: actual_default,
+        } => {
+            assert_eq!(
+                actual,
+                &values
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(actual_default, default);
+        }
+        other => panic!("{} axis {name} should be enum, got {other:?}", model.id),
+    }
+}
+
+fn assert_range_parameter(
+    model: &MediaModelDescriptor,
+    name: &str,
+    label: &str,
+    min: f64,
+    max: f64,
+    step: f64,
+    default: f64,
+    request_field: &str,
+) {
+    let axis = model
+        .axes
+        .iter()
+        .find(|axis| axis.id == name)
+        .unwrap_or_else(|| panic!("{} should declare axis {name}", model.id));
+
+    assert_eq!(axis.label, label);
+    assert_eq!(axis.role, AxisRole::Param);
+    assert_eq!(axis.request_field.as_deref(), Some(request_field));
+    assert_eq!(axis.wire_type, WireType::Number);
+    match &axis.control {
+        ControlKind::Range {
+            min: actual_min,
+            max: actual_max,
+            step: actual_step,
+            default: actual_default,
+        } => {
+            assert_eq!(
+                (*actual_min, *actual_max, *actual_step, *actual_default),
+                (min, max, step, default)
+            );
+        }
+        other => panic!("{} axis {name} should be range, got {other:?}", model.id),
+    }
+}
+
+fn assert_bool_axis(
+    model: &MediaModelDescriptor,
+    name: &str,
+    label: &str,
+    default: bool,
+    role: AxisRole,
+) {
+    let axis = model
+        .axes
+        .iter()
+        .find(|axis| axis.id == name)
+        .unwrap_or_else(|| panic!("{} should declare axis {name}", model.id));
+
+    assert_eq!(axis.label, label);
+    assert_eq!(axis.role, role);
+    assert_eq!(axis.request_field, None);
+    match &axis.control {
+        ControlKind::Bool {
+            default: actual_default,
+        } => assert_eq!(*actual_default, default),
+        other => panic!("{} axis {name} should be bool, got {other:?}", model.id),
+    }
 }
 
 #[test]
@@ -348,107 +443,98 @@ fn relaydance_declares_executable_video_descriptor() {
     assert_eq!(
         models_by_id.keys().copied().collect::<BTreeSet<_>>(),
         BTreeSet::from([
-            "doubao-seedance-2-0-720p",
-            "doubao-seedance-2-0-1080p",
-            "doubao-seedance-2-0-fast-260128",
+            "doubao-seedance-2-0",
+            "doubao-seedance-2-0-fast",
             "grok-imagine-video",
             "grok-imagine-video-1.5-preview",
             "happyhorse-1.0-t2v",
-            "seedance-1-5-pro-no-audio",
-            "seedance-1-5-pro-with-audio",
+            "seedance-1-5-pro",
             "seedance-fast-nsfw",
             "seedance-nsfw",
-            "seedance-nsfw-720p",
-            "seedance-nsfw-1080p",
         ])
     );
 
     let expected = [
         (
-            "doubao-seedance-2-0-720p",
-            "Seedance 2.0 720p",
+            "doubao-seedance-2-0",
+            "Seedance 2.0",
             SEEDANCE_VIDEO_DURATIONS,
-            &["720p"][..],
+            &["720p", "1080p"][..],
+            AxisRole::Selector,
+            None,
         ),
         (
-            "doubao-seedance-2-0-1080p",
-            "Seedance 2.0 1080p",
-            SEEDANCE_VIDEO_DURATIONS,
-            &["1080p"][..],
-        ),
-        (
-            "doubao-seedance-2-0-fast-260128",
+            "doubao-seedance-2-0-fast",
             "Seedance 2.0 Fast",
             SEEDANCE_VIDEO_DURATIONS,
             SEEDANCE_FAST_VIDEO_RESOLUTIONS,
+            AxisRole::Param,
+            Some("metadata.resolution"),
         ),
         (
-            "seedance-1-5-pro-no-audio",
-            "Seedance 1.5 Pro No Audio",
+            "seedance-1-5-pro",
+            "Seedance 1.5 Pro",
             SEEDANCE_15_VIDEO_DURATIONS,
             SEEDANCE_VIDEO_RESOLUTIONS,
-        ),
-        (
-            "seedance-1-5-pro-with-audio",
-            "Seedance 1.5 Pro With Audio",
-            SEEDANCE_15_VIDEO_DURATIONS,
-            SEEDANCE_VIDEO_RESOLUTIONS,
+            AxisRole::Param,
+            Some("metadata.resolution"),
         ),
         (
             "seedance-nsfw",
             "Seedance NSFW",
             SEEDANCE_VIDEO_DURATIONS,
-            &["720p"][..],
-        ),
-        (
-            "seedance-nsfw-720p",
-            "Seedance NSFW 720p",
-            SEEDANCE_VIDEO_DURATIONS,
-            &["720p"][..],
-        ),
-        (
-            "seedance-nsfw-1080p",
-            "Seedance NSFW 1080p",
-            SEEDANCE_VIDEO_DURATIONS,
-            &["1080p"][..],
+            &["720p", "1080p"][..],
+            AxisRole::Selector,
+            None,
         ),
         (
             "seedance-fast-nsfw",
             "Seedance Fast NSFW",
             SEEDANCE_VIDEO_DURATIONS,
             SEEDANCE_FAST_VIDEO_RESOLUTIONS,
+            AxisRole::Param,
+            Some("metadata.resolution"),
         ),
     ];
-    for (model_id, display_name, durations, resolutions) in expected {
+    for (model_id, display_name, durations, resolutions, resolution_role, resolution_field) in
+        expected
+    {
         let model = models_by_id
             .get(model_id)
             .unwrap_or_else(|| panic!("relaydance should include {model_id}"));
         assert_eq!(model.display_name.as_deref(), Some(display_name));
         assert_eq!(model.operations, vec![MediaOperation::Generate]);
-        assert_select_parameter(
+        assert_range_parameter(
             model,
-            "duration_seconds",
-            "Duration",
-            durations,
-            "5",
+            "duration",
+            "Length",
+            durations.first().unwrap().parse::<f64>().unwrap(),
+            durations.last().unwrap().parse::<f64>().unwrap(),
+            1.0,
+            5.0,
             "seconds",
         );
-        assert_select_parameter(
+        assert_enum_axis(
             model,
             "resolution",
-            "Resolution",
+            "Mode",
             resolutions,
             resolutions.last().expect("resolution default"),
-            "metadata.resolution",
+            resolution_role,
+            resolution_field,
+            WireType::String,
         );
         assert_select_parameter(
             model,
-            "aspect_ratio",
-            "Aspect ratio",
+            "ratio",
+            "Video ratio",
             SEEDANCE_VIDEO_RATIOS,
             "16:9",
             "metadata.ratio",
         );
+        if model_id == "seedance-1-5-pro" {
+            assert_bool_axis(model, "audio", "Native audio", true, AxisRole::Selector);
+        }
     }
 
     let prompt_only_expected = [
@@ -466,7 +552,7 @@ fn relaydance_declares_executable_video_descriptor() {
         assert_eq!(model.display_name.as_deref(), Some(display_name));
         assert_eq!(model.operations, vec![MediaOperation::Generate]);
         assert!(
-            model.parameters.is_empty(),
+            model.axes.is_empty(),
             "{model_id} should stay prompt-only until RelayDance exposes parameter metadata"
         );
     }
@@ -505,20 +591,17 @@ fn byteplus_declares_executable_video_descriptor() {
         .collect::<BTreeMap<_, _>>();
     assert_eq!(
         models_by_id.keys().copied().collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            "dreamina-seedance-2-0-260128",
-            "dreamina-seedance-2-0-fast-260128",
-        ])
+        BTreeSet::from(["dreamina-seedance-2-0", "dreamina-seedance-2-0-fast",])
     );
 
     let expected = [
         (
-            "dreamina-seedance-2-0-260128",
+            "dreamina-seedance-2-0",
             "Dreamina Seedance 2.0",
             SEEDANCE_VIDEO_RESOLUTIONS,
         ),
         (
-            "dreamina-seedance-2-0-fast-260128",
+            "dreamina-seedance-2-0-fast",
             "Dreamina Seedance 2.0 Fast",
             SEEDANCE_FAST_VIDEO_RESOLUTIONS,
         ),
@@ -529,19 +612,11 @@ fn byteplus_declares_executable_video_descriptor() {
             .unwrap_or_else(|| panic!("byteplus should include {model_id}"));
         assert_eq!(model.display_name.as_deref(), Some(display_name));
         assert_eq!(model.operations, vec![MediaOperation::Generate]);
-        assert_select_parameter_with_wire_type(
-            model,
-            "duration_seconds",
-            "Duration",
-            SEEDANCE_VIDEO_DURATIONS,
-            "5",
-            "duration",
-            MediaParameterWireType::Number,
-        );
+        assert_range_parameter(model, "duration", "Length", 4.0, 15.0, 1.0, 5.0, "duration");
         assert_select_parameter(
             model,
-            "aspect_ratio",
-            "Aspect ratio",
+            "ratio",
+            "Video ratio",
             SEEDANCE_VIDEO_RATIOS,
             "adaptive",
             "ratio",
@@ -549,7 +624,7 @@ fn byteplus_declares_executable_video_descriptor() {
         assert_select_parameter(
             model,
             "resolution",
-            "Resolution",
+            "Mode",
             resolutions,
             "720p",
             "resolution",
@@ -559,7 +634,7 @@ fn byteplus_declares_executable_video_descriptor() {
 
 #[test]
 fn only_executable_video_providers_declare_video_media() {
-    let expected = BTreeSet::from(["byteplus", "relaydance"]);
+    let expected = BTreeSet::from(["byteplus", "kling", "relaydance"]);
     for (provider_id, yaml) in ALL_PROVIDER_YAMLS {
         let descriptor = provider_descriptor(provider_id, yaml);
         let has_video = descriptor
@@ -843,9 +918,9 @@ fn byteplus_catalog_declares_only_current_native_seedream_models() {
             "{model_id} should support image generation"
         );
         let parameter_names = model
-            .parameters
+            .axes
             .iter()
-            .map(|parameter| parameter.name.as_str())
+            .map(|axis| axis.id.as_str())
             .collect::<BTreeSet<_>>();
         assert_select_parameter(model, "size", "Size", &["2K"], "2K", "size");
         assert_select_parameter(

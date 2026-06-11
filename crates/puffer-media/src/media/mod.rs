@@ -72,6 +72,7 @@ impl MediaGenerationService {
     }
 
     /// Writes generated artifact bytes to a safe artifact path.
+    #[cfg(test)]
     pub(crate) fn write_artifact_bytes(
         &self,
         artifact_id: &str,
@@ -114,6 +115,7 @@ impl MediaGenerationService {
     }
 
     /// Loads a media job JSON sidecar by id.
+    #[cfg(test)]
     pub(crate) fn load_job(&self, job_id: &str) -> Result<MediaJob> {
         read_json_sidecar(&self.job_sidecar_path(job_id)?)
     }

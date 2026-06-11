@@ -36,7 +36,6 @@ pub(crate) struct MediaJob {
     pub(crate) provider_job_id: Option<String>,
     pub(crate) remote_status: Option<String>,
     pub(crate) remote_get_url: Option<String>,
-    pub(crate) remote_cancel_url: Option<String>,
     pub(crate) artifact_ids: Vec<String>,
     pub(crate) requested_count: u8,
     pub(crate) error: Option<String>,
@@ -67,7 +66,6 @@ impl MediaJob {
             provider_job_id: None,
             remote_status: None,
             remote_get_url: None,
-            remote_cancel_url: None,
             artifact_ids: Vec::new(),
             requested_count,
             error: None,
@@ -96,6 +94,7 @@ impl MediaJob {
     }
 
     /// Returns the number of unique artifacts attached to this job.
+    #[cfg(test)]
     pub(crate) fn produced_count(&self) -> usize {
         self.artifact_ids.len()
     }

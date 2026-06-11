@@ -1,26 +1,26 @@
-use super::{
-    exact_media_generation_result, load_media_job_artifacts, now_ms, parse_media_operation,
-    ExactMediaDiscoveryCache, ExactMediaGenerationRequest, ExactMediaGenerationResult,
-};
-use crate::runtime::media::byteplus_video::{
+use crate::media::byteplus_video::{
     byteplus_video_request_from_parameters, BytePlusVideoAdapter, BytePlusVideoPollingConfig,
     BYTEPLUS_VIDEO_ADAPTER,
 };
-use crate::runtime::media::http_support::{
+use crate::media::http_support::{
     bearer_token, provider_error_secrets, provider_execution_url, redact_secrets,
     CredentialAliasMode,
 };
-use crate::runtime::media::relaydance_video::{
+use crate::media::relaydance_video::{
     relaydance_video_request_from_parameters, RelaydanceVideoAdapter, RelaydanceVideoPollingConfig,
     RELAYDANCE_VIDEO_ADAPTER,
 };
-use crate::runtime::media::replicate_video::{
+use crate::media::replicate_video::{
     ReplicatePollingConfig, ReplicateVideoAdapter, ReplicateVideoRequest,
 };
-use crate::runtime::media::resolver::{
+use crate::media::resolver::{
     resolve_media_request, resolve_video_execution_descriptor, ResolvedMediaRequest,
 };
-use crate::runtime::media::{MediaGenerationService, MediaJob, MediaKind};
+use crate::media::{MediaGenerationService, MediaJob, MediaKind};
+use crate::runtime::{
+    exact_media_generation_result, load_media_job_artifacts, now_ms, parse_media_operation,
+    ExactMediaDiscoveryCache, ExactMediaGenerationRequest, ExactMediaGenerationResult,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use std::collections::BTreeMap;
@@ -314,9 +314,9 @@ fn validate_video_count(count: u8) -> Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::media::byteplus_video::tests_support::scripted as byteplus_scripted;
-    use crate::runtime::media::relaydance_video::tests_support::scripted as relaydance_scripted;
-    use crate::runtime::media::MediaJobStatus;
+    use crate::media::byteplus_video::tests_support::scripted as byteplus_scripted;
+    use crate::media::relaydance_video::tests_support::scripted as relaydance_scripted;
+    use crate::media::MediaJobStatus;
     use serde_json::json;
 
     #[test]
@@ -414,7 +414,6 @@ mod tests {
                 provider_id: "relaydance".to_string(),
                 model_id: "doubao-seedance-2-0-720p".to_string(),
                 adapter: RELAYDANCE_VIDEO_ADAPTER.to_string(),
-                operation: puffer_provider_registry::MediaOperation::Generate,
                 parameters: BTreeMap::new(),
             },
         )
@@ -448,7 +447,6 @@ mod tests {
                 provider_id: "replicate".to_string(),
                 model_id: "owner/model-version".to_string(),
                 adapter: "replicate_video".to_string(),
-                operation: puffer_provider_registry::MediaOperation::Generate,
                 parameters: BTreeMap::new(),
             },
         )
