@@ -173,6 +173,17 @@
   let selectedMonitorNeedsRepair = $derived(
     selectedMonitorConnectionRecord ? connectionNeedsRepair(selectedMonitorConnectionRecord) : false
   );
+  let selectedMonitorRepairRunning = $derived(
+    selectedMonitorConnectionRecord
+      ? commandRunningFor === `connection:${selectedMonitorConnectionRecord.slug}`
+      : false
+  );
+  let selectedMonitorPrimaryDisabled = $derived(
+    !selectedMonitorConnection
+      || creatingMonitor
+      || selectedMonitorRepairRunning
+      || (selectedMonitorNeedsRepair && !onRunTaskCommand)
+  );
   let selectedHistoryMessage = $derived(
     historyMessages.find((message) => message.idx === selectedHistoryIdx) ?? historyMessages[0] ?? null
   );
@@ -448,7 +459,7 @@
   }
 
   function canCreateMonitor(connection: WorkflowConnection): boolean {
-    if (connection.monitor_command !== undefined) return Boolean(connection.monitor_command);
+    if (connection.monitor_command?.trim()) return true;
     return connection.can_trigger_workflow === true;
   }
 
@@ -486,6 +497,20 @@
 
   function monitorConnectionStateLabel(connection: WorkflowConnection): string {
     return connectionNeedsRepair(connection) ? "repair auth" : connection.state;
+  }
+
+  function monitorPrimaryActionLabel(): string {
+    if (selectedMonitorNeedsRepair) {
+      return selectedMonitorRepairRunning ? "Reconnecting" : "Reconnect";
+    }
+    if (creatingMonitor) {
+      return selectedMonitorBinding ? "Updating" : "Adding";
+    }
+    return selectedMonitorBinding ? "Update" : "Add";
+  }
+
+  function monitorRepairNotice(connection: WorkflowConnection): string {
+    return `${connection.slug} needs auth repair before it can start new monitor tasks.`;
   }
 
   function modelSupportsAgentTools(model: ModelDescriptorInfo): boolean {
@@ -576,7 +601,16 @@
 
   async function createSelectedMonitor(event?: SubmitEvent) {
     event?.preventDefault();
-    if (!selectedMonitorConnection || selectedMonitorNeedsRepair || creatingMonitor) return;
+    if (creatingMonitor || selectedMonitorRepairRunning) return;
+    if (!selectedMonitorConnection) {
+      notice = "Choose an account before adding a monitor.";
+      return;
+    }
+    if (selectedMonitorNeedsRepair) {
+      if (!selectedMonitorConnectionRecord) return;
+      await reconnectConnection(selectedMonitorConnectionRecord);
+      return;
+    }
     const connection = monitorConnections.find((item) => item.slug === selectedMonitorConnection);
     const wasUpdate = selectedMonitorBinding !== null;
     const selectedModel = selectedMonitorModel.trim();
@@ -601,7 +635,11 @@
   }
 
   async function reconnectConnection(connection: WorkflowConnection) {
-    if (!onRunTaskCommand || commandRunningFor !== null) return;
+    if (!onRunTaskCommand) {
+      notice = `Run ${connectionRepairCommand(connection)} to reconnect ${connection.slug}.`;
+      return;
+    }
+    if (commandRunningFor !== null) return;
     commandRunningFor = `connection:${connection.slug}`;
     try {
       const started = await onRunTaskCommand(connectionRepairCommand(connection));
@@ -1718,7 +1756,7 @@
                         <option value="">Choose an account</option>
                       {:else}
                         {#each monitorConnections as connection (connection.slug)}
-                          <option value={connection.slug} disabled={connectionNeedsRepair(connection)}>
+                          <option value={connection.slug}>
                             {monitorConnectionLabel(connection)}
                           </option>
                         {/each}
@@ -1746,12 +1784,15 @@
                     class="sc-btn pf-task-settings-primary-button pf-task-settings-compact-button"
                     data-variant="solid"
                     data-size="sm"
-                    disabled={!selectedMonitorConnection || selectedMonitorNeedsRepair || creatingMonitor}
+                    disabled={selectedMonitorPrimaryDisabled}
                   >
-                    {creatingMonitor ? (selectedMonitorBinding ? "Updating" : "Adding") : (selectedMonitorBinding ? "Update" : "Add")}
+                    {monitorPrimaryActionLabel()}
                   </button>
                 </div>
 
+                {#if selectedMonitorConnectionRecord && selectedMonitorNeedsRepair}
+                  <p>{monitorRepairNotice(selectedMonitorConnectionRecord)}</p>
+                {/if}
                 {#if monitorConnections.length === 0}
                   <p>No trigger-ready accounts.</p>
                 {/if}
