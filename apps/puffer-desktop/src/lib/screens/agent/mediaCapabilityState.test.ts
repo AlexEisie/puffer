@@ -13,9 +13,17 @@ function capability(overrides: Partial<MediaCapabilityInfo> = {}): MediaCapabili
     modelDisplayName: "Seedance 2.0 (720p)",
     kind: "video",
     operation: "generate",
-    adapter: "openai_video",
-    parameters: [],
-    defaults: {},
+    adapter: "relaydance_video",
+    axes: [
+      {
+        id: "resolution",
+        label: "Resolution",
+        role: "param",
+        control: { enum: { values: ["720p"], default: "720p" } },
+        requestField: "metadata.resolution",
+        wireType: "string"
+      }
+    ],
     status: "unavailable",
     source: "static",
     reason: "missing_auth",
