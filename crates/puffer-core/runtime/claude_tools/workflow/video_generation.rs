@@ -80,14 +80,16 @@ fn build_video_request(
 ) -> Result<VideoRequest> {
     let prompt = prompt_text(cwd, &input.prompt)?;
     let image_references = validate_video_image_references(&input.image_references)?;
-    let (provider, model, operation, adapter) = required_video_selection(settings)?;
-    let mut parameters = settings.parameters.clone();
+    let (provider, model) = required_video_selection(settings)?;
+    // Merge the persisted axis selections with any per-call overrides; the
+    // runtime resolves these against the logical model's axes/variants.
+    let mut parameters = settings.selections.clone();
     parameters.extend(input.parameters);
     Ok(VideoRequest {
         provider,
         model,
-        operation,
-        adapter,
+        operation: "generate".to_string(),
+        adapter: String::new(),
         prompt,
         image_references,
         parameters,
@@ -201,25 +203,13 @@ fn video_generation_output(
     }))?)
 }
 
-fn required_video_selection(
-    settings: &MediaGenerationConfig,
-) -> Result<(String, String, String, String)> {
+fn required_video_selection(settings: &MediaGenerationConfig) -> Result<(String, String)> {
     let provider = settings.provider_id.trim();
-    let model = settings.model_id.trim();
-    let operation = settings.operation.trim();
-    let adapter = settings.adapter.trim();
-    if provider.is_empty() || model.is_empty() || adapter.is_empty() {
-        bail!("video media provider/model/adapter is not configured");
+    let model = settings.logical_model_id.trim();
+    if provider.is_empty() || model.is_empty() {
+        bail!("video media provider/model is not configured");
     }
-    if operation.is_empty() {
-        bail!("video media operation is not configured");
-    }
-    Ok((
-        provider.to_string(),
-        model.to_string(),
-        operation.to_string(),
-        adapter.to_string(),
-    ))
+    Ok((provider.to_string(), model.to_string()))
 }
 
 fn prompt_text(cwd: &Path, value: &str) -> Result<String> {
@@ -281,19 +271,15 @@ mod tests {
     use tempfile::tempdir;
     use uuid::Uuid;
 
-    fn video_settings() -> MediaGenerationConfig {
-        MediaGenerationConfig {
+    fn video_settings() -> MediaGenerationConfig { MediaGenerationConfig {
             provider_id: "relaydance".to_string(),
-            model_id: "doubao-seedance-2-0-720p".to_string(),
-            operation: "generate".to_string(),
-            adapter: "relaydance_video".to_string(),
-            parameters: BTreeMap::from([
+            logical_model_id: "doubao-seedance-2-0-720p".to_string(),
+            selections: BTreeMap::from([
                 ("duration_seconds".to_string(), "5".to_string()),
                 ("aspect_ratio".to_string(), "16:9".to_string()),
                 ("resolution".to_string(), "720p".to_string()),
             ]),
-        }
-    }
+        } }
 
     fn test_state(settings: Option<MediaGenerationConfig>, cwd: &Path) -> AppState {
         let mut config = puffer_config::PufferConfig::default();
@@ -677,7 +663,8 @@ mod tests {
 
         assert_eq!(request.provider, "relaydance");
         assert_eq!(request.model, "doubao-seedance-2-0-720p");
-        assert_eq!(request.adapter, "relaydance_video");
+        // adapter is derived from the capability at runtime, not set here.
+        assert_eq!(request.adapter, "");
         assert_eq!(request.parameters["duration_seconds"], "5");
         assert_eq!(request.parameters["aspect_ratio"], "9:16");
         assert_eq!(request.parameters["resolution"], "1080p");

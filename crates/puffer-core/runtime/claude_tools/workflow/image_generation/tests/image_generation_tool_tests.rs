@@ -8,13 +8,7 @@ fn execute_uses_discovery_cache_for_chat_image_output_model() {
     let auth_store = openrouter_auth_store();
     let discovery_cache = discovered_chat_image_cache();
     let mut state = test_state(
-        MediaGenerationConfig {
-            provider_id: "openrouter".to_string(),
-            model_id: "openrouter/image-chat".to_string(),
-            operation: "generate".to_string(),
-            adapter: "chat_image_output".to_string(),
-            parameters: BTreeMap::new(),
-        },
+        MediaGenerationConfig { provider_id: "openrouter".to_string(), logical_model_id: "openrouter/image-chat".to_string(), selections: BTreeMap::new() },
         dir.path(),
     );
 
@@ -48,17 +42,11 @@ fn dispatcher_passes_media_context_to_image_generation_tool() {
     let registry = registry_with_provider(base_url);
     let auth_store = auth_store();
     let mut state = test_state(
-        MediaGenerationConfig {
-            provider_id: "exact-provider".to_string(),
-            model_id: "exact-image-model".to_string(),
-            operation: "generate".to_string(),
-            adapter: "images_json".to_string(),
-            parameters: BTreeMap::from([
+        MediaGenerationConfig { provider_id: "exact-provider".to_string(), logical_model_id: "exact-image-model".to_string(), selections: BTreeMap::from([
                 ("size".to_string(), "1024x1024".to_string()),
                 ("quality".to_string(), "auto".to_string()),
                 ("output_format".to_string(), "png".to_string()),
-            ]),
-        },
+            ]) },
         dir.path(),
     );
     let definition = image_generation_tool_definition();

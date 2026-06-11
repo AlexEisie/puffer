@@ -548,10 +548,8 @@ pub(crate) struct MediaSettingsDto {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MediaGenerationSettingsDto {
     pub(crate) provider_id: String,
-    pub(crate) model_id: String,
-    pub(crate) operation: String,
-    pub(crate) adapter: String,
-    pub(crate) parameters: std::collections::BTreeMap<String, String>,
+    pub(crate) logical_model_id: String,
+    pub(crate) selections: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

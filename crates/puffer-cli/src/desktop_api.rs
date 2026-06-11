@@ -450,10 +450,8 @@ fn media_selection_dto(
         .as_ref()
         .map(|selection| MediaGenerationSettingsDto {
             provider_id: selection.provider_id.clone(),
-            model_id: selection.model_id.clone(),
-            operation: selection.operation.clone(),
-            adapter: selection.adapter.clone(),
-            parameters: selection.parameters.clone(),
+            logical_model_id: selection.logical_model_id.clone(),
+            selections: selection.selections.clone(),
         })
 }
 

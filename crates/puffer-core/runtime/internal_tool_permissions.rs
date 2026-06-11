@@ -463,17 +463,11 @@ mod tests {
 
     fn media_state(cwd: &Path) -> AppState {
         let mut config = puffer_config::PufferConfig::default();
-        config.media.image = Some(MediaGenerationConfig {
-            provider_id: "exact-provider".to_string(),
-            model_id: "stale-image-model".to_string(),
-            operation: "generate".to_string(),
-            adapter: "images_json".to_string(),
-            parameters: BTreeMap::from([
+        config.media.image = Some(MediaGenerationConfig { provider_id: "exact-provider".to_string(), logical_model_id: "stale-image-model".to_string(), selections: BTreeMap::from([
                 ("size".to_string(), "1024x1024".to_string()),
                 ("quality".to_string(), "auto".to_string()),
                 ("output_format".to_string(), "png".to_string()),
-            ]),
-        });
+            ]) });
         AppState::new(
             config,
             cwd.to_path_buf(),

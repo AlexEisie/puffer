@@ -1,7 +1,7 @@
 use crate::runtime::media::planner::validate_image_generation_count;
 use crate::AppState;
 use crate::{
-    generate_exact_image_with_cache, resolved_exact_image_parameters_with_cache,
+    generate_exact_image_with_cache,
     ExactImageGenerationRequest, ExactMediaDiscoveryCache,
 };
 use anyhow::{bail, Context, Result};
@@ -87,21 +87,8 @@ pub fn execute_image_generation(
         .image
         .as_ref()
         .context("image media provider/model/adapter is not configured")?;
-    let mut request = build_image_request(cwd, parsed, settings)?;
+    let request = build_image_request(cwd, parsed, settings)?;
     let media_context = media_context.context("ImageGeneration media runtime is not configured")?;
-    request.parameters = resolved_exact_image_parameters_with_cache(
-        media_context.providers,
-        media_context.auth_store,
-        &ExactImageGenerationRequest {
-            provider_id: request.provider.clone(),
-            model_id: request.model.clone(),
-            adapter: request.adapter.clone(),
-            prompt: request.prompt.clone(),
-            parameters: request.parameters.clone(),
-            count: request.count,
-        },
-        media_context.discovery_cache,
-    )?;
     let generated = generate_exact_image_with_cache(
         media_context.providers,
         media_context.auth_store,
@@ -148,13 +135,15 @@ fn build_image_request(
 ) -> Result<ImageRequest> {
     validate_image_generation_count(input.count)?;
     let prompt = prompt_text(cwd, &input.prompt, input.prompt_reference.as_deref())?;
-    let (provider, model, adapter) = required_provider_model_adapter(settings)?;
-    let mut parameters = settings.parameters.clone();
+    let (provider, model) = required_provider_model(settings)?;
+    // Persisted axis selections; the runtime resolves them against the logical
+    // model's axes/variants. The adapter is derived from the capability.
+    let mut parameters = settings.selections.clone();
     apply_aspect_parameter(&mut parameters, input.aspect.as_deref())?;
     Ok(ImageRequest {
         provider,
         model,
-        adapter,
+        adapter: String::new(),
         prompt,
         parameters,
         count: input.count,
@@ -163,16 +152,13 @@ fn build_image_request(
     })
 }
 
-fn required_provider_model_adapter(
-    settings: &MediaGenerationConfig,
-) -> Result<(String, String, String)> {
+fn required_provider_model(settings: &MediaGenerationConfig) -> Result<(String, String)> {
     let provider = settings.provider_id.trim();
-    let model = settings.model_id.trim();
-    let adapter = settings.adapter.trim();
-    if provider.is_empty() || model.is_empty() || adapter.is_empty() {
-        bail!("image media provider/model/adapter is not configured");
+    let model = settings.logical_model_id.trim();
+    if provider.is_empty() || model.is_empty() {
+        bail!("image media provider/model is not configured");
     }
-    Ok((provider.to_string(), model.to_string(), adapter.to_string()))
+    Ok((provider.to_string(), model.to_string()))
 }
 
 fn image_generation_output(result: &ImageGenerationResult) -> Result<String> {
@@ -323,10 +309,8 @@ mod tests {
     fn image_settings() -> MediaGenerationConfig {
         MediaGenerationConfig {
             provider_id: "openai".to_string(),
-            model_id: "gpt-image-1".to_string(),
-            operation: "generate".to_string(),
-            adapter: "images_json".to_string(),
-            parameters: BTreeMap::from([
+            logical_model_id: "gpt-image-1".to_string(),
+            selections: BTreeMap::from([
                 ("size".to_string(), "1024x1024".to_string()),
                 ("quality".to_string(), "auto".to_string()),
                 ("output_format".to_string(), "png".to_string()),
@@ -667,16 +651,10 @@ mod tests {
     #[test]
     fn builds_request_maps_aspect_to_aspect_ratio_parameter() {
         let dir = tempdir().unwrap();
-        let settings = MediaGenerationConfig {
-            provider_id: "minimax".to_string(),
-            model_id: "image-01".to_string(),
-            operation: "generate".to_string(),
-            adapter: "minimax_image".to_string(),
-            parameters: BTreeMap::from([
+        let settings = MediaGenerationConfig { provider_id: "minimax".to_string(), logical_model_id: "image-01".to_string(), selections: BTreeMap::from([
                 ("aspect_ratio".to_string(), "1:1".to_string()),
                 ("response_format".to_string(), "base64".to_string()),
-            ]),
-        };
+            ]) };
 
         let request = build_image_request(
             dir.path(),
@@ -699,16 +677,10 @@ mod tests {
     #[test]
     fn builds_request_preserves_model_specific_size_tokens_for_aspect() {
         let dir = tempdir().unwrap();
-        let settings = MediaGenerationConfig {
-            provider_id: "byteplus".to_string(),
-            model_id: "seedream-4-5-251128".to_string(),
-            operation: "generate".to_string(),
-            adapter: "images_json".to_string(),
-            parameters: BTreeMap::from([
+        let settings = MediaGenerationConfig { provider_id: "byteplus".to_string(), logical_model_id: "seedream-4-5-251128".to_string(), selections: BTreeMap::from([
                 ("size".to_string(), "2K".to_string()),
                 ("output_format".to_string(), "png".to_string()),
-            ]),
-        };
+            ]) };
 
         let request = build_image_request(
             dir.path(),
@@ -730,13 +702,7 @@ mod tests {
     #[test]
     fn builds_request_rejects_aspect_when_selected_model_has_no_aspect_parameter() {
         let dir = tempdir().unwrap();
-        let settings = MediaGenerationConfig {
-            provider_id: "openrouter".to_string(),
-            model_id: "image-chat".to_string(),
-            operation: "generate".to_string(),
-            adapter: "chat_image_output".to_string(),
-            parameters: BTreeMap::new(),
-        };
+        let settings = MediaGenerationConfig { provider_id: "openrouter".to_string(), logical_model_id: "image-chat".to_string(), selections: BTreeMap::new() };
 
         let error = build_image_request(
             dir.path(),
@@ -762,17 +728,11 @@ mod tests {
     fn builds_request_from_media_settings_instead_of_env_model() {
         let dir = tempdir().unwrap();
         std::env::set_var("PUFFER_IMAGE_MODEL", "legacy-env-model");
-        let settings = MediaGenerationConfig {
-            provider_id: "openai".to_string(),
-            model_id: "configured-image-model".to_string(),
-            operation: "generate".to_string(),
-            adapter: "images_json".to_string(),
-            parameters: BTreeMap::from([
+        let settings = MediaGenerationConfig { provider_id: "openai".to_string(), logical_model_id: "configured-image-model".to_string(), selections: BTreeMap::from([
                 ("size".to_string(), "1024x1024".to_string()),
                 ("quality".to_string(), "high".to_string()),
                 ("output_format".to_string(), "webp".to_string()),
-            ]),
-        };
+            ]) };
 
         let request = build_image_request(
             dir.path(),
@@ -797,17 +757,11 @@ mod tests {
     #[test]
     fn builds_request_for_non_openai_exact_provider() {
         let dir = tempdir().unwrap();
-        let settings = MediaGenerationConfig {
-            provider_id: "exact-provider".to_string(),
-            model_id: "exact-image-model".to_string(),
-            operation: "generate".to_string(),
-            adapter: "images_json".to_string(),
-            parameters: BTreeMap::from([
+        let settings = MediaGenerationConfig { provider_id: "exact-provider".to_string(), logical_model_id: "exact-image-model".to_string(), selections: BTreeMap::from([
                 ("size".to_string(), "1024x1024".to_string()),
                 ("quality".to_string(), "auto".to_string()),
                 ("output_format".to_string(), "png".to_string()),
-            ]),
-        };
+            ]) };
 
         let request = build_image_request(
             dir.path(),
@@ -877,17 +831,11 @@ mod tests {
         let auth_store = auth_store();
         let discovery_cache = ExactMediaDiscoveryCache::empty();
         let mut state = test_state(
-            MediaGenerationConfig {
-                provider_id: "exact-provider".to_string(),
-                model_id: "stale-image-model".to_string(),
-                operation: "generate".to_string(),
-                adapter: "images_json".to_string(),
-                parameters: BTreeMap::from([
+            MediaGenerationConfig { provider_id: "exact-provider".to_string(), logical_model_id: "stale-image-model".to_string(), selections: BTreeMap::from([
                     ("size".to_string(), "1024x1024".to_string()),
                     ("quality".to_string(), "auto".to_string()),
                     ("output_format".to_string(), "png".to_string()),
-                ]),
-            },
+                ]) },
             dir.path(),
         );
 
@@ -917,17 +865,11 @@ mod tests {
         let auth_store = auth_store();
         let discovery_cache = ExactMediaDiscoveryCache::empty();
         let mut state = test_state(
-            MediaGenerationConfig {
-                provider_id: "exact-provider".to_string(),
-                model_id: "exact-image-model".to_string(),
-                operation: "generate".to_string(),
-                adapter: "images_json".to_string(),
-                parameters: BTreeMap::from([
+            MediaGenerationConfig { provider_id: "exact-provider".to_string(), logical_model_id: "exact-image-model".to_string(), selections: BTreeMap::from([
                     ("size".to_string(), "1024x1024".to_string()),
                     ("quality".to_string(), "auto".to_string()),
                     ("output_format".to_string(), "png".to_string()),
-                ]),
-            },
+                ]) },
             dir.path(),
         );
 
