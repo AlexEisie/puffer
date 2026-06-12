@@ -2680,21 +2680,12 @@ mod tests {
                 && capability["status"] == "unavailable"
                 && capability["reason"] == "missing_auth"
         }));
-        assert!(capabilities.iter().any(|capability| {
-            capability["providerId"] == "kling"
-                && capability["axes"]
-                    .as_array()
-                    .map(|axes| {
-                        axes.iter().any(|axis| {
-                            axis["id"] == "ratio"
-                                && axis["label"] == "Ratio"
-                                && axis["control"]["enum"]["default"] == "16:9"
-                                && axis.get("requestField").is_none()
-                                && axis.get("wireType").is_none()
-                        })
-                    })
-                    .unwrap_or(false)
-        }));
+        assert!(
+            !capabilities
+                .iter()
+                .any(|capability| capability["providerId"] == "kling"),
+            "standalone Kling provider must not be exposed"
+        );
     }
 
     #[test]

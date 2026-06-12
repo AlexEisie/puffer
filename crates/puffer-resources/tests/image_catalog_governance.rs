@@ -75,10 +75,6 @@ const ALL_PROVIDER_YAMLS: &[(&str, &str)] = &[
         include_str!("../../../resources/providers/lmstudio.yaml"),
     ),
     (
-        "kling",
-        include_str!("../../../resources/providers/kling.yaml"),
-    ),
-    (
         "minimax",
         include_str!("../../../resources/providers/minimax.yaml"),
     ),
@@ -538,7 +534,7 @@ fn task5_image_providers_expose_only_canonical_product_axes() {
 
 #[test]
 fn task5_video_providers_use_canonical_setting_labels() {
-    for provider_id in ["byteplus", "relaydance", "kling"] {
+    for provider_id in ["byteplus", "relaydance"] {
         let yaml = ALL_PROVIDER_YAMLS
             .iter()
             .find_map(|(id, yaml)| (*id == provider_id).then_some(*yaml))
@@ -798,7 +794,7 @@ fn byteplus_declares_executable_video_descriptor() {
 
 #[test]
 fn only_executable_video_providers_declare_video_media() {
-    let expected = BTreeSet::from(["byteplus", "kling", "relaydance"]);
+    let expected = BTreeSet::from(["byteplus", "relaydance", "worldrouter"]);
     for (provider_id, yaml) in ALL_PROVIDER_YAMLS {
         let descriptor = provider_descriptor(provider_id, yaml);
         let has_video = descriptor

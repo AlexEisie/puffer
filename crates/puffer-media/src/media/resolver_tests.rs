@@ -31,10 +31,10 @@ media:
             "false": { model_id: seedance-1-5-pro-no-audio }
 "#;
 
-const KLING_YAML: &str = r#"
-id: kling
-display_name: Kling
-base_url: https://api.klingai.com
+const TIERED_VIDEO_YAML: &str = r#"
+id: tiered-video
+display_name: Tiered Video
+base_url: https://example.invalid
 default_api: openai-completions
 auth_modes: [api_key]
 media:
@@ -42,8 +42,8 @@ media:
     discovery: { adapter: static }
     execution: { adapter: replicate_video, path: /v1/videos/generations }
     models:
-      - id: kling-2-1
-        display_name: Kling 2.1
+      - id: tiered-2-1
+        display_name: Tiered 2.1
         operations: [generate]
         axes:
           - { id: tier, label: Quality, role: selector, control: !enum { values: ["std", "pro"], default: "std" } }
@@ -51,8 +51,8 @@ media:
         variants:
           selector: tier
           map:
-            "std": { model_id: kling-2-1-std, base_params: { resolution: "720p" } }
-            "pro": { model_id: kling-2-1-pro, base_params: { resolution: "1080p" } }
+            "std": { model_id: tiered-2-1-std, base_params: { resolution: "720p" } }
+            "pro": { model_id: tiered-2-1-pro, base_params: { resolution: "1080p" } }
 "#;
 
 const OPENAI_IMAGE_YAML: &str = r#"
@@ -168,8 +168,8 @@ fn auth_for(provider_ids: &[&str]) -> AuthStore {
 
 fn test_video_registry() -> (ProviderRegistry, AuthStore) {
     (
-        registry_from_yaml(&[RELAYDANCE_YAML, KLING_YAML]),
-        auth_for(&["relaydance", "kling"]),
+        registry_from_yaml(&[RELAYDANCE_YAML, TIERED_VIDEO_YAML]),
+        auth_for(&["relaydance", "tiered-video"]),
     )
 }
 
@@ -404,14 +404,14 @@ fn resolves_selector_base_params() {
     let r = resolve_media_request(
         &registry,
         &auth,
-        "kling",
-        "kling-2-1",
+        "tiered-video",
+        "tiered-2-1",
         MediaKind::Video,
         &btree(&[("tier", "pro"), ("duration", "10")]),
         &MediaDiscoveryCache::default(),
     )
     .unwrap();
-    assert_eq!(r.model_id, "kling-2-1-pro");
+    assert_eq!(r.model_id, "tiered-2-1-pro");
     assert_eq!(r.parameters["resolution"], "1080p");
     assert_eq!(r.parameters["duration"], "10");
 }
@@ -558,8 +558,8 @@ fn rejects_unknown_selector_value() {
     let err = resolve_media_request(
         &registry,
         &auth,
-        "kling",
-        "kling-2-1",
+        "tiered-video",
+        "tiered-2-1",
         MediaKind::Video,
         &btree(&[("tier", "ultra")]),
         &MediaDiscoveryCache::default(),

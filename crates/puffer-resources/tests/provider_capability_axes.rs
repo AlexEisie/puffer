@@ -12,6 +12,18 @@ fn provider(file: &str) -> puffer_provider_registry::ProviderDescriptor {
 }
 
 #[test]
+fn standalone_kling_provider_yaml_is_removed() {
+    let path = format!(
+        "{}/../../resources/providers/kling.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    assert!(
+        !std::path::Path::new(&path).exists(),
+        "standalone kling provider must not be bundled"
+    );
+}
+
+#[test]
 fn byteplus_seedance_declares_param_axes_and_single_variant() {
     let p = provider("byteplus");
     let video = p.media.as_ref().unwrap().video.as_ref().unwrap();
@@ -137,38 +149,7 @@ fn all_providers_parse_after_axis_migration() {
         "openrouter",
         "byteplus",
         "relaydance",
-        "kling",
     ] {
         let _ = provider(file); // panics on parse failure
-    }
-}
-
-#[test]
-fn kling_uses_tier_selector_and_discrete_duration() {
-    let p = provider("kling");
-    let video = p.media.as_ref().unwrap().video.as_ref().unwrap();
-    let m = video
-        .models
-        .iter()
-        .find(|m| m.id == "kling-2-1")
-        .expect("kling-2-1");
-    let tier = m.axes.iter().find(|a| a.id == "tier").expect("tier");
-    assert_eq!(tier.role, AxisRole::Selector);
-    let dur = m
-        .axes
-        .iter()
-        .find(|a| a.id == "duration")
-        .expect("duration");
-    assert_eq!(dur.label, "Duration");
-    assert!(
-        matches!(&dur.control, ControlKind::Enum { values, .. } if values == &vec!["5".to_string(), "10".to_string()])
-    );
-    let ratio = m.axes.iter().find(|a| a.id == "ratio").expect("ratio");
-    assert_eq!(ratio.label, "Ratio");
-    match &m.variants {
-        Variants::BySelector { map, .. } => {
-            assert_eq!(map["pro"].base_params["resolution"], "1080p")
-        }
-        _ => panic!("expected BySelector"),
     }
 }
