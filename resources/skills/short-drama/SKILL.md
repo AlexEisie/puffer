@@ -38,8 +38,14 @@ to `.puffer/media/images|videos/` — you only reference them, never relocate th
    are `https://` or `asset://` URLs.
    - If present, use those URLs directly as `--image-reference` in stage 4. Do NOT
      generate images.
-   - If absent, run text-to-video in stage 4 (do not generate character images — a
-     locally generated image cannot currently be passed to the video tool).
+   - If absent and the user wants character-consistent shots, generate each character
+     once with `imagegen --prompt "<character sheet>" --count 1`. Read the tool result's
+     `remoteSourceUrl` for that artifact (same key the video tool already uses):
+       - If `remoteSourceUrl` is present, use it as `--image-reference` in stage 4.
+       - If `remoteSourceUrl` is absent, stop and report that the configured image
+         provider does not produce a referenceable URL, so image-to-video is unavailable.
+         Do NOT silently fall back to text-to-video.
+   - If absent and consistency is not required, run text-to-video in stage 4.
 
 4. **Per-shot video.** For each shot in storyboard order, run one `videogen` command:
    - `videogen --prompt "<shot visual + action>"`
