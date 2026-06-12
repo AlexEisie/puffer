@@ -355,15 +355,17 @@ fn failed_poll_persists_remote_failure_diagnostics() {
     let job = adapter
         .poll_until_terminal(&service, job, VideoPollingConfig::default(), |_| {}, || 2)
         .expect("poll");
+    let persisted = service.load_job(&job.id).expect("persisted job");
 
-    assert_eq!(job.status, MediaJobStatus::Failed);
-    assert_eq!(job.provider_job_id.as_deref(), Some("task-123"));
-    assert_eq!(job.remote_status.as_deref(), Some("failed"));
+    assert_eq!(persisted, job);
+    assert_eq!(persisted.status, MediaJobStatus::Failed);
+    assert_eq!(persisted.provider_job_id.as_deref(), Some("task-123"));
+    assert_eq!(persisted.remote_status.as_deref(), Some("failed"));
     assert_eq!(
-        job.error.as_deref(),
+        persisted.error.as_deref(),
         Some("The service encountered an unexpected internal error.")
     );
-    assert!(job.artifact_ids.is_empty());
+    assert!(persisted.artifact_ids.is_empty());
 }
 
 #[test]

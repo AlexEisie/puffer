@@ -457,6 +457,18 @@ fn exact_generation_result_returns_artifacts_in_order() {
     assert_eq!(result.artifacts[1].index, 1);
 }
 
+fn assert_exact_media_result_hides_internal_job_fields(value: &serde_json::Value) {
+    for key in [
+        "remoteGetUrl",
+        "prompt",
+        "adapter",
+        "rawPayload",
+        "providerResponseBody",
+    ] {
+        assert!(value.get(key).is_none(), "unexpected `{key}` in {value}");
+    }
+}
+
 #[test]
 fn exact_media_generation_result_returns_failed_video_diagnostics() {
     let job = MediaJob {
@@ -491,7 +503,7 @@ fn exact_media_generation_result_returns_failed_video_diagnostics() {
         Some("The service encountered an unexpected internal error.")
     );
     let value = serde_json::to_value(&result).expect("serialize result");
-    assert!(value.get("remoteGetUrl").is_none());
+    assert_exact_media_result_hides_internal_job_fields(&value);
 }
 
 #[test]

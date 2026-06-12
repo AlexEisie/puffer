@@ -529,6 +529,26 @@ mod tests {
         }
     }
 
+    fn assert_null_diagnostic_fields(value: &Value) {
+        for key in ["providerJobId", "remoteStatus", "error"] {
+            assert_eq!(value.get(key), Some(&Value::Null));
+        }
+    }
+
+    fn assert_workflow_output_hides_internal_fields(value: &Value) {
+        for key in [
+            "remoteGetUrl",
+            "prompt",
+            "adapter",
+            "rawPayload",
+            "providerResponseBody",
+            "credential",
+            "apiKey",
+        ] {
+            assert!(value.get(key).is_none(), "unexpected `{key}` in {value}");
+        }
+    }
+
     #[test]
     fn execute_rejects_missing_video_provider_model_config() {
         let dir = tempdir().unwrap();
@@ -749,6 +769,7 @@ mod tests {
                 "The service encountered an unexpected internal error."
             ))
         );
+        assert_workflow_output_hides_internal_fields(&parsed);
     }
 
     #[test]
@@ -769,10 +790,7 @@ mod tests {
         let output = video_generation_output(&result, &BTreeMap::new(), None).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-        let object = parsed.as_object().unwrap();
-        for key in ["providerJobId", "remoteStatus", "error"] {
-            assert_eq!(object.get(key), Some(&serde_json::Value::Null));
-        }
+        assert_null_diagnostic_fields(&parsed);
     }
 
     #[test]
@@ -820,6 +838,7 @@ mod tests {
         assert_eq!(object.get("providerJobId"), Some(&json!("task-1")));
         assert_eq!(object.get("remoteStatus"), Some(&json!("completed")));
         assert_eq!(object.get("error"), Some(&serde_json::Value::Null));
+        assert_workflow_output_hides_internal_fields(&parsed);
         assert_eq!(parsed["parameters"]["duration_seconds"], "5");
         assert_eq!(parsed["parameters"]["resolution"], "720p");
         assert_eq!(parsed["parameters"]["aspect_ratio"], "9:16");
