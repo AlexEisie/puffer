@@ -638,6 +638,7 @@ fn execution_adapter_is_available_for_kind(kind: MediaKind, adapter: MediaExecut
             | (MediaKind::Video, MediaExecutionKind::ReplicateVideo)
             | (MediaKind::Video, MediaExecutionKind::RelaydanceVideo)
             | (MediaKind::Video, MediaExecutionKind::BytePlusVideo)
+            | (MediaKind::Video, MediaExecutionKind::WorldRouterVideo)
     )
 }
 
@@ -671,6 +672,7 @@ pub(crate) fn adapter_id(adapter: MediaExecutionKind) -> &'static str {
         MediaExecutionKind::ReplicateVideo => "replicate_video",
         MediaExecutionKind::RelaydanceVideo => "relaydance_video",
         MediaExecutionKind::BytePlusVideo => "byteplus_video",
+        MediaExecutionKind::WorldRouterVideo => "worldrouter_video",
     }
 }
 

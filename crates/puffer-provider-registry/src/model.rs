@@ -438,6 +438,8 @@ pub enum MediaExecutionKind {
     RelaydanceVideo,
     #[serde(rename = "byteplus_video")]
     BytePlusVideo,
+    #[serde(rename = "worldrouter_video")]
+    WorldRouterVideo,
 }
 
 /// Describes image media operations.

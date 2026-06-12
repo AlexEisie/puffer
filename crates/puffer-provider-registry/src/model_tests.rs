@@ -765,6 +765,12 @@ fn media_execution_kind_parses_byteplus_video() {
 }
 
 #[test]
+fn media_execution_kind_parses_worldrouter_video() {
+    let kind: MediaExecutionKind = serde_yaml::from_str("worldrouter_video").expect("parse");
+    assert_eq!(kind, MediaExecutionKind::WorldRouterVideo);
+}
+
+#[test]
 fn media_execution_kind_parses_gemini_generate_content() {
     let kind: MediaExecutionKind = serde_yaml::from_str("gemini_generate_content").expect("parse");
     assert_eq!(kind, MediaExecutionKind::GeminiGenerateContent);
