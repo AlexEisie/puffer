@@ -1,7 +1,7 @@
 # Skill 行动义务守卫设计
 
 - 日期：2026-06-12
-- 状态：设计已确认，待写实现 plan
+- 状态：设计复审完成，待实现
 - 范围：agent runtime + skill frontmatter；不重建短剧 internal tool
 
 ## 1. 背景与问题
@@ -48,9 +48,9 @@ skill 完成，Rust 端只提供原子能力与最小执行约束。
    requires-action: true
    ```
 
-2. runtime 观察工具调用流。
-3. 当模型调用 `Skill` 工具进入一个 `requires-action: true` 的 skill 后，runtime 记录
-   一个 pending obligation。
+2. runtime 观察已执行的工具结果，而不是仅观察模型请求。
+3. 当 `Skill` 工具成功执行、且进入了一个 `requires-action: true` 的 skill 后，
+   runtime 记录一个 pending obligation。
 4. 后续出现任意真实工具调用时，obligation 满足。
 5. 如果后续模型返回无工具调用：
    - 第一次：runtime 注入纠正提醒并继续下一轮。
@@ -106,6 +106,20 @@ pub(crate) enum NoToolDecision {
 }
 ```
 
+核心 API：
+
+```rust
+impl SkillActionObligation {
+    pub(crate) fn observe_invocations(
+        &mut self,
+        resources: &LoadedResources,
+        invocations: &[ToolInvocation],
+    );
+
+    pub(crate) fn no_tool_decision(&mut self) -> NoToolDecision;
+}
+```
+
 状态：
 
 - `Idle`：没有待履行义务。
@@ -114,9 +128,13 @@ pub(crate) enum NoToolDecision {
 
 事件规则：
 
-- 观察到 `Skill` 工具调用，且目标 skill 的 `requires_action == true`：
-  设置 pending obligation。
-- 观察到 pending 状态下的任意非 `Skill` 工具调用：
+- 观察到成功的 `ToolInvocation { tool_id: "Skill", success: true, ... }`：
+  通过 `Skill` 工具共享 helper 从 invocation input 解析被激活的 skill 名，再用
+  `skill_by_name(resources, name)` 查出 canonical `SkillSpec`。如果目标 skill 的
+  `requires_action == true`，设置 pending obligation。
+- 失败的 `Skill` invocation 不触发 obligation。unknown skill、`disable-model-invocation`
+  拒绝、权限拒绝等错误不应被误判为“已进入 skill”。
+- 观察到 pending 状态下的任意非 `Skill` invocation：
   清空 pending obligation。
 - 观察到 pending 状态下再次触发另一个 `requires-action` skill：
   用最新 skill 覆盖 pending。这样避免多 pending 队列和复杂优先级，符合实际 agent
@@ -133,21 +151,25 @@ pub(crate) enum NoToolDecision {
 在 `crates/puffer-core/runtime/agent_loop.rs`：
 
 1. agent loop 开始时创建 `SkillActionObligation`。
-2. 每轮收到 `turn.tool_calls` 后，先调用：
-
-   ```rust
-   obligation.observe_tool_calls(&turn.tool_calls);
-   ```
-
-3. 在现有 `turn.tool_calls.is_empty()` 分支中，先问：
+2. 在现有 `turn.tool_calls.is_empty()` 分支中，先问：
 
    ```rust
    match obligation.no_tool_decision() { ... }
    ```
 
-4. `Complete` 走现有 final assistant text 路径。
-5. `ContinueWithReminder` 把提醒追加进 conversation items，然后 `continue` 下一轮。
-6. `FailNotStarted` 返回一段明确失败 assistant text，并运行与普通 final text 一致的收尾逻辑。
+3. `Complete` 走现有 final assistant text 路径。
+4. `ContinueWithReminder` 必须先把 `turn.pre_tool_items` 追加进 conversation items，
+   保留模型刚才的 promise/progress 文本；然后追加一条 user reminder，再 `continue`
+   下一轮。这样下一次 provider 调用能看到“刚才为什么被纠正”。
+5. `FailNotStarted` 返回一段明确失败 assistant text，并运行与普通 final text 一致的收尾逻辑。
+6. 工具批执行完成并得到 `new_invocations` 后，调用：
+
+   ```rust
+   obligation.observe_invocations(inputs.resources, &new_invocations);
+   ```
+
+   这一步放在 FunctionCallOutput 入 conversation 前后均可；它只影响后续 no-tool
+   分支，不改变本批工具结果。
 
 ### Blocking loop
 
@@ -179,6 +201,7 @@ The "{skill_name}" skill was activated, but the model did not start the required
 ```text
 User asks for short drama
 -> model calls Skill(short-drama)
+-> Skill invocation succeeds and returns the skill prompt
 -> obligation pending
 -> model calls Write/Bash/Read/etc.
 -> obligation satisfied
@@ -190,6 +213,7 @@ User asks for short drama
 ```text
 User asks for short drama
 -> model calls Skill(short-drama)
+-> Skill invocation succeeds
 -> obligation pending
 -> model returns pure promise text
 -> runtime injects reminder, does not finish
@@ -202,6 +226,7 @@ User asks for short drama
 ```text
 User asks for short drama
 -> model calls Skill(short-drama)
+-> Skill invocation succeeds
 -> obligation pending
 -> model returns pure promise text
 -> runtime injects reminder
@@ -214,6 +239,8 @@ User asks for short drama
 稳定性：
 
 - 约束点在 runtime no-tool 分支，正好覆盖 promise-only 的干净退出路径。
+- obligation 只由成功执行后的 `Skill` invocation 激活，避免把 unknown/disabled skill
+  的失败结果误判为 pending。
 - streaming 与 blocking loop 一致接入，避免路径差异。
 - 不依赖模型自觉遵守 skill 文案。
 - 不依赖特定 provider 的 tool-choice 功能。
@@ -234,11 +261,13 @@ User asks for short drama
 
 `puffer-core` obligation 单元测试：
 
-- `Skill(short-drama)` 后无工具调用 -> `ContinueWithReminder`。
+- 成功的 `Skill(short-drama)` invocation 后无工具调用 -> `ContinueWithReminder`。
 - 提醒后仍无工具调用 -> `FailNotStarted`。
-- `Skill(short-drama)` 后出现任意非 `Skill` 工具调用 -> `Complete`。
+- 成功的 `Skill(short-drama)` invocation 后出现任意非 `Skill` invocation -> `Complete`。
+- 失败的 `Skill(short-drama)` invocation 不触发 pending。
 - 未声明 `requires-action` 的 skill 不触发 pending。
 - pending 中触发另一个 requires-action skill 时，pending skill 名更新。
+- 同一批 invocation 中 `Skill(short-drama)` 后跟 `Write` -> pending 立即满足。
 
 loop 集成测试：
 
@@ -260,6 +289,7 @@ loop 集成测试：
 - `crates/puffer-resources/src/loader.rs`
 - `crates/puffer-core/runtime.rs`
 - `crates/puffer-core/runtime/skill_obligation.rs`
+- `crates/puffer-core/runtime/claude_tools/skill.rs`
 - `crates/puffer-core/runtime/agent_loop.rs`
 - `crates/puffer-core/runtime/blocking_loop.rs`
 - `resources/skills/short-drama/SKILL.md`
@@ -280,6 +310,12 @@ loop 集成测试：
 - 更跨 provider。
 - 不改变请求层工具选择策略。
 - 与旧 short-drama 守卫的成功经验一致。
+
+基于成功 invocation 激活，而不是基于模型请求激活：
+
+- 复用 `Skill` 工具自己的 unknown/disabled/lambda gate 校验结果。
+- 不在 obligation 守卫里复制 permission、resource lookup 或 provider 请求逻辑。
+- 不需要给所有 runtime-local tool 改返回类型，也不需要新增复杂 metadata 管道。
 
 只判定“开始”，不判定“完成”：
 
