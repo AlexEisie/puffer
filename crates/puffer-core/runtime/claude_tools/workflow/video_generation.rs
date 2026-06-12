@@ -195,6 +195,9 @@ fn video_generation_output(
         "provider": result.provider_id,
         "model": result.model_id,
         "status": result.status,
+        "providerJobId": result.provider_job_id,
+        "remoteStatus": result.remote_status,
+        "error": result.error,
         "parameters": parameters,
         "purpose": purpose
     }))?)
@@ -712,6 +715,67 @@ mod tests {
     }
 
     #[test]
+    fn output_includes_failed_job_diagnostics() {
+        let result = ExactMediaGenerationResult {
+            job_id: "job-1".to_string(),
+            requested_count: 1,
+            artifacts: Vec::new(),
+            kind: "video".to_string(),
+            provider_id: "worldrouter".to_string(),
+            model_id: "seedance-2.0-fast".to_string(),
+            status: "failed".to_string(),
+            provider_job_id: Some("task-123".to_string()),
+            remote_status: Some("failed".to_string()),
+            error: Some("The service encountered an unexpected internal error.".to_string()),
+        };
+
+        let output = video_generation_output(
+            &result,
+            &BTreeMap::from([
+                ("duration".to_string(), "5".to_string()),
+                ("resolution".to_string(), "480p".to_string()),
+            ]),
+            None,
+        )
+        .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let object = parsed.as_object().unwrap();
+        assert_eq!(object.get("providerJobId"), Some(&json!("task-123")));
+        assert_eq!(object.get("remoteStatus"), Some(&json!("failed")));
+        assert_eq!(
+            object.get("error"),
+            Some(&json!(
+                "The service encountered an unexpected internal error."
+            ))
+        );
+    }
+
+    #[test]
+    fn output_includes_null_diagnostics_when_absent() {
+        let result = ExactMediaGenerationResult {
+            job_id: "job-1".to_string(),
+            requested_count: 1,
+            artifacts: Vec::new(),
+            kind: "video".to_string(),
+            provider_id: "provider-1".to_string(),
+            model_id: "model-1".to_string(),
+            status: "succeeded".to_string(),
+            provider_job_id: None,
+            remote_status: None,
+            error: None,
+        };
+
+        let output = video_generation_output(&result, &BTreeMap::new(), None).unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let object = parsed.as_object().unwrap();
+        for key in ["providerJobId", "remoteStatus", "error"] {
+            assert_eq!(object.get(key), Some(&serde_json::Value::Null));
+        }
+    }
+
+    #[test]
     fn execute_uses_exact_video_generation_and_returns_artifacts() {
         let (base_url, server) = spawn_relaydance_video_server();
         let dir = tempdir().unwrap();
@@ -752,6 +816,10 @@ mod tests {
         assert_eq!(parsed["model"], "doubao-seedance-2-0-720p");
         assert_eq!(parsed["status"], "succeeded");
         assert_eq!(parsed["purpose"], "short launch clip");
+        let object = parsed.as_object().unwrap();
+        assert_eq!(object.get("providerJobId"), Some(&json!("task-1")));
+        assert_eq!(object.get("remoteStatus"), Some(&json!("completed")));
+        assert_eq!(object.get("error"), Some(&serde_json::Value::Null));
         assert_eq!(parsed["parameters"]["duration_seconds"], "5");
         assert_eq!(parsed["parameters"]["resolution"], "720p");
         assert_eq!(parsed["parameters"]["aspect_ratio"], "9:16");

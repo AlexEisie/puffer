@@ -458,6 +458,43 @@ fn exact_generation_result_returns_artifacts_in_order() {
 }
 
 #[test]
+fn exact_media_generation_result_returns_failed_video_diagnostics() {
+    let job = MediaJob {
+        id: "job-1".to_string(),
+        kind: MediaKind::Video,
+        provider_id: "worldrouter".to_string(),
+        model_id: "seedance-2.0-fast".to_string(),
+        adapter: Some("worldrouter_video".to_string()),
+        prompt: "make a robot battle video".to_string(),
+        parameters: BTreeMap::from([
+            ("duration".to_string(), "5".to_string()),
+            ("resolution".to_string(), "480p".to_string()),
+        ]),
+        status: MediaJobStatus::Failed,
+        provider_job_id: Some("task-123".to_string()),
+        remote_status: Some("failed".to_string()),
+        remote_get_url: Some("https://provider.example.test/tasks/task-123".to_string()),
+        artifact_ids: Vec::new(),
+        requested_count: 1,
+        error: Some("The service encountered an unexpected internal error.".to_string()),
+        created_at_ms: 1,
+        updated_at_ms: 2,
+    };
+
+    let result = exact_media_generation_result(job, Vec::new());
+
+    assert_eq!(result.status, "failed");
+    assert_eq!(result.provider_job_id.as_deref(), Some("task-123"));
+    assert_eq!(result.remote_status.as_deref(), Some("failed"));
+    assert_eq!(
+        result.error.as_deref(),
+        Some("The service encountered an unexpected internal error.")
+    );
+    let value = serde_json::to_value(&result).expect("serialize result");
+    assert!(value.get("remoteGetUrl").is_none());
+}
+
+#[test]
 fn generate_exact_image_dispatches_to_minimax_adapter() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
     let address = listener.local_addr().expect("address");

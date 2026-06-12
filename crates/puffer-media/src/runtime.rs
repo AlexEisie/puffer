@@ -120,6 +120,9 @@ pub struct ExactMediaGenerationResult {
     pub provider_id: String,
     pub model_id: String,
     pub status: String,
+    pub provider_job_id: Option<String>,
+    pub remote_status: Option<String>,
+    pub error: Option<String>,
 }
 
 /// Carries trusted media discovery results used by capability resolution.
@@ -353,6 +356,9 @@ fn generate_exact_image_from_media_request(
         provider_id: result.provider_id,
         model_id: result.model_id,
         status: result.status,
+        provider_job_id: None,
+        remote_status: None,
+        error: None,
     })
 }
 
@@ -424,6 +430,9 @@ pub(crate) fn exact_media_generation_result(
         provider_id: job.provider_id,
         model_id: job.model_id,
         status: media_job_status_name(job.status).to_string(),
+        provider_job_id: job.provider_job_id,
+        remote_status: job.remote_status,
+        error: job.error,
     }
 }
 

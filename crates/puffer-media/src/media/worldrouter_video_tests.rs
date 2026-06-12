@@ -320,6 +320,53 @@ fn succeeded_poll_without_video_url_marks_job_failed() {
 }
 
 #[test]
+fn failed_poll_persists_remote_failure_diagnostics() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = MediaGenerationService::new(temp.path());
+    let adapter = test_adapter(ScriptedTransport {
+        asset_group: json!({"id": "group-1"}),
+        assets: Rc::new(RefCell::new(Vec::new())),
+        submit: json!({"id": "task-123", "requestId": "req-123"}),
+        polls: Rc::new(RefCell::new(vec![json!({
+            "id": "task-123",
+            "status": "failed",
+            "error": {
+                "message": "The service encountered an unexpected internal error."
+            }
+        })])),
+        downloads: Rc::new(RefCell::new(Vec::new())),
+        requests: Rc::new(RefCell::new(Vec::new())),
+    });
+    let request = WorldRouterVideoRequest {
+        model: "seedance-2.0-fast".to_string(),
+        prompt: "a robot battle".to_string(),
+        image_references: Vec::new(),
+        params: params(&[("resolution", "480p"), ("duration", "5")]),
+    };
+
+    let job = adapter
+        .submit(
+            &service,
+            request,
+            params(&[("resolution", "480p"), ("duration", "5")]),
+            1,
+        )
+        .expect("submit");
+    let job = adapter
+        .poll_until_terminal(&service, job, VideoPollingConfig::default(), |_| {}, || 2)
+        .expect("poll");
+
+    assert_eq!(job.status, MediaJobStatus::Failed);
+    assert_eq!(job.provider_job_id.as_deref(), Some("task-123"));
+    assert_eq!(job.remote_status.as_deref(), Some("failed"));
+    assert_eq!(
+        job.error.as_deref(),
+        Some("The service encountered an unexpected internal error.")
+    );
+    assert!(job.artifact_ids.is_empty());
+}
+
+#[test]
 fn builds_text_to_video_request_body() {
     let request = WorldRouterVideoRequest {
         model: "seedance-2.0-fast".to_string(),
