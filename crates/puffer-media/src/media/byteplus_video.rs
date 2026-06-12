@@ -3,6 +3,7 @@ use super::video_jobs::{
     CompletedVideoTask, VideoPollingConfig,
 };
 use super::{MediaGenerationService, MediaJob, MediaJobStatus, MediaKind};
+use crate::{media_failure_error, MediaFailureContext, ProviderHttpError};
 use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
 use serde_json::{json, Map, Value};
@@ -233,7 +234,11 @@ fn byteplus_video_json_response(
         .text()
         .with_context(|| format!("read {label} response body"))?;
     if !status.is_success() {
-        bail!("{label} failed with status {}: {text}", status.as_u16());
+        return Err(anyhow::Error::new(ProviderHttpError::new(
+            label,
+            status.as_u16(),
+            text,
+        )));
     }
     serde_json::from_str(&text).with_context(|| format!("parse {label} response JSON"))
 }
@@ -294,17 +299,12 @@ where
         selected_parameters: BTreeMap<String, String>,
         now_ms: u64,
     ) -> Result<MediaJob> {
-        let response = self.transport.submit_task(
-            &self.submit_url,
-            &self.api_token,
-            &request.request_body(),
-        )?;
-        let task = BytePlusVideoTask::from_submit_value(response).with_context(|| {
-            format!(
-                "provider={} adapter={BYTEPLUS_VIDEO_ADAPTER} task=unknown",
-                self.provider_id
-            )
-        })?;
+        let response = self
+            .transport
+            .submit_task(&self.submit_url, &self.api_token, &request.request_body())
+            .map_err(|error| self.wrap_request_error(&request.model, "submit", error))?;
+        let task = BytePlusVideoTask::from_submit_value(response)
+            .map_err(|error| self.wrap_request_error(&request.model, "submit", error))?;
         let mut job = MediaJob::new(
             Uuid::new_v4().to_string(),
             MediaKind::Video,
@@ -346,11 +346,13 @@ where
         match self.fetch_task(&job) {
             Ok(task) => self.apply_task(service, job, task, now_ms),
             Err(error) => {
-                let diagnostic = error.context(format!(
-                    "provider={} adapter={BYTEPLUS_VIDEO_ADAPTER} task={}",
+                let label = format!(
+                    "provider={} adapter={BYTEPLUS_VIDEO_ADAPTER} phase=poll task={}",
                     self.provider_id,
                     job.provider_job_id.as_deref().unwrap_or("unknown")
-                ));
+                );
+                let diagnostic =
+                    media_failure_error(self.job_context(&job, "poll"), error.context(label));
                 super::video_jobs::record_transient_poll_error(service, job, diagnostic, now_ms)
             }
         }
@@ -409,6 +411,10 @@ where
         task: &BytePlusVideoTask,
         now_ms: u64,
     ) -> Result<MediaJob> {
+        let model_id = job.model_id.clone();
+        let provider_job_id = job.provider_job_id.clone();
+        let remote_status = task.status.clone();
+        let task_id = task.id.clone();
         complete_video_job(
             service,
             job,
@@ -421,7 +427,54 @@ where
                 missing_url_message: "completed video task is missing content.video_url",
             },
             now_ms,
-            |url| self.transport.download_bytes(url),
+            |url| {
+                let mut context = self
+                    .request_context(&model_id, "download")
+                    .remote_status(remote_status);
+                if let Some(provider_job_id) = &provider_job_id {
+                    context = context.provider_job_id(provider_job_id.clone());
+                }
+                let label = format!(
+                    "provider={} adapter={BYTEPLUS_VIDEO_ADAPTER} phase=download task={task_id}",
+                    self.provider_id
+                );
+                self.transport
+                    .download_bytes(url)
+                    .map_err(|error| media_failure_error(context, error.context(label)))
+            },
+        )
+    }
+
+    fn request_context(&self, model: &str, phase: &str) -> MediaFailureContext {
+        MediaFailureContext::new("video", self.provider_id.clone())
+            .adapter(BYTEPLUS_VIDEO_ADAPTER)
+            .model(model.to_string())
+            .phase(phase)
+    }
+
+    fn job_context(&self, job: &MediaJob, phase: &str) -> MediaFailureContext {
+        let mut context = self.request_context(&job.model_id, phase);
+        if let Some(provider_job_id) = &job.provider_job_id {
+            context = context.provider_job_id(provider_job_id.clone());
+        }
+        if let Some(remote_status) = &job.remote_status {
+            context = context.remote_status(remote_status.clone());
+        }
+        context
+    }
+
+    fn wrap_request_error(
+        &self,
+        model: &str,
+        phase: &'static str,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        media_failure_error(
+            self.request_context(model, phase),
+            error.context(format!(
+                "provider={} adapter={BYTEPLUS_VIDEO_ADAPTER} phase={phase}",
+                self.provider_id
+            )),
         )
     }
 }
@@ -429,19 +482,51 @@ where
 #[cfg(test)]
 pub(crate) mod tests_support {
     use super::BytePlusVideoTransport;
-    use anyhow::Result;
+    use crate::ProviderHttpError;
+    use anyhow::{anyhow, Result};
     use serde_json::Value;
     use std::cell::RefCell;
 
+    #[derive(Clone)]
+    pub(crate) enum ScriptedJson {
+        Ok(Value),
+        Err(ProviderHttpError),
+    }
+
+    impl ScriptedJson {
+        fn result(&self) -> Result<Value> {
+            match self {
+                Self::Ok(value) => Ok(value.clone()),
+                Self::Err(error) => Err(anyhow::Error::new(error.clone())),
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    pub(crate) enum ScriptedBytes {
+        Ok(Vec<u8>),
+        Err(String),
+    }
+
+    impl ScriptedBytes {
+        fn result(&self) -> Result<Vec<u8>> {
+            match self {
+                Self::Ok(bytes) => Ok(bytes.clone()),
+                Self::Err(error) => Err(anyhow!(error.clone())),
+            }
+        }
+    }
+
     /// Scripted transport returning canned submit/poll responses in tests.
     pub(crate) struct ScriptedTransport {
-        pub(crate) submit: Value,
+        pub(crate) submit: ScriptedJson,
         pub(crate) polls: RefCell<Vec<Value>>,
+        pub(crate) downloads: RefCell<Vec<ScriptedBytes>>,
     }
 
     impl BytePlusVideoTransport for ScriptedTransport {
         fn submit_task(&self, _url: &str, _api_token: &str, _body: &Value) -> Result<Value> {
-            Ok(self.submit.clone())
+            self.submit.result()
         }
 
         fn poll_task(&self, _url: &str, _api_token: &str) -> Result<Value> {
@@ -449,204 +534,32 @@ pub(crate) mod tests_support {
         }
 
         fn download_bytes(&self, _url: &str) -> Result<Vec<u8>> {
-            Ok(b"MP4BYTES".to_vec())
+            let mut downloads = self.downloads.borrow_mut();
+            if downloads.is_empty() {
+                return Ok(b"MP4BYTES".to_vec());
+            }
+            downloads.remove(0).result()
         }
     }
 
     /// Builds a scripted transport from a submit response and ordered polls.
     pub(crate) fn scripted(submit: Value, polls: Vec<Value>) -> ScriptedTransport {
         ScriptedTransport {
-            submit,
+            submit: ScriptedJson::Ok(submit),
             polls: RefCell::new(polls),
+            downloads: RefCell::new(vec![ScriptedBytes::Ok(b"MP4BYTES".to_vec())]),
+        }
+    }
+
+    pub(crate) fn scripted_submit_error(error: ProviderHttpError) -> ScriptedTransport {
+        ScriptedTransport {
+            submit: ScriptedJson::Err(error),
+            polls: RefCell::new(Vec::new()),
+            downloads: RefCell::new(Vec::new()),
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::tests_support::ScriptedTransport;
-    use super::*;
-    use serde_json::json;
-    use std::cell::RefCell;
-
-    fn submit_fixture() -> serde_json::Value {
-        serde_json::from_str(include_str!("fixtures/byteplus_submit_task.json")).expect("fixture")
-    }
-
-    fn poll_fixture() -> serde_json::Value {
-        serde_json::from_str(include_str!("fixtures/byteplus_poll_task.json")).expect("fixture")
-    }
-
-    #[test]
-    fn parses_byteplus_submit_fixture() {
-        let task = BytePlusVideoTask::from_submit_value(submit_fixture()).expect("task");
-        assert!(!task.id.trim().is_empty());
-    }
-
-    #[test]
-    fn parses_byteplus_poll_fixture() {
-        let task = BytePlusVideoTask::from_poll_value(poll_fixture()).expect("task");
-        assert!(!task.status.trim().is_empty());
-    }
-
-    #[test]
-    fn byteplus_request_body_contains_model_and_prompt() {
-        let request = BytePlusVideoRequest {
-            model: "dreamina-seedance-2-0-fast-260128".to_string(),
-            prompt: "a cat".to_string(),
-            image_references: Vec::new(),
-            params: vec![],
-        };
-        let body = request.request_body();
-        assert_eq!(body["model"], json!("dreamina-seedance-2-0-fast-260128"));
-        assert_eq!(body["content"][0]["type"], json!("text"));
-        assert_eq!(body["content"][0]["text"], json!("a cat"));
-    }
-
-    #[test]
-    fn byteplus_request_body_includes_public_image_references() {
-        let request = BytePlusVideoRequest {
-            model: "dreamina-seedance-2-0-fast-260128".to_string(),
-            prompt: "animate image 1".to_string(),
-            image_references: vec!["https://example.com/person.png".to_string()],
-            params: vec![],
-        };
-        let body = request.request_body();
-
-        assert_eq!(body["content"][0]["type"], json!("text"));
-        assert_eq!(body["content"][1]["type"], json!("image_url"));
-        assert_eq!(
-            body["content"][1]["image_url"]["url"],
-            json!("https://example.com/person.png")
-        );
-        assert!(body["content"][1].get("role").is_none());
-    }
-
-    #[test]
-    fn byteplus_request_body_includes_asset_image_references() {
-        let request = BytePlusVideoRequest {
-            model: "dreamina-seedance-2-0-fast-260128".to_string(),
-            prompt: "animate image 1".to_string(),
-            image_references: vec!["asset://approved-person".to_string()],
-            params: vec![],
-        };
-        let body = request.request_body();
-
-        assert_eq!(
-            body["content"][1]["image_url"]["url"],
-            json!("asset://approved-person")
-        );
-    }
-
-    #[test]
-    fn byteplus_request_body_encodes_duration_as_number() {
-        let request = BytePlusVideoRequest {
-            model: "dreamina-seedance-2-0-fast-260128".to_string(),
-            prompt: "a cat".to_string(),
-            image_references: Vec::new(),
-            params: vec![
-                ("duration".to_string(), json!(5)),
-                ("ratio".to_string(), json!("16:9")),
-            ],
-        };
-        let body = request.request_body();
-
-        assert_eq!(body["duration"], json!(5));
-        assert_eq!(body["ratio"], json!("16:9"));
-    }
-
-    #[test]
-    fn byteplus_request_body_defaults_to_silent_video() {
-        let request = BytePlusVideoRequest {
-            model: "dreamina-seedance-2-0-fast-260128".to_string(),
-            prompt: "a cat".to_string(),
-            image_references: Vec::new(),
-            params: vec![],
-        };
-        let body = request.request_body();
-
-        // Silent by default; BytePlus audio moderation otherwise fails the job.
-        assert_eq!(body["generate_audio"], json!(false));
-    }
-
-    #[test]
-    fn byteplus_request_body_allows_generate_audio_override() {
-        let request = BytePlusVideoRequest {
-            model: "dreamina-seedance-2-0-fast-260128".to_string(),
-            prompt: "a cat".to_string(),
-            image_references: Vec::new(),
-            params: vec![("generate_audio".to_string(), json!(true))],
-        };
-        let body = request.request_body();
-
-        assert_eq!(body["generate_audio"], json!(true));
-    }
-
-    #[test]
-    fn byteplus_request_body_encodes_integer_fields_as_numbers() {
-        let request = byteplus_video_request_from_parameters(
-            "dreamina-seedance-2-0-260128".to_string(),
-            "animate a calm lake".to_string(),
-            Vec::new(),
-            &BTreeMap::from([
-                ("duration".to_string(), "5".to_string()),
-                ("ratio".to_string(), "16:9".to_string()),
-                ("resolution".to_string(), "720p".to_string()),
-            ]),
-        )
-        .expect("request");
-
-        let body = request.request_body();
-
-        assert_eq!(body["duration"], json!(5));
-        assert_eq!(body["ratio"], json!("16:9"));
-        assert_eq!(body["resolution"], json!("720p"));
-    }
-
-    #[test]
-    fn poll_parser_failure_is_transient_and_keeps_polling() {
-        let dir = tempfile::tempdir().unwrap();
-        let service = MediaGenerationService::new(dir.path());
-        let adapter = BytePlusVideoAdapter::with_transport(
-            "token",
-            "https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks",
-            "byteplus",
-            ScriptedTransport {
-                submit: json!({ "id": "task-1" }),
-                // Malformed poll response missing the task id = transient error;
-                // must not terminate or mark the job failed.
-                polls: RefCell::new(vec![json!({ "status": "running" })]),
-            },
-        );
-        let request = BytePlusVideoRequest {
-            model: "dreamina-seedance-2-0-260128".to_string(),
-            prompt: "a cat".to_string(),
-            image_references: Vec::new(),
-            params: vec![],
-        };
-        let job = adapter
-            .submit(&service, request, BTreeMap::new(), 1)
-            .expect("submit");
-
-        let polled = adapter
-            .poll(&service, job.clone(), 2)
-            .expect("poll returns Ok (transient)");
-
-        assert_eq!(polled.status, MediaJobStatus::Queued); // still non-terminal
-        let saved = service.load_job(&job.id).expect("saved job");
-        assert_eq!(saved.status, MediaJobStatus::Queued); // not marked Failed
-        assert!(saved
-            .error
-            .as_deref()
-            .is_some_and(|value| value.contains("missing task id")));
-        assert!(saved
-            .error
-            .as_deref()
-            .is_some_and(|value| value.contains("provider=byteplus")));
-        assert!(saved
-            .error
-            .as_deref()
-            .is_some_and(|value| value.contains("adapter=byteplus_video")));
-        assert!(saved.updated_at_ms >= saved.created_at_ms);
-    }
-}
+#[path = "byteplus_video_tests.rs"]
+mod tests;
