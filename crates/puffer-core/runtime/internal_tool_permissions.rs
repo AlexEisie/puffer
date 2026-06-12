@@ -60,7 +60,17 @@ pub(crate) fn execute_internal_tool_request(
         request,
     ) {
         Ok(output) => InternalToolExecutionResponse::success(output),
-        Err(error) => InternalToolExecutionResponse::failure(error.to_string()),
+        Err(error) => {
+            let reason = format!("{error:#}");
+            if let Some(diagnostic) = puffer_media::media_failure_diagnostic(&error) {
+                let fallback_reason = reason.clone();
+                let value = serde_json::to_value(diagnostic)
+                    .unwrap_or_else(|_| serde_json::json!({ "error": fallback_reason }));
+                InternalToolExecutionResponse::failure_with_diagnostic(reason, value)
+            } else {
+                InternalToolExecutionResponse::failure(reason)
+            }
+        }
     }
 }
 
