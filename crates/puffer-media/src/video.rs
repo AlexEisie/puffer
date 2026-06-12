@@ -333,7 +333,7 @@ fn generate_worldrouter_video(
             resolved.parameters.clone(),
             now_ms(),
         )
-        .map_err(|error| anyhow!("{}", redact_secrets(&error.to_string(), &secrets)))?;
+        .map_err(|error| redact_media_error(error, &secrets))?;
     let job = adapter
         .poll_until_terminal(
             &service,
@@ -342,7 +342,7 @@ fn generate_worldrouter_video(
             std::thread::sleep,
             now_ms,
         )
-        .map_err(|error| anyhow!("{}", redact_secrets(&error.to_string(), &secrets)))?;
+        .map_err(|error| redact_media_error(error, &secrets))?;
     finish_exact_video_job(&service, job)
 }
 
@@ -362,6 +362,14 @@ fn reject_unsupported_video_image_references(
         return Ok(());
     }
     bail!("provider {provider_id} does not support video image references")
+}
+
+fn redact_media_error(error: anyhow::Error, secrets: &[String]) -> anyhow::Error {
+    if let Some(diagnostic) = crate::media_failure_diagnostic(&error) {
+        let diagnostic = diagnostic.redact(secrets);
+        return anyhow::Error::new(crate::MediaFailureError::new(diagnostic));
+    }
+    anyhow!("{}", redact_secrets(&format!("{error:#}"), secrets))
 }
 
 fn replicate_video_request_from_parameters(

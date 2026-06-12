@@ -1,4 +1,5 @@
 use super::*;
+use crate::{media_failure_diagnostic, ProviderHttpError};
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
 use std::cell::RefCell;
@@ -13,12 +14,42 @@ struct RecordedRequest {
 }
 
 #[derive(Clone)]
+enum ScriptedJson {
+    Ok(Value),
+    Err(ProviderHttpError),
+}
+
+impl ScriptedJson {
+    fn result(&self) -> Result<Value> {
+        match self {
+            Self::Ok(value) => Ok(value.clone()),
+            Self::Err(error) => Err(anyhow::Error::new(error.clone())),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum ScriptedBytes {
+    Ok(Vec<u8>),
+    Err(String),
+}
+
+impl ScriptedBytes {
+    fn result(&self) -> Result<Vec<u8>> {
+        match self {
+            Self::Ok(bytes) => Ok(bytes.clone()),
+            Self::Err(error) => Err(anyhow::anyhow!(error.clone())),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct ScriptedTransport {
     asset_group: Value,
     assets: Rc<RefCell<Vec<Value>>>,
-    submit: Value,
+    submit: ScriptedJson,
     polls: Rc<RefCell<Vec<Value>>>,
-    downloads: Rc<RefCell<Vec<Vec<u8>>>>,
+    downloads: Rc<RefCell<Vec<ScriptedBytes>>>,
     requests: Rc<RefCell<Vec<RecordedRequest>>>,
 }
 
@@ -29,6 +60,17 @@ impl ScriptedTransport {
             url: url.to_string(),
             body: body.cloned(),
         });
+    }
+
+    fn submit_error(error: ProviderHttpError) -> Self {
+        Self {
+            asset_group: json!({"id": "group-1"}),
+            assets: Rc::new(RefCell::new(Vec::new())),
+            submit: ScriptedJson::Err(error),
+            polls: Rc::new(RefCell::new(Vec::new())),
+            downloads: Rc::new(RefCell::new(Vec::new())),
+            requests: Rc::new(RefCell::new(Vec::new())),
+        }
     }
 }
 
@@ -45,7 +87,7 @@ impl WorldRouterVideoTransport for ScriptedTransport {
 
     fn submit_task(&self, url: &str, _api_token: &str, body: &Value) -> Result<Value> {
         self.record("submit", url, Some(body));
-        Ok(self.submit.clone())
+        self.submit.result()
     }
 
     fn poll_task(&self, url: &str, _api_token: &str) -> Result<Value> {
@@ -67,12 +109,12 @@ fn pop_json(queue: &Rc<RefCell<Vec<Value>>>, label: &str) -> Result<Value> {
     Ok(queue.remove(0))
 }
 
-fn pop_bytes(queue: &Rc<RefCell<Vec<Vec<u8>>>>) -> Result<Vec<u8>> {
+fn pop_bytes(queue: &Rc<RefCell<Vec<ScriptedBytes>>>) -> Result<Vec<u8>> {
     let mut queue = queue.borrow_mut();
     if queue.is_empty() {
         bail!("missing scripted download response");
     }
-    Ok(queue.remove(0))
+    queue.remove(0).result()
 }
 
 fn params(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -92,6 +134,121 @@ fn test_adapter(transport: ScriptedTransport) -> WorldRouterVideoAdapter<Scripte
 }
 
 #[test]
+fn submit_http_failure_returns_media_diagnostic() {
+    let service = MediaGenerationService::new(tempfile::tempdir().unwrap().path());
+    let adapter = test_adapter(ScriptedTransport::submit_error(ProviderHttpError::new(
+        "submit WorldRouter video task",
+        402,
+        r#"{"error":{"code":"seedance_balance_too_low","message":"low credits","request_id":"req-1"}}"#,
+    )));
+    let request = WorldRouterVideoRequest {
+        model: "seedance-2.0-fast".to_string(),
+        prompt: "a robot battle".to_string(),
+        image_references: Vec::new(),
+        params: params(&[("resolution", "480p"), ("duration", "5")]),
+    };
+
+    let error = adapter
+        .submit(&service, request, BTreeMap::new(), 1)
+        .expect_err("submit should fail");
+    let diagnostic = media_failure_diagnostic(&error).expect("diagnostic");
+
+    assert_eq!(diagnostic.provider_id, "worldrouter");
+    assert_eq!(diagnostic.adapter.as_deref(), Some("worldrouter_video"));
+    assert_eq!(diagnostic.phase.as_deref(), Some("submit"));
+    assert_eq!(diagnostic.http_status, Some(402));
+    assert_eq!(
+        diagnostic.provider_code.as_deref(),
+        Some("seedance_balance_too_low")
+    );
+    assert_eq!(diagnostic.request_id.as_deref(), Some("req-1"));
+    assert!(diagnostic.hint.unwrap().contains("credits"));
+}
+
+#[test]
+fn worldrouter_download_failure_returns_media_diagnostic() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = MediaGenerationService::new(temp.path());
+    let adapter = test_adapter(ScriptedTransport {
+        asset_group: json!({"id": "group-1"}),
+        assets: Rc::new(RefCell::new(Vec::new())),
+        submit: ScriptedJson::Ok(json!({"id": "task-123", "requestId": "req-123"})),
+        polls: Rc::new(RefCell::new(vec![json!({
+            "id": "task-123",
+            "status": "succeeded",
+            "content": { "video_url": "https://media.example.com/out.mp4" }
+        })])),
+        downloads: Rc::new(RefCell::new(vec![ScriptedBytes::Err(
+            "cdn returned 503".to_string(),
+        )])),
+        requests: Rc::new(RefCell::new(Vec::new())),
+    });
+    let request = WorldRouterVideoRequest {
+        model: "seedance-2.0-fast".to_string(),
+        prompt: "a robot battle".to_string(),
+        image_references: Vec::new(),
+        params: params(&[("resolution", "480p"), ("duration", "5")]),
+    };
+
+    let job = adapter
+        .submit(
+            &service,
+            request,
+            params(&[("resolution", "480p"), ("duration", "5")]),
+            1,
+        )
+        .expect("submit");
+    let error = adapter
+        .poll_until_terminal(&service, job, VideoPollingConfig::default(), |_| {}, || 2)
+        .expect_err("download should fail");
+    let diagnostic = media_failure_diagnostic(&error).expect("diagnostic");
+
+    assert_eq!(diagnostic.provider_id, "worldrouter");
+    assert_eq!(diagnostic.adapter.as_deref(), Some("worldrouter_video"));
+    assert_eq!(diagnostic.phase.as_deref(), Some("download"));
+    assert_eq!(diagnostic.provider_job_id.as_deref(), Some("task-123"));
+    assert!(diagnostic.hint.unwrap().contains("download"));
+}
+
+#[test]
+fn worldrouter_poll_parser_failure_records_phase_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = MediaGenerationService::new(temp.path());
+    let adapter = test_adapter(ScriptedTransport {
+        asset_group: json!({"id": "group-1"}),
+        assets: Rc::new(RefCell::new(Vec::new())),
+        submit: ScriptedJson::Ok(json!({"id": "task-123", "requestId": "req-123"})),
+        polls: Rc::new(RefCell::new(vec![json!({"status": "running"})])),
+        downloads: Rc::new(RefCell::new(Vec::new())),
+        requests: Rc::new(RefCell::new(Vec::new())),
+    });
+    let request = WorldRouterVideoRequest {
+        model: "seedance-2.0-fast".to_string(),
+        prompt: "a robot battle".to_string(),
+        image_references: Vec::new(),
+        params: params(&[("resolution", "480p"), ("duration", "5")]),
+    };
+
+    let job = adapter
+        .submit(
+            &service,
+            request,
+            params(&[("resolution", "480p"), ("duration", "5")]),
+            1,
+        )
+        .expect("submit");
+    let job = adapter.poll(&service, job, 2).expect("transient poll");
+    let persisted = service.load_job(&job.id).expect("persisted job");
+    let error = persisted.error.as_deref().expect("poll error");
+
+    assert!(!persisted.status.is_terminal());
+    assert!(error.contains("provider=worldrouter"), "{error}");
+    assert!(error.contains("adapter=worldrouter_video"), "{error}");
+    assert!(error.contains("phase=poll"), "{error}");
+    assert!(error.contains("task=task-123"), "{error}");
+}
+
+#[test]
 fn submit_uploads_assets_before_creating_video_task() {
     let temp = tempfile::tempdir().unwrap();
     let service = MediaGenerationService::new(temp.path());
@@ -99,13 +256,13 @@ fn submit_uploads_assets_before_creating_video_task() {
     let adapter = test_adapter(ScriptedTransport {
         asset_group: json!({"id": "group-1"}),
         assets: Rc::new(RefCell::new(vec![json!({"url": "asset://asset-1"})])),
-        submit: json!({"id": "task-123", "requestId": "req-123"}),
+        submit: ScriptedJson::Ok(json!({"id": "task-123", "requestId": "req-123"})),
         polls: Rc::new(RefCell::new(vec![json!({
             "id": "task-123",
             "status": "succeeded",
             "content": { "video_url": "https://media.example.com/out.mp4" }
         })])),
-        downloads: Rc::new(RefCell::new(vec![b"mp4-bytes".to_vec()])),
+        downloads: Rc::new(RefCell::new(vec![ScriptedBytes::Ok(b"mp4-bytes".to_vec())])),
         requests: requests.clone(),
     });
     let request = WorldRouterVideoRequest {
@@ -193,7 +350,7 @@ fn rejects_invalid_image_reference_before_asset_group_request() {
     let adapter = test_adapter(ScriptedTransport {
         asset_group: json!({"id": "group-1"}),
         assets: Rc::new(RefCell::new(Vec::new())),
-        submit: json!({"id": "task-123", "requestId": "req-123"}),
+        submit: ScriptedJson::Ok(json!({"id": "task-123", "requestId": "req-123"})),
         polls: Rc::new(RefCell::new(Vec::new())),
         downloads: Rc::new(RefCell::new(Vec::new())),
         requests: requests.clone(),
@@ -286,7 +443,7 @@ fn succeeded_poll_without_video_url_marks_job_failed() {
     let adapter = test_adapter(ScriptedTransport {
         asset_group: json!({"id": "group-1"}),
         assets: Rc::new(RefCell::new(Vec::new())),
-        submit: json!({"id": "task-123", "requestId": "req-123"}),
+        submit: ScriptedJson::Ok(json!({"id": "task-123", "requestId": "req-123"})),
         polls: Rc::new(RefCell::new(vec![json!({
             "id": "task-123",
             "status": "succeeded",
@@ -326,7 +483,7 @@ fn failed_poll_persists_remote_failure_diagnostics() {
     let adapter = test_adapter(ScriptedTransport {
         asset_group: json!({"id": "group-1"}),
         assets: Rc::new(RefCell::new(Vec::new())),
-        submit: json!({"id": "task-123", "requestId": "req-123"}),
+        submit: ScriptedJson::Ok(json!({"id": "task-123", "requestId": "req-123"})),
         polls: Rc::new(RefCell::new(vec![json!({
             "id": "task-123",
             "status": "failed",
