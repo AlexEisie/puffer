@@ -1,17 +1,20 @@
 use super::video_jobs::{
-    complete_video_job, map_video_task_status, persist_failed_video_job,
-    poll_video_until_terminal, video_poll_url, CompletedVideoTask, VideoPollingConfig,
+    complete_video_job, map_video_task_status, persist_failed_video_job, poll_video_until_terminal,
+    video_poll_url, CompletedVideoTask, VideoPollingConfig,
 };
 use super::{MediaGenerationService, MediaJob, MediaJobStatus, MediaKind};
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::blocking::Client;
 use serde_json::{json, Map, Number, Value};
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::time::Duration;
 use uuid::Uuid;
 
 /// Adapter identifier for WorldRouter Seedance video generation.
 pub(crate) const WORLDROUTER_VIDEO_ADAPTER: &str = "worldrouter_video";
+const MISSING_VIDEO_URL_MESSAGE: &str =
+    "succeeded WorldRouter video task is missing content.video_url";
 
 /// One WorldRouter Seedance video generation request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,13 +26,17 @@ pub(crate) struct WorldRouterVideoRequest {
 }
 
 impl WorldRouterVideoRequest {
-    /// Builds the WorldRouter Seedance task request body.
-    pub(crate) fn request_body(
+    #[cfg(test)]
+    fn request_body(&self, asset_group_id: Option<&str>, asset_urls: &[String]) -> Result<Value> {
+        self.validate()?;
+        self.build_request_body(asset_group_id, asset_urls)
+    }
+
+    fn build_request_body(
         &self,
         asset_group_id: Option<&str>,
         asset_urls: &[String],
     ) -> Result<Value> {
-        self.validate()?;
         if self.image_references.len() != asset_urls.len() {
             bail!(
                 "WorldRouter image reference count {} does not match uploaded asset count {}",
@@ -39,6 +46,9 @@ impl WorldRouterVideoRequest {
         }
         if !asset_urls.is_empty() && asset_group_id.unwrap_or("").trim().is_empty() {
             bail!("WorldRouter image-to-video requires an asset group id");
+        }
+        for (index, url) in asset_urls.iter().enumerate() {
+            validate_uploaded_asset_url(url, index)?;
         }
 
         let mut body = Map::new();
@@ -109,7 +119,56 @@ fn validate_image_reference(reference: &str, index: usize) -> Result<()> {
     if url.scheme() != "https" || url.host_str().is_none() {
         bail!("WorldRouter image reference {index} must be an https:// URL");
     }
+    let host = url.host_str().unwrap_or_default();
+    if is_localhost_name(host) {
+        bail!("WorldRouter image reference {index} must be a public https:// URL");
+    }
+    let ip_host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(address) = ip_host.parse::<IpAddr>() {
+        validate_public_reference_ip(address, index)?;
+    }
     Ok(())
+}
+
+fn is_localhost_name(host: &str) -> bool {
+    let host = host.trim_end_matches('.');
+    host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost")
+}
+
+fn validate_public_reference_ip(address: IpAddr, index: usize) -> Result<()> {
+    let invalid = match address {
+        IpAddr::V4(address) => {
+            address.is_private()
+                || address.is_loopback()
+                || address.is_link_local()
+                || address.is_broadcast()
+                || address.is_unspecified()
+        }
+        IpAddr::V6(address) => {
+            if let Some(mapped) = address.to_ipv4_mapped() {
+                return validate_public_reference_ip(IpAddr::V4(mapped), index);
+            }
+            address.is_loopback()
+                || address.is_unspecified()
+                || address.is_unique_local()
+                || address.is_unicast_link_local()
+        }
+    };
+    if invalid {
+        bail!("WorldRouter image reference {index} must be a public https:// URL");
+    }
+    Ok(())
+}
+
+fn validate_uploaded_asset_url(url: &str, index: usize) -> Result<()> {
+    let url = url.trim();
+    if url.starts_with("asset://") {
+        return Ok(());
+    }
+    bail!("WorldRouter uploaded asset URL {index} must start with asset://");
 }
 
 /// Parsed response from the WorldRouter asset-group creation endpoint.
@@ -348,9 +407,20 @@ fn asset_groups_url(submit_url: &str) -> Result<String> {
 }
 
 fn asset_upload_url(submit_url: &str, group_id: &str) -> Result<String> {
+    let group_id = group_id.trim();
+    if group_id.is_empty() {
+        bail!("WorldRouter asset group id is required");
+    }
     let mut url =
         reqwest::Url::parse(submit_url).context("WorldRouter submit URL must be absolute")?;
-    url.set_path(&format!("/v1/asset-groups/{}/assets", group_id.trim()));
+    url.set_path("/v1/asset-groups");
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| anyhow!("WorldRouter submit URL cannot be a base"))?;
+        segments.push(group_id);
+        segments.push("assets");
+    }
     url.set_query(None);
     Ok(url.to_string())
 }
@@ -437,7 +507,7 @@ where
             )
         })?;
         let (asset_group_id, asset_urls) = self.prepare_assets(&request)?;
-        let body = request.request_body(asset_group_id.as_deref(), &asset_urls)?;
+        let body = request.build_request_body(asset_group_id.as_deref(), &asset_urls)?;
         let response = self
             .transport
             .submit_task(&self.submit_url, &self.api_token, &body)
@@ -499,7 +569,11 @@ where
                 .with_context(|| asset_upload_phase.clone())?;
             let response = self
                 .transport
-                .upload_asset(&asset_url, &self.api_token, &asset_upload_body(index, reference))
+                .upload_asset(
+                    &asset_url,
+                    &self.api_token,
+                    &asset_upload_body(index, reference),
+                )
                 .with_context(|| asset_upload_phase.clone())?;
             let asset = WorldRouterAsset::from_value(response)
                 .with_context(|| asset_upload_phase.clone())?;
@@ -568,6 +642,14 @@ where
                 Ok(job)
             }
             MediaJobStatus::Succeeded => {
+                if task.video_url.is_none() {
+                    return persist_failed_video_job(
+                        service,
+                        job,
+                        MISSING_VIDEO_URL_MESSAGE,
+                        now_ms,
+                    );
+                }
                 let task_id = task.id.clone();
                 complete_video_job(
                     service,
@@ -578,8 +660,7 @@ where
                         remote_status: &task.status,
                         video_url: task.video_url.as_deref(),
                         filename_prefix: "worldrouter-video",
-                        missing_url_message:
-                            "succeeded WorldRouter video task is missing content.video_url",
+                        missing_url_message: MISSING_VIDEO_URL_MESSAGE,
                     },
                     now_ms,
                     |url| {
@@ -609,280 +690,5 @@ where
 }
 
 #[cfg(test)]
-pub(crate) mod tests_support {
-    use super::WorldRouterVideoTransport;
-    use anyhow::Result;
-    use serde_json::Value;
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    /// Scripted transport returning canned WorldRouter responses in tests.
-    #[derive(Clone)]
-    pub(crate) struct ScriptedTransport {
-        pub(crate) asset_group: Value,
-        pub(crate) assets: Rc<RefCell<Vec<Value>>>,
-        pub(crate) submit: Value,
-        pub(crate) polls: Rc<RefCell<Vec<Value>>>,
-        pub(crate) downloads: Rc<RefCell<Vec<Vec<u8>>>>,
-        pub(crate) seen: Rc<RefCell<Vec<String>>>,
-    }
-
-    impl WorldRouterVideoTransport for ScriptedTransport {
-        fn create_asset_group(
-            &self,
-            _url: &str,
-            _api_token: &str,
-            _body: &Value,
-        ) -> Result<Value> {
-            self.seen.borrow_mut().push("asset-group".to_string());
-            Ok(self.asset_group.clone())
-        }
-
-        fn upload_asset(&self, _url: &str, _api_token: &str, _body: &Value) -> Result<Value> {
-            let index = self
-                .seen
-                .borrow()
-                .iter()
-                .filter(|event| event.starts_with("asset-upload"))
-                .count();
-            self.seen
-                .borrow_mut()
-                .push(format!("asset-upload:{index}"));
-            Ok(self.assets.borrow_mut().remove(0))
-        }
-
-        fn submit_task(&self, _url: &str, _api_token: &str, _body: &Value) -> Result<Value> {
-            self.seen.borrow_mut().push("submit".to_string());
-            Ok(self.submit.clone())
-        }
-
-        fn poll_task(&self, _url: &str, _api_token: &str) -> Result<Value> {
-            self.seen.borrow_mut().push("poll".to_string());
-            Ok(self.polls.borrow_mut().remove(0))
-        }
-
-        fn download_bytes(&self, _url: &str) -> Result<Vec<u8>> {
-            self.seen.borrow_mut().push("download".to_string());
-            Ok(self.downloads.borrow_mut().remove(0))
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::tests_support::ScriptedTransport;
-    use super::*;
-    use serde_json::json;
-    use std::collections::BTreeMap;
-
-    fn params(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
-    }
-
-    #[test]
-    fn submit_uploads_assets_before_creating_video_task() {
-        let temp = tempfile::tempdir().unwrap();
-        let service = MediaGenerationService::new(temp.path());
-        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let transport = ScriptedTransport {
-            asset_group: json!({"id": "group-1"}),
-            assets: std::rc::Rc::new(std::cell::RefCell::new(vec![json!({
-                "url": "asset://asset-1"
-            })])),
-            submit: json!({"id": "task-123", "requestId": "req-123"}),
-            polls: std::rc::Rc::new(std::cell::RefCell::new(vec![json!({
-                "id": "task-123",
-                "status": "succeeded",
-                "content": { "video_url": "https://media.example.com/out.mp4" }
-            })])),
-            downloads: std::rc::Rc::new(std::cell::RefCell::new(vec![b"mp4-bytes".to_vec()])),
-            seen: seen.clone(),
-        };
-        let adapter = WorldRouterVideoAdapter::with_transport(
-            "token",
-            "https://inference-api.worldrouter.ai/api/v3/contents/generations/tasks",
-            "worldrouter",
-            transport,
-        );
-        let request = WorldRouterVideoRequest {
-            model: "seedance-2.0-fast".to_string(),
-            prompt: "animate image 1".to_string(),
-            image_references: vec!["https://example.com/ref.png".to_string()],
-            params: params(&[("resolution", "480p"), ("duration", "5")]),
-        };
-
-        let job = adapter
-            .submit(
-                &service,
-                request,
-                params(&[("resolution", "480p"), ("duration", "5")]),
-                1,
-            )
-            .expect("submit");
-        let job = adapter
-            .poll_until_terminal(&service, job, VideoPollingConfig::default(), |_| {}, || 2)
-            .expect("poll");
-
-        assert_eq!(job.status, MediaJobStatus::Succeeded);
-        assert_eq!(job.artifact_ids.len(), 1);
-        let seen = seen.borrow();
-        assert!(seen.iter().any(|event| event.contains("asset-group")));
-        assert!(seen.iter().any(|event| event.contains("asset-upload:0")));
-        assert!(seen.iter().any(|event| event.contains("submit")));
-    }
-
-    #[test]
-    fn rejects_invalid_image_reference_before_asset_group_request() {
-        let temp = tempfile::tempdir().unwrap();
-        let service = MediaGenerationService::new(temp.path());
-        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let transport = ScriptedTransport {
-            asset_group: json!({"id": "group-1"}),
-            assets: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-            submit: json!({"id": "task-123", "requestId": "req-123"}),
-            polls: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-            downloads: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-            seen: seen.clone(),
-        };
-        let adapter = WorldRouterVideoAdapter::with_transport(
-            "token",
-            "https://inference-api.worldrouter.ai/api/v3/contents/generations/tasks",
-            "worldrouter",
-            transport,
-        );
-        let request = WorldRouterVideoRequest {
-            model: "seedance-2.0-fast".to_string(),
-            prompt: "animate image 1".to_string(),
-            image_references: vec!["file:///tmp/ref.png".to_string()],
-            params: params(&[("resolution", "480p"), ("duration", "5")]),
-        };
-
-        let error = adapter
-            .submit(
-                &service,
-                request,
-                params(&[("resolution", "480p"), ("duration", "5")]),
-                1,
-            )
-            .unwrap_err()
-            .to_string();
-
-        assert!(error.contains("phase=validate"), "{error}");
-        assert!(error.contains("image reference 0"), "{error}");
-        assert!(seen.borrow().is_empty());
-    }
-
-    #[test]
-    fn builds_text_to_video_request_body() {
-        let request = WorldRouterVideoRequest {
-            model: "seedance-2.0-fast".to_string(),
-            prompt: "a robot battle".to_string(),
-            image_references: Vec::new(),
-            params: params(&[("resolution", "480p"), ("duration", "5")]),
-        };
-
-        assert_eq!(
-            request.request_body(None, &[]).expect("body"),
-            json!({
-                "model": "seedance-2.0-fast",
-                "content": [
-                    { "type": "text", "text": "a robot battle" }
-                ],
-                "resolution": "480p",
-                "duration": 5
-            })
-        );
-    }
-
-    #[test]
-    fn builds_image_to_video_request_body_with_asset_references() {
-        let request = WorldRouterVideoRequest {
-            model: "seedance-2.0-fast".to_string(),
-            prompt: "animate image 1".to_string(),
-            image_references: vec!["https://example.com/ref.png".to_string()],
-            params: params(&[("resolution", "720p"), ("duration", "5")]),
-        };
-
-        assert_eq!(
-            request
-                .request_body(Some("group-1"), &["asset://asset-1".to_string()])
-                .expect("body"),
-            json!({
-                "model": "seedance-2.0-fast",
-                "asset_group_id": "group-1",
-                "content": [
-                    { "type": "text", "text": "animate image 1" },
-                    {
-                        "type": "image_url",
-                        "role": "reference_image",
-                        "image_url": { "url": "asset://asset-1" }
-                    }
-                ],
-                "resolution": "720p",
-                "duration": 5
-            })
-        );
-    }
-
-    #[test]
-    fn rejects_worldrouter_asset_references_without_group_context() {
-        let error = validate_image_reference("asset://asset-1", 0)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("image reference 0"), "{error}");
-        assert!(error.contains("https://"), "{error}");
-    }
-
-    #[test]
-    fn parses_submit_response_without_status() {
-        let task = WorldRouterSubmitTask::from_value(json!({
-            "id": "task-123",
-            "requestId": "req-123"
-        }))
-        .expect("submit task");
-
-        assert_eq!(task.id, "task-123");
-        assert_eq!(task.request_id.as_deref(), Some("req-123"));
-    }
-
-    #[test]
-    fn parses_succeeded_poll_response_video_url() {
-        let task = WorldRouterVideoTask::from_value(json!({
-            "id": "task-123",
-            "status": "succeeded",
-            "content": { "video_url": "https://media.example.com/out.mp4" }
-        }))
-        .expect("poll task");
-
-        assert_eq!(task.id, "task-123");
-        assert_eq!(task.media_status(), MediaJobStatus::Succeeded);
-        assert_eq!(
-            task.video_url.as_deref(),
-            Some("https://media.example.com/out.mp4")
-        );
-    }
-
-    #[test]
-    fn parses_asset_group_response() {
-        let group = WorldRouterAssetGroup::from_value(json!({
-            "id": "group-1",
-            "requestId": "req-1"
-        }))
-        .expect("asset group");
-        assert_eq!(group.id, "group-1");
-    }
-
-    #[test]
-    fn parses_asset_upload_response_asset_url() {
-        let asset = WorldRouterAsset::from_value(json!({
-            "id": "asset-1",
-            "url": "asset://asset-1",
-            "source_url": "https://example.com/ref.png"
-        }))
-        .expect("asset");
-        assert_eq!(asset.url, "asset://asset-1");
-    }
-}
+#[path = "worldrouter_video_tests.rs"]
+mod tests;

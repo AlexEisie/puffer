@@ -13,12 +13,12 @@ use crate::media::relaydance_video::{
 use crate::media::replicate_video::{
     ReplicatePollingConfig, ReplicateVideoAdapter, ReplicateVideoRequest,
 };
+use crate::media::resolver::{
+    resolve_media_request, resolve_video_execution_descriptor, ResolvedMediaRequest,
+};
 use crate::media::worldrouter_video::{
     WorldRouterVideoAdapter, WorldRouterVideoPollingConfig, WorldRouterVideoRequest,
     WORLDROUTER_VIDEO_ADAPTER,
-};
-use crate::media::resolver::{
-    resolve_media_request, resolve_video_execution_descriptor, ResolvedMediaRequest,
 };
 use crate::media::{MediaGenerationService, MediaJob, MediaKind};
 use crate::runtime::{
@@ -327,7 +327,12 @@ fn generate_worldrouter_video(
         params: resolved.parameters.clone(),
     };
     let job = adapter
-        .submit(&service, video_request, resolved.parameters.clone(), now_ms())
+        .submit(
+            &service,
+            video_request,
+            resolved.parameters.clone(),
+            now_ms(),
+        )
         .map_err(|error| anyhow!("{}", redact_secrets(&error.to_string(), &secrets)))?;
     let job = adapter
         .poll_until_terminal(

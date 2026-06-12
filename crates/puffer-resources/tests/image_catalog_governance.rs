@@ -542,7 +542,7 @@ fn task5_image_providers_expose_only_canonical_product_axes() {
 
 #[test]
 fn task5_video_providers_use_canonical_setting_labels() {
-    for provider_id in ["byteplus", "relaydance"] {
+    for provider_id in ["byteplus", "relaydance", "worldrouter"] {
         let yaml = ALL_PROVIDER_YAMLS
             .iter()
             .find_map(|(id, yaml)| (*id == provider_id).then_some(*yaml))
