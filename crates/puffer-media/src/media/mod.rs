@@ -14,6 +14,7 @@ pub(crate) mod replicate_video;
 pub(crate) mod resolver;
 pub(crate) mod video_jobs;
 pub(crate) mod video_poster;
+pub(crate) mod worldrouter_video;
 
 pub(crate) use artifacts::MediaArtifact;
 pub(crate) use capabilities::MediaKind;
