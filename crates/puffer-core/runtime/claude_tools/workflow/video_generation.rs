@@ -198,6 +198,7 @@ fn video_generation_output(
         "providerJobId": result.provider_job_id,
         "remoteStatus": result.remote_status,
         "error": result.error,
+        "diagnostic": result.diagnostic,
         "parameters": parameters,
         "purpose": purpose
     }))?)
@@ -251,6 +252,7 @@ mod tests {
     use crate::AppState;
     use indexmap::IndexMap;
     use puffer_config::MediaGenerationConfig;
+    use puffer_media::MediaFailureDiagnostic;
     use puffer_provider_registry::{
         AuthMode, AuthStore, Axis, AxisRole, ControlKind, MediaExecutionDescriptor,
         MediaExecutionKind, MediaKindDescriptor, MediaModelDescriptor, MediaOperation,
@@ -530,7 +532,7 @@ mod tests {
     }
 
     fn assert_null_diagnostic_fields(value: &Value) {
-        for key in ["providerJobId", "remoteStatus", "error"] {
+        for key in ["providerJobId", "remoteStatus", "error", "diagnostic"] {
             assert_eq!(value.get(key), Some(&Value::Null));
         }
     }
@@ -747,7 +749,20 @@ mod tests {
             provider_job_id: Some("task-123".to_string()),
             remote_status: Some("failed".to_string()),
             error: Some("The service encountered an unexpected internal error.".to_string()),
-            diagnostic: None,
+            diagnostic: Some(MediaFailureDiagnostic {
+                kind: "video".to_string(),
+                provider_id: "worldrouter".to_string(),
+                adapter: Some("worldrouter_video".to_string()),
+                model_id: Some("seedance-2.0-fast".to_string()),
+                phase: Some("poll".to_string()),
+                provider_job_id: Some("task-123".to_string()),
+                remote_status: Some("failed".to_string()),
+                http_status: None,
+                provider_code: None,
+                request_id: None,
+                error: "The service encountered an unexpected internal error.".to_string(),
+                hint: Some("Provider or upstream service returned an internal error; retry later or compare another provider.".to_string()),
+            }),
         };
 
         let output = video_generation_output(
@@ -770,6 +785,9 @@ mod tests {
                 "The service encountered an unexpected internal error."
             ))
         );
+        assert_eq!(object["diagnostic"]["provider"], json!("worldrouter"));
+        assert_eq!(object["diagnostic"]["adapter"], json!("worldrouter_video"));
+        assert_eq!(object["diagnostic"]["phase"], json!("poll"));
         assert_workflow_output_hides_internal_fields(&parsed);
     }
 
