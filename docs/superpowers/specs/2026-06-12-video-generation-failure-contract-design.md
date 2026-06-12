@@ -2,7 +2,7 @@
 
 Date: 2026-06-12
 
-Status: Approved design, awaiting implementation plan
+Status: Approved design, reviewed for overdesign, implementation plan written
 
 Constraints: do not optimize for backward compatibility; optimize for
 long-term clarity, stability, and performance; prevent overdesign.
@@ -56,6 +56,8 @@ user had to inspect `.puffer/media/jobs/<job-id>.json` to see the real reason.
   generation request.
 - Surface persisted job diagnostics in the workflow JSON when a video job
   fails.
+- Keep the diagnostic contract deterministic: the workflow JSON always includes
+  the three diagnostic keys, using `null` when a value is absent.
 - Preserve the current media job state machine and artifact persistence model.
 - Keep provider adapters responsible for writing `provider_job_id`,
   `remote_status`, and `error` onto `MediaJob`.
@@ -75,6 +77,8 @@ user had to inspect `.puffer/media/jobs/<job-id>.json` to see the real reason.
   minimal update for the new fields.
 - Do not change image generation behavior except for the smallest shared-struct
   adjustment required by compilation.
+- Do not expose additional job internals such as prompt text, adapter id,
+  `remoteGetUrl`, raw provider payloads, or HTTP response bodies.
 
 ## Selected Approach
 
@@ -156,9 +160,37 @@ For a failed remote job, `videogen` should return:
 }
 ```
 
-For a successful job, the new fields may be omitted or serialized as `null`
-when absent. The important contract is that failed jobs with persisted
-diagnostics must expose those diagnostics.
+For successful jobs or failed jobs without a provider diagnostic, the workflow
+JSON must still include the same three diagnostic keys with `null` values:
+
+```json
+{
+  "providerJobId": null,
+  "remoteStatus": null,
+  "error": null
+}
+```
+
+This removes caller ambiguity and keeps the output shape stable without adding a
+new result variant.
+
+## Diagnostic Safety
+
+Only these job diagnostics should cross the `videogen` stdout boundary:
+
+- `providerJobId`
+- `remoteStatus`
+- `error`
+
+Do not add `remoteGetUrl`, adapter id, prompt text, raw provider response JSON,
+HTTP request metadata, headers, or credentials to the result. Artifact entries
+already expose persisted local artifact paths on success; that behavior stays
+unchanged.
+
+Provider errors that originate from submit, poll, or download failures must keep
+using the existing secret-redaction paths before they reach `MediaJob.error`.
+This design does not add new redaction logic; it preserves the current boundary
+and only exposes the already persisted, redacted `error` field.
 
 ## Error Semantics
 
@@ -187,7 +219,10 @@ Remote success with unusable output:
 
 `puffer-media`:
 
-- Extend `ExactMediaGenerationResult` with optional diagnostics.
+- Extend `ExactMediaGenerationResult` with optional diagnostics:
+  `provider_job_id`, `remote_status`, and `error`. The struct already uses
+  `#[serde(rename_all = "camelCase")]`, so serialized field names become
+  `providerJobId`, `remoteStatus`, and `error`.
 - Populate the fields in `exact_media_generation_result(job, artifacts)` from
   `MediaJob`.
 - Avoid adding provider-specific logic to the result builder.
@@ -195,7 +230,8 @@ Remote success with unusable output:
 `puffer-core`:
 
 - Extend `video_generation_output` to include `providerJobId`,
-  `remoteStatus`, and `error`.
+  `remoteStatus`, and `error` on every response, using JSON `null` when the
+  result has no value.
 - Keep parameter and artifact output unchanged.
 - Do not inspect provider-specific job files from workflow code.
 
@@ -217,8 +253,8 @@ Add focused tests only:
    `job.error` and `remote_status`.
 3. `puffer-core` `VideoGeneration` output serializes failed-job diagnostics as
    `error`, `remoteStatus`, and `providerJobId`.
-4. Existing successful video output tests continue to pass with artifact output
-   unchanged.
+4. Successful video output includes the same diagnostic keys as `null`, while
+   artifact output stays unchanged.
 
 Avoid broad test matrices for retries, health checks, UI rendering, or image
 generation. Those belong to later work if the scope expands.
@@ -230,6 +266,7 @@ generation. Those belong to later work if the scope expands.
 - The assistant can report the real cause directly from tool output without
   reading `.puffer/media/jobs`.
 - Successful video generation still returns the same artifact entries.
+- Successful video generation returns `providerJobId`, `remoteStatus`, and
+  `error` as `null` when no values are present.
 - No new background services, retry loops, or provider health state are added.
 - The change remains localized to media result shaping and workflow output.
-
