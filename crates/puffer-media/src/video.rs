@@ -251,7 +251,7 @@ fn generate_relaydance_video(
             resolved.parameters.clone(),
             now_ms(),
         )
-        .map_err(|error| anyhow!("{}", redact_secrets(&error.to_string(), &secrets)))?;
+        .map_err(|error| redact_media_error(error, &secrets))?;
     let job = adapter
         .poll_until_terminal(
             &service,
@@ -260,7 +260,7 @@ fn generate_relaydance_video(
             std::thread::sleep,
             now_ms,
         )
-        .map_err(|error| anyhow!("{}", redact_secrets(&error.to_string(), &secrets)))?;
+        .map_err(|error| redact_media_error(error, &secrets))?;
     finish_exact_video_job(&service, job)
 }
 

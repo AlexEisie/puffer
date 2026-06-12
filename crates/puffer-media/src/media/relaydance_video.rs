@@ -3,6 +3,7 @@ use super::video_jobs::{
     CompletedVideoTask, VideoPollingConfig,
 };
 use super::{MediaGenerationService, MediaJob, MediaJobStatus, MediaKind};
+use crate::{media_failure_error, MediaFailureContext, ProviderHttpError};
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_provider_registry::{VideoPromptFormat, WireType};
 use reqwest::blocking::Client;
@@ -173,7 +174,11 @@ fn relaydance_video_json_response(
         .text()
         .with_context(|| format!("read {label} response body"))?;
     if !status.is_success() {
-        bail!("{label} failed with status {}: {text}", status.as_u16());
+        return Err(anyhow::Error::new(ProviderHttpError::new(
+            label,
+            status.as_u16(),
+            text,
+        )));
     }
     serde_json::from_str(&text).with_context(|| format!("parse {label} response JSON"))
 }
@@ -360,18 +365,12 @@ where
         selected_parameters: BTreeMap<String, String>,
         now_ms: u64,
     ) -> Result<MediaJob> {
-        let response = self.transport.submit_task(
-            &self.submit_url,
-            &self.api_token,
-            &request.request_body(),
-        )?;
-        let task =
-            RelaydanceVideoTask::from_value(response, "submit video task").with_context(|| {
-                format!(
-                    "provider={} adapter={RELAYDANCE_VIDEO_ADAPTER} task=unknown",
-                    self.provider_id
-                )
-            })?;
+        let response = self
+            .transport
+            .submit_task(&self.submit_url, &self.api_token, &request.request_body())
+            .map_err(|error| self.wrap_request_error(&request.model, "submit", error))?;
+        let task = RelaydanceVideoTask::from_value(response, "submit video task")
+            .map_err(|error| self.wrap_request_error(&request.model, "submit", error))?;
         let mut job = MediaJob::new(
             Uuid::new_v4().to_string(),
             MediaKind::Video,
@@ -417,11 +416,13 @@ where
         match self.fetch_task(&job) {
             Ok(task) => self.apply_task(service, job, task, now_ms),
             Err(error) => {
-                let diagnostic = error.context(format!(
-                    "provider={} adapter={RELAYDANCE_VIDEO_ADAPTER} task={}",
+                let label = format!(
+                    "provider={} adapter={RELAYDANCE_VIDEO_ADAPTER} phase=poll task={}",
                     self.provider_id,
                     job.provider_job_id.as_deref().unwrap_or("unknown")
-                ));
+                );
+                let diagnostic =
+                    media_failure_error(self.job_context(&job, "poll"), error.context(label));
                 super::video_jobs::record_transient_poll_error(service, job, diagnostic, now_ms)
             }
         }
@@ -480,6 +481,10 @@ where
         task: &RelaydanceVideoTask,
         now_ms: u64,
     ) -> Result<MediaJob> {
+        let model_id = job.model_id.clone();
+        let provider_job_id = job.provider_job_id.clone();
+        let remote_status = task.status.clone();
+        let task_id = task.id.clone();
         complete_video_job(
             service,
             job,
@@ -492,7 +497,54 @@ where
                 missing_url_message: "completed video task is missing `metadata.url`",
             },
             now_ms,
-            |url| self.transport.download_bytes(url),
+            |url| {
+                let mut context = self
+                    .request_context(&model_id, "download")
+                    .remote_status(remote_status);
+                if let Some(provider_job_id) = &provider_job_id {
+                    context = context.provider_job_id(provider_job_id.clone());
+                }
+                let label = format!(
+                    "provider={} adapter={RELAYDANCE_VIDEO_ADAPTER} phase=download task={task_id}",
+                    self.provider_id
+                );
+                self.transport
+                    .download_bytes(url)
+                    .map_err(|error| media_failure_error(context, error.context(label)))
+            },
+        )
+    }
+
+    fn request_context(&self, model: &str, phase: &str) -> MediaFailureContext {
+        MediaFailureContext::new("video", self.provider_id.clone())
+            .adapter(RELAYDANCE_VIDEO_ADAPTER)
+            .model(model.to_string())
+            .phase(phase)
+    }
+
+    fn job_context(&self, job: &MediaJob, phase: &str) -> MediaFailureContext {
+        let mut context = self.request_context(&job.model_id, phase);
+        if let Some(provider_job_id) = &job.provider_job_id {
+            context = context.provider_job_id(provider_job_id.clone());
+        }
+        if let Some(remote_status) = &job.remote_status {
+            context = context.remote_status(remote_status.clone());
+        }
+        context
+    }
+
+    fn wrap_request_error(
+        &self,
+        model: &str,
+        phase: &'static str,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        media_failure_error(
+            self.request_context(model, phase),
+            error.context(format!(
+                "provider={} adapter={RELAYDANCE_VIDEO_ADAPTER} phase={phase}",
+                self.provider_id
+            )),
         )
     }
 }
@@ -500,451 +552,82 @@ where
 #[cfg(test)]
 pub(crate) mod tests_support {
     use super::RelaydanceVideoTransport;
-    use anyhow::Result;
+    use crate::ProviderHttpError;
+    use anyhow::{anyhow, Result};
     use serde_json::Value;
     use std::cell::RefCell;
 
+    #[derive(Clone)]
+    pub(crate) enum ScriptedJson {
+        Ok(Value),
+        Err(ProviderHttpError),
+    }
+
+    impl ScriptedJson {
+        fn result(&self) -> Result<Value> {
+            match self {
+                Self::Ok(value) => Ok(value.clone()),
+                Self::Err(error) => Err(anyhow::Error::new(error.clone())),
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    pub(crate) enum ScriptedBytes {
+        Ok(Vec<u8>),
+        Err(String),
+    }
+
+    impl ScriptedBytes {
+        fn result(&self) -> Result<Vec<u8>> {
+            match self {
+                Self::Ok(bytes) => Ok(bytes.clone()),
+                Self::Err(error) => Err(anyhow!(error.clone())),
+            }
+        }
+    }
+
     /// Scripted transport returning canned submit/poll responses in tests.
     pub(crate) struct ScriptedTransport {
-        pub(crate) submit: Value,
+        pub(crate) submit: ScriptedJson,
         pub(crate) polls: RefCell<Vec<Value>>,
+        pub(crate) downloads: RefCell<Vec<ScriptedBytes>>,
     }
 
     impl RelaydanceVideoTransport for ScriptedTransport {
         fn submit_task(&self, _url: &str, _token: &str, _body: &Value) -> Result<Value> {
-            Ok(self.submit.clone())
+            self.submit.result()
         }
         fn poll_task(&self, _url: &str, _token: &str) -> Result<Value> {
             Ok(self.polls.borrow_mut().remove(0))
         }
         fn download_bytes(&self, _url: &str) -> Result<Vec<u8>> {
-            Ok(b"MP4BYTES".to_vec())
+            let mut downloads = self.downloads.borrow_mut();
+            if downloads.is_empty() {
+                return Ok(b"MP4BYTES".to_vec());
+            }
+            downloads.remove(0).result()
         }
     }
 
     /// Builds a scripted transport from a submit response and ordered polls.
     pub(crate) fn scripted(submit: Value, polls: Vec<Value>) -> ScriptedTransport {
         ScriptedTransport {
-            submit,
+            submit: ScriptedJson::Ok(submit),
             polls: RefCell::new(polls),
+            downloads: RefCell::new(vec![ScriptedBytes::Ok(b"MP4BYTES".to_vec())]),
+        }
+    }
+
+    pub(crate) fn scripted_submit_error(error: ProviderHttpError) -> ScriptedTransport {
+        ScriptedTransport {
+            submit: ScriptedJson::Err(error),
+            polls: RefCell::new(Vec::new()),
+            downloads: RefCell::new(Vec::new()),
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    fn params(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
-    }
-
-    fn wire_types(pairs: &[(&str, WireType)]) -> BTreeMap<String, WireType> {
-        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
-    }
-
-    #[test]
-    fn splits_top_level_and_metadata_params() {
-        let request = relaydance_video_request_from_parameters(
-            "doubao-seedance-2-0-1080p".to_string(),
-            "a cat".to_string(),
-            &params(&[
-                ("seconds", "5"),
-                ("metadata.resolution", "1080p"),
-                ("metadata.ratio", "16:9"),
-            ]),
-            &wire_types(&[("seconds", WireType::Number)]),
-            Default::default(),
-        )
-        .expect("request");
-
-        let body = request.request_body();
-        assert_eq!(body["model"], json!("doubao-seedance-2-0-1080p"));
-        assert_eq!(body["prompt"], json!("a cat"));
-        assert_eq!(body["n"], json!(1));
-        assert_eq!(body["seconds"], json!(5));
-        assert_eq!(body["metadata"]["resolution"], json!("1080p"));
-        assert_eq!(body["metadata"]["ratio"], json!("16:9"));
-    }
-
-    #[test]
-    fn omits_metadata_when_no_metadata_params() {
-        let request = relaydance_video_request_from_parameters(
-            "m".to_string(),
-            "a cat".to_string(),
-            &params(&[("seconds", "5")]),
-            &BTreeMap::new(),
-            Default::default(),
-        )
-        .expect("request");
-        let body = request.request_body();
-        assert!(body.get("metadata").is_none());
-    }
-
-    #[test]
-    fn builds_prompt_only_request_without_optional_params() {
-        let request = relaydance_video_request_from_parameters(
-            "grok-imagine-video".to_string(),
-            "a city skyline".to_string(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            Default::default(),
-        )
-        .expect("request");
-
-        let body = request.request_body();
-        assert_eq!(body["model"], json!("grok-imagine-video"));
-        assert_eq!(body["prompt"], json!("a city skyline"));
-        assert_eq!(body["n"], json!(1));
-        assert!(body.get("metadata").is_none());
-        assert!(body.get("seconds").is_none());
-    }
-
-    #[test]
-    fn builds_content_array_request_for_worldrouter_format() {
-        let request = relaydance_video_request_from_parameters(
-            "seedance-2.0".to_string(),
-            "a sunset".to_string(),
-            &params(&[("resolution", "720p"), ("duration", "5")]),
-            &wire_types(&[("duration", WireType::Number)]),
-            VideoPromptFormat::ContentArray,
-        )
-        .expect("request");
-
-        let body = request.request_body();
-        assert_eq!(body["model"], json!("seedance-2.0"));
-        assert_eq!(
-            body["content"],
-            json!([{"type": "text", "text": "a sunset"}])
-        );
-        assert!(body.get("prompt").is_none());
-        assert!(body.get("n").is_none());
-        assert_eq!(body["resolution"], json!("720p"));
-        assert_eq!(body["duration"], json!(5));
-    }
-
-    #[test]
-    fn rejects_invalid_numeric_parameter_before_http() {
-        let error = relaydance_video_request_from_parameters(
-            "seedance-2.0".to_string(),
-            "a sunset".to_string(),
-            &params(&[("duration", "soon")]),
-            &wire_types(&[("duration", WireType::Number)]),
-            VideoPromptFormat::ContentArray,
-        )
-        .unwrap_err()
-        .to_string();
-
-        assert!(error.contains("duration"), "{error}");
-    }
-
-    #[test]
-    fn rejects_empty_prompt() {
-        let error = relaydance_video_request_from_parameters(
-            "m".to_string(),
-            "   ".to_string(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            Default::default(),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("prompt is required"));
-    }
-
-    fn relaydance_poll_fixture() -> serde_json::Value {
-        serde_json::from_str(include_str!("fixtures/relaydance_poll_task.json")).expect("fixture")
-    }
-
-    #[test]
-    fn parses_relaydance_poll_fixture() {
-        let task = RelaydanceVideoTask::from_value(relaydance_poll_fixture(), "poll video task")
-            .expect("task");
-        assert!(!task.id.trim().is_empty());
-        assert!(!task.status.trim().is_empty());
-    }
-
-    #[test]
-    fn relaydance_shape_summary_lists_top_level_keys() {
-        let summary = relaydance_response_shape_summary(&relaydance_poll_fixture());
-        assert!(summary.contains("keys=["));
-    }
-
-    #[test]
-    fn parses_relaydance_completed_task_with_task_id_and_url() {
-        let task = RelaydanceVideoTask::from_value(
-            json!({
-                "task_id": "task-1",
-                "status": "succeeded",
-                "url": "https://example.com/video.mp4"
-            }),
-            "poll video task",
-        )
-        .expect("task");
-
-        assert_eq!(task.id, "task-1");
-        assert_eq!(task.status, "succeeded");
-        assert_eq!(
-            task.video_url.as_deref(),
-            Some("https://example.com/video.mp4")
-        );
-    }
-
-    #[test]
-    fn relaydance_missing_task_id_reports_phase_and_keys() {
-        let error = RelaydanceVideoTask::from_value(
-            json!({
-                "code": "ok",
-                "message": "accepted",
-                "data": { "status": "running" }
-            }),
-            "poll video task",
-        )
-        .unwrap_err()
-        .to_string();
-
-        assert!(error.contains("poll video task response missing task id"));
-        assert!(error.contains("keys=[code,data,message]"));
-    }
-
-    #[test]
-    fn parses_completed_task_with_metadata_url() {
-        let value = json!({
-            "id": "vid-1",
-            "status": "completed",
-            "metadata": { "url": "https://cdn.example.com/v.mp4" }
-        });
-        let task = RelaydanceVideoTask::from_value(value, "poll video task").expect("task");
-        assert_eq!(task.id, "vid-1");
-        assert_eq!(task.media_status(), MediaJobStatus::Succeeded);
-        assert_eq!(
-            task.video_url.as_deref(),
-            Some("https://cdn.example.com/v.mp4")
-        );
-    }
-
-    #[test]
-    fn parses_failed_task_error_message() {
-        let value = json!({
-            "id": "vid-2",
-            "status": "failed",
-            "error": { "code": "x", "message": "content blocked" }
-        });
-        let task = RelaydanceVideoTask::from_value(value, "poll video task").expect("task");
-        assert_eq!(task.media_status(), MediaJobStatus::Failed);
-        assert_eq!(task.error.as_deref(), Some("content blocked"));
-    }
-
-    #[test]
-    fn unknown_status_maps_to_non_terminal() {
-        let value = json!({ "id": "v", "status": "weird" });
-        let task = RelaydanceVideoTask::from_value(value, "poll video task").expect("task");
-        assert_eq!(task.media_status(), MediaJobStatus::Running);
-        assert!(!task.media_status().is_terminal());
-    }
-
-    #[test]
-    fn parses_failure_status_with_fail_reason() {
-        let value = json!({
-            "data": { "id": "v", "status": "FAILURE", "fail_reason": "content blocked upstream" }
-        });
-        let task = RelaydanceVideoTask::from_value(value, "poll video task").expect("task");
-        assert_eq!(task.media_status(), MediaJobStatus::Failed);
-        assert_eq!(task.error.as_deref(), Some("content blocked upstream"));
-    }
-
-    use super::super::MediaGenerationService;
-    use super::tests_support::ScriptedTransport;
-    use std::cell::RefCell;
-
-    #[test]
-    fn submit_then_poll_downloads_video_artifact() {
-        let dir = tempfile::tempdir().unwrap();
-        let service = MediaGenerationService::new(dir.path());
-        let transport = ScriptedTransport {
-            submit: json!({ "id": "vid-9", "status": "queued" }),
-            polls: RefCell::new(vec![
-                json!({ "id": "vid-9", "status": "in_progress" }),
-                json!({ "id": "vid-9", "status": "completed", "metadata": { "url": "https://cdn.example.com/v.mp4" } }),
-            ]),
-        };
-        let adapter = RelaydanceVideoAdapter::with_transport(
-            "token",
-            "https://relaydance.com/v1/video/generations",
-            "relaydance",
-            transport,
-        );
-
-        let request = RelaydanceVideoRequest {
-            model: "m".into(),
-            prompt: "a cat".into(),
-            params: vec![],
-            prompt_format: Default::default(),
-        };
-        let job = adapter
-            .submit(&service, request, BTreeMap::new(), 1)
-            .expect("submit");
-        let job = adapter
-            .poll_until_terminal(
-                &service,
-                job,
-                RelaydanceVideoPollingConfig {
-                    max_attempts: 5,
-                    delay: Duration::from_millis(0),
-                },
-                |_| {},
-                || 2,
-            )
-            .expect("poll");
-
-        assert_eq!(job.status, MediaJobStatus::Succeeded);
-        assert_eq!(job.artifact_ids.len(), 1);
-        let artifact = service.load_artifact(&job.artifact_ids[0]).unwrap();
-        assert!(artifact
-            .path
-            .starts_with(dir.path().join(".puffer/media/videos")));
-    }
-
-    #[test]
-    fn poll_url_preserves_submit_url_query() {
-        let adapter = RelaydanceVideoAdapter::with_transport(
-            "token",
-            "https://relaydance.com/v1/video/generations?token=x",
-            "relaydance",
-            ScriptedTransport {
-                submit: json!({}),
-                polls: RefCell::new(vec![]),
-            },
-        );
-        let mut job = MediaJob::new(
-            "job-1".to_string(),
-            MediaKind::Video,
-            "relaydance",
-            "m",
-            "a cat",
-            1,
-            1,
-        );
-        job.provider_job_id = Some("vid-9".to_string());
-        assert_eq!(
-            adapter.poll_url(&job).expect("poll url"),
-            "https://relaydance.com/v1/video/generations/vid-9?token=x"
-        );
-    }
-
-    #[test]
-    fn submit_persists_selected_parameters() {
-        let dir = tempfile::tempdir().unwrap();
-        let service = MediaGenerationService::new(dir.path());
-        let adapter = RelaydanceVideoAdapter::with_transport(
-            "token",
-            "https://relaydance.com/v1/video/generations",
-            "relaydance",
-            ScriptedTransport {
-                submit: json!({ "id": "vid-9", "status": "queued" }),
-                polls: RefCell::new(vec![]),
-            },
-        );
-        let request = RelaydanceVideoRequest {
-            model: "m".into(),
-            prompt: "a cat".into(),
-            params: vec![],
-            prompt_format: Default::default(),
-        };
-        let selected = BTreeMap::from([
-            ("duration_seconds".to_string(), "5".to_string()),
-            ("resolution".to_string(), "1080p".to_string()),
-        ]);
-        let job = adapter
-            .submit(&service, request, selected.clone(), 1)
-            .expect("submit");
-        assert_eq!(job.parameters, selected);
-    }
-
-    #[test]
-    fn submit_then_poll_drives_new_api_lifecycle_to_success() {
-        let dir = tempfile::tempdir().unwrap();
-        let service = MediaGenerationService::new(dir.path());
-        let transport = ScriptedTransport {
-            submit: json!({ "data": { "id": "vid-9", "status": "NOT_START" } }),
-            polls: RefCell::new(vec![
-                json!({ "data": { "id": "vid-9", "status": "SUBMITTED" } }),
-                json!({ "data": { "id": "vid-9", "status": "IN_PROGRESS" } }),
-                json!({ "data": { "id": "vid-9", "status": "SUCCESS",
-                    "result_url": "https://cdn.example.com/v.mp4" } }),
-            ]),
-        };
-        let adapter = RelaydanceVideoAdapter::with_transport(
-            "token",
-            "https://relaydance.com/v1/video/generations",
-            "relaydance",
-            transport,
-        );
-        let request = RelaydanceVideoRequest {
-            model: "seedance-nsfw".into(),
-            prompt: "a fleet battle".into(),
-            params: vec![],
-            prompt_format: Default::default(),
-        };
-        let job = adapter
-            .submit(&service, request, BTreeMap::new(), 1)
-            .expect("submit");
-        assert_eq!(job.status, MediaJobStatus::Queued); // NOT_START no longer errors
-        let job = adapter
-            .poll_until_terminal(
-                &service,
-                job,
-                RelaydanceVideoPollingConfig {
-                    max_attempts: 5,
-                    delay: Duration::from_millis(0),
-                },
-                |_| {},
-                || 2,
-            )
-            .expect("poll");
-        assert_eq!(job.status, MediaJobStatus::Succeeded);
-        assert_eq!(job.artifact_ids.len(), 1);
-    }
-
-    #[test]
-    fn poll_parser_failure_is_transient_and_keeps_polling() {
-        let dir = tempfile::tempdir().unwrap();
-        let service = MediaGenerationService::new(dir.path());
-        let adapter = RelaydanceVideoAdapter::with_transport(
-            "token",
-            "https://relaydance.com/v1/video/generations",
-            "relaydance",
-            ScriptedTransport {
-                submit: json!({ "data": { "id": "task-1", "status": "queued" } }),
-                // Malformed response missing the task id = transient error; must
-                // not terminate or mark the job failed.
-                polls: RefCell::new(vec![json!({ "data": { "status": "running" } })]),
-            },
-        );
-        let request = RelaydanceVideoRequest {
-            model: "m".into(),
-            prompt: "a cat".into(),
-            params: vec![],
-            prompt_format: Default::default(),
-        };
-        let job = adapter
-            .submit(&service, request, BTreeMap::new(), 1)
-            .expect("submit");
-        let polled = adapter
-            .poll(&service, job.clone(), 2)
-            .expect("poll returns Ok (transient)");
-
-        assert_eq!(polled.status, MediaJobStatus::Queued); // still non-terminal
-        let saved = service.load_job(&job.id).expect("saved job");
-        assert_eq!(saved.status, MediaJobStatus::Queued); // not marked Failed
-        assert!(saved
-            .error
-            .as_deref()
-            .is_some_and(|e| e.contains("missing task id")));
-        assert!(saved.updated_at_ms >= saved.created_at_ms); // persisted refresh, not frozen
-    }
-}
+#[path = "relaydance_video_tests.rs"]
+mod tests;
