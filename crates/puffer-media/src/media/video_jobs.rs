@@ -3,6 +3,7 @@ use super::video_poster::{
     extract_video_poster, VideoPosterExtraction, VideoPosterExtractionRequest, VideoPosterOptions,
 };
 use super::{MediaArtifact, MediaGenerationService, MediaJob, MediaJobStatus, MediaKind};
+use crate::{media_failure_error, MediaFailureContext};
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 use std::path::Path;
@@ -69,6 +70,52 @@ pub(crate) fn map_video_task_status(raw: &str) -> MediaJobStatus {
         "cancelled" | "canceled" => MediaJobStatus::Canceled,
         _ => MediaJobStatus::Running,
     }
+}
+
+/// Builds provider request context for video adapter failures.
+pub(crate) fn video_request_failure_context(
+    provider_id: &str,
+    adapter_id: &'static str,
+    model_id: &str,
+    phase: &str,
+) -> MediaFailureContext {
+    MediaFailureContext::new("video", provider_id.to_string())
+        .adapter(adapter_id)
+        .model(model_id.to_string())
+        .phase(phase)
+}
+
+/// Builds provider job context for video adapter failures.
+pub(crate) fn video_job_failure_context(
+    provider_id: &str,
+    adapter_id: &'static str,
+    job: &MediaJob,
+    phase: &str,
+) -> MediaFailureContext {
+    let mut context = video_request_failure_context(provider_id, adapter_id, &job.model_id, phase);
+    if let Some(provider_job_id) = &job.provider_job_id {
+        context = context.provider_job_id(provider_job_id.clone());
+    }
+    if let Some(remote_status) = &job.remote_status {
+        context = context.remote_status(remote_status.clone());
+    }
+    context
+}
+
+/// Wraps a request-scoped video adapter failure with structured diagnostics.
+pub(crate) fn wrap_video_request_error(
+    provider_id: &str,
+    adapter_id: &'static str,
+    model_id: &str,
+    phase: &'static str,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    media_failure_error(
+        video_request_failure_context(provider_id, adapter_id, model_id, phase),
+        error.context(format!(
+            "provider={provider_id} adapter={adapter_id} phase={phase}"
+        )),
+    )
 }
 
 /// Records a transient poll error on the job without changing its status, then

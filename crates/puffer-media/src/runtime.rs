@@ -440,7 +440,7 @@ pub(crate) fn exact_media_generation_result(
             if let Some(remote_status) = &job.remote_status {
                 context = context.remote_status(remote_status.clone());
             }
-            MediaFailureDiagnostic::from_error(context, &anyhow::anyhow!(error.clone()))
+            MediaFailureDiagnostic::from_message(context, error.clone())
         })
     } else {
         None

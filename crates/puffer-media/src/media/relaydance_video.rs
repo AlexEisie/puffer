@@ -1,9 +1,10 @@
 use super::video_jobs::{
-    complete_video_job, persist_failed_video_job, poll_video_until_terminal, video_poll_url,
-    CompletedVideoTask, VideoPollingConfig,
+    complete_video_job, persist_failed_video_job, poll_video_until_terminal,
+    video_job_failure_context, video_poll_url, video_request_failure_context,
+    wrap_video_request_error, CompletedVideoTask, VideoPollingConfig,
 };
 use super::{MediaGenerationService, MediaJob, MediaJobStatus, MediaKind};
-use crate::{media_failure_error, MediaFailureContext, ProviderHttpError};
+use crate::{media_failure_error, ProviderHttpError};
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_provider_registry::{VideoPromptFormat, WireType};
 use reqwest::blocking::Client;
@@ -368,9 +369,25 @@ where
         let response = self
             .transport
             .submit_task(&self.submit_url, &self.api_token, &request.request_body())
-            .map_err(|error| self.wrap_request_error(&request.model, "submit", error))?;
-        let task = RelaydanceVideoTask::from_value(response, "submit video task")
-            .map_err(|error| self.wrap_request_error(&request.model, "submit", error))?;
+            .map_err(|error| {
+                wrap_video_request_error(
+                    &self.provider_id,
+                    RELAYDANCE_VIDEO_ADAPTER,
+                    &request.model,
+                    "submit",
+                    error,
+                )
+            })?;
+        let task =
+            RelaydanceVideoTask::from_value(response, "submit video task").map_err(|error| {
+                wrap_video_request_error(
+                    &self.provider_id,
+                    RELAYDANCE_VIDEO_ADAPTER,
+                    &request.model,
+                    "submit",
+                    error,
+                )
+            })?;
         let mut job = MediaJob::new(
             Uuid::new_v4().to_string(),
             MediaKind::Video,
@@ -421,8 +438,15 @@ where
                     self.provider_id,
                     job.provider_job_id.as_deref().unwrap_or("unknown")
                 );
-                let diagnostic =
-                    media_failure_error(self.job_context(&job, "poll"), error.context(label));
+                let diagnostic = media_failure_error(
+                    video_job_failure_context(
+                        &self.provider_id,
+                        RELAYDANCE_VIDEO_ADAPTER,
+                        &job,
+                        "poll",
+                    ),
+                    error.context(label),
+                );
                 super::video_jobs::record_transient_poll_error(service, job, diagnostic, now_ms)
             }
         }
@@ -498,9 +522,13 @@ where
             },
             now_ms,
             |url| {
-                let mut context = self
-                    .request_context(&model_id, "download")
-                    .remote_status(remote_status);
+                let mut context = video_request_failure_context(
+                    &self.provider_id,
+                    RELAYDANCE_VIDEO_ADAPTER,
+                    &model_id,
+                    "download",
+                )
+                .remote_status(remote_status);
                 if let Some(provider_job_id) = &provider_job_id {
                     context = context.provider_job_id(provider_job_id.clone());
                 }
@@ -512,39 +540,6 @@ where
                     .download_bytes(url)
                     .map_err(|error| media_failure_error(context, error.context(label)))
             },
-        )
-    }
-
-    fn request_context(&self, model: &str, phase: &str) -> MediaFailureContext {
-        MediaFailureContext::new("video", self.provider_id.clone())
-            .adapter(RELAYDANCE_VIDEO_ADAPTER)
-            .model(model.to_string())
-            .phase(phase)
-    }
-
-    fn job_context(&self, job: &MediaJob, phase: &str) -> MediaFailureContext {
-        let mut context = self.request_context(&job.model_id, phase);
-        if let Some(provider_job_id) = &job.provider_job_id {
-            context = context.provider_job_id(provider_job_id.clone());
-        }
-        if let Some(remote_status) = &job.remote_status {
-            context = context.remote_status(remote_status.clone());
-        }
-        context
-    }
-
-    fn wrap_request_error(
-        &self,
-        model: &str,
-        phase: &'static str,
-        error: anyhow::Error,
-    ) -> anyhow::Error {
-        media_failure_error(
-            self.request_context(model, phase),
-            error.context(format!(
-                "provider={} adapter={RELAYDANCE_VIDEO_ADAPTER} phase={phase}",
-                self.provider_id
-            )),
         )
     }
 }

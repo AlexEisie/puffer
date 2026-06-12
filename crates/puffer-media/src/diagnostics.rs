@@ -152,44 +152,29 @@ impl std::error::Error for MediaFailureError {}
 impl MediaFailureDiagnostic {
     /// Builds a diagnostic from a provider HTTP error.
     pub fn from_http_error(context: MediaFailureContext, error: ProviderHttpError) -> Self {
-        let message = error
-            .provider_message
-            .clone()
-            .unwrap_or_else(|| error.to_string());
-        let mut diagnostic = Self {
-            kind: context.kind,
-            provider_id: context.provider_id,
-            adapter: context.adapter,
-            model_id: context.model_id,
-            phase: context.phase,
-            provider_job_id: context.provider_job_id,
-            remote_status: context.remote_status,
-            http_status: error.http_status,
-            provider_code: error.provider_code,
-            request_id: error.request_id,
-            error: format!("{}: {}", error.label, message),
-            hint: None,
+        let message = match error.provider_message.clone() {
+            Some(message) => format!("{}: {message}", error.label),
+            None => error.to_string(),
         };
+        let mut diagnostic = Self::from_parts(
+            context,
+            error.http_status,
+            error.provider_code,
+            error.request_id,
+            message,
+        );
         diagnostic.hint = diagnostic_hint(&diagnostic);
         diagnostic
     }
 
     /// Builds a diagnostic from an arbitrary error.
     pub fn from_error(context: MediaFailureContext, error: &Error) -> Self {
-        let mut diagnostic = Self {
-            kind: context.kind,
-            provider_id: context.provider_id,
-            adapter: context.adapter,
-            model_id: context.model_id,
-            phase: context.phase,
-            provider_job_id: context.provider_job_id,
-            remote_status: context.remote_status,
-            http_status: None,
-            provider_code: None,
-            request_id: None,
-            error: format!("{error:#}"),
-            hint: None,
-        };
+        Self::from_message(context, format!("{error:#}"))
+    }
+
+    /// Builds a diagnostic from a plain error message.
+    pub(crate) fn from_message(context: MediaFailureContext, message: impl Into<String>) -> Self {
+        let mut diagnostic = Self::from_parts(context, None, None, None, message);
         diagnostic.hint = diagnostic_hint(&diagnostic);
         diagnostic
     }
@@ -201,6 +186,29 @@ impl MediaFailureDiagnostic {
         self.request_id = self.request_id.map(|value| redact_text(&value, secrets));
         self.hint = self.hint.map(|value| redact_text(&value, secrets));
         self
+    }
+
+    fn from_parts(
+        context: MediaFailureContext,
+        http_status: Option<u16>,
+        provider_code: Option<String>,
+        request_id: Option<String>,
+        error: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: context.kind,
+            provider_id: context.provider_id,
+            adapter: context.adapter,
+            model_id: context.model_id,
+            phase: context.phase,
+            provider_job_id: context.provider_job_id,
+            remote_status: context.remote_status,
+            http_status,
+            provider_code,
+            request_id,
+            error: error.into(),
+            hint: None,
+        }
     }
 }
 
@@ -289,8 +297,7 @@ fn diagnostic_hint(diagnostic: &MediaFailureDiagnostic) -> Option<String> {
                 .to_string(),
         );
     }
-    if provider == "byteplus" && (message.contains("sensitive") || message.contains("moderation"))
-    {
+    if provider == "byteplus" && (message.contains("sensitive") || message.contains("moderation")) {
         return Some(
             "BytePlus rejected the generated media or references; revise the prompt or inputs."
                 .to_string(),
@@ -387,6 +394,43 @@ mod tests {
             diagnostic.hint.as_deref(),
             Some("WorldRouter Seedance credits appear to be too low; check team credits.")
         );
+    }
+
+    #[test]
+    fn http_error_without_provider_message_does_not_duplicate_label() {
+        let diagnostic = MediaFailureDiagnostic::from_http_error(
+            MediaFailureContext::new("video", "byteplus")
+                .adapter("byteplus_video")
+                .model("dreamina-seedance-2-0-fast-260128")
+                .phase("submit"),
+            ProviderHttpError::new("submit video task", 500, "upstream unavailable"),
+        );
+
+        assert_eq!(
+            diagnostic.error,
+            "submit video task failed with status 500: upstream unavailable"
+        );
+        assert!(!diagnostic
+            .error
+            .contains("submit video task: submit video task"));
+    }
+
+    #[test]
+    fn diagnostic_from_message_builds_plain_failed_job_diagnostic() {
+        let diagnostic = MediaFailureDiagnostic::from_message(
+            MediaFailureContext::new("video", "relaydance")
+                .adapter("relaydance_video")
+                .model("doubao-seedance-2-0-720p")
+                .phase("poll")
+                .provider_job_id("rd-task-1")
+                .remote_status("failed"),
+            "content blocked upstream",
+        );
+
+        assert_eq!(diagnostic.provider_id, "relaydance");
+        assert_eq!(diagnostic.provider_job_id.as_deref(), Some("rd-task-1"));
+        assert_eq!(diagnostic.remote_status.as_deref(), Some("failed"));
+        assert_eq!(diagnostic.error, "content blocked upstream");
     }
 
     #[test]

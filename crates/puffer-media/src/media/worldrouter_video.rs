@@ -1,9 +1,10 @@
 use super::video_jobs::{
     complete_video_job, map_video_task_status, persist_failed_video_job, poll_video_until_terminal,
-    video_poll_url, CompletedVideoTask, VideoPollingConfig,
+    video_job_failure_context, video_poll_url, video_request_failure_context,
+    wrap_video_request_error, CompletedVideoTask, VideoPollingConfig,
 };
 use super::{MediaGenerationService, MediaJob, MediaJobStatus, MediaKind};
-use crate::{media_failure_error, MediaFailureContext, ProviderHttpError};
+use crate::{media_failure_error, ProviderHttpError};
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::blocking::Client;
 use serde_json::{json, Map, Number, Value};
@@ -505,19 +506,48 @@ where
         selected_parameters: BTreeMap<String, String>,
         now_ms: u64,
     ) -> Result<MediaJob> {
-        request
-            .validate()
-            .map_err(|error| self.wrap_request_error(&request.model, "validate", error))?;
+        request.validate().map_err(|error| {
+            wrap_video_request_error(
+                &self.provider_id,
+                WORLDROUTER_VIDEO_ADAPTER,
+                &request.model,
+                "validate",
+                error,
+            )
+        })?;
         let (asset_group_id, asset_urls) = self.prepare_assets(&request)?;
         let body = request
             .build_request_body(asset_group_id.as_deref(), &asset_urls)
-            .map_err(|error| self.wrap_request_error(&request.model, "validate", error))?;
+            .map_err(|error| {
+                wrap_video_request_error(
+                    &self.provider_id,
+                    WORLDROUTER_VIDEO_ADAPTER,
+                    &request.model,
+                    "validate",
+                    error,
+                )
+            })?;
         let response = self
             .transport
             .submit_task(&self.submit_url, &self.api_token, &body)
-            .map_err(|error| self.wrap_request_error(&request.model, "submit", error))?;
-        let task = WorldRouterSubmitTask::from_value(response)
-            .map_err(|error| self.wrap_request_error(&request.model, "submit", error))?;
+            .map_err(|error| {
+                wrap_video_request_error(
+                    &self.provider_id,
+                    WORLDROUTER_VIDEO_ADAPTER,
+                    &request.model,
+                    "submit",
+                    error,
+                )
+            })?;
+        let task = WorldRouterSubmitTask::from_value(response).map_err(|error| {
+            wrap_video_request_error(
+                &self.provider_id,
+                WORLDROUTER_VIDEO_ADAPTER,
+                &request.model,
+                "submit",
+                error,
+            )
+        })?;
         let mut job = MediaJob::new(
             Uuid::new_v4().to_string(),
             MediaKind::Video,
@@ -547,7 +577,12 @@ where
         );
         let asset_group_url = asset_groups_url(&self.submit_url).map_err(|error| {
             media_failure_error(
-                self.request_context(&request.model, "asset_group"),
+                video_request_failure_context(
+                    &self.provider_id,
+                    WORLDROUTER_VIDEO_ADAPTER,
+                    &request.model,
+                    "asset_group",
+                ),
                 error.context(asset_group_phase.clone()),
             )
         })?;
@@ -556,13 +591,23 @@ where
             .create_asset_group(&asset_group_url, &self.api_token, &asset_group_body())
             .map_err(|error| {
                 media_failure_error(
-                    self.request_context(&request.model, "asset_group"),
+                    video_request_failure_context(
+                        &self.provider_id,
+                        WORLDROUTER_VIDEO_ADAPTER,
+                        &request.model,
+                        "asset_group",
+                    ),
                     error.context(asset_group_phase.clone()),
                 )
             })?;
         let group = WorldRouterAssetGroup::from_value(group_response).map_err(|error| {
             media_failure_error(
-                self.request_context(&request.model, "asset_group"),
+                video_request_failure_context(
+                    &self.provider_id,
+                    WORLDROUTER_VIDEO_ADAPTER,
+                    &request.model,
+                    "asset_group",
+                ),
                 error.context(asset_group_phase),
             )
         })?;
@@ -575,7 +620,12 @@ where
             );
             let asset_url = asset_upload_url(&self.submit_url, &group.id).map_err(|error| {
                 media_failure_error(
-                    self.request_context(&request.model, "asset_upload"),
+                    video_request_failure_context(
+                        &self.provider_id,
+                        WORLDROUTER_VIDEO_ADAPTER,
+                        &request.model,
+                        "asset_upload",
+                    ),
                     error.context(asset_upload_phase.clone()),
                 )
             })?;
@@ -588,13 +638,23 @@ where
                 )
                 .map_err(|error| {
                     media_failure_error(
-                        self.request_context(&request.model, "asset_upload"),
+                        video_request_failure_context(
+                            &self.provider_id,
+                            WORLDROUTER_VIDEO_ADAPTER,
+                            &request.model,
+                            "asset_upload",
+                        ),
                         error.context(asset_upload_phase.clone()),
                     )
                 })?;
             let asset = WorldRouterAsset::from_value(response).map_err(|error| {
                 media_failure_error(
-                    self.request_context(&request.model, "asset_upload"),
+                    video_request_failure_context(
+                        &self.provider_id,
+                        WORLDROUTER_VIDEO_ADAPTER,
+                        &request.model,
+                        "asset_upload",
+                    ),
                     error.context(asset_upload_phase.clone()),
                 )
             })?;
@@ -628,8 +688,15 @@ where
                     self.provider_id,
                     job.provider_job_id.as_deref().unwrap_or("unknown")
                 );
-                let diagnostic =
-                    media_failure_error(self.job_context(&job, "poll"), error.context(label));
+                let diagnostic = media_failure_error(
+                    video_job_failure_context(
+                        &self.provider_id,
+                        WORLDROUTER_VIDEO_ADAPTER,
+                        &job,
+                        "poll",
+                    ),
+                    error.context(label),
+                );
                 super::video_jobs::record_transient_poll_error(service, job, diagnostic, now_ms)
             }
         }
@@ -690,9 +757,13 @@ where
                     },
                     now_ms,
                     |url| {
-                        let mut context = self
-                            .request_context(&model_id, "download")
-                            .remote_status(remote_status);
+                        let mut context = video_request_failure_context(
+                            &self.provider_id,
+                            WORLDROUTER_VIDEO_ADAPTER,
+                            &model_id,
+                            "download",
+                        )
+                        .remote_status(remote_status);
                         if let Some(provider_job_id) = &provider_job_id {
                             context = context.provider_job_id(provider_job_id.clone());
                         }
@@ -719,39 +790,6 @@ where
                 Ok(job)
             }
         }
-    }
-
-    fn request_context(&self, model: &str, phase: &str) -> MediaFailureContext {
-        MediaFailureContext::new("video", self.provider_id.clone())
-            .adapter(WORLDROUTER_VIDEO_ADAPTER)
-            .model(model.to_string())
-            .phase(phase)
-    }
-
-    fn job_context(&self, job: &MediaJob, phase: &str) -> MediaFailureContext {
-        let mut context = self.request_context(&job.model_id, phase);
-        if let Some(provider_job_id) = &job.provider_job_id {
-            context = context.provider_job_id(provider_job_id.clone());
-        }
-        if let Some(remote_status) = &job.remote_status {
-            context = context.remote_status(remote_status.clone());
-        }
-        context
-    }
-
-    fn wrap_request_error(
-        &self,
-        model: &str,
-        phase: &'static str,
-        error: anyhow::Error,
-    ) -> anyhow::Error {
-        media_failure_error(
-            self.request_context(model, phase),
-            error.context(format!(
-                "provider={} adapter={WORLDROUTER_VIDEO_ADAPTER} phase={phase}",
-                self.provider_id
-            )),
-        )
     }
 }
 
