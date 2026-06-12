@@ -801,6 +801,33 @@ fn byteplus_declares_executable_video_descriptor() {
 }
 
 #[test]
+fn worldrouter_declares_executable_video_descriptor() {
+    let descriptor = provider_descriptor(
+        "worldrouter",
+        include_str!("../../../resources/providers/worldrouter.yaml"),
+    );
+    descriptor
+        .validate_media_descriptors()
+        .expect("worldrouter media descriptor validates");
+    let video = descriptor
+        .media
+        .as_ref()
+        .and_then(|media| media.video.as_ref())
+        .expect("worldrouter video media descriptor");
+    let execution = video
+        .execution
+        .as_ref()
+        .expect("worldrouter video execution descriptor");
+
+    assert_eq!(
+        video.discovery.as_ref().map(|discovery| discovery.adapter),
+        Some(MediaDiscoveryKind::Static)
+    );
+    assert_eq!(execution.adapter, MediaExecutionKind::WorldRouterVideo);
+    assert_eq!(execution.path, "/api/v3/contents/generations/tasks");
+}
+
+#[test]
 fn only_executable_video_providers_declare_video_media() {
     let expected = BTreeSet::from(["byteplus", "relaydance", "worldrouter"]);
     for (provider_id, yaml) in ALL_PROVIDER_YAMLS {

@@ -746,6 +746,9 @@ fn list_video_capabilities_exposes_current_worldrouter_seedance_settings() {
             && capability.operation == "generate"
             && capability.status == "available"
     }));
+    assert!(capabilities
+        .iter()
+        .all(|capability| capability.adapter == "worldrouter_video"));
 
     let seedance = capabilities
         .iter()

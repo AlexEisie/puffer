@@ -84,7 +84,7 @@ media:
     discovery:
       adapter: static
     execution:
-      adapter: relaydance_video
+      adapter: worldrouter_video
       base_url: https://inference-api.worldrouter.ai
       path: /api/v3/contents/generations/tasks
       prompt_format: content_array

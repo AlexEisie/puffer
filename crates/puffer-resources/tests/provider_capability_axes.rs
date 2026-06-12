@@ -161,7 +161,7 @@ fn worldrouter_declares_current_video_models() {
     let video = p.media.as_ref().unwrap().video.as_ref().unwrap();
     assert_eq!(
         video.execution.as_ref().map(|execution| execution.adapter),
-        Some(puffer_provider_registry::MediaExecutionKind::RelaydanceVideo)
+        Some(puffer_provider_registry::MediaExecutionKind::WorldRouterVideo)
     );
     assert_eq!(
         video
