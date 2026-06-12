@@ -1,11 +1,16 @@
 //! Pure media generation runtime for Puffer Code.
 
 mod artifacts;
+mod diagnostics;
 mod internal_tools;
 pub(crate) mod media;
 mod runtime;
 mod video;
 
+pub use diagnostics::{
+    media_failure_diagnostic, media_failure_error, MediaFailureContext, MediaFailureDiagnostic,
+    MediaFailureError, ProviderHttpError,
+};
 pub use media::planner::validate_image_generation_count;
 pub use runtime::{
     discover_exact_media_capabilities, generate_exact_image_with_cache,
