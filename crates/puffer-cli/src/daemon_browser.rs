@@ -374,17 +374,11 @@ impl BrowserRegistry {
         if !self.enabled {
             return;
         }
-        // Adoption only applies to the native-CEF fixed-pool backend. Managed
-        // headless Chrome (screencast fallback) has no user-driven tabs, and its
-        // targets are off-screen, so there is nothing to discover there.
-        let Some(root) = self
-            .roots
-            .lock()
-            .unwrap()
-            .get(GLOBAL_BROWSER_ROOT_ID)
-            .cloned()
-            .filter(|root| root.is_alive() && root.reuses_fixed_target_pool())
-        else {
+        // Adoption only applies to the native-CEF fixed-pool backend. Establish
+        // the CEF connection on demand if the agent never opened a browser this
+        // session (the user may have browsed entirely by hand, #649) — but never
+        // launch a managed Chrome just to sync.
+        let Some(root) = self.ensure_native_cef_root() else {
             return;
         };
         let browser_ws = root.browser_ws();
@@ -461,6 +455,52 @@ impl BrowserRegistry {
                 ),
             );
         }
+    }
+
+    /// Returns the live native-CEF global root, attaching to the desktop's CEF
+    /// on demand if none exists yet (#649: the user may have opened pages by hand
+    /// before the agent ever touched the browser). Returns `None` — never a
+    /// managed Chrome — when no CEF endpoint is configured, so a plain `list`
+    /// cannot spawn a browser. Established once per daemon lifetime; later opens
+    /// reuse the same global root.
+    fn ensure_native_cef_root(&self) -> Option<BrowserRootSession> {
+        if let Some(root) = self
+            .roots
+            .lock()
+            .unwrap()
+            .get(GLOBAL_BROWSER_ROOT_ID)
+            .cloned()
+            .filter(|root| root.is_alive() && root.reuses_fixed_target_pool())
+        {
+            return Some(root);
+        }
+        // Only attach when the desktop actually configured a CEF endpoint;
+        // otherwise discovery is a no-op (managed-Chrome deployments have no
+        // user-driven tabs).
+        session::native_cef_remote_port()?;
+        let launch_settings = self.launch_settings.lock().unwrap().clone();
+        let spawned = match BrowserRootSession::try_spawn_cef_remote(
+            &self.profile_root.join(GLOBAL_BROWSER_ROOT_ID),
+            &launch_settings,
+        ) {
+            Ok(Some(root)) => root,
+            Ok(None) => return None,
+            Err(error) => {
+                browser_debug("tabs.sync.cef-root-failed", format!("error={error}"));
+                return None;
+            }
+        };
+        let mut roots = self.roots.lock().unwrap();
+        // Lost a race with a concurrent open()/sync — reuse the winner.
+        if let Some(existing) = roots
+            .get(GLOBAL_BROWSER_ROOT_ID)
+            .cloned()
+            .filter(|root| root.is_alive())
+        {
+            return Some(existing);
+        }
+        roots.insert(GLOBAL_BROWSER_ROOT_ID.to_string(), spawned.clone());
+        Some(spawned)
     }
 
     /// Opens or reuses a tab inside the agent session browser set.

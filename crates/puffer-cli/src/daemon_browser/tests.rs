@@ -534,6 +534,52 @@ fn real_chrome_adopts_and_snapshots_user_opened_tab() {
     }
 }
 
+/// Reproduces the real-app gap behind issue #649: when the user browses
+/// entirely by hand and the agent never opened a browser, the daemon has no
+/// global root yet. `sync_native_tabs` must still establish the native-CEF
+/// connection on demand and surface the user's tab — without a prior agent open.
+#[test]
+fn native_cef_sync_surfaces_user_tab_without_prior_open() {
+    let _guard = cef_env_lock().lock().unwrap();
+    let previous_port = std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT");
+    let previous_profile = std::env::var_os("PUFFER_CEF_PROFILE_DIR");
+
+    let cef = FakeCefDevtools::spawn_with_user_pages(
+        2,
+        vec![("user-checkout", "https://www.ridge.com/checkouts/manual")],
+    );
+    let profile = tempfile::tempdir().unwrap();
+    std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", cef.port.to_string());
+    std::env::set_var("PUFFER_CEF_PROFILE_DIR", profile.path());
+
+    let registry = BrowserRegistry::new(
+        profile.path().to_path_buf(),
+        true,
+        BrowserLaunchSettings::default(),
+    );
+    let (events, _rx) = tokio::sync::broadcast::channel::<ServerEnvelope>(256);
+    let root = "sess-manual";
+
+    // NO registry.open(...) — the agent never touched the browser this session.
+    registry.sync_native_tabs(&events, root, 1024, 768);
+    let tabs = registry.list_tabs(root);
+
+    match previous_port {
+        Some(value) => std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", value),
+        None => std::env::remove_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT"),
+    }
+    match previous_profile {
+        Some(value) => std::env::set_var("PUFFER_CEF_PROFILE_DIR", value),
+        None => std::env::remove_var("PUFFER_CEF_PROFILE_DIR"),
+    }
+
+    assert!(
+        tabs.tabs.iter().any(|t| t.url.contains("ridge.com/checkouts/manual")),
+        "sync must surface the user tab even with no prior agent open, got {:?}",
+        tabs.tabs.iter().map(|t| &t.url).collect::<Vec<_>>()
+    );
+}
+
 /// Guards the reclaim interaction for issue #649: an adopted user tab holds no
 /// prewarm-pool slot, so reclaiming it to satisfy an exhausted pool would be
 /// futile (it frees no slot) AND would needlessly kill the page the user is

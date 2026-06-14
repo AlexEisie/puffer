@@ -60,6 +60,13 @@ use pending::PendingKind;
 const CEF_REMOTE_START_TIMEOUT: Duration = Duration::from_secs(30);
 const CEF_TARGET_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The native-CEF remote debugging port, if the desktop configured one. Used to
+/// decide whether tab discovery may lazily attach to an existing CEF (#649)
+/// without risking a managed-Chrome launch.
+pub(super) fn native_cef_remote_port() -> Option<u16> {
+    cef_remote_debugging_port()
+}
+
 /// Whether something is accepting TCP connections on the loopback CEF DevTools
 /// port. A short connect timeout so a missing CEF runtime (e.g. `tauri dev`, which
 /// doesn't stage CEF) falls back to the Chrome screencast backend fast instead of
@@ -156,6 +163,18 @@ impl BrowserRootSession {
             })),
         })
     }
+    /// Establishes a native-CEF remote root **without** the managed-Chrome
+    /// fallback. Returns `Ok(None)` when no CEF endpoint is configured. Used to
+    /// lazily attach to the desktop's CEF for tab discovery (#649) even when the
+    /// agent never opened a browser itself — so a plain `list` can never end up
+    /// launching a headless Chrome.
+    pub(super) fn try_spawn_cef_remote(
+        profile_dir: &PathBuf,
+        launch_settings: &BrowserLaunchSettings,
+    ) -> Result<Option<Self>> {
+        Self::spawn_cef_remote_root(profile_dir, launch_settings)
+    }
+
     fn spawn_cef_remote_root(
         profile_dir: &PathBuf,
         launch_settings: &BrowserLaunchSettings,
