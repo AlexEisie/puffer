@@ -79,8 +79,16 @@ fn value_to_string(value: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use puffer_config::ConfigPaths;
+    use puffer_subscriber_runtime::EventEnvelope;
+    use puffer_subscriptions::{
+        ActionDispatcher, ActionResult, ActionSpec, ClassifyDecision, Classifier,
+        WorkflowBindingSpec, WorkflowBindingStatus, WorkflowBindingStore,
+        process_envelope_result,
+    };
     use serde_json::json;
     use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     fn make_event(payload: Value) -> Event {
         Event {
@@ -197,5 +205,248 @@ mod tests {
         );
         let event_no_chat_id = make_event(json!({ "is_outgoing": true }));
         assert!(!gate.should_dispatch_self_message(&event_no_chat_id));
+    }
+
+    // -------------------------------------------------------------------------
+    // Integration Test A: real MonitorSelfGate wired through real process_envelope_result
+    //
+    // This is the high-value seam test: it proves that the gate + router
+    // actually drop/allow outgoing envelopes end-to-end, without an LLM.
+    // A PanicClassifier proves the self/outgoing path never reaches classify.
+    // -------------------------------------------------------------------------
+
+    /// Test double: records dispatch calls and reports success.
+    struct CountingDispatcher {
+        calls: Arc<AtomicUsize>,
+    }
+    impl ActionDispatcher for CountingDispatcher {
+        fn dispatch(&self, _action: &ActionSpec, _envelope: &EventEnvelope) -> ActionResult {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            ActionResult::success("dispatched")
+        }
+    }
+
+    /// Test double: panics if `classify` runs. Proves the self/outgoing path
+    /// short-circuits the classifier (the #569 credit-burn guard).
+    struct PanicClassifier;
+    impl Classifier for PanicClassifier {
+        fn classify(
+            &self,
+            _spec: &WorkflowBindingSpec,
+            _event: &puffer_subscriber_runtime::Event,
+        ) -> ClassifyDecision {
+            panic!("classifier must not run for self/outgoing events");
+        }
+    }
+
+    fn monitor_binding_spec() -> WorkflowBindingSpec {
+        WorkflowBindingSpec {
+            slug: "monitor-telegram-user".into(),
+            description: "Monitor telegram-user for actionable tasks".into(),
+            connection_slug: "telegram-user".into(),
+            connector_slug: Some("telegram-login".into()),
+            status: WorkflowBindingStatus::Enabled,
+            filter: None,
+            ignore_filters: Vec::new(),
+            contact_ids: Vec::new(),
+            classify_prompt: Some("classify".into()),
+            classify_model: None,
+            action: ActionSpec::TriageAgent {
+                prompt: "triage".into(),
+                model: None,
+            },
+            created_at_ms: 0,
+        }
+    }
+
+    fn outgoing_envelope_for(chat_id: i64) -> EventEnvelope {
+        EventEnvelope {
+            envelope_id: format!("env-outgoing-{chat_id}"),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: puffer_subscriber_runtime::Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: None,
+                text: "done, just sent it".into(),
+                payload: json!({ "is_outgoing": true, "chat_id": chat_id }),
+            },
+        }
+    }
+
+    /// Integration: outgoing envelope for chat 42 (open task) → dispatched once,
+    /// classifier never called.
+    #[test]
+    fn integration_real_gate_allows_outgoing_when_chat_has_open_task() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+
+        // Write monitor_tasks.json with one OPEN task for chat_id 42.
+        write_task_store(
+            &paths,
+            &json!({
+                "tasks": [{
+                    "task_id": "monitor-1",
+                    "status": "pending",
+                    "metadata": { "_monitor": true, "chat_id": 42 }
+                }]
+            }),
+        );
+
+        let gate: Arc<dyn SelfMessageGate> =
+            Arc::new(MonitorSelfGate::new(paths.clone()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher: Arc<dyn ActionDispatcher> =
+            Arc::new(CountingDispatcher { calls: calls.clone() });
+        let classifier: Arc<dyn Classifier> = Arc::new(PanicClassifier);
+
+        let store =
+            WorkflowBindingStore::load(tempdir.path().join("bindings.json")).unwrap();
+        store.create(monitor_binding_spec()).unwrap();
+
+        let result = process_envelope_result(
+            &outgoing_envelope_for(42),
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            None,
+            &gate,
+        );
+
+        assert!(result.matched, "chat 42 has open task — must dispatch");
+        assert_eq!(result.acted, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "dispatcher runs exactly once"
+        );
+        // PanicClassifier did not panic → classifier was bypassed for self event.
+    }
+
+    /// Integration: outgoing envelope for chat 99 (no open task) → dropped,
+    /// dispatcher never called, classifier never called.
+    #[test]
+    fn integration_real_gate_drops_outgoing_when_chat_has_no_open_task() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+
+        // Write monitor_tasks.json with an open task for chat 42, NOT chat 99.
+        write_task_store(
+            &paths,
+            &json!({
+                "tasks": [{
+                    "task_id": "monitor-1",
+                    "status": "pending",
+                    "metadata": { "_monitor": true, "chat_id": 42 }
+                }]
+            }),
+        );
+
+        let gate: Arc<dyn SelfMessageGate> =
+            Arc::new(MonitorSelfGate::new(paths.clone()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher: Arc<dyn ActionDispatcher> =
+            Arc::new(CountingDispatcher { calls: calls.clone() });
+        let classifier: Arc<dyn Classifier> = Arc::new(PanicClassifier);
+
+        let store =
+            WorkflowBindingStore::load(tempdir.path().join("bindings.json")).unwrap();
+        store.create(monitor_binding_spec()).unwrap();
+
+        let result = process_envelope_result(
+            &outgoing_envelope_for(99),
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            None,
+            &gate,
+        );
+
+        assert!(!result.matched, "chat 99 has no open task — must not dispatch");
+        assert_eq!(result.acted, 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "dispatcher must not run");
+        // PanicClassifier did not panic → classifier was bypassed.
+    }
+
+    /// Integration: after marking the chat-42 task completed, the gate must
+    /// drop the next outgoing envelope for that chat.
+    #[test]
+    fn integration_real_gate_drops_outgoing_after_task_completed() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+
+        // Start with an OPEN task for chat 42.
+        write_task_store(
+            &paths,
+            &json!({
+                "tasks": [{
+                    "task_id": "monitor-1",
+                    "status": "pending",
+                    "metadata": { "_monitor": true, "chat_id": 42 }
+                }]
+            }),
+        );
+
+        let gate: Arc<dyn SelfMessageGate> =
+            Arc::new(MonitorSelfGate::new(paths.clone()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher: Arc<dyn ActionDispatcher> =
+            Arc::new(CountingDispatcher { calls: calls.clone() });
+        let classifier: Arc<dyn Classifier> = Arc::new(PanicClassifier);
+
+        let store =
+            WorkflowBindingStore::load(tempdir.path().join("bindings.json")).unwrap();
+        store.create(monitor_binding_spec()).unwrap();
+
+        // First pass: open task → dispatched.
+        let first = process_envelope_result(
+            &outgoing_envelope_for(42),
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            None,
+            &gate,
+        );
+        assert!(first.matched, "open task — first outgoing must dispatch");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Simulate task completion: writeback the store with status=completed.
+        write_task_store(
+            &paths,
+            &json!({
+                "tasks": [{
+                    "task_id": "monitor-1",
+                    "status": "completed",
+                    "completed_via": "agent_report:incoming",
+                    "metadata": { "_monitor": true, "chat_id": 42 }
+                }]
+            }),
+        );
+
+        // Second pass: completed task → gate must drop.
+        let second = process_envelope_result(
+            &outgoing_envelope_for(42),
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            None,
+            &gate,
+        );
+        assert!(
+            !second.matched,
+            "task completed — subsequent outgoing must be dropped"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "dispatcher must not run after task completed"
+        );
+        // PanicClassifier never panicked — classifier bypassed on both passes.
     }
 }

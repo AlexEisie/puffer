@@ -2127,4 +2127,47 @@ mod tests {
             "unexpected error: {error}"
         );
     }
+
+    #[test]
+    fn task_update_stamps_completed_via_incoming_label_on_monitor_completion() {
+        // Test B (integration coverage Task 7): prove the incoming-label variant
+        // of completed_via is persisted correctly.  The existing sibling test
+        // `task_update_stamps_completed_via_on_monitor_completion` covers the
+        // outgoing label ("agent_report:outgoing"); this test exercises the
+        // symmetrical incoming path so both labels are regression-protected.
+
+        // GIVEN a non-human-gated monitor task
+        let (mut state, tmp) = make_state();
+        let task_id = create_plain_monitor_task(&mut state, tmp.path());
+
+        // WHEN the agent completes it with the incoming direction label
+        execute_task_update(
+            &mut state,
+            tmp.path(),
+            json!({
+                "taskId": task_id,
+                "status": "completed",
+                "metadata": { "completed_via": "agent_report:incoming" }
+            }),
+        )
+        .unwrap();
+
+        // THEN the persisted monitor task records completed_via = "agent_report:incoming"
+        let path = monitor_tasks_path(tmp.path());
+        let store_raw = std::fs::read_to_string(&path).unwrap();
+        let store: serde_json::Value = serde_json::from_str(&store_raw).unwrap();
+        let task_json = store["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["task_id"].as_str() == Some(&task_id))
+            .expect("task must be in monitor store");
+
+        assert_eq!(task_json["status"], "completed");
+        assert_eq!(
+            task_json["completed_via"],
+            "agent_report:incoming",
+            "incoming-direction completion must record the incoming label"
+        );
+    }
 }
