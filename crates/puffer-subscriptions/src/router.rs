@@ -3,6 +3,7 @@
 
 use crate::action::{ActionDispatcher, BuiltinActionDispatcher};
 use crate::classify::{Classifier, ClassifyDecision, NullClassifier};
+use crate::self_gate::{DropAllSelfGate, SelfMessageGate, SELF_MESSAGE_KIND};
 use crate::contacts::contact_filter_matches;
 use crate::history::{
     now_ms, DedupDecision, WorkflowActionLog, WorkflowBindingRunStatus, WorkflowHistoryStore,
@@ -84,6 +85,7 @@ impl SubscriptionRouter {
         history_store: Option<Arc<WorkflowHistoryStore>>,
         dispatcher: Arc<dyn ActionDispatcher>,
         classifier: Arc<dyn Classifier>,
+        gate: Arc<dyn SelfMessageGate>,
     ) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let stats = Arc::new(RouterStats::default());
@@ -96,6 +98,7 @@ impl SubscriptionRouter {
                 history_store,
                 dispatcher,
                 classifier,
+                gate,
                 shutdown_rx,
                 stats_for_task,
             )
@@ -117,6 +120,7 @@ impl SubscriptionRouter {
             None,
             Arc::new(BuiltinActionDispatcher::new()),
             Arc::new(NullClassifier),
+            Arc::new(DropAllSelfGate),
         )
     }
 
@@ -140,6 +144,7 @@ async fn run(
     history_store: Option<Arc<WorkflowHistoryStore>>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    gate: Arc<dyn SelfMessageGate>,
     mut shutdown_rx: watch::Receiver<bool>,
     stats: Arc<RouterStats>,
 ) {
@@ -159,6 +164,7 @@ async fn run(
                     history_store.clone(),
                     dispatcher.clone(),
                     classifier.clone(),
+                    gate.clone(),
                     stats.clone(),
                     permits.clone(),
                 );
@@ -173,6 +179,7 @@ fn spawn_envelope_processor(
     history_store: Option<Arc<WorkflowHistoryStore>>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    gate: Arc<dyn SelfMessageGate>,
     stats: Arc<RouterStats>,
     permits: Arc<Semaphore>,
 ) {
@@ -191,6 +198,7 @@ fn spawn_envelope_processor(
             history_store,
             dispatcher,
             classifier,
+            gate,
             stats.clone(),
         )
         .await;
@@ -206,6 +214,7 @@ async fn process_envelope_blocking(
     history_store: Option<Arc<WorkflowHistoryStore>>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    gate: Arc<dyn SelfMessageGate>,
     stats: Arc<RouterStats>,
 ) -> EnvelopeProcessResult {
     let stats_for_processing = stats.clone();
@@ -217,6 +226,7 @@ async fn process_envelope_blocking(
             &dispatcher,
             &classifier,
             Some(stats_for_processing.as_ref()),
+            &gate,
         )
     })
     .await
@@ -252,6 +262,7 @@ pub fn process_envelope(
     dispatcher: &Arc<dyn ActionDispatcher>,
     classifier: &Arc<dyn Classifier>,
     stats: Option<&RouterStats>,
+    gate: &Arc<dyn SelfMessageGate>,
 ) -> bool {
     process_envelope_result(
         envelope,
@@ -260,6 +271,7 @@ pub fn process_envelope(
         dispatcher,
         classifier,
         stats,
+        gate,
     )
     .matched
 }
@@ -272,6 +284,7 @@ pub fn process_envelope_result(
     dispatcher: &Arc<dyn ActionDispatcher>,
     classifier: &Arc<dyn Classifier>,
     stats: Option<&RouterStats>,
+    gate: &Arc<dyn SelfMessageGate>,
 ) -> EnvelopeProcessResult {
     let mut result = EnvelopeProcessResult::default();
     if envelope.event.control {
@@ -297,6 +310,26 @@ pub fn process_envelope_result(
         topic_matched_any = true;
         if spec.status == WorkflowBindingStatus::Paused {
             log_router_skip(&spec, envelope, "binding_paused");
+            continue;
+        }
+        if event_is_self(&envelope.event) {
+            // Self/outgoing events SHORT-CIRCUIT the normal filter chain
+            // (dedup/contact/classify). classify can be an LLM call, so gating
+            // before it is essential (#569). The gate is cheap and injected so
+            // the router holds no monitor/task knowledge.
+            if !gate.should_dispatch_self_message(&envelope.event) {
+                log_router_skip(&spec, envelope, "self_no_open_task");
+                continue;
+            }
+            result.matched = true;
+            dispatch_one_matched_envelope(
+                &spec,
+                envelope,
+                history_store,
+                dispatcher,
+                stats,
+                &mut result,
+            );
             continue;
         }
         if event_dedup_key_seen(history_store, &spec, envelope) {
@@ -952,6 +985,13 @@ fn monitor_language_guarded_prompt(prompt: &str) -> String {
 
 fn payload_bool(payload: &Value, key: &str) -> bool {
     payload.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// Whether an event is the user's own self/outgoing message. The telegram path
+/// carries `payload.is_outgoing == true`; a future connector may instead tag the
+/// event kind as [`SELF_MESSAGE_KIND`].
+fn event_is_self(event: &puffer_subscriber_runtime::Event) -> bool {
+    event.kind == SELF_MESSAGE_KIND || payload_bool(&event.payload, "is_outgoing")
 }
 
 /// Free-standing helper used by tests and by future explicit "test this

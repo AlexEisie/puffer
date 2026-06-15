@@ -3,10 +3,15 @@ mod monitor_rule_tests {
     use super::*;
     use crate::action::{ActionResult, BuiltinActionDispatcher};
     use crate::classify::NullClassifier;
+    use crate::self_gate::{DropAllSelfGate, SelfMessageGate};
     use crate::spec::{ActionSpec, TaggedFilterSpec, WorkflowBindingSpec};
     use puffer_subscriber_runtime::{Event, EventEnvelope};
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    fn drop_all_gate() -> Arc<dyn SelfMessageGate> {
+        Arc::new(DropAllSelfGate)
+    }
 
     #[test]
     fn keyword_ignore_filter_suppresses_matching_text() {
@@ -65,9 +70,10 @@ mod monitor_rule_tests {
             &dispatcher,
             &classifier,
             None,
+            &drop_all_gate(),
         );
         let passed =
-            process_envelope_result(&non_matching, &store, None, &dispatcher, &classifier, None);
+            process_envelope_result(&non_matching, &store, None, &dispatcher, &classifier, None, &drop_all_gate());
 
         assert!(!ignored.matched);
         assert_eq!(ignored.acted, 0);
@@ -135,9 +141,9 @@ mod monitor_rule_tests {
             ..base.clone()
         };
 
-        let skipped = process_envelope_result(&base, &store, None, &dispatcher, &classifier, None);
+        let skipped = process_envelope_result(&base, &store, None, &dispatcher, &classifier, None, &drop_all_gate());
         let passed =
-            process_envelope_result(&matching, &store, None, &dispatcher, &classifier, None);
+            process_envelope_result(&matching, &store, None, &dispatcher, &classifier, None, &drop_all_gate());
 
         assert!(!skipped.matched);
         assert_eq!(skipped.acted, 0);

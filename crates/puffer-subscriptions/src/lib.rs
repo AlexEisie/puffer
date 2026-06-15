@@ -30,6 +30,7 @@ mod manager;
 mod protocol;
 mod proxy;
 mod router;
+mod self_gate;
 mod spec;
 mod store;
 mod subscriber_manifest;
@@ -81,6 +82,7 @@ pub use router::{
     prefilter_passes, process_envelope, process_envelope_batch_result, process_envelope_result,
     EnvelopeProcessResult, RouterStats, SubscriptionRouter,
 };
+pub use self_gate::{DropAllSelfGate, SelfMessageGate, SELF_MESSAGE_KIND};
 pub use spec::{
     filter_matches, render_value_templates, validate_action_spec, validate_spec, ActionGraphNode,
     ActionSpec, FilterSpec, PrefilterSpec, SubscriptionSpec, SubscriptionStatus, TaggedFilterSpec,

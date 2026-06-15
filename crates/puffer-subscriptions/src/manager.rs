@@ -19,6 +19,7 @@ use crate::proxy::{
     AgentProxyStore,
 };
 use crate::router::{process_envelope_batch_result, process_envelope_result, SubscriptionRouter};
+use crate::self_gate::{DropAllSelfGate, SelfMessageGate};
 use crate::spec::ActionSpec;
 use crate::store::SubscriptionStore;
 use anyhow::Result;
@@ -87,6 +88,7 @@ pub struct SubscriptionManagerBuilder {
     proxy_store_path: PathBuf,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    self_gate: Arc<dyn SelfMessageGate>,
     auth_checker: Option<Arc<dyn ConnectionAuthChecker>>,
 }
 
@@ -120,6 +122,10 @@ impl SubscriptionManagerBuilder {
             proxy_store_path,
             dispatcher: Arc::new(BuiltinActionDispatcher::new()),
             classifier: Arc::new(NullClassifier),
+            // Default MUST drop self messages so absent wiring == master
+            // behaviour (outgoing never acted on); the real monitor gate is
+            // installed by the daemon in a later task.
+            self_gate: Arc::new(DropAllSelfGate),
             auth_checker: None,
         }
     }
@@ -166,6 +172,12 @@ impl SubscriptionManagerBuilder {
         self
     }
 
+    /// Override the self/outgoing message gate. Defaults to [`DropAllSelfGate`].
+    pub fn with_self_gate(mut self, gate: Arc<dyn SelfMessageGate>) -> Self {
+        self.self_gate = gate;
+        self
+    }
+
     /// Override the process-provided connection auth checker.
     pub fn with_connection_auth_checker(mut self, checker: Arc<dyn ConnectionAuthChecker>) -> Self {
         self.auth_checker = Some(checker);
@@ -191,6 +203,7 @@ impl SubscriptionManagerBuilder {
         let proxy_store = Arc::new(AgentProxyStore::load(&self.proxy_store_path)?);
         let dispatcher = self.dispatcher.clone();
         let classifier = self.classifier.clone();
+        let self_gate = self.self_gate.clone();
         let bus = self.bus.clone();
         let store_for_router = store.clone();
         let history_for_router = history_store.clone();
@@ -204,6 +217,7 @@ impl SubscriptionManagerBuilder {
                 watch_connection_health_events(health_bus, health_connection_store).await;
             })
         };
+        let gate_for_router = self_gate.clone();
         let router = {
             let _runtime_guard = handle.enter();
             SubscriptionRouter::spawn(
@@ -212,6 +226,7 @@ impl SubscriptionManagerBuilder {
                 Some(history_for_router),
                 dispatcher_for_router,
                 classifier_for_router,
+                gate_for_router,
             )
         };
         let manager = SubscriptionManager {
@@ -224,6 +239,7 @@ impl SubscriptionManagerBuilder {
             proxy_store,
             dispatcher,
             classifier,
+            self_gate,
             auth_checker: self.auth_checker,
             router: Mutex::new(Some(router)),
             health_watcher: Mutex::new(Some(health_watcher)),
@@ -248,6 +264,7 @@ pub struct SubscriptionManager {
     proxy_store: Arc<AgentProxyStore>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    self_gate: Arc<dyn SelfMessageGate>,
     auth_checker: Option<Arc<dyn ConnectionAuthChecker>>,
     router: Mutex<Option<SubscriptionRouter>>,
     health_watcher: Mutex<Option<JoinHandle<()>>>,
@@ -423,6 +440,7 @@ impl SubscriptionManager {
                         proxy_store: self.proxy_store.clone(),
                         dispatcher: self.dispatcher.clone(),
                         classifier: self.classifier.clone(),
+                        self_gate: self.self_gate.clone(),
                     });
                 if let Some(handle) = block_on_manager_handle(
                     &self.handle,
@@ -956,6 +974,7 @@ struct ManagerConnectorEventProcessor {
     proxy_store: Arc<AgentProxyStore>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    self_gate: Arc<dyn SelfMessageGate>,
 }
 
 impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
@@ -973,6 +992,7 @@ impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
             &self.dispatcher,
             &self.classifier,
             None,
+            &self.self_gate,
         );
         if result.failed > 0 {
             anyhow::bail!(
