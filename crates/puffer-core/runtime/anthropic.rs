@@ -118,11 +118,22 @@ fn setup_anthropic_session(
         },
     )?;
 
-    let tools = anthropic_tool_definitions_for_request(
-        &registry,
-        options.structured_output,
-        Some(&permission_context),
-    )?;
+    let tools = {
+        let mut t = anthropic_tool_definitions_for_request(
+            &registry,
+            options.structured_output,
+            Some(&permission_context),
+        )?;
+        if !options.excluded_tools.is_empty() {
+            t.retain(|tool| {
+                !tool
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| options.excluded_tools.iter().any(|ex| ex == name))
+            });
+        }
+        t
+    };
 
     let system_prompt = render_runtime_system_prompt(
         state,
