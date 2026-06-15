@@ -7,10 +7,18 @@ use std::sync::Arc;
 use super::monitor_task_ignore::monitor_tasks_path;
 
 /// Gate that dispatches self/outgoing events to the monitor triage agent only
-/// when the event's `chat_id` belongs to a chat that has at least one OPEN
-/// (not completed, not cancelled) monitor task in the monitor task store.
+/// when the event's conversation has at least one OPEN (not completed, not
+/// cancelled) monitor task in the monitor task store.
 ///
-/// On any error (missing file, parse failure, missing chat_id) returns `false`
+/// The conversation is identified by whichever connector-specific identity key
+/// the event payload carries (`chat_id`, `channel_id`, `room_id`,
+/// `conversation_id`, `thread_id`, `mailbox_id`, `project_id`, or WeChat's bare
+/// `chat`). It is matched key-by-key against the same key stamped on a task's
+/// metadata, so the gate is connector-agnostic: any connector that emits
+/// `is_outgoing` plus one of these keys is supported with no further gate
+/// changes.
+///
+/// On any error (missing file, parse failure, no identity key) returns `false`
 /// (drop), which is the safe #569-preserving default.
 pub(crate) struct MonitorSelfGate {
     paths: ConfigPaths,
@@ -24,9 +32,12 @@ impl MonitorSelfGate {
 
 impl SelfMessageGate for MonitorSelfGate {
     fn should_dispatch_self_message(&self, event: &Event) -> bool {
-        let Some(chat_id) = chat_id_string(&event.payload) else {
+        // The event must carry at least one conversation-identity key, else we
+        // cannot scope it to a conversation → drop (safe default).
+        let payload_ids = conversation_ids(&event.payload);
+        if payload_ids.is_empty() {
             return false;
-        };
+        }
         let path = monitor_tasks_path(&self.paths);
         let Ok(raw) = std::fs::read_to_string(&path) else {
             return false;
@@ -43,24 +54,51 @@ impl SelfMessageGate for MonitorSelfGate {
                         t.get("status").and_then(Value::as_str),
                         Some("completed") | Some("cancelled")
                     );
-                    open && task_chat_id_string(t).as_deref() == Some(chat_id.as_str())
+                    open && task_shares_conversation(t, &payload_ids)
                 })
             })
     }
 }
 
-/// Extract `payload["chat_id"]` as a normalised string.
-/// Accepts both `Value::String` and `Value::Number`.
-fn chat_id_string(payload: &Value) -> Option<String> {
-    value_to_string(payload.get("chat_id")?)
+/// Conversation-identity keys a connector may use to scope a monitor task to a
+/// conversation. The triage protocol stamps one of these onto each task's
+/// metadata, and the matching key appears in the connector's event payload.
+/// (`chat` is WeChat's bare key.)
+const CONVERSATION_ID_KEYS: &[&str] = &[
+    "chat_id",
+    "channel_id",
+    "room_id",
+    "conversation_id",
+    "thread_id",
+    "mailbox_id",
+    "project_id",
+    "chat",
+];
+
+/// Collect the `(key, normalised value)` conversation-identity pairs present in
+/// a JSON object, scanning [`CONVERSATION_ID_KEYS`]. Applied to both the event
+/// payload and a task's `metadata` so matching is key-by-key.
+fn conversation_ids(obj: &Value) -> Vec<(&'static str, String)> {
+    CONVERSATION_ID_KEYS
+        .iter()
+        .filter_map(|key| obj.get(*key).and_then(value_to_string).map(|v| (*key, v)))
+        .collect()
 }
 
-/// Extract `task["metadata"]["chat_id"]` as a normalised string.
-fn task_chat_id_string(task: &Value) -> Option<String> {
-    value_to_string(task.get("metadata")?.get("chat_id")?)
+/// Whether a task shares a conversation-identity key/value with the event
+/// payload (same key, equal normalised value). Key-by-key matching avoids
+/// cross-key collisions (a `chat_id` never matches a `channel_id`).
+fn task_shares_conversation(task: &Value, payload_ids: &[(&'static str, String)]) -> bool {
+    let Some(metadata) = task.get("metadata") else {
+        return false;
+    };
+    let task_ids = conversation_ids(metadata);
+    payload_ids
+        .iter()
+        .any(|(pk, pv)| task_ids.iter().any(|(tk, tv)| pk == tk && pv == tv))
 }
 
-/// Convert a `&Value` to a canonical string used for chat_id comparison.
+/// Convert a `&Value` to a canonical string used for conversation-id comparison.
 /// - `Value::String`: returned if non-empty after trimming.
 /// - `Value::Number`: stringified via `to_string()`.
 /// - Everything else: `None`.
@@ -205,6 +243,63 @@ mod tests {
         );
         let event_no_chat_id = make_event(json!({ "is_outgoing": true }));
         assert!(!gate.should_dispatch_self_message(&event_no_chat_id));
+    }
+
+    #[test]
+    fn gate_matches_non_chat_id_conversation_keys() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        let gate = Arc::new(MonitorSelfGate::new(paths.clone()));
+
+        // Email-style task keyed on thread_id; WeChat-style on the bare `chat`.
+        write_task_store(
+            &paths,
+            &json!({
+                "tasks": [
+                    { "task_id": "mail", "status": "pending",
+                      "metadata": { "_monitor": true, "thread_id": "abc-123" } },
+                    { "task_id": "wechat", "status": "pending",
+                      "metadata": { "_monitor": true, "chat": 7788 } }
+                ]
+            }),
+        );
+
+        // thread_id match (email).
+        assert!(gate.should_dispatch_self_message(
+            &make_event(json!({ "thread_id": "abc-123", "is_outgoing": true }))
+        ));
+        // bare `chat` key (WeChat); numeric on both sides.
+        assert!(gate.should_dispatch_self_message(
+            &make_event(json!({ "chat": 7788, "is_outgoing": true }))
+        ));
+        // A different thread_id → drop.
+        assert!(!gate.should_dispatch_self_message(
+            &make_event(json!({ "thread_id": "other", "is_outgoing": true }))
+        ));
+    }
+
+    #[test]
+    fn gate_does_not_match_across_different_identity_keys() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        let gate = Arc::new(MonitorSelfGate::new(paths.clone()));
+
+        // Task keyed on channel_id = 42.
+        write_task_store(
+            &paths,
+            &json!({
+                "tasks": [{ "task_id": "c", "status": "pending",
+                            "metadata": { "_monitor": true, "channel_id": 42 } }]
+            }),
+        );
+        // Event carries chat_id = 42 (a DIFFERENT key) → must NOT match.
+        assert!(!gate.should_dispatch_self_message(
+            &make_event(json!({ "chat_id": 42, "is_outgoing": true }))
+        ));
+        // Same key (channel_id) → matches.
+        assert!(gate.should_dispatch_self_message(
+            &make_event(json!({ "channel_id": 42, "is_outgoing": true }))
+        ));
     }
 
     // -------------------------------------------------------------------------
