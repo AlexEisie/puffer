@@ -392,7 +392,21 @@ fn render_triage_batch_prompt(prompt: &str, triggers: &[serde_json::Value]) -> R
             triggers.len()
         );
     }
-    let trigger = serde_json::to_string_pretty(&triggers[0])?;
+    let mut trigger = triggers[0].clone();
+    let is_outgoing = trigger
+        .get("payload")
+        .and_then(|p| p.get("is_outgoing"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if let Some(obj) = trigger.as_object_mut() {
+        obj.insert(
+            "direction".to_string(),
+            serde_json::Value::String(
+                if is_outgoing { "outgoing" } else { "incoming" }.to_string(),
+            ),
+        );
+    }
+    let trigger = serde_json::to_string_pretty(&trigger)?;
     Ok(format!(
         "{prompt}\n\nWorkflow trigger:\n```json\n{trigger}\n```"
     ))
@@ -1870,5 +1884,27 @@ mod tests {
         let trigger = json!({ "envelope_id": "env-1", "text": "hello" });
 
         super::record_monitor_source_text(&paths, &trigger).unwrap();
+    }
+
+    #[test]
+    fn triage_prompt_includes_direction_from_payload() {
+        let triggers = vec![json!({
+            "connection_id": "telegram-user",
+            "text": "done",
+            "payload": { "is_outgoing": true, "chat_id": 42 }
+        })];
+        let prompt = render_triage_batch_prompt("Monitor prompt", &triggers).unwrap();
+        assert!(prompt.contains("\"direction\""));
+        assert!(prompt.contains("outgoing"));
+    }
+
+    #[test]
+    fn triage_prompt_direction_defaults_incoming() {
+        let triggers = vec![json!({
+            "connection_id": "telegram-user", "text": "hi",
+            "payload": { "is_outgoing": false, "chat_id": 7 }
+        })];
+        let prompt = render_triage_batch_prompt("Monitor prompt", &triggers).unwrap();
+        assert!(prompt.contains("incoming"));
     }
 }
