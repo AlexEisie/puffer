@@ -87,6 +87,7 @@ pub(super) fn execute_task_create(
         created_at_ms: Some(now_ms()),
         updated_at_ms: Some(now_ms()),
         exit_code: None,
+        completed_via: None,
     };
     store.tasks.push(task.clone());
     save_store(&tp, &store)?;
@@ -312,6 +313,23 @@ pub(super) fn execute_task_update(
             "to": task.status,
         }));
         updated_fields.push("status");
+    }
+    // Stamp completed_via on monitor tasks when the agent drives completion.
+    // This mirrors the daemon's human-approval path (handle_monitor_task_complete)
+    // which also records completed_via as a top-level field.
+    if task.status == "completed"
+        && (tp == monitor_tasks_path(&store_cwd) || is_monitor_task_metadata(&task.metadata))
+    {
+        let via = parsed
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("completed_via"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("agent_report")
+            .to_string();
+        task.completed_via = Some(via);
     }
     // Auto-set owner when transitioning to in_progress without an explicit owner.
     if task.status == "in_progress" && task.owner.is_none() {
@@ -1976,5 +1994,137 @@ mod tests {
         let error = monitor_reply_target(&task).expect_err("missing chat_id must be rejected");
 
         assert!(error.to_string().contains("has no source_context"));
+    }
+
+    /// Creates a plain (non-human-gated) monitor task — no telegram connector,
+    /// no reply action, no delivery target — so `monitor_task_is_human_gated`
+    /// returns false and `TaskUpdate` is allowed to complete it directly.
+    fn create_plain_monitor_task(state: &mut AppState, cwd: &Path) -> String {
+        let raw = execute_task_create(
+            state,
+            cwd,
+            json!({
+                "subject": "Log check for anomalies",
+                "description": "Scan logs for error spikes.",
+                "receivedAt": "2026-06-10T13:00:00Z",
+                "expiresAt": "2026-06-11T13:00:00Z",
+                "metadata": {
+                    "_monitor": true,
+                    "chat_id": "42"
+                }
+            }),
+        )
+        .unwrap();
+        serde_json::from_str::<Value>(&raw)
+            .unwrap()
+            .pointer("/task/id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn task_update_stamps_completed_via_on_monitor_completion() {
+        // GIVEN a non-human-gated monitor task in the monitor store
+        let (mut state, tmp) = make_state();
+        let task_id = create_plain_monitor_task(&mut state, tmp.path());
+
+        // Confirm the task is NOT human-gated before we proceed
+        let task = load_monitor_task(tmp.path(), &task_id).unwrap().unwrap();
+        assert!(
+            !monitor_task_is_human_gated(&task),
+            "test setup: task should not be human-gated"
+        );
+
+        // WHEN execute_task_update completes it with completed_via in metadata
+        execute_task_update(
+            &mut state,
+            tmp.path(),
+            json!({
+                "taskId": task_id,
+                "status": "completed",
+                "metadata": { "completed_via": "agent_report:outgoing" }
+            }),
+        )
+        .unwrap();
+
+        // THEN the persisted monitor task records completed_via at top level
+        let path = monitor_tasks_path(tmp.path());
+        let store_raw = std::fs::read_to_string(&path).unwrap();
+        let store: Value = serde_json::from_str(&store_raw).unwrap();
+        let task_json = store["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["task_id"].as_str() == Some(&task_id))
+            .expect("task must be in monitor store");
+
+        assert_eq!(task_json["status"], "completed");
+        assert_eq!(task_json["completed_via"], "agent_report:outgoing");
+    }
+
+    #[test]
+    fn task_update_stamps_completed_via_default_when_not_in_metadata() {
+        // GIVEN a non-human-gated monitor task
+        let (mut state, tmp) = make_state();
+        let task_id = create_plain_monitor_task(&mut state, tmp.path());
+
+        // WHEN execute_task_update completes it WITHOUT completed_via in metadata
+        execute_task_update(
+            &mut state,
+            tmp.path(),
+            json!({
+                "taskId": task_id,
+                "status": "completed"
+            }),
+        )
+        .unwrap();
+
+        // THEN the persisted task records the default "agent_report" value
+        let path = monitor_tasks_path(tmp.path());
+        let store_raw = std::fs::read_to_string(&path).unwrap();
+        let store: Value = serde_json::from_str(&store_raw).unwrap();
+        let task_json = store["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["task_id"].as_str() == Some(&task_id))
+            .expect("task must be in monitor store");
+
+        assert_eq!(task_json["status"], "completed");
+        assert_eq!(task_json["completed_via"], "agent_report");
+    }
+
+    #[test]
+    fn task_update_still_refuses_human_gated_monitor_completion() {
+        // GIVEN a human-gated monitor task (telegram connector + chat_id triggers the gate)
+        let (mut state, tmp) = make_state();
+        let task_id = create_telegram_monitor_task(&mut state, tmp.path());
+
+        // Confirm it IS human-gated
+        let task = load_monitor_task(tmp.path(), &task_id).unwrap().unwrap();
+        assert!(
+            monitor_task_is_human_gated(&task),
+            "test setup: task should be human-gated"
+        );
+
+        // WHEN execute_task_update tries status: completed
+        let error = execute_task_update(
+            &mut state,
+            tmp.path(),
+            json!({
+                "taskId": task_id,
+                "status": "completed"
+            }),
+        )
+        .expect_err("human-gated monitor tasks must not be completable by agent");
+
+        // THEN it errors with the expected message
+        assert!(
+            error
+                .to_string()
+                .contains("must be completed through its monitor action"),
+            "unexpected error: {error}"
+        );
     }
 }
