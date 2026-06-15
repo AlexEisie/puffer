@@ -143,17 +143,9 @@ pub(crate) async fn emit_message_if_new(
     let notification_silent = message.silent();
     let is_outgoing = message.outgoing();
     if should_suppress_message(is_outgoing, notification_muted, notification_silent) {
-        // Outgoing (self-sent) messages are recorded as seen but never emitted
-        // into the triage pipeline: otherwise the user's own messages spin up a
-        // triage turn (burning credits) and can be misread as incoming tasks.
-        let stage = if is_outgoing {
-            "suppressed_outgoing"
-        } else {
-            "suppressed"
-        };
         append_message_diagnostic(
             env,
-            stage,
+            "suppressed",
             message,
             delivery_source,
             source_received_at_ms,
@@ -168,7 +160,7 @@ pub(crate) async fn emit_message_if_new(
             is_outgoing,
             notification_muted,
             notification_silent,
-            "skipped Telegram message (outgoing or muted/silent)"
+            "skipped Telegram message (muted/silent)"
         );
         return Ok(false);
     }
@@ -228,15 +220,15 @@ fn message_notifications_suppressed(notification_muted: bool, notification_silen
 }
 
 /// Whether a message should be recorded as seen but NOT emitted into the triage
-/// pipeline. Outgoing (self-sent) messages are always suppressed so the user's
-/// own messages never trigger a triage turn (the #569 credit-burn bug); muted /
-/// silent chats are suppressed per the user's notification settings.
+/// pipeline. Muted/silent chats are suppressed per the user's notification
+/// settings. Outgoing messages are no longer suppressed here — they carry
+/// `is_outgoing: true` in the payload so downstream gating can decide.
 fn should_suppress_message(
-    is_outgoing: bool,
+    _is_outgoing: bool,
     notification_muted: bool,
     notification_silent: bool,
 ) -> bool {
-    is_outgoing || message_notifications_suppressed(notification_muted, notification_silent)
+    message_notifications_suppressed(notification_muted, notification_silent)
 }
 
 fn message_chat_key(message: &Message) -> String {
@@ -385,15 +377,16 @@ mod tests {
     }
 
     #[test]
-    fn outgoing_messages_are_suppressed() {
-        // #569: the user's own (outgoing) messages must be suppressed from the
-        // triage pipeline even when the chat is not muted/silent.
-        assert!(should_suppress_message(true, false, false));
+    fn outgoing_messages_are_emitted_unless_muted() {
+        // outgoing + not muted/silent => NOT suppressed (it gets emitted)
+        assert!(!should_suppress_message(true, false, false));
+        // outgoing + muted => suppressed (muting still wins)
         assert!(should_suppress_message(true, true, false));
+        // outgoing + silent => suppressed
         assert!(should_suppress_message(true, false, true));
-        // Incoming messages still follow the notification-suppression rules.
-        assert!(!should_suppress_message(false, false, false));
+        // incoming + muted => suppressed (unchanged)
         assert!(should_suppress_message(false, true, false));
-        assert!(should_suppress_message(false, false, true));
+        // incoming + not muted => not suppressed (unchanged)
+        assert!(!should_suppress_message(false, false, false));
     }
 }
