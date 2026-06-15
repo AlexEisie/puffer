@@ -150,6 +150,7 @@ pub fn load_resources(paths: &ConfigPaths, runner: &dyn ToolRunner) -> Result<Lo
             &mut loaded.diagnostics,
         );
     }
+    validate_provider_media_descriptors(&loaded.providers)?;
     apply_runtime_resource_filters(&mut loaded);
     Ok(loaded)
 }
@@ -581,6 +582,8 @@ fn load_skill_embedded() -> Result<Vec<LoadedItem<SkillSpec>>> {
             &["disable-model-invocation", "disableModelInvocation"],
         )
         .unwrap_or(false);
+        let requires_action =
+            frontmatter_bool(&frontmatter, &["requires-action", "requiresAction"]).unwrap_or(false);
         let allowed_tools =
             frontmatter_string_list(&frontmatter, &["allowed-tools", "allowedTools"]);
         let argument_hint = frontmatter_string(&frontmatter, &["argument-hint", "argumentHint"]);
@@ -605,6 +608,7 @@ fn load_skill_embedded() -> Result<Vec<LoadedItem<SkillSpec>>> {
                 effort,
                 context,
                 disable_model_invocation,
+                requires_action,
                 verification: None,
             },
             source_info: SourceInfo {
@@ -785,6 +789,8 @@ fn load_skill_dir(
             &["disable-model-invocation", "disableModelInvocation"],
         )
         .unwrap_or(false);
+        let requires_action =
+            frontmatter_bool(&frontmatter, &["requires-action", "requiresAction"]).unwrap_or(false);
         let allowed_tools =
             frontmatter_string_list(&frontmatter, &["allowed-tools", "allowedTools"]);
         let argument_hint = frontmatter_string(&frontmatter, &["argument-hint", "argumentHint"]);
@@ -809,6 +815,7 @@ fn load_skill_dir(
                 effort,
                 context,
                 disable_model_invocation,
+                requires_action,
                 verification: None,
             },
             source_info: SourceInfo {
@@ -1016,6 +1023,24 @@ fn merge_by_id<T, F>(
         merged.insert(dedup, (item, display));
     }
     *existing = merged.into_values().map(|(item, _)| item).collect();
+}
+
+fn validate_provider_media_descriptors(providers: &[LoadedItem<ProviderPack>]) -> Result<()> {
+    for provider in providers {
+        provider
+            .value
+            .clone()
+            .into_descriptor()
+            .validate_media_descriptors()
+            .with_context(|| {
+                format!(
+                    "invalid media descriptor for provider `{}` from {}",
+                    provider.value.id,
+                    provider.source_info.path.display()
+                )
+            })?;
+    }
+    Ok(())
 }
 
 /// Pairs the dedup key used to merge resources with a user-friendly id for diagnostics.
@@ -1235,6 +1260,53 @@ mod tests {
     }
 
     #[test]
+    fn load_resources_rejects_invalid_provider_media_descriptor() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let resources_dir = root.join("resources/providers");
+        fs::create_dir_all(&resources_dir).unwrap();
+        fs::write(
+            resources_dir.join("bad-media.yaml"),
+            r#"
+id: bad-media
+display_name: Bad Media
+base_url: https://bad-media.example
+default_api: openai-responses
+auth_modes:
+  - api_key
+models: []
+media:
+  image:
+    execution:
+      adapter: images_json
+      path: /v1/images/generations
+    models:
+      - id: exact-image-model
+        operations:
+          - generate
+        axes:
+          - id: size
+            label: Size
+            role: param
+            control: !enum
+              values:
+                - 1024x1024
+              default: 1024x1024
+        variants:
+          model_id: exact-image-model
+"#,
+        )
+        .unwrap();
+
+        let paths = ConfigPaths::discover(&root);
+        let error = load_resources(&paths, &FsTestRunner).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("invalid media descriptor for provider `bad-media`"));
+        assert!(message.contains("param axis size needs a request_field"));
+    }
+
+    #[test]
     fn load_tool_resources_reads_tools_without_scanning_skills() {
         let temp = tempdir().unwrap();
         let root = temp.path().join("workspace");
@@ -1266,6 +1338,105 @@ mod tests {
             .any(|tool| tool.value.id == "CustomTool"));
         assert!(loaded.skills.is_empty());
         assert!(loaded.plugins.is_empty());
+    }
+
+    #[test]
+    fn bundled_image_generation_internal_tool_accepts_optional_count_and_describes_multi_image_use()
+    {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        fs::create_dir_all(&root).unwrap();
+        let paths = ConfigPaths::discover(&root);
+
+        let loaded = load_tool_resources(&paths, &FsTestRunner).unwrap();
+        let tool = loaded
+            .internal_tools
+            .iter()
+            .find(|tool| tool.value.id == "ImageGeneration")
+            .expect("ImageGeneration internal tool");
+        assert!(!loaded
+            .tools
+            .iter()
+            .any(|tool| tool.value.id == "ImageGeneration"));
+
+        assert!(tool
+            .value
+            .description
+            .contains("Generate one or more images"));
+        assert_eq!(
+            tool.value.aliases,
+            vec!["image-generation".to_string(), "imagegen".to_string()]
+        );
+        assert!(tool.value.description.contains("count"));
+        assert!(!tool.value.description.contains("Generate one image"));
+
+        let schema = tool.value.input_schema.as_ref().expect("input schema");
+        let required = schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .expect("required array");
+        assert!(required.iter().any(|value| value == "prompt"));
+        assert!(!required.iter().any(|value| value == "count"));
+        assert_eq!(schema["properties"]["count"]["maximum"], 9);
+    }
+
+    #[test]
+    fn bundled_video_generation_internal_tool_accepts_prompt_and_remote_image_references() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        fs::create_dir_all(&root).unwrap();
+        let paths = ConfigPaths::discover(&root);
+
+        let loaded = load_tool_resources(&paths, &FsTestRunner).unwrap();
+        let tool = loaded
+            .internal_tools
+            .iter()
+            .find(|tool| tool.value.id == "VideoGeneration")
+            .expect("VideoGeneration internal tool");
+        assert!(!loaded
+            .tools
+            .iter()
+            .any(|tool| tool.value.id == "VideoGeneration"));
+
+        assert_eq!(tool.value.handler, "runtime:workflow:video_generation");
+        assert_eq!(
+            tool.value.aliases,
+            vec!["video-generation".to_string(), "videogen".to_string()]
+        );
+        assert!(tool.value.description.contains("Generate one video clip"));
+        assert!(tool
+            .value
+            .description
+            .contains("public https:// URLs or approved asset:// URLs"));
+        assert!(tool.value.description.contains("Local image"));
+        assert!(tool.value.description.contains("paths are not accepted"));
+
+        let schema = tool.value.input_schema.as_ref().expect("input schema");
+        let required = schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .expect("required array");
+        assert!(required.iter().any(|value| value == "prompt"));
+        assert_eq!(
+            schema.get("additionalProperties"),
+            Some(&serde_json::Value::Bool(false))
+        );
+        let properties = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("properties object");
+        let image_references = properties
+            .get("imageReferences")
+            .expect("imageReferences property");
+        let image_references_description = image_references
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .expect("imageReferences description");
+        assert!(image_references_description.contains("base64/data URLs are not supported"));
+        assert!(!properties.contains_key("image"));
+        assert!(!properties.contains_key("referenceImage"));
+        assert!(!properties.contains_key("firstFrame"));
+        assert!(!properties.contains_key("lastFrame"));
     }
 
     #[test]
@@ -1386,7 +1557,13 @@ mod tests {
         fs::create_dir_all(resources_dir.join("skills/review-helper")).unwrap();
         fs::write(
             resources_dir.join("skills/review-helper/SKILL.md"),
-            "---\nname: Review Helper ++\ndescription: Review changes\nallowed-tools:\n  - Read\n  - Grep, Glob\nargument-hint: <ticket>\narguments: ticket env\nmodel: openai/gpt-5\neffort: high\nuser-invocable: false\ndisable-model-invocation: true\ncontext: fork\n---\nBody\n",
+            "---\nname: Review Helper ++\ndescription: Review changes\nallowed-tools:\n  - Read\n  - Grep, Glob\nargument-hint: <ticket>\narguments: ticket env\nmodel: openai/gpt-5\neffort: high\nuser-invocable: false\ndisable-model-invocation: true\nrequires-action: true\ncontext: fork\n---\nBody\n",
+        )
+        .unwrap();
+        fs::create_dir_all(resources_dir.join("skills/plain-helper")).unwrap();
+        fs::write(
+            resources_dir.join("skills/plain-helper/SKILL.md"),
+            "---\nname: Plain Helper\ndescription: No action obligation\n---\nBody\n",
         )
         .unwrap();
 
@@ -1410,6 +1587,12 @@ mod tests {
         assert_eq!(skill.context.as_deref(), Some("fork"));
         assert!(!skill.user_invocable);
         assert!(skill.disable_model_invocation);
+        assert!(skill.requires_action);
+
+        let default_skill = &skill_by_name(&loaded, "plain-helper")
+            .expect("workspace skill without action obligation should load")
+            .value;
+        assert!(!default_skill.requires_action);
     }
 
     #[test]
@@ -1426,7 +1609,7 @@ mod tests {
         .unwrap();
         fs::write(
             skill_dir.join("out/GENERATED.SKILL.md"),
-            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\n# Runtime body\nUse generated prompt.\n",
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\nrequiresAction: true\n---\n# Runtime body\nUse generated prompt.\n",
         )
         .unwrap();
         fs::write(
@@ -1460,6 +1643,7 @@ mod tests {
         assert_eq!(skill.value.description, "Verified CI repair");
         assert_eq!(skill.value.allowed_tools, vec!["Bash", "Read"]);
         assert!(!skill.value.disable_model_invocation);
+        assert!(skill.value.requires_action);
         assert_eq!(skill.source_info.path, skill_dir.join("skill.lskill"));
         assert!(skill
             .value

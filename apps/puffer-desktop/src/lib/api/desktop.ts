@@ -6,6 +6,7 @@ import type {
   AuthProviderStatus,
   AskUserQuestionItem,
   BrowserRenderer,
+  ChatAttachmentUpload,
   DesktopPinState,
   ContactContextItem,
   ContactProposal,
@@ -14,6 +15,9 @@ import type {
   DraftProxyEndpoint,
   ExternalCredential,
   FolderGroup,
+  GenerateMediaInput,
+  GenerateMediaResult,
+  GeneratedVideoAccessResult,
   ProviderSummary,
   ProxyTestResult,
   PullRequest,
@@ -29,6 +33,9 @@ import type {
   SessionGroupsPage,
   SessionListItem,
   SettingsSnapshot,
+  MediaSettings,
+  MediaCapabilityInfo,
+  MediaKind,
   MessageActor,
   MessageAttachment,
   OpenAIRealtimeClientSecret,
@@ -36,6 +43,7 @@ import type {
   TimelineItem,
   WorkflowDefinition,
   WorkflowBindingCreateRequest,
+  WorkflowFilterRule,
   WorkflowMonitorHistoryMessage,
   WorkflowRun,
   WorkflowSnapshot
@@ -145,15 +153,39 @@ type BackendActorFields = {
   subject?: MessageActor | null;
 };
 
+type BackendChatAttachmentSource =
+  | { kind: "local_file"; path: string }
+  | { kind: "remote_url"; url: string }
+  | {
+      kind: "generated_media";
+      jobId: string;
+      artifactId: string;
+      index: number;
+      localPath?: string | null;
+      remoteSourceUrl?: string | null;
+    };
+
+type BackendTurnFields = {
+  turnId?: string | null;
+  turn_id?: string | null;
+};
+
 type BackendChatAttachment = {
   id: string;
   name: string;
   mimeType: string;
   size: number;
   extension: string;
-  kind: "image" | "file";
+  kind: "image" | "file" | "video";
   state?: AttachmentState;
+  source: BackendChatAttachmentSource;
+  previewUrl?: string | null;
 };
+
+type BackendGeneratedVideoAccessResult =
+  | { state: "available"; path: string; mimeType: string; size: number; expiresAtMs: number }
+  | { state: "missing" }
+  | { state: "unsupported" };
 
 type BackendTimelineItem =
   | ({
@@ -162,26 +194,27 @@ type BackendTimelineItem =
       text: string;
       createdAtMs?: number | null;
       attachments?: BackendChatAttachment[];
-    } & BackendActorFields)
+    } & BackendActorFields & BackendTurnFields)
   | ({
       kind: "assistant_message";
       id: string;
       text: string;
       createdAtMs?: number | null;
-    } & BackendActorFields)
+      attachments?: BackendChatAttachment[];
+    } & BackendActorFields & BackendTurnFields)
   | ({
       kind: "system_message";
       id: string;
       text: string;
       createdAtMs?: number | null;
-    } & BackendActorFields)
+    } & BackendActorFields & BackendTurnFields)
   | ({
       kind: "command";
       id: string;
       commandName: string;
       commandArgs: string;
       createdAtMs?: number | null;
-    } & BackendActorFields)
+    } & BackendActorFields & BackendTurnFields)
   | {
       kind: "tool_call";
       id: string;
@@ -197,7 +230,7 @@ type BackendTimelineItem =
       outputText?: string;
       output_text?: string;
       metadata?: unknown;
-    } & BackendActorFields
+    } & BackendActorFields & BackendTurnFields
   | ({
       kind: "permission_dialog";
       id: string;
@@ -207,8 +240,8 @@ type BackendTimelineItem =
       summary: string | null;
       reason: string;
       inputText: string | null;
-    } & BackendActorFields)
-  | { kind: "diff_snapshot"; id: string; snapshot: BackendDiff; createdAtMs?: number | null };
+    } & BackendActorFields & BackendTurnFields)
+  | ({ kind: "diff_snapshot"; id: string; snapshot: BackendDiff; createdAtMs?: number | null } & BackendTurnFields);
 
 type BackendAgentDiffFile = {
   path: string;
@@ -293,7 +326,7 @@ type BackendRemoteOperation = RemoteOperation;
 
 type StageChatAttachmentHook = (
   sessionId: string,
-  attachment: MessageAttachment
+  attachment: ChatAttachmentUpload
 ) => Promise<MessageAttachment> | MessageAttachment;
 
 type ReadChatAttachmentPreviewHook = (
@@ -371,6 +404,9 @@ function normalizeDiff(value: BackendDiff): DiffSnapshot {
 }
 
 function normalizeMessageAttachment(value: BackendChatAttachment): MessageAttachment {
+  const previewUrl =
+    value.previewUrl ??
+    (value.kind === "image" && value.source.kind === "remote_url" ? value.source.url : undefined);
   return {
     id: value.id,
     name: value.name,
@@ -378,7 +414,9 @@ function normalizeMessageAttachment(value: BackendChatAttachment): MessageAttach
     size: value.size,
     extension: value.extension,
     kind: value.kind,
-    state: value.state
+    state: value.state,
+    source: value.source,
+    ...(previewUrl !== undefined ? { previewUrl } : {})
   };
 }
 
@@ -451,6 +489,7 @@ function normalizeAskUserQuestionTool(
     id: value.id,
     kind: "question",
     createdAtMs: value.createdAtMs ?? null,
+    turnId: normalizeBackendTurnId(value),
     title: pending ? "Question" : "Answered question",
     summary: answerSummary || questions.map((question) => question.question).join("\n"),
     body: "",
@@ -494,6 +533,11 @@ function normalizeActivityStatus(value: string | null | undefined): AgentActivit
   }
 }
 
+function normalizeBackendTurnId(value: BackendTurnFields): string | null {
+  const raw = value.turnId ?? value.turn_id ?? null;
+  return typeof raw === "string" && raw.trim().length > 0 ? raw : null;
+}
+
 function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
   switch (value.kind) {
     case "user_message": {
@@ -502,6 +546,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         id: value.id,
         kind: "user",
         createdAtMs: value.createdAtMs ?? null,
+        turnId: normalizeBackendTurnId(value),
         title: "User message",
         summary: preview(value.text),
         body: value.text,
@@ -510,17 +555,21 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         actor: value.actor ?? null
       };
     }
-    case "assistant_message":
+    case "assistant_message": {
+      const attachments = (value.attachments ?? []).map(normalizeMessageAttachment);
       return {
         id: value.id,
         kind: "assistant",
         createdAtMs: value.createdAtMs ?? null,
+        turnId: normalizeBackendTurnId(value),
         title: "Assistant response",
         summary: preview(value.text),
         body: value.text,
         meta: [],
+        ...(attachments.length > 0 ? { attachments } : {}),
         actor: value.actor ?? null
       };
+    }
     case "system_message":
       const systemText = value.text;
       const isVerifiedSkillGate = systemText.trim().startsWith("Verified Skill Gate");
@@ -529,6 +578,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         id: value.id,
         kind: "system",
         createdAtMs: value.createdAtMs ?? null,
+        turnId: normalizeBackendTurnId(value),
         title: isVerifiedSkillGate ? "Verified Skill Gate" : "System message",
         summary: preview(systemText),
         body: systemText,
@@ -541,6 +591,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         id: value.id,
         kind: "command",
         createdAtMs: value.createdAtMs ?? null,
+        turnId: normalizeBackendTurnId(value),
         title: `/${value.commandName}`,
         summary: preview(value.commandArgs || `/${value.commandName}`),
         body: [value.commandName, value.commandArgs].filter(Boolean).join(" "),
@@ -566,6 +617,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         id: value.id,
         kind: "tool",
         createdAtMs: value.createdAtMs ?? null,
+        turnId: normalizeBackendTurnId(value),
         title: `Tool call: ${toolName}`,
         summary: value.summary ?? preview(outputText || inputText),
         body: outputText || "Tool call completed without textual output.",
@@ -584,6 +636,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         id: value.id,
         kind: "permission",
         createdAtMs: value.createdAtMs ?? null,
+        turnId: normalizeBackendTurnId(value),
         title: "Permission request",
         summary: value.summary ?? `${value.toolId} requires approval`,
         body: `Tool: ${value.toolId}\nReason: ${value.reason}`,
@@ -608,6 +661,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         id: value.id,
         kind: "diff",
         createdAtMs: value.createdAtMs ?? null,
+        turnId: normalizeBackendTurnId(value),
         title: diff.title,
         summary: diff.status,
         body: diff.patch,
@@ -981,12 +1035,17 @@ export type ContactInferTracePayload =
       createdAtMs?: number | null;
     };
 
-export async function inferContacts(limit = 30, traceId?: string): Promise<{
-  proposals: ContactProposal[];
-  candidates: ContactsSnapshot["candidates"];
-}> {
+export type ContactInferResult = Partial<ContactsSnapshot>;
+
+const CONTACT_INFER_TIMEOUT_MS = 180_000;
+
+export async function inferContacts(limit = 30, traceId?: string): Promise<ContactInferResult> {
   const client = await ensureLocalDaemonClient();
-  return client.request("contacts_infer", { limit, trace_id: traceId });
+  return client.request(
+    "contacts_infer",
+    { limit, trace_id: traceId },
+    { timeoutMs: CONTACT_INFER_TIMEOUT_MS }
+  );
 }
 
 export async function subscribeContactInferEvents(
@@ -1517,6 +1576,36 @@ export async function saveMonitorMemory(connectionSlug: string, content: string)
   });
 }
 
+/** Add one include or exclude monitor rule and return the refreshed workflow snapshot. */
+export async function addMonitorRule(params: {
+  connection_slug: string;
+  mode: "exclude" | "include";
+  keywords: string[];
+  case_insensitive?: boolean;
+}): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("task_monitor_rule_add", {
+    connection_slug: params.connection_slug,
+    mode: params.mode,
+    keywords: params.keywords,
+    case_insensitive: params.case_insensitive ?? true
+  });
+}
+
+/** Delete one displayed include or exclude monitor rule. */
+export async function deleteMonitorRule(
+  connectionSlug: string,
+  mode: "exclude" | "include",
+  rule: WorkflowFilterRule
+): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("task_monitor_rule_delete", {
+    connection_slug: connectionSlug,
+    mode,
+    rule
+  });
+}
+
 /** Load recent received monitor messages and their agent outcomes. */
 export async function loadMonitorHistory(limit = 200): Promise<WorkflowMonitorHistoryMessage[]> {
   const client = await ensureLocalDaemonClient();
@@ -1572,7 +1661,7 @@ export type AgentTurnOptions = {
   attachmentIds?: string[];
 };
 export type AgentTurnSubmitOptions = AgentTurnOptions & {
-  displayAttachments?: MessageAttachment[];
+  displayAttachments?: ChatAttachmentUpload[];
 };
 export type StaleTurnRecoveryResult =
   | { recovery: "retry_started"; turnId: string }
@@ -1581,7 +1670,7 @@ export type StaleTurnRecoveryResult =
 
 export async function stageChatAttachment(
   sessionId: string,
-  attachment: MessageAttachment
+  attachment: ChatAttachmentUpload
 ): Promise<MessageAttachment> {
   const hook = devStageChatAttachmentHook();
   if (hook) return hook(sessionId, attachment);
@@ -2554,7 +2643,116 @@ export type ConfigPatch = {
   defaultModel?: string | null;
   theme?: string;
   openaiBaseUrl?: string | null;
+  media?: MediaSettings;
 };
+
+type MediaCapabilitiesResponse = {
+  capabilities: MediaCapabilityInfo[];
+};
+
+export type {
+  GenerateMediaInput,
+  GeneratedMediaArtifactResult,
+  GenerateMediaResult
+} from "../types";
+
+export async function listMediaCapabilities(kind?: MediaKind): Promise<MediaCapabilityInfo[]> {
+  const client = await ensureLocalDaemonClient();
+  const result = await client.request<MediaCapabilitiesResponse>(
+    "list_media_capabilities",
+    kind ? { kind } : {}
+  );
+  return result.capabilities;
+}
+
+export async function generateMedia(input: GenerateMediaInput): Promise<GenerateMediaResult> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<GenerateMediaResult>("generate_media", input);
+}
+
+export async function readGeneratedMediaPreview(
+  sessionId: string,
+  artifactId: string
+): Promise<AttachmentPreviewResult> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<AttachmentPreviewResult>("read_generated_media_preview", {
+    sessionId,
+    artifactId
+  });
+}
+
+/** Issue a media-access RPC and rewrite the daemon's ticket path into an HTTP
+ *  URL. Shared by every media-access endpoint: they return the same shape and
+ *  differ only by method name and params. */
+async function requestMediaAccess(
+  method: string,
+  params: Record<string, unknown>
+): Promise<GeneratedVideoAccessResult> {
+  const client = await ensureLocalDaemonClient();
+  const result = await client.request<BackendGeneratedVideoAccessResult>(method, params);
+  if (result.state !== "available") return result;
+  return {
+    state: "available",
+    url: client.httpUrl(result.path),
+    mimeType: result.mimeType,
+    size: result.size,
+    expiresAtMs: result.expiresAtMs
+  };
+}
+
+export async function createGeneratedVideoAccess(
+  sessionId: string,
+  artifactId: string
+): Promise<GeneratedVideoAccessResult> {
+  return requestMediaAccess("create_generated_video_access", { sessionId, artifactId });
+}
+
+export type FileMediaAccessResult = GeneratedVideoAccessResult;
+
+/** Mint a streaming access URL for an in-workspace media file (e.g. video).
+ *  The daemon validates the path against its allowed roots and serves the file
+ *  with HTTP Range support, so the <video> element can seek without loading the
+ *  whole file. */
+export async function createFileMediaAccess(path: string): Promise<FileMediaAccessResult> {
+  return requestMediaAccess("create_file_media_access", { path });
+}
+
+export async function readMessageAttachmentPreview(
+  sessionId: string,
+  attachment: MessageAttachment
+): Promise<AttachmentPreviewResult> {
+  if (attachment.source.kind === "generated_media") {
+    return readGeneratedMediaPreview(sessionId, attachment.source.artifactId);
+  }
+  if (attachment.source.kind === "remote_url") {
+    return { state: "unsupported" };
+  }
+  return readChatAttachmentPreview(sessionId, attachment.id);
+}
+
+export type DownloadImageFromUrlResult = {
+  path: string;
+};
+
+export async function openContainingFolder(path: string): Promise<void> {
+  if (!canInvokeTauri()) {
+    throw new Error("Opening a folder requires the Tauri desktop shell.");
+  }
+  await invoke("open_containing_folder", { path });
+}
+
+export async function downloadImageFromUrl(
+  url: string,
+  suggestedName?: string
+): Promise<DownloadImageFromUrlResult> {
+  if (!canInvokeTauri()) {
+    throw new Error("Downloading an image requires the Tauri desktop shell.");
+  }
+  return invoke<DownloadImageFromUrlResult>("download_image_from_url", {
+    url,
+    suggestedName
+  });
+}
 
 export async function localModelStatus(modelId = "qwen35"): Promise<LocalModelStatus> {
   const client = await ensureLocalDaemonClient();

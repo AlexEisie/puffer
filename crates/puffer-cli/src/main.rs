@@ -1,3 +1,4 @@
+mod attachment_bridge;
 mod auth_credentials;
 mod auth_provider;
 mod authflow;
@@ -31,6 +32,8 @@ mod daemon_title;
 mod daemon_turn_recovery;
 mod daemon_turn_routing;
 mod daemon_ui_state;
+#[cfg(unix)]
+mod daemon_wechat_browser_setup;
 mod daemon_workflows;
 mod desktop_activity;
 mod desktop_api;
@@ -41,6 +44,7 @@ mod gmail_browser_log;
 mod heartbeat;
 mod internal_tools;
 mod lark_connector;
+mod media_internal_tools;
 mod non_interactive;
 mod project_metadata;
 mod resource_fs;
@@ -48,6 +52,8 @@ mod runner_selection;
 mod subscriber_tool_args;
 mod subscriber_tools;
 mod subscriptions;
+#[cfg(unix)]
+mod wechat_connector;
 mod workflow_runtime;
 mod workflows;
 
@@ -125,6 +131,12 @@ fn main() -> Result<()> {
     let auth_path = paths.user_config_dir.join("auth.json");
     let mut auth_store = AuthStore::load(&auth_path)?;
     let mut resources = load_resources(&paths, &puffer_runner_local::LocalToolRunner::new())?;
+
+    // Durable default logging: tracing events (connect/RPC/browser/errors)
+    // roll into ~/.puffer/logs/puffer.log so failures are debuggable after the
+    // fact. The telegram-user subscriber path returned earlier and keeps its
+    // own per-account log. The guard must live for the whole process.
+    let _log_guard = puffer_logging::init("puffer");
 
     // Observability: opt-in via OTEL_EXPORTER_OTLP_ENDPOINT (+ optional
     // LANGFUSE_PUBLIC_KEY/SECRET_KEY for Basic auth). When unset,
@@ -1378,6 +1390,8 @@ fn run_connector_bridge(id: &str, args: &[String]) -> Result<()> {
         match id {
             "lark-user" => lark_connector::run("user", args).await,
             "lark-bot" => lark_connector::run("bot", args).await,
+            #[cfg(unix)]
+            "wechat-user" => wechat_connector::run("user", args).await,
             other => Err(anyhow::anyhow!(
                 "unknown connector id `{other}`; this puffer build does not bundle a bridge for it"
             )),

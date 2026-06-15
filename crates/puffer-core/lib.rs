@@ -100,9 +100,9 @@ pub use runtime::{
     BrowserPermissionPromptSource, BrowserPermissionPromptTargetClass, CancelToken,
     CodeJudgeConfig, LlmJudgeConfig, LlmJudgeContextScope, LlmJudgeMode, LlmJudgePromptCacheMode,
     PermissionPromptAction, PermissionPromptRequest, PermissionPromptReviewPayload,
-    ReflectionConfig, ReflectionLanguage, ReflectionTraceEvent, StructuredOutputConfig,
-    ToolCallRequest, ToolInvocation, TurnExecution, TurnStreamEvent, TurnUsageReport,
-    UserQuestionPromptRequest, UserQuestionPromptResponse,
+    ReflectionConfig, ReflectionLanguage, ReflectionTraceEvent, RetryAttemptKind,
+    StructuredOutputConfig, ToolCallRequest, ToolInvocation, TurnExecution, TurnStreamEvent,
+    TurnUsageReport, UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 pub use runtime::{install_observability, observability_handle};
 pub use state::{AppState, MessageRole, RenderedMessage, TaskRecord, TaskStatus};

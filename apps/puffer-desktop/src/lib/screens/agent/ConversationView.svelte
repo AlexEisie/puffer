@@ -11,6 +11,7 @@
   import QuestionPrompt from "./QuestionPrompt.svelte";
   import CanvasOffer from "./CanvasOffer.svelte";
   import ModelPicker from "./ModelPicker.svelte";
+  import MediaSettingsModal from "./MediaSettingsModal.svelte";
   import AttachmentPreviewStrip from "./AttachmentPreviewStrip.svelte";
   import MessageAttachmentPreviewStrip from "./MessageAttachmentPreviewStrip.svelte";
   import {
@@ -33,6 +34,8 @@
     ToolTimelineItem,
     DiffTimelineItem,
     MessageTimelineItem,
+    MediaKind,
+    MediaSettings,
     UserQuestionTimelineItem
   } from "../../types";
   import type { AgentState } from "../../shell/tweaks";
@@ -55,6 +58,14 @@
   const RECAP_DISPLAY_PREFIX = "\u203B recap: ";
   const COMPOSER_MAX_HEIGHT_PX = 200;
   const THREAD_BOTTOM_THRESHOLD_PX = 100;
+  const DEFAULT_MEDIA_SETTINGS: MediaSettings = {
+    image: null,
+    video: null
+  };
+  const MEDIA_SETTINGS_LABELS: Record<MediaKind, string> = {
+    image: "Image generation settings",
+    video: "Video generation settings"
+  };
   type SubmitMessageResult = boolean | void | Promise<boolean | void>;
   type ComposerRoutingPreference = {
     providerId: string | null;
@@ -95,6 +106,7 @@
     ) => void;
     onCancelTurn?: () => void;
     onOpenChatIntent?: (intent: ChatOpenIntent) => void;
+    onMediaSettingsSaved: (snapshot: SettingsSnapshot) => void;
     onDraftChange?: (hasDraft: boolean) => void;
   };
 
@@ -120,6 +132,7 @@
     onResolveUserQuestion,
     onCancelTurn,
     onOpenChatIntent,
+    onMediaSettingsSaved,
     onDraftChange
   }: Props = $props();
 
@@ -144,6 +157,7 @@
   let attachmentDraftsBySessionId = $state<Record<string, ComposerAttachmentDraft[]>>({});
   let attachmentError = $state<string | null>(null);
   let attachmentMenuOpen = $state(false);
+  let mediaSettingsKind = $state<MediaKind | null>(null);
   let attachmentDropActive = $state(false);
   let attachmentDragDepth = 0;
   let attachmentIdSequence = 0;
@@ -504,6 +518,7 @@
     | {
         key: string;
         kind: "agent";
+        turnId: string | null;
         item: MessageTimelineItem | null;
         children: ActivityChild[];
         approvals: PermissionTimelineItem[];
@@ -719,20 +734,33 @@
     return `${base}:${count}`;
   }
 
+  function timelineTurnId(item: TimelineItem): string | null {
+    const turnId = item.turnId?.trim();
+    return turnId ? turnId : null;
+  }
+
   function buildRows(items: TimelineItem[]): RowKind[] {
     const rows: RowKind[] = [];
     const keyCounts = new Map<string, number>();
     let lastUserKey: string | null = null;
+    const userKeyByTurnId = new Map<string, string>();
+    const agentByTurnId = new Map<string, Extract<RowKind, { kind: "agent" }>>();
     let current:
       | Extract<RowKind, { kind: "agent" }>
       | null = null;
 
-    const startAgentRow = (seed: TimelineItem): Extract<RowKind, { kind: "agent" }> => ({
+    const startAgentRow = (
+      seed: TimelineItem,
+      turnId: string | null = timelineTurnId(seed)
+    ): Extract<RowKind, { kind: "agent" }> => ({
       key: nextRowKey(
-        lastUserKey ? `agent-after:${lastUserKey}` : `agent:${timelineItemKeyBase(seed)}`,
+        turnId
+          ? `agent-turn:${turnId}`
+          : lastUserKey ? `agent-after:${lastUserKey}` : `agent:${timelineItemKeyBase(seed)}`,
         keyCounts
       ),
       kind: "agent",
+      turnId,
       item: null,
       children: [],
       approvals: [],
@@ -741,11 +769,70 @@
 
     const flushCurrent = () => {
       if (!current) return;
-      current.children = normalizeLegacyActivityOrder(current.children);
-      const hasActionChildren = current.children.some((child) => !isActivityMessage(child));
+      rows.push(current);
+      current = null;
+    };
+
+    const insertAgentRowForTurn = (
+      row: Extract<RowKind, { kind: "agent" }>,
+      turnId: string
+    ) => {
+      const userKey = userKeyByTurnId.get(turnId);
+      if (!userKey) {
+        rows.push(row);
+        return;
+      }
+      const userIndex = rows.findIndex((candidate) => candidate.key === userKey);
+      if (userIndex < 0) {
+        rows.push(row);
+        return;
+      }
+      let insertIndex = userIndex + 1;
+      while (rows[insertIndex]?.kind === "agent") insertIndex += 1;
+      rows.splice(insertIndex, 0, row);
+    };
+
+    const rowForTurn = (
+      turnId: string,
+      seed: TimelineItem
+    ): Extract<RowKind, { kind: "agent" }> => {
+      const existing = agentByTurnId.get(turnId);
+      if (existing) return existing;
+      const row = startAgentRow(seed, turnId);
+      agentByTurnId.set(turnId, row);
+      insertAgentRowForTurn(row, turnId);
+      return row;
+    };
+
+    const rowForActivity = (item: TimelineItem): Extract<RowKind, { kind: "agent" }> => {
+      const turnId = timelineTurnId(item);
+      if (turnId) {
+        flushCurrent();
+        return rowForTurn(turnId, item);
+      }
+      if (!current) current = startAgentRow(item, null);
+      return current;
+    };
+
+    const orderedChildren = (row: Extract<RowKind, { kind: "agent" }>): ActivityChild[] => {
+      if (!row.turnId) return normalizeLegacyActivityOrder(row.children);
+      return row.children
+        .map((child, index) => ({ child, index, createdAtMs: activityCreatedAtMs(child) }))
+        .sort((a, b) => {
+          if (a.createdAtMs !== null && b.createdAtMs !== null && a.createdAtMs !== b.createdAtMs) {
+            return a.createdAtMs - b.createdAtMs;
+          }
+          return a.index - b.index;
+        })
+        .map(({ child }) => child);
+    };
+
+    const finalizeAgentRow = (row: Extract<RowKind, { kind: "agent" }>) => {
+      row.children = orderedChildren(row);
+      const hasActionChildren = row.children.some((child) => !isActivityMessage(child));
       let finalIndex = -1;
-      for (let index = current.children.length - 1; index >= 0; index -= 1) {
-        const child = current.children[index];
+      for (let index = row.children.length - 1; index >= 0; index -= 1) {
+        const child = row.children[index];
         if (isActivityMessage(child)) {
           if (hasActionChildren && isLiveStreamingAssistant(child)) continue;
           finalIndex = index;
@@ -753,22 +840,21 @@
         }
       }
       if (finalIndex >= 0) {
-        current.item = current.children[finalIndex] as MessageTimelineItem;
-        current.children = current.children.filter((_, index) => index !== finalIndex);
+        row.item = row.children[finalIndex] as MessageTimelineItem;
+        row.children = row.children.filter((_, index) => index !== finalIndex);
       }
-      rows.push(current);
-      current = null;
     };
 
     for (const item of items) {
+      const turnId = timelineTurnId(item);
       if (item.kind === "user") {
         flushCurrent();
         lastUserKey = nextRowKey(timelineItemKeyBase(item), keyCounts);
+        if (turnId) userKeyByTurnId.set(turnId, lastUserKey);
         rows.push({ key: lastUserKey, kind: "user", item: item as MessageTimelineItem });
       } else if (item.kind === "system") {
         if (isVerifiedSkillGateItem(item)) {
-          if (!current) current = startAgentRow(item);
-          current.children.push(item as MessageTimelineItem);
+          rowForActivity(item).children.push(item as MessageTimelineItem);
         } else {
           flushCurrent();
           rows.push({
@@ -778,20 +864,19 @@
           });
         }
       } else if (item.kind === "assistant" || item.kind === "command") {
-        if (!current) current = startAgentRow(item);
-        current.children.push(item as MessageTimelineItem);
+        rowForActivity(item).children.push(item as MessageTimelineItem);
       } else if (item.kind === "tool") {
-        if (!current) current = startAgentRow(item);
-        current.children.push(item as ToolTimelineItem);
+        rowForActivity(item).children.push(item as ToolTimelineItem);
       } else if (item.kind === "diff") {
-        if (!current) current = startAgentRow(item);
-        current.children.push(item as DiffTimelineItem);
+        rowForActivity(item).children.push(item as DiffTimelineItem);
       } else if (item.kind === "question") {
-        if (!current) current = startAgentRow(item);
-        current.questions.push(item as UserQuestionTimelineItem);
+        rowForActivity(item).questions.push(item as UserQuestionTimelineItem);
       }
     }
     flushCurrent();
+    for (const row of rows) {
+      if (row.kind === "agent") finalizeAgentRow(row);
+    }
     return rows;
   }
 
@@ -984,6 +1069,16 @@
     fileInputEl?.click();
   }
 
+  function openMediaSettings(kind: MediaKind) {
+    if (composerDisabled) return;
+    attachmentMenuOpen = false;
+    mediaSettingsKind = kind;
+  }
+
+  function closeMediaSettings() {
+    mediaSettingsKind = null;
+  }
+
   function toggleAttachmentMenu(event: MouseEvent) {
     event.stopPropagation();
     if (composerDisabled) return;
@@ -1028,6 +1123,12 @@
     const suffix = `\n\n${attachmentSummary}`;
     if (body.endsWith(suffix)) return body.slice(0, -suffix.length).trimEnd();
     return item.body;
+  }
+
+  function hasGeneratedMediaAttachments(item: MessageTimelineItem): boolean {
+    return Boolean(
+      item.attachments?.some((attachment) => attachment.source.kind === "generated_media")
+    );
   }
 
   $effect(() => {
@@ -1329,6 +1430,7 @@
       out.push({
         key: "agent-pending-prompts",
         kind: "agent",
+        turnId: null,
         item: null,
         children: [],
         approvals: [...pendingPermissions],
@@ -2287,9 +2389,27 @@
                     </div>
                   {/if}
                   {#if row.item}
-                    <div class="pf-msg-text">
-                      <MessageBody body={row.item.body} {onOpenChatIntent} />
-                    </div>
+                    {@const messageItem = row.item as MessageTimelineItem}
+                    {@const visibleBody = visibleMessageBody(messageItem)}
+                    {@const hasVisibleBody = Boolean(visibleBody.trim())}
+                    {@const hasGeneratedMedia = hasGeneratedMediaAttachments(messageItem)}
+                    {#if hasGeneratedMedia && hasVisibleBody}
+                      <div class="pf-msg-text">
+                        <MessageBody body={visibleBody} {onOpenChatIntent} />
+                      </div>
+                    {/if}
+                    {#if messageItem.attachments?.length}
+                      <MessageAttachmentPreviewStrip
+                        sessionId={session?.id ?? null}
+                        attachments={messageItem.attachments}
+                        {onOpenChatIntent}
+                      />
+                    {/if}
+                    {#if !hasGeneratedMedia && hasVisibleBody}
+                      <div class="pf-msg-text">
+                        <MessageBody body={visibleBody} {onOpenChatIntent} />
+                      </div>
+                    {/if}
                   {/if}
                 </div>
               </div>
@@ -2379,6 +2499,24 @@
                 <Icon name="paperclip" size={15} />
                 <span>Add images and files</span>
               </button>
+              <button
+                type="button"
+                class="pf-attachment-dropdown-item"
+                role="menuitem"
+                onclick={() => openMediaSettings("image")}
+              >
+                <Icon name="image" size={15} />
+                <span>{MEDIA_SETTINGS_LABELS.image}</span>
+              </button>
+              <button
+                type="button"
+                class="pf-attachment-dropdown-item"
+                role="menuitem"
+                onclick={() => openMediaSettings("video")}
+              >
+                <Icon name="video" size={15} />
+                <span>{MEDIA_SETTINGS_LABELS.video}</span>
+              </button>
             </div>
           {/if}
         </div>
@@ -2444,6 +2582,17 @@
       </div>
     </div>
   </div>
+
+  {#if mediaSettingsKind}
+    <MediaSettingsModal
+      kind={mediaSettingsKind}
+      sessionCwd={session?.cwd ?? ""}
+      settings={settingsSnapshot?.config.media ?? DEFAULT_MEDIA_SETTINGS}
+      settingsReady={settingsSnapshot !== null}
+      onSaved={onMediaSettingsSaved}
+      onClose={closeMediaSettings}
+    />
+  {/if}
 </div>
 
 <style>

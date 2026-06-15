@@ -51,6 +51,7 @@ mod request_tool_filter;
 pub mod resource_watcher;
 pub(crate) mod secrets;
 mod side_question;
+mod skill_obligation;
 mod structured_output_support;
 mod system_prompt;
 pub mod teammate_loop;
@@ -312,6 +313,34 @@ pub struct TurnUsageReport {
     pub cache_creation_tokens: u64,
 }
 
+/// Identifies which retry loop (or one-shot fallback) emitted a
+/// `TurnStreamEvent::RetryAttempt`. The inner transport loop and the outer
+/// stream-restart loop run independent counters with different maxima, so
+/// consumers need the source to render interleaved attempts coherently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryAttemptKind {
+    /// Inner connection-level retry (`retry_openai_transport`).
+    Transport,
+    /// Outer restart of a stream that died before a terminal event.
+    Stream,
+    /// One-shot resend without the reasoning include selector.
+    ReasoningFallback,
+    /// WebSocket transport retry / one-shot fallback to SSE.
+    WsFallback,
+}
+
+impl RetryAttemptKind {
+    /// Returns the stable event label for this retry-attempt source.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RetryAttemptKind::Transport => "transport",
+            RetryAttemptKind::Stream => "stream",
+            RetryAttemptKind::ReasoningFallback => "reasoning-fallback",
+            RetryAttemptKind::WsFallback => "ws-fallback",
+        }
+    }
+}
+
 /// Describes one incremental event emitted while a model turn is running.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnStreamEvent {
@@ -341,6 +370,7 @@ pub enum TurnStreamEvent {
         attempt: usize,
         max_attempts: usize,
         error: String,
+        kind: RetryAttemptKind,
     },
     /// Per-turn token usage (including cache hit data).
     Usage(TurnUsageReport),
@@ -458,6 +488,8 @@ pub fn execute_side_question(
 pub fn execute_tool_action_once(
     state: &mut AppState,
     resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &AuthStore,
     cwd: &std::path::Path,
     tool_id: &str,
     input: Value,
@@ -472,6 +504,8 @@ pub fn execute_tool_action_once(
     claude_tools::execute_tool(
         state,
         resources,
+        providers,
+        auth_store,
         &registry,
         &definition,
         cwd,

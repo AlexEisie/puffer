@@ -7,9 +7,11 @@
     buildFilePreview,
     hasRichFilePreview,
     hasRichFilePreviewPath,
+    isPlayableMediaPath,
     type FilePreview
   } from "./filePreview";
   import {
+    createFileMediaAccess,
     fsUnwatch,
     fsWatch,
     isDaemonReachable,
@@ -65,6 +67,15 @@
   let expanded = $state<Set<string>>(new Set());
   let loading = $state<Set<string>>(new Set());
   let errors = $state<Map<string, string>>(new Map());
+
+  // In-flight directory loads, keyed by path. Lets callers await a load even
+  // when another caller already kicked it off (e.g. root is loaded by the cwd
+  // effect while revealAndOpenFile needs to await it). Plain control-flow state,
+  // not reactive — the `loading` set above remains the UI spinner source.
+  const dirLoads = new Map<string, Promise<void>>();
+
+  // The scrollable tree container; used to center the revealed row.
+  let treeBodyEl = $state<HTMLDivElement | null>(null);
 
   // Active right-pane state. Open tabs mirror VS Code's preview behavior:
   // an unpinned preview tab is replaceable until edited, saved, or pinned.
@@ -326,6 +337,10 @@
   async function reloadActiveFile() {
     const target = activePath;
     if (!target) return;
+    if (isPlayableMediaPath(target)) {
+      await activateFile(target, activeSize);
+      return;
+    }
     const wasDirty = isTabDirty(target);
     const expectedRoot = root;
     const expectedSessionId = sessionId;
@@ -594,28 +609,35 @@
     if (isTabDirty(activePath)) pinTab(activePath);
   }
 
-  async function loadDir(path: string) {
-    if (cache.has(path) || loading.has(path)) return;
-    const nextLoading = new Set(loading);
-    nextLoading.add(path);
-    loading = nextLoading;
-    try {
-      const entries = normalizeDirEntries(await listDir(path));
-      const nextCache = new Map(cache);
-      nextCache.set(path, entries);
-      cache = nextCache;
-      const nextErrors = new Map(errors);
-      nextErrors.delete(path);
-      errors = nextErrors;
-    } catch (err) {
-      const nextErrors = new Map(errors);
-      nextErrors.set(path, err instanceof Error ? err.message : String(err));
-      errors = nextErrors;
-    } finally {
-      const next = new Set(loading);
-      next.delete(path);
-      loading = next;
-    }
+  function loadDir(path: string): Promise<void> {
+    if (cache.has(path)) return Promise.resolve();
+    const existing = dirLoads.get(path);
+    if (existing) return existing;
+    const run = (async () => {
+      const nextLoading = new Set(loading);
+      nextLoading.add(path);
+      loading = nextLoading;
+      try {
+        const entries = normalizeDirEntries(await listDir(path));
+        const nextCache = new Map(cache);
+        nextCache.set(path, entries);
+        cache = nextCache;
+        const nextErrors = new Map(errors);
+        nextErrors.delete(path);
+        errors = nextErrors;
+      } catch (err) {
+        const nextErrors = new Map(errors);
+        nextErrors.set(path, err instanceof Error ? err.message : String(err));
+        errors = nextErrors;
+      } finally {
+        const next = new Set(loading);
+        next.delete(path);
+        loading = next;
+        dirLoads.delete(path);
+      }
+    })();
+    dirLoads.set(path, run);
+    return run;
   }
 
   function normalizeDirEntries(entries: unknown): DirEntry[] {
@@ -651,24 +673,59 @@
       next.delete(path);
     } else {
       next.add(path);
-      if (!cache.has(path)) void loadDir(path);
+      void loadDir(path); // self-guards on cache; no-op if already loaded
     }
     expanded = next;
   }
 
+  /** Scroll the tree so the row for `path` is vertically centered. Instant
+   *  jump (no smooth animation). No-op when the container or row is absent —
+   *  the browser clamps scrollTop, so top/bottom rows center as far as they can. */
+  function scrollTreeRowIntoCenter(path: string) {
+    const container = treeBodyEl;
+    if (!container) return;
+    let row: HTMLElement | null = null;
+    for (const el of container.querySelectorAll<HTMLElement>(".row")) {
+      if (el.dataset.path === path) {
+        row = el;
+        break;
+      }
+    }
+    if (!row) return;
+    const containerRect = container.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    container.scrollTop +=
+      (rowRect.top - containerRect.top) - (container.clientHeight - row.clientHeight) / 2;
+  }
+
   async function revealAndOpenFile(path: string, line: number | null = null) {
-    const nextExpanded = new Set(expanded);
     const relative = path.startsWith(`${root}/`) ? path.slice(root.length + 1) : "";
+    // Open in the viewer immediately — activateFile sets activePath synchronously,
+    // so the staleness guard below sees the right path. Don't block the viewer on
+    // tree expansion.
+    const opened = openFile(path, 0, { pinned: true, line });
     if (relative) {
+      const expectedRoot = root;
+      const nextExpanded = new Set(expanded);
+      // Cold-mount: the tab is conditionally rendered, so on first reveal the root
+      // dir is still loading (owned by the cwd effect). Await it too, or buildRows
+      // can't render even the first level.
+      const loads: Promise<void>[] = [loadDir(root)];
       let current = root;
       for (const segment of relative.split("/").slice(0, -1)) {
         current = joinPath(current, segment);
         nextExpanded.add(current);
-        if (!cache.has(current)) void loadDir(current);
+        loads.push(loadDir(current));
       }
       expanded = nextExpanded;
+      await Promise.allSettled(loads);
+      await tick();
+      // Bail if a newer reveal or a session switch superseded us mid-await.
+      if (root === expectedRoot && activePath === path) {
+        scrollTreeRowIntoCenter(path);
+      }
     }
-    await openFile(path, 0, { pinned: true, line });
+    await opened;
   }
 
   async function openFile(path: string, size: number, options: OpenFileOptions = {}) {
@@ -754,6 +811,38 @@
     clearActivePreview();
     viewerMode = "preview";
     clearLspState();
+
+    if (isPlayableMediaPath(path)) {
+      activeFile = null;
+      draftContent = "";
+      activeLoading = false;
+      activePreviewLoading = true;
+      try {
+        const access = await createFileMediaAccess(path);
+        if (!isCurrentRead()) return;
+        if (access.state !== "available") {
+          activePreviewError =
+            access.state === "unsupported"
+              ? "This video format can't be previewed."
+              : "Video is unavailable.";
+          return;
+        }
+        activeSize = access.size;
+        activePreview = {
+          kind: "video",
+          src: access.url,
+          mimeType: access.mimeType,
+          name: fileName(path)
+        };
+      } catch (err) {
+        if (isCurrentRead()) {
+          activePreviewError = err instanceof Error ? err.message : String(err);
+        }
+      } finally {
+        if (isCurrentRead()) activePreviewLoading = false;
+      }
+      return;
+    }
 
     const cached = fileCache.get(path);
     if (cached) {
@@ -1278,7 +1367,7 @@
         {root ? (root.split("/").pop() || root) : "workspace"}
       </span>
     </div>
-    <div class="tree-body">
+    <div class="tree-body" bind:this={treeBodyEl}>
       {#if previewMode}
         <div class="tree-empty">
           <div class="msg">Files view is live in the desktop app</div>
@@ -1307,6 +1396,7 @@
               openFileSafely(row.path, row.size, { pinned: true });
             }}
             aria-expanded={row.kind === "directory" || row.kind === "symlink" ? expanded.has(row.path) : undefined}
+            data-path={row.path}
             title={row.path}
           >
             {#if row.kind === "directory"}
@@ -1503,6 +1593,22 @@
         {:else if activePreview && activePreview.kind === "pdf"}
           <div class="file-preview pdf-shell" aria-label="PDF preview">
             <PdfDocumentPreview base64={activePreview.base64} textLines={activePreview.lines} />
+          </div>
+        {:else if activePreview && activePreview.kind === "image"}
+          <div class="file-preview image-preview" aria-label="Image preview">
+            <img src={activePreview.src} alt={activePreview.alt} />
+          </div>
+        {:else if activePreview && activePreview.kind === "video"}
+          <div class="file-preview video-preview" aria-label="Video preview">
+            <!-- svelte-ignore a11y_media_has_caption -->
+            <!-- Arbitrary workspace videos have no caption track to attach. -->
+            <video
+              src={activePreview.src}
+              controls
+              playsinline
+              preload="metadata"
+              aria-label={activePreview.name}
+            ></video>
           </div>
         {:else if activePreview && activePreview.kind === "docx"}
           <article class="file-preview office-preview" aria-label="DOCX preview">
@@ -2042,6 +2148,38 @@
     height: 100%;
     overflow: hidden;
     background: color-mix(in oklab, var(--background) 94%, var(--muted));
+  }
+  .image-preview {
+    height: 100%;
+    min-height: 100%;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background: color-mix(in oklab, var(--background) 96%, var(--muted));
+  }
+  .image-preview img {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+  }
+  .video-preview {
+    height: 100%;
+    min-height: 100%;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background: #000;
+  }
+  .video-preview video {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
   }
   .office-preview section,
   .spreadsheet-preview section {

@@ -67,6 +67,7 @@ urlencoding = "2.1.3"
 uuid.workspace = true
 puffer-config = { path = "../puffer-config" }
 puffer-mcp-oauth = { path = "../puffer-mcp-oauth" }
+puffer-media = { path = "../puffer-media" }
 puffer-observability = { path = "../puffer-observability" }
 puffer-provider-openai = { path = "../puffer-provider-openai" }
 puffer-provider-registry = { path = "../puffer-provider-registry" }
@@ -81,10 +82,10 @@ puffer-subscriptions = { path = "../puffer-subscriptions" }
 puffer-tools = { path = "../puffer-tools" }
 puffer-transport-anthropic = { path = "../puffer-transport-anthropic" }
 puffer-workflow = { path = "../puffer-workflow" }
+sha2.workspace = true
 
 [dev-dependencies]
 axum = "0.8"
-sha2.workspace = true
 tempfile.workspace = true
 tokio-util = "0.7"
 uuid.workspace = true

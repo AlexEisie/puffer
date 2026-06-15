@@ -130,8 +130,12 @@
     }
   }
 
-  function applyContactsSnapshot(next: ContactsSnapshot) {
-    snapshot = { ...next, proposals: next.proposals ?? [] };
+  function applyContactsSnapshot(next: Partial<ContactsSnapshot>) {
+    snapshot = {
+      contacts: next.contacts ?? snapshot.contacts,
+      candidates: next.candidates ?? snapshot.candidates,
+      proposals: next.proposals ?? []
+    };
     proposals = snapshot.proposals;
   }
 
@@ -242,9 +246,10 @@
     try {
       inferTraceUnsubscribe = await subscribeContactInferEvents(traceId, applyInferTraceEvent);
       const result = await inferContacts(30, traceId);
-      proposals = result.proposals;
-      snapshot = { ...snapshot, candidates: result.candidates, proposals: result.proposals };
-      notice = proposals.length === 0 ? "No proposals returned." : `Inferred ${proposals.length} contacts.`;
+      applyContactsSnapshot(result);
+      notice = proposals.length === 0
+        ? "No proposals returned."
+        : `Inferred ${proposals.length} proposal${proposals.length === 1 ? "" : "s"}.`;
     } catch (err) {
       inferError = `Could not infer contacts: ${messageOf(err)}`;
     } finally {
@@ -382,6 +387,12 @@
 
   function parsedContactIds(): string[] {
     return normalizeContactIds(contactIdsText.split(/[,\n]/));
+  }
+
+  function contactIdValidationMessage(): string | null {
+    if (parsedContactIds().length > 0) return null;
+    if (!contactIdsText.trim()) return "Enter at least one contact id.";
+    return "No valid contact ids. Use telegram@alice, telegram-user-id@123, or google@alice@example.com.";
   }
 
   function findSavedContact(contacts: SavedContact[], contactName: string, ids: string[]): SavedContact | null {
@@ -758,7 +769,10 @@
             </label>
             <label class="pf-contact-field">
               <span>Contact IDs</span>
-              <textarea class="pf-contact-ids-input" bind:value={contactIdsText} rows="6" placeholder="telegram@alice&#10;google@alice@example.com" disabled={saving}></textarea>
+              <textarea class="pf-contact-ids-input" bind:value={contactIdsText} rows="6" placeholder="telegram@alice&#10;telegram-user-id@123&#10;google@alice@example.com" disabled={saving}></textarea>
+              {#if contactIdValidationMessage()}
+                <small class="pf-contact-field-hint" data-state="invalid">{contactIdValidationMessage()}</small>
+              {/if}
             </label>
             <div class="pf-task-config-actions">
               <button
@@ -802,7 +816,9 @@
         <header class="pf-task-config-head">
           <div>
             <h2 id="pf-contact-infer-title">Infer contacts</h2>
-            <span>{proposals.length} proposal{proposals.length === 1 ? "" : "s"}</span>
+            <span>
+              {proposals.length} proposal{proposals.length === 1 ? "" : "s"}
+            </span>
           </div>
           <div class="pf-contact-modal-actions">
             <button
@@ -904,7 +920,7 @@
               {/each}
             </div>
           {:else if inferring}
-            <div class="pf-tasks-empty">Waiting for proposals...</div>
+            <div class="pf-tasks-empty">Waiting for contacts...</div>
           {:else if proposals.length === 0}
             <div class="pf-tasks-empty">No inferred contacts yet.</div>
           {/if}
@@ -1035,6 +1051,16 @@
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
+  }
+
+  .pf-contact-field-hint {
+    color: var(--muted-foreground);
+    font-size: 11px;
+    line-height: 1.4;
+  }
+
+  .pf-contact-field-hint[data-state="invalid"] {
+    color: var(--pf-run-failed);
   }
 
   .pf-contact-dialog textarea {

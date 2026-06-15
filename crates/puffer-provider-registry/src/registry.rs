@@ -543,6 +543,7 @@ mod tests {
             headers: IndexMap::new(),
             query_params: IndexMap::new(),
             discovery: None,
+            media: None,
             models: vec![ModelDescriptor {
                 id: "claude-sonnet-4-5".to_string(),
                 display_name: "Claude Sonnet 4.5".to_string(),
@@ -691,6 +692,7 @@ mod tests {
             headers: IndexMap::new(),
             query_params: IndexMap::new(),
             discovery: None,
+            media: None,
             models: Vec::new(),
             chat_completions_path: None,
         });
@@ -717,6 +719,7 @@ mod tests {
             headers: IndexMap::new(),
             query_params: IndexMap::new(),
             discovery: None,
+            media: None,
             models: Vec::new(),
             chat_completions_path: None,
         });
@@ -747,6 +750,7 @@ mod tests {
             headers: IndexMap::new(),
             query_params: IndexMap::new(),
             discovery: None,
+            media: None,
             models: Vec::new(),
             chat_completions_path: None,
         });

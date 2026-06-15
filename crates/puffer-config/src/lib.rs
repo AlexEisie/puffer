@@ -63,6 +63,8 @@ pub struct PufferConfig {
     pub browser: BrowserConfig,
     #[serde(default)]
     pub network: NetworkConfig,
+    #[serde(default)]
+    pub media: MediaConfig,
     pub mascot: MascotConfig,
     pub ui: UiConfig,
     /// When set, the runtime constructs a remote `RemoteToolRunner` against
@@ -134,6 +136,63 @@ pub struct StatusLineConfig {
     pub command: String,
     #[serde(default)]
     pub padding: u16,
+}
+
+/// Configures media generation defaults shared by UI and runtime tools.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MediaConfig {
+    #[serde(default, deserialize_with = "lenient_media_selection")]
+    pub image: Option<MediaGenerationConfig>,
+    #[serde(default, deserialize_with = "lenient_media_selection")]
+    pub video: Option<MediaGenerationConfig>,
+}
+
+/// Deserializes a persisted media selection leniently: a previously persisted
+/// concrete selection (old `model_id`/`adapter`/`parameters` shape, no
+/// `logical_model_id`) is treated as absent and resets to provider defaults on
+/// first run, rather than failing the whole config load. No backward-compat
+/// shim — the old fields are simply ignored.
+fn lenient_media_selection<'de, D>(
+    deserializer: D,
+) -> Result<Option<MediaGenerationConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct Raw {
+        #[serde(default, alias = "providerId")]
+        provider_id: String,
+        #[serde(default, alias = "logicalModelId")]
+        logical_model_id: String,
+        #[serde(default)]
+        selections: BTreeMap<String, String>,
+    }
+    let raw = Option::<Raw>::deserialize(deserializer)?;
+    Ok(raw.and_then(|raw| {
+        if raw.provider_id.trim().is_empty() || raw.logical_model_id.trim().is_empty() {
+            None
+        } else {
+            Some(MediaGenerationConfig {
+                provider_id: raw.provider_id,
+                logical_model_id: raw.logical_model_id,
+                selections: raw.selections,
+            })
+        }
+    }))
+}
+
+/// Configures one default media generation selection as a logical model plus
+/// the user's per-axis selections. The concrete upstream model id, adapter, and
+/// request parameters are resolved at use time from the provider capability
+/// model (see `resolve_media_request`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MediaGenerationConfig {
+    #[serde(alias = "providerId")]
+    pub provider_id: String,
+    #[serde(alias = "logicalModelId")]
+    pub logical_model_id: String,
+    #[serde(default)]
+    pub selections: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -238,6 +297,7 @@ impl Default for PufferConfig {
             night: NightConfig::default(),
             browser: BrowserConfig::default(),
             network: NetworkConfig::default(),
+            media: MediaConfig::default(),
             mascot: MascotConfig {
                 id: "clawd".to_string(),
                 display_name: "Clawd".to_string(),
@@ -417,48 +477,62 @@ impl ConfigPaths {
 /// Loads layered Puffer configuration from the user and workspace config files.
 pub fn load_config(paths: &ConfigPaths) -> Result<PufferConfig> {
     let mut config = PufferConfig::default();
-    let mut user_selection = None;
+    let mut user_preferences = None;
     if paths.user_config_file().exists() {
         merge_config_file(&mut config, &paths.user_config_file())?;
-        user_selection = Some((
-            config.default_provider.clone(),
-            config.default_model.clone(),
-            config.theme.clone(),
-            config.editor_mode.clone(),
-            config.fast_mode,
-            config.effort_level.clone(),
-            config.copy_full_response,
-            config.browser.clone(),
-            config.network.clone(),
-        ));
+        user_preferences = Some(UserPreferenceSnapshot::capture(&config));
     }
     if paths.workspace_config_file().exists() {
         merge_config_file(&mut config, &paths.workspace_config_file())?;
     }
     apply_claude_status_line_fallback(&mut config, paths);
-    if let Some((
-        provider,
-        model,
-        theme,
-        editor_mode,
-        fast_mode,
-        effort_level,
-        copy_full_response,
-        browser,
-        network,
-    )) = user_selection
-    {
-        config.default_provider = provider;
-        config.default_model = model;
-        config.theme = theme;
-        config.editor_mode = editor_mode;
-        config.fast_mode = fast_mode;
-        config.effort_level = effort_level;
-        config.copy_full_response = copy_full_response;
-        config.browser = browser;
-        config.network = network;
+    if let Some(snapshot) = user_preferences {
+        snapshot.restore(&mut config);
     }
     Ok(config)
+}
+
+struct UserPreferenceSnapshot {
+    default_provider: Option<String>,
+    default_model: Option<String>,
+    theme: String,
+    editor_mode: String,
+    fast_mode: bool,
+    effort_level: Option<String>,
+    copy_full_response: bool,
+    browser: BrowserConfig,
+    network: NetworkConfig,
+    media: MediaConfig,
+}
+
+impl UserPreferenceSnapshot {
+    fn capture(config: &PufferConfig) -> Self {
+        Self {
+            default_provider: config.default_provider.clone(),
+            default_model: config.default_model.clone(),
+            theme: config.theme.clone(),
+            editor_mode: config.editor_mode.clone(),
+            fast_mode: config.fast_mode,
+            effort_level: config.effort_level.clone(),
+            copy_full_response: config.copy_full_response,
+            browser: config.browser.clone(),
+            network: config.network.clone(),
+            media: config.media.clone(),
+        }
+    }
+
+    fn restore(self, config: &mut PufferConfig) {
+        config.default_provider = self.default_provider;
+        config.default_model = self.default_model;
+        config.theme = self.theme;
+        config.editor_mode = self.editor_mode;
+        config.fast_mode = self.fast_mode;
+        config.effort_level = self.effort_level;
+        config.copy_full_response = self.copy_full_response;
+        config.browser = self.browser;
+        config.network = self.network;
+        config.media = self.media;
+    }
 }
 
 /// Saves the user-level Puffer configuration file.
@@ -612,6 +686,76 @@ mod tests {
     }
 
     #[test]
+    fn media_generation_config_stores_logical_selection() {
+        let toml = r#"
+app_name = "Puffer"
+theme = "system"
+mascot = { id = "none", display_name = "None", enabled = false }
+ui = { no_alt_screen = false, tmux_golden_mode = false }
+
+[media.image]
+provider_id = "openai"
+logical_model_id = "gpt-image-1"
+selections = { size = "1024x1024", quality = "auto" }
+
+[media.video]
+provider_id = "relaydance"
+logical_model_id = "seedance-1-5-pro"
+
+[media.video.selections]
+audio = "true"
+resolution = "1080p"
+duration = "5"
+"#;
+
+        let parsed: PufferConfig = toml::from_str(toml).expect("config parses");
+        let image = parsed.media.image.as_ref().unwrap();
+        assert_eq!(image.logical_model_id, "gpt-image-1");
+        assert_eq!(image.selections["size"], "1024x1024");
+        let video = parsed.media.video.as_ref().unwrap();
+        assert_eq!(video.logical_model_id, "seedance-1-5-pro");
+        assert_eq!(video.selections["audio"], "true");
+    }
+
+    #[test]
+    fn old_concrete_media_config_resets_to_absent() {
+        // A previously persisted concrete selection (old model_id/adapter/
+        // parameters shape, no logical_model_id) must load as absent rather
+        // than failing the whole config.
+        let toml = r#"
+app_name = "Puffer"
+theme = "system"
+mascot = { id = "none", display_name = "None", enabled = false }
+ui = { no_alt_screen = false, tmux_golden_mode = false }
+
+[media.image]
+provider_id = "openai"
+model_id = "gpt-image-1"
+operation = "generate"
+adapter = "images_json"
+parameters = { size = "1024x1024" }
+"#;
+        let parsed: PufferConfig = toml::from_str(toml).expect("config parses");
+        assert!(parsed.media.image.is_none());
+        assert!(parsed.media.video.is_none());
+    }
+
+    #[test]
+    fn media_generation_config_accepts_camel_case_aliases() {
+        let json = r#"{ "providerId": "openai", "logicalModelId": "gpt-image-1", "selections": { "size": "1024x1024" } }"#;
+        let parsed: MediaGenerationConfig = serde_json::from_str(json).expect("json parses");
+        assert_eq!(parsed.provider_id, "openai");
+        assert_eq!(parsed.logical_model_id, "gpt-image-1");
+    }
+
+    #[test]
+    fn media_config_defaults_to_unconfigured_selections() {
+        let config = MediaConfig::default();
+        assert!(config.image.is_none());
+        assert!(config.video.is_none());
+    }
+
+    #[test]
     fn load_config_preserves_user_provider_selection_over_workspace_defaults() {
         let _guard = lock_puffer_home();
         let tempdir = tempdir().expect("tempdir");
@@ -634,6 +778,11 @@ mod tests {
         user.editor_mode = "vim".to_string();
         user.fast_mode = true;
         user.effort_level = Some("high".to_string());
+        user.media.image = Some(MediaGenerationConfig {
+            provider_id: "user-image-provider".to_string(),
+            logical_model_id: "user-image-model".to_string(),
+            selections: BTreeMap::from([("size".to_string(), "1024x1024".to_string())]),
+        });
         save_user_config(&paths, &user).expect("user config");
 
         let mut workspace = PufferConfig::default();
@@ -644,6 +793,11 @@ mod tests {
         workspace.openai_query_params =
             BTreeMap::from([("workspace_param".to_string(), "2".to_string())]);
         workspace.theme = "harbor".to_string();
+        workspace.media.image = Some(MediaGenerationConfig {
+            provider_id: "workspace-image-provider".to_string(),
+            logical_model_id: "workspace-image-model".to_string(),
+            selections: BTreeMap::new(),
+        });
         save_workspace_config(&paths, &workspace).expect("workspace config");
 
         let loaded = load_config(&paths).expect("load");
@@ -668,6 +822,7 @@ mod tests {
         assert_eq!(loaded.editor_mode, "vim");
         assert!(loaded.fast_mode);
         assert_eq!(loaded.effort_level.as_deref(), Some("high"));
+        assert_eq!(loaded.media, user.media);
     }
 
     #[test]
@@ -833,6 +988,11 @@ tmux_golden_mode = false
             command: "printf puffer-status".to_string(),
             padding: 2,
         });
+        workspace_config.media.image = Some(MediaGenerationConfig {
+            provider_id: "workspace-image-provider".to_string(),
+            logical_model_id: "workspace-image-model".to_string(),
+            selections: BTreeMap::new(),
+        });
         save_workspace_config(&paths, &workspace_config).expect("workspace config");
 
         let loaded = load_config(&paths).expect("load");
@@ -852,6 +1012,7 @@ tmux_golden_mode = false
                 .map(|status_line| status_line.padding),
             Some(2)
         );
+        assert_eq!(loaded.media, workspace_config.media);
     }
 
     #[test]

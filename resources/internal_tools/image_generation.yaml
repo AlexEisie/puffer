@@ -1,13 +1,19 @@
 id: ImageGeneration
 name: ImageGeneration
+aliases:
+  - image-generation
+  - imagegen
 description: |-
-  Generate one image through Puffer's configured OpenAI image backend and
-  write the resulting image into the workspace.
+  Generate one or more images through Puffer's configured image media settings
+  and write the resulting image artifacts into the workspace image folder.
 
-  Use this for verified Lambda Skill contracts that have a concrete image
-  prompt and optional aspect ratio. The tool reads a workspace-relative prompt
-  file when the prompt value names one; otherwise it treats prompt as literal
-  text. Output paths must be workspace-relative.
+  Use one ImageGeneration call for one logical image-generation request. When
+  the user asks for multiple images from one prompt, set count to the requested
+  number instead of issuing multiple count=1 calls. When count is omitted, the
+  persisted image Output setting is used. The tool reads a
+  workspace-relative prompt file when the prompt value names one; otherwise it
+  treats prompt as literal text. The result includes one media job id and one
+  artifact entry per persisted image file.
 handler: runtime:workflow:image_generation
 approval_policy: ask
 sandbox_policy: network
@@ -23,9 +29,11 @@ input_schema:
     aspect:
       type: string
       description: Aspect ratio such as square, landscape, portrait, 1:1, 16:9, 9:16, or auto.
-    outputPath:
-      type: string
-      description: Workspace-relative PNG output path. Defaults to .puffer/workflows/images/.
+    count:
+      type: integer
+      description: Optional number of images to generate in one request. Must be between 1 and 9 when provided.
+      minimum: 1
+      maximum: 9
     purpose:
       type: string
       description: Optional caller purpose preserved in the result metadata.

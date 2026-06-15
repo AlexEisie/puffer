@@ -1,6 +1,6 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import { deflateRawSync } from "node:zlib";
-import { FakeDaemon } from "./support/fakeDaemon";
+import { FakeDaemon, ONE_PIXEL_JPEG_BASE64 } from "./support/fakeDaemon";
 
 async function openRegressionAgent(page: Page): Promise<void> {
   await page
@@ -690,6 +690,26 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   await page.getByRole("button", { name: "old-html.doc" }).click();
   await expect(page.getByLabel("Legacy Word preview")).toContainText("Legacy HTML agenda");
   await expect(page.getByLabel("Legacy Word preview")).toContainText("Owner: Otter");
+});
+
+test("Files tab renders image preview with rich read cap", async ({ page }) => {
+  const imagePath = "/tmp/puffer/artifact-image.jpeg";
+  const daemon = new FakeDaemon();
+  daemon.seedBinaryFile(imagePath, ONE_PIXEL_JPEG_BASE64);
+  daemon.setFileTabs([{ path: imagePath, pinned: true }], imagePath);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  const readRequest = await daemon.waitForRequest(
+    "read_file",
+    (request) => request.params.path === imagePath
+  );
+  expect(readRequest.params.maxBytes).toBe(24 * 1024 * 1024);
+  await expect(page.locator(".viewer").getByRole("img", { name: "artifact-image.jpeg" })).toBeVisible();
+  await expect(page.locator(".viewer")).not.toContainText("Binary file (");
 });
 
 test("Files tab previews files whose read path canonicalizes differently", async ({ page }) => {

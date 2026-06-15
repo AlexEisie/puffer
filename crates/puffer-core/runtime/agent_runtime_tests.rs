@@ -22,6 +22,7 @@ fn provider() -> ProviderDescriptor {
         headers: Default::default(),
         query_params: Default::default(),
         discovery: None,
+        media: None,
         models: vec![puffer_provider_registry::ModelDescriptor {
             id: "claude-sonnet-4-5".to_string(),
             display_name: "Claude Sonnet 4.5".to_string(),

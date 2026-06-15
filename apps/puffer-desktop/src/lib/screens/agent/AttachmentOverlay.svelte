@@ -1,7 +1,9 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import Icon from "../../design/Icon.svelte";
+  import { downloadImageFromUrl, openContainingFolder } from "../../api/desktop";
+  import Icon, { type IconName } from "../../design/Icon.svelte";
   import type { MessageAttachment } from "../../types";
+  import { attachmentOverlayAction, type AttachmentOverlayAction } from "./attachmentOverlayAction";
 
   type Props = {
     attachment: MessageAttachment | null;
@@ -10,8 +12,22 @@
 
   let { attachment, onClose }: Props = $props();
   let closeButtonEl = $state<HTMLButtonElement | undefined>(undefined);
+  let actionBusy = $state(false);
+  let actionError = $state<string | null>(null);
+  let actionSavedPath = $state<string | null>(null);
   let titleId = $derived(attachment ? `attachment-overlay-title-${attachment.id}` : "attachment-overlay-title");
   let canPreviewImage = $derived(Boolean(attachment?.kind === "image" && attachment.previewUrl));
+  let canPreviewVideo = $derived(Boolean(attachment?.kind === "video" && attachment.previewUrl));
+  let overlayAction = $derived(attachmentOverlayAction(attachment));
+  let overlayActionLabel = $derived(
+    overlayAction?.kind === "download" ? "Download image" : "Open containing folder"
+  );
+  let overlayActionIcon = $derived<IconName>(
+    overlayAction?.kind === "download" ? "download" : "folderOpen"
+  );
+  let actionResetKey = $derived(
+    attachment ? `${attachment.id}:${overlayActionKey(overlayAction)}` : "none"
+  );
 
   function formatBytes(size: number): string {
     if (!Number.isFinite(size) || size < 0) return "Unknown size";
@@ -25,6 +41,46 @@
   function close() {
     onClose();
   }
+
+  function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  function overlayActionKey(action: AttachmentOverlayAction | null): string {
+    if (!action) return "none";
+    return action.kind === "download"
+      ? `download:${action.url}:${action.suggestedName}`
+      : `open_folder:${action.path}`;
+  }
+
+  async function runOverlayAction() {
+    const action = overlayAction;
+    if (!action || actionBusy) return;
+
+    actionBusy = true;
+    actionError = null;
+    actionSavedPath = null;
+    try {
+      if (action.kind === "open_folder") {
+        await openContainingFolder(action.path);
+      } else {
+        const result = await downloadImageFromUrl(action.url, action.suggestedName);
+        actionSavedPath = result.path;
+      }
+    } catch (error) {
+      actionError = errorMessage(error);
+    } finally {
+      actionBusy = false;
+    }
+  }
+
+  $effect(() => {
+    const resetKey = actionResetKey;
+    if (!resetKey) return;
+    actionBusy = false;
+    actionError = null;
+    actionSavedPath = null;
+  });
 
   $effect(() => {
     if (!attachment || typeof window === "undefined") return;
@@ -60,24 +116,58 @@
     ></button>
     <section class="pf-attachment-dialog">
       <header class="pf-attachment-dialog-head">
-        <div>
+        <div class="pf-attachment-dialog-meta">
           <h2 id={titleId}>{attachment.name}</h2>
           <p>{attachment.extension} · {attachment.mimeType} · {formatBytes(attachment.size)}</p>
+          {#if actionError}
+            <span class="pf-attachment-action-status pf-attachment-action-status-error">
+              {actionError}
+            </span>
+          {:else if actionSavedPath}
+            <span class="pf-attachment-action-status">
+              Downloaded to {actionSavedPath}
+            </span>
+          {/if}
         </div>
-        <button
-          bind:this={closeButtonEl}
-          type="button"
-          class="pf-attachment-dialog-close"
-          aria-label="Close attachment preview"
-          onclick={close}
-        >
-          <Icon name="x" size={15} />
-        </button>
+        <div class="pf-attachment-dialog-actions">
+          {#if overlayAction}
+            <button
+              type="button"
+              class="pf-attachment-dialog-action"
+              aria-label={overlayActionLabel}
+              title={overlayActionLabel}
+              disabled={actionBusy}
+              onclick={runOverlayAction}
+            >
+              <Icon name={overlayActionIcon} size={15} />
+            </button>
+          {/if}
+          <button
+            bind:this={closeButtonEl}
+            type="button"
+            class="pf-attachment-dialog-action pf-attachment-dialog-close"
+            aria-label="Close attachment preview"
+            onclick={close}
+          >
+            <Icon name="x" size={15} />
+          </button>
+        </div>
       </header>
 
       {#if canPreviewImage && attachment.previewUrl}
         <div class="pf-attachment-image-frame">
           <img src={attachment.previewUrl} alt={attachment.name} draggable="false" />
+        </div>
+      {:else if canPreviewVideo && attachment.previewUrl}
+        <div class="pf-attachment-video-frame">
+          <!-- svelte-ignore a11y_media_has_caption: Generated videos do not have caption tracks. -->
+          <video
+            src={attachment.previewUrl}
+            controls
+            autoplay
+            playsinline
+            aria-label={attachment.name}
+          ></video>
         </div>
       {:else}
         <div class="pf-attachment-unavailable">
@@ -127,6 +217,9 @@
     padding: 14px 16px;
     border-bottom: 1px solid var(--border);
   }
+  .pf-attachment-dialog-meta {
+    min-width: 0;
+  }
   .pf-attachment-dialog-head h2 {
     margin: 0;
     font-size: 14px;
@@ -139,7 +232,24 @@
     font-size: 12px;
     line-height: 16px;
   }
-  .pf-attachment-dialog-close {
+  .pf-attachment-action-status {
+    display: block;
+    margin-top: 4px;
+    color: var(--muted-foreground);
+    font-size: 12px;
+    line-height: 16px;
+    overflow-wrap: anywhere;
+  }
+  .pf-attachment-action-status-error {
+    color: var(--destructive, #b42318);
+  }
+  .pf-attachment-dialog-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
+  }
+  .pf-attachment-dialog-action {
     width: 30px;
     height: 30px;
     display: inline-flex;
@@ -151,9 +261,13 @@
     color: var(--muted-foreground);
     cursor: pointer;
   }
-  .pf-attachment-dialog-close:hover {
+  .pf-attachment-dialog-action:hover:not(:disabled) {
     color: var(--foreground);
     background: var(--accent);
+  }
+  .pf-attachment-dialog-action:disabled {
+    cursor: default;
+    opacity: 0.55;
   }
   .pf-attachment-image-frame {
     min-height: 240px;
@@ -167,6 +281,18 @@
     max-height: 72vh;
     display: block;
     object-fit: contain;
+  }
+  .pf-attachment-video-frame {
+    min-height: 0;
+    display: grid;
+    place-items: center;
+    background: black;
+  }
+  .pf-attachment-video-frame video {
+    width: 100%;
+    max-height: calc(90vh - 82px);
+    display: block;
+    background: black;
   }
   .pf-attachment-unavailable {
     min-height: 240px;

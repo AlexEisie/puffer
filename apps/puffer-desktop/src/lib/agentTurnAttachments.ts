@@ -5,7 +5,8 @@ function promptSafeAttachmentName(name: string): string {
 }
 
 export function formatAgentTurnAttachmentLine(attachment: AgentTurnAttachment): string {
-  const label = attachment.kind === "image" ? "Image" : "File";
+  const label =
+    attachment.kind === "image" ? "Image" : attachment.kind === "video" ? "Video" : "File";
   return `[${label}: ${promptSafeAttachmentName(attachment.name)}]`;
 }
 
@@ -28,13 +29,13 @@ export function stripAttachmentPreviewUrls(item: TimelineItem): TimelineItem {
   if (!item.attachments?.length) return item;
   return {
     ...item,
-    attachments: item.attachments.map(({ previewUrl: _previewUrl, file: _file, ...attachment }) => attachment)
+    attachments: item.attachments.map(({ previewUrl: _previewUrl, ...attachment }) => attachment)
   };
 }
 
 export function revokeMessageAttachmentPreviews(attachments: MessageAttachment[] = []): void {
   for (const attachment of attachments) {
-    if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+    if (attachment.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(attachment.previewUrl);
   }
 }
 

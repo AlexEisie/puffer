@@ -27,6 +27,8 @@ mod lsp_live_diagnostics;
 pub mod mcp_status;
 pub mod mcp_tool_call;
 pub mod modal_action;
+pub mod monitor_reply_draft;
+pub mod monitor_reply_send;
 pub mod native_mcp_action;
 pub mod powershell;
 pub mod process_control;
@@ -63,6 +65,7 @@ mod telegram_format;
 pub mod telegram_login;
 pub mod todo_write;
 pub mod touchdesigner_action;
+pub mod video_generation;
 pub mod vision_analyze;
 pub mod workflow_tools;
 

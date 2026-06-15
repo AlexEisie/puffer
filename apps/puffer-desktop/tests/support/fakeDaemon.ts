@@ -32,6 +32,37 @@ export type AttachmentPreviewFixture =
   | { state: "missing" }
   | { state: "unsupported" };
 
+type GeneratedVideoAccessFixture =
+  | {
+      state: "available";
+      path: string;
+      mimeType: string;
+      size: number;
+      expiresAtMs: number;
+      bytes?: Buffer;
+    }
+  | { state: "missing" }
+  | { state: "unsupported" };
+
+type GeneratedMediaArtifactFixture = {
+  artifactId: string;
+  index: number;
+  path: string;
+  mimeType: string;
+  size: number;
+};
+
+type GeneratedMediaResultFixture = Partial<{
+  jobId: string;
+  requestedCount: number;
+  kind: "image" | "video";
+  artifacts: GeneratedMediaArtifactFixture[];
+  providerId: string;
+  modelId: string;
+  status: string;
+  prompt: string;
+}>;
+
 type FakeFileValue =
   | string
   | {
@@ -93,6 +124,53 @@ type SessionDetailOverrides = {
   divergence: JsonRecord;
 };
 
+type FakeMediaSelection = {
+  providerId: string;
+  logicalModelId: string;
+  selections: Record<string, string>;
+};
+
+type FakeMediaSettings = {
+  image: FakeMediaSelection | null;
+  video: FakeMediaSelection | null;
+};
+
+type FakeSettingsConfig = {
+  defaultProvider: string | null;
+  defaultModel: string | null;
+  openaiBaseUrl: string | null;
+  media: FakeMediaSettings;
+};
+
+export type FakeMediaCapability = {
+  providerId: string;
+  providerDisplayName: string;
+  modelId: string;
+  modelDisplayName: string;
+  kind: "image" | "video";
+  operation: string;
+  adapter?: string;
+  axes: FakeMediaCapabilityAxis[];
+  status: string;
+  source: string;
+  reason: string | null;
+  checkedAtMs: number;
+};
+
+export type FakeMediaAxisControl =
+  | { enum: { values: string[]; default: string } }
+  | { range: { min: number; max: number; step: number; default: number } }
+  | { bool: { default: boolean } };
+
+export type FakeMediaCapabilityAxis = {
+  id: string;
+  label: string;
+  role: "param" | "selector" | string;
+  control: FakeMediaAxisControl;
+  requestField: string | null;
+  wireType: "string" | "number" | string;
+};
+
 export type FakeDaemonSessionInput = {
   sessionId: string;
   displayName?: string | null;
@@ -121,10 +199,17 @@ export type FakeDaemonSessionInput = {
 const ONE_PIXEL_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==";
 
+export const ONE_PIXEL_JPEG_BASE64 =
+  "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/ASP/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/ASP/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Asf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QE//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QE//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QE//Z";
+
 const now = Date.now();
 function overlapsContactIds(record: JsonRecord, contactIds: string[]): boolean {
   const saved = new Set(contactIds);
   return normalizeContactIds(record.contact_ids).some((id) => saved.has(id));
+}
+
+function includesKnownContactId(contactIds: string[], knownIds: Set<string>): boolean {
+  return contactIds.some((id) => knownIds.has(id));
 }
 
 function mergedOverlappingContactIds(contacts: JsonRecord[], savedId: string, contactIds: string[]): string[] {
@@ -134,6 +219,164 @@ function mergedOverlappingContactIds(contacts: JsonRecord[], savedId: string, co
     merged.push(...normalizeContactIds(contact.contact_ids));
   }
   return Array.from(new Set(merged)).sort();
+}
+
+function defaultMediaSettings(): FakeMediaSettings {
+  return {
+    image: null,
+    video: null
+  };
+}
+
+function cloneMediaSettings(media: FakeMediaSettings): FakeMediaSettings {
+  return {
+    image: cloneMediaSelection(media.image),
+    video: cloneMediaSelection(media.video)
+  };
+}
+
+function normalizeMediaSettings(value: unknown): FakeMediaSettings {
+  const defaults = defaultMediaSettings();
+  if (!value || typeof value !== "object") return defaults;
+  const record = value as JsonRecord;
+  return {
+    image: normalizeMediaSelection(record.image),
+    video: normalizeMediaSelection(record.video)
+  };
+}
+
+function cloneMediaSelection(selection: FakeMediaSelection | null): FakeMediaSelection | null {
+  return selection ? { ...selection, selections: { ...selection.selections } } : null;
+}
+
+function normalizeMediaSelection(value: unknown): FakeMediaSelection | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as JsonRecord;
+  if (
+    typeof record.providerId !== "string" ||
+    typeof record.logicalModelId !== "string" ||
+    record.modelId !== undefined ||
+    record.adapter !== undefined ||
+    record.parameters !== undefined ||
+    record.defaults !== undefined ||
+    !record.selections ||
+    typeof record.selections !== "object" ||
+    Array.isArray(record.selections)
+  ) {
+    return null;
+  }
+  return {
+    providerId: record.providerId,
+    logicalModelId: record.logicalModelId,
+    selections: normalizeStringRecord(record.selections)
+  };
+}
+
+function normalizeStringRecord(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object") return {};
+  return Object.fromEntries(
+    Object.entries(value as JsonRecord)
+      .filter(([, entry]) => typeof entry === "string")
+      .map(([key, entry]) => [key, entry as string])
+  );
+}
+
+export function defaultFakeMediaCapabilities(): FakeMediaCapability[] {
+  return [
+    {
+      providerId: "openai",
+      providerDisplayName: "OpenAI",
+      modelId: "gpt-image-1",
+      modelDisplayName: "GPT Image 1",
+      kind: "image",
+      operation: "generate",
+      adapter: "images_json",
+      axes: [
+        {
+          id: "size",
+          label: "Size",
+          role: "param",
+          control: {
+            enum: { values: ["1024x1024", "1024x1536", "1536x1024"], default: "1024x1024" }
+          },
+          requestField: "size",
+          wireType: "string"
+        },
+        {
+          id: "quality",
+          label: "Quality",
+          role: "param",
+          control: { enum: { values: ["auto", "low", "medium", "high"], default: "auto" } },
+          requestField: "quality",
+          wireType: "string"
+        },
+        {
+          id: "output_format",
+          label: "Output format",
+          role: "param",
+          control: { enum: { values: ["png", "jpeg", "webp"], default: "png" } },
+          requestField: "output_format",
+          wireType: "string"
+        }
+      ],
+      status: "available",
+      source: "fake-daemon",
+      reason: null,
+      checkedAtMs: now
+    }
+  ];
+}
+
+function cloneMediaCapability(capability: FakeMediaCapability): FakeMediaCapability {
+  return {
+    ...capability,
+    axes: capability.axes.map((axis) => ({
+      ...axis,
+      control: cloneMediaAxisControl(axis.control)
+    }))
+  };
+}
+
+function cloneMediaAxisControl(control: FakeMediaAxisControl): FakeMediaAxisControl {
+  if ("enum" in control) {
+    return { enum: { values: [...control.enum.values], default: control.enum.default } };
+  }
+  if ("range" in control) {
+    return { range: { ...control.range } };
+  }
+  return { bool: { ...control.bool } };
+}
+
+function contactsQuery(params: JsonRecord): string {
+  if (params.query !== undefined && typeof params.query !== "string") {
+    throw new Error("invalid contact query");
+  }
+  return String(params.query ?? "").trim().toLowerCase();
+}
+
+function contactsLimit(params: JsonRecord): number {
+  if (
+    params.limit !== undefined &&
+    (typeof params.limit !== "number" || !Number.isFinite(params.limit))
+  ) {
+    throw new Error("invalid contact limit");
+  }
+  return Math.max(1, Math.min(120, Math.trunc(Number(params.limit ?? 60))));
+}
+
+function savedContactMatches(record: JsonRecord, query: string): boolean {
+  if (!query) return true;
+  return [
+    record.id,
+    record.name,
+    record.description,
+    Array.isArray(record.contact_ids) ? record.contact_ids.join(" ") : ""
+  ].join(" ").toLowerCase().includes(query);
+}
+
+function candidateContactMatches(record: JsonRecord, query: string): boolean {
+  if (!query) return true;
+  return [record.id, record.name].join(" ").toLowerCase().includes(query);
 }
 
 const session = {
@@ -309,6 +552,9 @@ export class FakeDaemon {
   private readonly projectTags = new Map<string, string[]>();
   private readonly timelines = new Map<string, JsonRecord[]>();
   private readonly attachmentPreviews = new Map<string, AttachmentPreviewFixture>();
+  private readonly generatedMediaPreviews = new Map<string, AttachmentPreviewFixture>();
+  private readonly generatedVideoAccesses = new Map<string, GeneratedVideoAccessFixture>();
+  private generatedMediaResult: GeneratedMediaResultFixture | null = null;
   private readonly details = new Map<string, SessionDetailOverrides>();
   private groupedSessionFilter: ((metadata: JsonRecord) => boolean) | null = null;
   private readonly files = new Map<string, FakeFileValue>();
@@ -318,19 +564,17 @@ export class FakeDaemon {
   private readonly lspLocations = new Map<string, string>();
   private readonly providerModels: Record<string, JsonRecord[]>;
   private readonly providerSummaries: JsonRecord[] | null;
+  private mediaCapabilities: FakeMediaCapability[];
   private readonly emitBrowserOpenFrame: boolean;
   private readonly emitBrowserResizeFrame: boolean;
   private workspaceRoot = "/tmp/puffer";
   private authStatuses: JsonRecord[];
   private externalCredentials: JsonRecord[];
-  private settingsConfig: {
-    defaultProvider: string | null;
-    defaultModel: string | null;
-    openaiBaseUrl: string | null;
-  } = {
+  private settingsConfig: FakeSettingsConfig = {
     defaultProvider: "codex",
     defaultModel: "test-model",
-    openaiBaseUrl: null
+    openaiBaseUrl: null,
+    media: defaultMediaSettings()
   };
   private secrets: JsonRecord[] = [];
   private permissions: JsonRecord = {
@@ -744,17 +988,19 @@ export class FakeDaemon {
           }
         ]
       }
-    ],
-    proposals: []
+    ]
   };
+  private inferredContactProposals: JsonRecord[] = [];
   private nextTab = 2;
   private nextPty = 1;
   private rejectConnections = false;
+  private legacyContactInferResponse = false;
 
   constructor(options: {
     sessions?: FakeDaemonSessionInput[];
     providerModels?: Record<string, JsonRecord[]>;
     providers?: JsonRecord[];
+    mediaCapabilities?: FakeMediaCapability[];
     mcpServers?: JsonRecord[];
     protocol?: "legacy" | "real";
     workspaceRoot?: string;
@@ -789,6 +1035,9 @@ export class FakeDaemon {
     }
     this.providerModels = options.providerModels ?? {};
     this.providerSummaries = options.providers ?? null;
+    this.mediaCapabilities = (options.mediaCapabilities ?? defaultFakeMediaCapabilities()).map(
+      cloneMediaCapability
+    );
     this.mcpServers = options.mcpServers ?? this.mcpServers;
     this.emitBrowserOpenFrame = options.emitBrowserOpenFrame ?? true;
     this.emitBrowserResizeFrame = options.emitBrowserResizeFrame ?? false;
@@ -802,21 +1051,20 @@ export class FakeDaemon {
     };
   }
 
-  setSettingsConfig(
-    config: Partial<{
-      defaultProvider: string | null;
-      defaultModel: string | null;
-      openaiBaseUrl: string | null;
-    }>
-  ): void {
+  setSettingsConfig(config: Partial<FakeSettingsConfig>): void {
     this.settingsConfig = {
       ...this.settingsConfig,
-      ...config
+      ...config,
+      media: config.media ? cloneMediaSettings(config.media) : this.settingsConfig.media
     };
   }
 
   setProviderModels(providerId: string, models: JsonRecord[]): void {
     this.providerModels[providerId] = models;
+  }
+
+  setMediaCapabilities(capabilities: FakeMediaCapability[]): void {
+    this.mediaCapabilities = capabilities.map(cloneMediaCapability);
   }
 
   setNetworkProxy(networkProxy: JsonRecord): void {
@@ -928,9 +1176,13 @@ export class FakeDaemon {
   setContactsSnapshot(snapshot: ContactsSnapshotFixture): void {
     this.contactsSnapshot = {
       contacts: snapshot.contacts.map((contact) => ({ ...contact })),
-      candidates: snapshot.candidates.map((candidate) => ({ ...candidate })),
-      proposals: snapshot.proposals?.map((proposal) => ({ ...proposal })) ?? []
+      candidates: snapshot.candidates.map((candidate) => ({ ...candidate }))
     };
+    this.inferredContactProposals = snapshot.proposals?.map((proposal) => ({ ...proposal })) ?? [];
+  }
+
+  setLegacyContactInferResponse(enabled = true): void {
+    this.legacyContactInferResponse = enabled;
   }
 
   setConnectorSetupQuestions(questions: ConnectorSetupQuestionFixture[]): void {
@@ -976,6 +1228,22 @@ export class FakeDaemon {
       socket.onMessage((message) => this.handleMessage(socket, String(message)));
       socket.onClose(() => {
         this.sockets.delete(socket);
+      });
+    });
+    const httpOrigin = expectedUrl.origin.replace(/^ws/, "http");
+    await page.route(`${httpOrigin}/media/generated-video/**`, async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      const access = Array.from(this.generatedVideoAccesses.values()).find(
+        (entry) => entry.state === "available" && entry.path === path
+      );
+      if (!access || access.state !== "available") {
+        await route.fulfill({ status: 404, body: "" });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: access.mimeType,
+        body: access.bytes ?? Buffer.from("mp4-bytes")
       });
     });
   }
@@ -1088,6 +1356,26 @@ export class FakeDaemon {
     preview: AttachmentPreviewFixture
   ): void {
     this.attachmentPreviews.set(this.attachmentPreviewKey(sessionId, attachmentId), preview);
+  }
+
+  seedGeneratedMediaPreview(
+    sessionId: string,
+    artifactId: string,
+    preview: AttachmentPreviewFixture
+  ): void {
+    this.generatedMediaPreviews.set(this.generatedMediaPreviewKey(sessionId, artifactId), preview);
+  }
+
+  seedGeneratedVideoAccess(
+    sessionId: string,
+    artifactId: string,
+    access: GeneratedVideoAccessFixture
+  ): void {
+    this.generatedVideoAccesses.set(this.generatedMediaPreviewKey(sessionId, artifactId), access);
+  }
+
+  setGeneratedMediaResult(result: GeneratedMediaResultFixture | null): void {
+    this.generatedMediaResult = result ? { ...result } : null;
   }
 
   updateSessionMetadata(sessionId: string, updates: JsonRecord): void {
@@ -1227,6 +1515,10 @@ export class FakeDaemon {
         return this.runAgentTurn(request.params);
       case "read_chat_attachment_preview":
         return this.readChatAttachmentPreview(request.params);
+      case "read_generated_media_preview":
+        return this.readGeneratedMediaPreview(request.params);
+      case "create_generated_video_access":
+        return this.createGeneratedVideoAccess(request.params);
       case "start_connector_setup":
         return this.startConnectorSetup(request.params);
       case "cancel_turn": {
@@ -1245,6 +1537,10 @@ export class FakeDaemon {
           providerId: String(request.params.providerId ?? "codex"),
           models: this.modelsForProvider(String(request.params.providerId ?? "codex"))
         };
+      case "list_media_capabilities":
+        return this.listMediaCapabilities(request.params);
+      case "generate_media":
+        return this.generateMedia(request.params);
       case "update_config":
         return this.updateConfig(request.params);
       case "local_model_status":
@@ -1338,6 +1634,12 @@ export class FakeDaemon {
         return this.createMonitor(request.params);
       case "task_monitor_memory_save":
         return this.saveMonitorMemory(request.params);
+      case "task_monitor_rule_add":
+      case "monitor_rule_add":
+        return this.addMonitorRule(request.params);
+      case "task_monitor_rule_delete":
+      case "monitor_rule_delete":
+        return this.deleteMonitorRule(request.params);
       case "workflow_toggle":
         return this.toggleWorkflow(request.params);
       case "contacts_list":
@@ -1597,14 +1899,87 @@ export class FakeDaemon {
     return this.workflowListResponse();
   }
 
-  private contactsList(params: JsonRecord): JsonRecord {
-    const query = String(params.query ?? "").trim().toLowerCase();
-    const limit = Math.max(1, Number(params.limit ?? 60) || 60);
-    const matches = (record: JsonRecord) => !query || JSON.stringify(record).toLowerCase().includes(query);
+  private addMonitorRule(params: JsonRecord): JsonRecord {
+    const connectionSlug = String(params.connection_slug ?? "").trim();
+    const mode = String(params.mode ?? "exclude");
+    const keywords = Array.isArray(params.keywords)
+      ? params.keywords.map((keyword) => String(keyword).trim()).filter(Boolean)
+      : [];
+    if (!connectionSlug) throw new Error("missing monitor rule connection slug");
+    if (keywords.length === 0) throw new Error("missing monitor rule keywords");
+    const rule = this.monitorRuleFromParams(params, keywords);
+    let matched = false;
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      workflow_bindings: (this.workflowSnapshot.workflow_bindings ?? []).map((binding) => {
+        if (binding.connection_slug !== connectionSlug || binding.monitor !== true) return binding;
+        matched = true;
+        if (mode === "include") {
+          return {
+            ...binding,
+            include_filters: [...((binding.include_filters as JsonRecord[] | undefined) ?? []), rule],
+            include_filter: rule
+          };
+        }
+        return {
+          ...binding,
+          ignore_filters: [...((binding.ignore_filters as JsonRecord[] | undefined) ?? []), rule]
+        };
+      })
+    };
+    if (!matched) throw new Error(`monitor ${connectionSlug} not found`);
+    return this.workflowListResponse();
+  }
+
+  private deleteMonitorRule(params: JsonRecord): JsonRecord {
+    const connectionSlug = String(params.connection_slug ?? "").trim();
+    const mode = String(params.mode ?? "exclude");
+    const rule = params.rule as JsonRecord | undefined;
+    if (!connectionSlug || !rule) throw new Error("missing monitor rule delete params");
+    const target = JSON.stringify(rule);
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      workflow_bindings: (this.workflowSnapshot.workflow_bindings ?? []).map((binding) => {
+        if (binding.connection_slug !== connectionSlug || binding.monitor !== true) return binding;
+        if (mode === "include") {
+          const includeFilters = ((binding.include_filters as JsonRecord[] | undefined) ?? [])
+            .filter((candidate) => JSON.stringify(candidate) !== target);
+          return {
+            ...binding,
+            include_filters: includeFilters,
+            include_filter: includeFilters[0] ?? null
+          };
+        }
+        return {
+          ...binding,
+          ignore_filters: ((binding.ignore_filters as JsonRecord[] | undefined) ?? [])
+            .filter((candidate) => JSON.stringify(candidate) !== target)
+        };
+      })
+    };
+    return this.workflowListResponse();
+  }
+
+  private monitorRuleFromParams(params: JsonRecord, keywords: string[]): JsonRecord {
     return {
-      contacts: this.contactsSnapshot.contacts.filter(matches).slice(0, limit).map((contact) => ({ ...contact })),
-      candidates: this.contactsSnapshot.candidates.filter(matches).slice(0, limit).map((candidate) => ({ ...candidate })),
-      proposals: this.contactsSnapshot.proposals.map((proposal) => ({ ...proposal }))
+      type: "regex",
+      pattern: keywords.join("|"),
+      case_insensitive: params.case_insensitive !== false
+    };
+  }
+
+  private contactsList(params: JsonRecord): JsonRecord {
+    const query = contactsQuery(params);
+    const limit = contactsLimit(params);
+    return {
+      contacts: this.contactsSnapshot.contacts
+        .filter((contact) => savedContactMatches(contact, query))
+        .map((contact) => ({ ...contact })),
+      candidates: this.contactsSnapshot.candidates
+        .filter((candidate) => candidateContactMatches(candidate, query))
+        .slice(0, limit)
+        .map((candidate) => ({ ...candidate })),
+      proposals: this.inferredContactProposals.map((proposal) => ({ ...proposal }))
     };
   }
 
@@ -1634,9 +2009,11 @@ export class FakeDaemon {
           candidate.id !== id && !overlapsContactIds(candidate, contactIds)
         ),
         contact
-      ].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""))),
-      proposals: this.contactsSnapshot.proposals.filter((proposal) => !overlapsContactIds(proposal, contactIds))
+      ].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")))
     };
+    this.inferredContactProposals = this.inferredContactProposals.filter(
+      (proposal) => !overlapsContactIds(proposal, contactIds)
+    );
     return this.contactsList({});
   }
 
@@ -1657,26 +2034,35 @@ export class FakeDaemon {
         Array.isArray(contact.contact_ids) ? contact.contact_ids : []
       )
     );
-    const proposals = this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({
-      name: String(candidate.name ?? candidate.id ?? "Contact"),
-      description: `Messages from ${String(candidate.id ?? "this contact")} are frequent and have task-like context. They are retained because the candidate has recent conversation content rather than isolated bulk traffic.`,
-      avatar: candidate.avatar ?? null,
-      contact_ids: [String(candidate.id ?? "")]
-    })).filter((proposal) => proposal.contact_ids[0] && !overlapsContactIds(proposal, savedContactIds));
-    this.contactsSnapshot = {
-      ...this.contactsSnapshot,
-      proposals
-    };
-    return {
+    const knownContactIds = new Set(savedContactIds);
+    const proposals: JsonRecord[] = [];
+    for (const candidate of this.contactsSnapshot.candidates.slice(0, limit)) {
+      const contactIds = normalizeContactIds([String(candidate.id ?? "")]);
+      const name = String(candidate.name ?? candidate.id ?? "Contact").trim();
+      if (!name || contactIds.length === 0 || includesKnownContactId(contactIds, knownContactIds)) {
+        continue;
+      }
+      proposals.push({
+        name,
+        description: `Messages from ${String(candidate.id ?? "this contact")} are frequent and have task-like context. They are retained because the candidate has recent conversation content rather than isolated bulk traffic.`,
+        avatar: candidate.avatar ?? null,
+        contact_ids: contactIds
+      });
+      for (const id of contactIds) knownContactIds.add(id);
+    }
+    this.inferredContactProposals = proposals;
+    const response = {
       proposals: proposals.map((proposal) => ({ ...proposal })),
       candidates: this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({ ...candidate }))
     };
+    return this.legacyContactInferResponse ? response : { ...this.contactsList({ limit }), ...response };
   }
 
   private contactContext(params: JsonRecord): JsonRecord {
-    const ids = Array.isArray(params.contact_ids)
-      ? params.contact_ids.map((item) => String(item).trim()).filter(Boolean)
-      : [];
+    const ids = normalizeContactIds(Array.isArray(params.contact_ids) ? params.contact_ids : []);
+    if (ids.length === 0) {
+      throw new Error("contact context requires at least one valid contact id");
+    }
     const context = this.contactsSnapshot.candidates
       .filter((candidate) => ids.includes(String(candidate.id ?? "")))
       .flatMap((candidate) => Array.isArray(candidate.context) ? candidate.context : [])
@@ -1841,8 +2227,32 @@ export class FakeDaemon {
     };
   }
 
+  private readGeneratedMediaPreview(params: JsonRecord): AttachmentPreviewFixture {
+    const sessionId = String(params.sessionId ?? "");
+    const artifactId = String(params.artifactId ?? "");
+    return this.generatedMediaPreviews.get(this.generatedMediaPreviewKey(sessionId, artifactId)) ?? {
+      state: "missing"
+    };
+  }
+
+  private createGeneratedVideoAccess(params: JsonRecord): GeneratedVideoAccessFixture {
+    const sessionId = String(params.sessionId ?? "");
+    const artifactId = String(params.artifactId ?? "");
+    const access = this.generatedVideoAccesses.get(
+      this.generatedMediaPreviewKey(sessionId, artifactId)
+    );
+    if (!access) return { state: "missing" };
+    if (access.state !== "available") return access;
+    const { bytes: _bytes, ...wire } = access;
+    return wire;
+  }
+
   private attachmentPreviewKey(sessionId: string, attachmentId: string): string {
     return `${sessionId}:${attachmentId}`;
+  }
+
+  private generatedMediaPreviewKey(sessionId: string, artifactId: string): string {
+    return `${sessionId}\u0000${artifactId}`;
   }
 
   private startConnectorSetup(params: JsonRecord): JsonRecord {
@@ -1990,7 +2400,58 @@ export class FakeDaemon {
       this.settingsConfig.openaiBaseUrl =
         typeof params.openaiBaseUrl === "string" ? params.openaiBaseUrl : null;
     }
+    if ("media" in params) {
+      this.settingsConfig.media = normalizeMediaSettings(params.media);
+    }
     return this.settingsSnapshot();
+  }
+
+  private listMediaCapabilities(params: JsonRecord): JsonRecord {
+    const kind = typeof params.kind === "string" ? params.kind : null;
+    return {
+      capabilities: this.mediaCapabilities
+        .filter((capability) => !kind || capability.kind === kind)
+        .map(cloneMediaCapability)
+    };
+  }
+
+  private generateMedia(params: JsonRecord): JsonRecord {
+    const kind = params.kind === "video" ? "video" : "image";
+    const prompt = typeof params.prompt === "string" ? params.prompt.trim() : "";
+    if (!prompt) throw new Error(`/${kind} requires a prompt.`);
+    const capabilities = this.mediaCapabilities.filter(
+      (capability) => capability.kind === kind && capability.status === "available"
+    );
+    if (capabilities.length === 0) {
+      throw new Error(`No ${kind} capabilities available.`);
+    }
+    const settings = this.settingsConfig.media[kind];
+    if (!settings) {
+      throw new Error(`${kind} media provider/model is not configured.`);
+    }
+    const capability = capabilities.find(
+      (item) =>
+        item.providerId === settings.providerId &&
+        item.modelId === settings.logicalModelId
+    );
+    if (!capability) {
+      throw new Error(
+        `selected ${kind} model unavailable: ${settings.providerId}/${settings.logicalModelId}`
+      );
+    }
+    const jobId = `media-job-${Date.now().toString(36)}`;
+    const fixture = this.generatedMediaResult;
+    const artifacts = fixture?.artifacts ?? [];
+    return {
+      jobId: fixture?.jobId ?? jobId,
+      requestedCount: fixture?.requestedCount ?? artifacts.length,
+      artifacts,
+      kind: fixture?.kind ?? kind,
+      providerId: fixture?.providerId ?? settings.providerId,
+      modelId: fixture?.modelId ?? settings.logicalModelId,
+      status: fixture?.status ?? "queued",
+      prompt: fixture?.prompt ?? prompt
+    };
   }
 
   private testProxy(params: JsonRecord): JsonRecord {
@@ -2198,6 +2659,7 @@ export class FakeDaemon {
         defaultModel: this.settingsConfig.defaultModel,
         openaiBaseUrl: this.settingsConfig.openaiBaseUrl,
         theme: "system",
+        media: cloneMediaSettings(this.settingsConfig.media),
         mascotId: "puffer",
         mascotDisplayName: "Puffer",
         mascotEnabled: true,

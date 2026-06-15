@@ -168,6 +168,7 @@ fn auth_required_provider_registry() -> ProviderRegistry {
         headers: Default::default(),
         query_params: Default::default(),
         discovery: None,
+        media: None,
         models: vec![ModelDescriptor {
             id: "claude-sonnet-4-5".to_string(),
             display_name: "Claude Sonnet 4.5".to_string(),
@@ -196,6 +197,7 @@ fn openai_provider_registry() -> ProviderRegistry {
         headers: Default::default(),
         query_params: Default::default(),
         discovery: None,
+        media: None,
         models: vec![ModelDescriptor {
             id: "gpt-5".to_string(),
             display_name: "GPT-5".to_string(),

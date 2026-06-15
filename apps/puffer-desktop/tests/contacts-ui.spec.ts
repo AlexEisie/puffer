@@ -69,6 +69,31 @@ test("contacts save selects the sanitized backend-normalized saved contact", asy
   await expect(selectedContact).not.toContainText("Aaron should remain");
 });
 
+test("contacts save accepts telegram user id contacts", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openContacts(page);
+  await daemon.waitForRequest("contacts_list");
+
+  await page.getByRole("button", { name: "New" }).click();
+  const dialog = page.getByRole("dialog", { name: "Create contact" });
+  await dialog.getByLabel("Name").fill("Shawn Mai");
+  await dialog
+    .getByLabel("Description")
+    .fill("Shawn coordinates on puffer bugs, issue triage, and repo work.");
+  await dialog.getByLabel("Contact IDs").fill("telegram–user–id@8063934836");
+  await expect(dialog.getByText("No valid contact ids.")).toBeHidden();
+  await dialog.getByRole("button", { name: /^Create$/ }).click();
+
+  const request = await daemon.waitForRequest("contacts_save");
+  expect(request.params.contact_ids).toEqual(["telegram-user-id@8063934836"]);
+  const selectedContact = page.getByRole("complementary", { name: "Selected contact" });
+  await expect(selectedContact).toContainText("Shawn Mai");
+  await expect(selectedContact).toContainText("telegram-user-id@8063934836");
+});
+
 test("contacts save replaces an existing saved identity", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.setContactsSnapshot({
@@ -109,7 +134,7 @@ test("contacts save replaces an existing saved identity", async ({ page }) => {
 test("contacts list lazily renders large snapshots", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.setContactsSnapshot({
-    contacts: Array.from({ length: 65 }, (_, index) => ({
+    contacts: Array.from({ length: 95 }, (_, index) => ({
       id: `contact-lazy-${index}`,
       name: `Lazy Contact ${index}`,
       description: `Contact ${index} should not render until its batch is loaded.`,
@@ -126,10 +151,12 @@ test("contacts list lazily renders large snapshots", async ({ page }) => {
 
   const list = page.getByLabel("Contact list");
   await expect(list.locator(".pf-task-row")).toHaveCount(40);
-  await expect(list).not.toContainText("Lazy Contact 64");
-  await list.getByRole("button", { name: "Load 25 more contacts" }).scrollIntoViewIfNeeded();
-  await expect(list.locator(".pf-task-row")).toHaveCount(65);
-  await expect(list).toContainText("Lazy Contact 64");
+  await expect(list).not.toContainText("Lazy Contact 94");
+  await list.getByRole("button", { name: "Load 55 more contacts" }).scrollIntoViewIfNeeded();
+  await expect(list.locator(".pf-task-row")).toHaveCount(80);
+  await list.getByRole("button", { name: "Load 15 more contacts" }).scrollIntoViewIfNeeded();
+  await expect(list.locator(".pf-task-row")).toHaveCount(95);
+  await expect(list).toContainText("Lazy Contact 94");
 });
 
 test("contacts avatars render without exposing raw data URIs", async ({ page }) => {
@@ -183,7 +210,7 @@ test("contacts infer modal reruns only from explicit action", async ({ page }) =
   await openContacts(page);
   await daemon.waitForRequest("contacts_list");
 
-  await page.getByRole("button", { name: "Infer" }).click();
+  await page.getByRole("button", { name: "Infer", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Infer contacts" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Rerun" })).toBeVisible();
@@ -194,23 +221,27 @@ test("contacts infer modal reruns only from explicit action", async ({ page }) =
   await dialog.getByRole("button", { name: "Rerun" }).click();
   const inferRequest = await daemon.waitForRequest("contacts_infer");
   expect(inferRequest.params.limit).toBe(30);
-  await expect(dialog).toContainText("Alice");
+  await expect(dialog).toContainText("1 proposal");
+  await expect(dialog.locator(".pf-contact-proposal")).toHaveCount(1);
+  await expect(dialog.locator(".pf-contact-proposal").filter({ hasText: "Alice" })).toHaveCount(1);
   await expect(dialog.locator(".pf-contact-proposal img")).toHaveAttribute("src", ALICE_AVATAR);
+  await expect(page.getByRole("heading", { name: "Contacts 0" })).toBeVisible();
 
   await dialog.getByRole("button", { name: "Close inferred contacts" }).click();
-  await page.getByRole("button", { name: "Infer" }).click();
-  await expect(dialog).toContainText("Alice");
+  await page.getByRole("button", { name: "Infer", exact: true }).click();
+  await expect(dialog).toContainText("1 proposal");
   await page.waitForTimeout(250);
   expect(daemon.requests.filter((request) => request.method === "contacts_infer")).toHaveLength(1);
 
   daemon.delayResponse("contacts_infer", () => true, 750);
   await dialog.getByRole("button", { name: "Rerun" }).click();
   await expect(dialog.getByRole("button", { name: "Inferring", exact: true })).toBeVisible();
-  await expect(dialog).toContainText("Alice");
   await expect
     .poll(() => daemon.requests.filter((request) => request.method === "contacts_infer").length)
     .toBe(2);
   await expect(dialog.getByRole("button", { name: "Rerun" })).toBeVisible();
+  await expect(dialog.locator(".pf-contact-proposal")).toHaveCount(1);
+  await expect(dialog).toContainText("1 proposal");
 
   await dialog.getByRole("button", { name: "Close inferred contacts" }).click();
   const contactListCount = daemon.requests.filter((request) => request.method === "contacts_list").length;
@@ -219,15 +250,15 @@ test("contacts infer modal reruns only from explicit action", async ({ page }) =
   await expect
     .poll(() => daemon.requests.filter((request) => request.method === "contacts_list").length)
     .toBeGreaterThan(contactListCount);
-  await page.getByRole("button", { name: "Infer" }).click();
+  await expect(page.getByRole("heading", { name: "Contacts 0" })).toBeVisible();
+  await page.getByRole("button", { name: "Infer", exact: true }).click();
   const reloadedDialog = page.getByRole("dialog", { name: "Infer contacts" });
-  await expect(reloadedDialog).toContainText("Alice");
-  await expect(reloadedDialog.locator(".pf-contact-proposal img")).toHaveAttribute("src", ALICE_AVATAR);
+  await expect(reloadedDialog.locator(".pf-contact-proposal")).toHaveCount(1);
   await page.waitForTimeout(250);
   expect(daemon.requests.filter((request) => request.method === "contacts_infer")).toHaveLength(2);
 });
 
-test("contacts infer removes a proposal after it is saved", async ({ page }) => {
+test("contacts infer presents proposals until the user saves", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.setContactsSnapshot({
     contacts: [],
@@ -247,24 +278,110 @@ test("contacts infer removes a proposal after it is saved", async ({ page }) => 
   await openContacts(page);
   await daemon.waitForRequest("contacts_list");
 
-  await page.getByRole("button", { name: "Infer" }).click();
+  await page.getByRole("button", { name: "Infer", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Infer contacts" });
   await dialog.getByRole("button", { name: "Rerun" }).click();
   await daemon.waitForRequest("contacts_infer");
-  await expect(dialog).toContainText("Alice");
+  await expect(dialog).toContainText("1 proposal");
+  await expect(dialog.locator(".pf-contact-proposal")).toHaveCount(1);
+  await expect(page.getByRole("heading", { name: "Contacts 0" })).toBeVisible();
+  expect(daemon.requests.filter((request) => request.method === "contacts_save")).toHaveLength(0);
 
   await dialog.getByRole("button", { name: "Use" }).click();
   const createDialog = page.getByRole("dialog", { name: "Create contact" });
   await expect(createDialog.getByLabel("Name")).toHaveValue("Alice");
-  await expect(createDialog.getByLabel("Contact IDs")).toHaveValue("telegram@alice");
   await createDialog.getByRole("button", { name: /^Create$/ }).click();
+  const saveRequest = await daemon.waitForRequest("contacts_save");
+  expect(saveRequest.params.contact_ids).toEqual(["telegram@alice"]);
+  await expect(page.getByRole("heading", { name: "Contacts 1" })).toBeVisible();
+  const selectedContact = page.getByRole("complementary", { name: "Selected contact" });
+  await expect(selectedContact).toContainText("Alice");
+  await expect(selectedContact).toContainText("telegram@alice");
+});
 
-  const request = await daemon.waitForRequest("contacts_save");
-  expect(request.params.contact_ids).toEqual(["telegram@alice"]);
-  await page.getByRole("button", { name: "Infer" }).click();
-  const refreshedDialog = page.getByRole("dialog", { name: "Infer contacts" });
-  await expect(refreshedDialog.locator(".pf-contact-proposal")).toHaveCount(0);
-  await expect(refreshedDialog).toContainText("No inferred contacts yet.");
+test("contacts infer deduplicates repeated candidate identities", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setContactsSnapshot({
+    contacts: [],
+    candidates: [
+      {
+        id: "telegram@alice",
+        name: "Alice",
+        avatar: ALICE_AVATAR,
+        score: 42,
+        context: []
+      },
+      {
+        id: "Telegram@@Alice",
+        name: "Alice Duplicate",
+        avatar: null,
+        score: 41,
+        context: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openContacts(page);
+  await daemon.waitForRequest("contacts_list");
+
+  await page.getByRole("button", { name: "Infer", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Infer contacts" });
+  await dialog.getByRole("button", { name: "Rerun" }).click();
+  await daemon.waitForRequest("contacts_infer");
+
+  await expect(dialog).toContainText("1 proposal");
+  await expect(dialog.locator(".pf-contact-proposal")).toHaveCount(1);
+  await expect(dialog.locator(".pf-contact-proposal").filter({ hasText: "Alice" })).toHaveCount(1);
+  await expect(page.getByRole("heading", { name: "Contacts 0" })).toBeVisible();
+});
+
+test("contacts infer preserves saved contacts for legacy proposal responses", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setLegacyContactInferResponse();
+  daemon.setContactsSnapshot({
+    contacts: [
+      {
+        id: "contact-alice",
+        name: "Alice",
+        description: "Alice should remain saved when inference returns legacy proposals.",
+        avatar: null,
+        contact_ids: ["telegram@alice"]
+      }
+    ],
+    candidates: [
+      {
+        id: "google@bob@example.com",
+        name: "Bob",
+        avatar: null,
+        score: 21,
+        context: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openContacts(page);
+  await daemon.waitForRequest("contacts_list");
+
+  await page.getByRole("button", { name: "Infer", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Infer contacts" });
+  await dialog.getByRole("button", { name: "Rerun" }).click();
+  await daemon.waitForRequest("contacts_infer");
+
+  await expect(page.getByRole("heading", { name: "Contacts 1" })).toBeVisible();
+  await expect(dialog.locator(".pf-contact-proposal")).toHaveCount(1);
+  await expect(dialog).toContainText("Bob");
+
+  await dialog.getByRole("button", { name: "Use" }).click();
+  const createDialog = page.getByRole("dialog", { name: "Create contact" });
+  await expect(createDialog.getByLabel("Name")).toHaveValue("Bob");
+  await createDialog.getByRole("button", { name: /^Create$/ }).click();
+  const saveRequest = await daemon.waitForRequest("contacts_save");
+  expect(saveRequest.params.contact_ids).toEqual(["google@bob@example.com"]);
+  await expect(page.getByRole("heading", { name: "Contacts 2" })).toBeVisible();
 });
 
 test("contacts infer skips contacts that are already saved", async ({ page }) => {
@@ -275,13 +392,14 @@ test("contacts infer skips contacts that are already saved", async ({ page }) =>
   await openContacts(page);
   await daemon.waitForRequest("contacts_list");
 
-  await page.getByRole("button", { name: "Infer" }).click();
+  await page.getByRole("button", { name: "Infer", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Infer contacts" });
   await dialog.getByRole("button", { name: "Rerun" }).click();
   await daemon.waitForRequest("contacts_infer");
 
-  const proposals = dialog.locator(".pf-contact-proposal");
-  await expect(proposals).toHaveCount(1);
-  await expect(proposals).toContainText("bob@example.com");
-  await expect(proposals).not.toContainText("Alice");
+  await expect(dialog).toContainText("1 proposal");
+  await expect(dialog.locator(".pf-contact-proposal")).toHaveCount(1);
+  await expect(dialog.locator(".pf-contact-proposal").filter({ hasText: "Alice" })).toHaveCount(0);
+  await expect(dialog.locator(".pf-contact-proposal").filter({ hasText: "bob@example.com" })).toHaveCount(1);
+  await expect(page.getByRole("heading", { name: "Contacts 1" })).toBeVisible();
 });

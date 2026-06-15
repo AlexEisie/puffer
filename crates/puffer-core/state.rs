@@ -5,6 +5,7 @@ use crate::permissions::SessionPermissionState;
 use crate::runner_adapter::LocalToolRunner;
 use crate::runtime::ReflectionConfig;
 use puffer_config::PufferConfig;
+use puffer_media::ExactMediaDiscoveryCache;
 use puffer_runner_api::ToolRunner;
 use puffer_session_store::{
     ClaudeReadSnapshotEvent, MessageActor, MessageActorKind, SessionMetadata, SessionRecord,
@@ -268,6 +269,9 @@ pub struct AppState {
     /// When `Some`, tool calls with outbound URLs must stay on this origin
     /// (`scheme://host:port`). Set by /pentest start/resume; cleared by stop.
     pub pentest_in_scope_origin: Option<String>,
+    /// Request-scoped monitor reply binding. Set by daemon-validated monitor
+    /// action turns so `MonitorReplyDraft` cannot write arbitrary tasks.
+    pub(crate) monitor_reply_scope: Option<MonitorReplyScope>,
     /// Wall-clock timestamp of the most recent committed assistant message.
     /// Set by `push_message` when role == Assistant. Consumed by the
     /// microcompact time-based trigger to mirror Claude Code's "gap since
@@ -298,6 +302,15 @@ pub struct AppState {
     pub(crate) masked_secrets: Arc<Mutex<HashMap<String, String>>>,
     /// Session-scoped approvals for persistent encrypted secrets.
     pub(crate) secret_access_state: SecretAccessState,
+    /// Trusted exact media discovery entries available to workflow tools.
+    pub(crate) exact_media_discovery_cache: Option<ExactMediaDiscoveryCache>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MonitorReplyScope {
+    pub task_id: String,
+    pub session_id: String,
+    pub turn_id: String,
 }
 
 impl AppState {
@@ -379,6 +392,7 @@ impl AppState {
             pending_query_prompt: None,
             last_input_tokens: None,
             pentest_in_scope_origin: None,
+            monitor_reply_scope: None,
             last_assistant_at: None,
             last_cache_hit_ratio: None,
             session_cache_hit_ratio: None,
@@ -394,7 +408,21 @@ impl AppState {
             secret_values: Arc::new(Mutex::new(HashMap::new())),
             masked_secrets: Arc::new(Mutex::new(HashMap::new())),
             secret_access_state: SecretAccessState::default(),
+            exact_media_discovery_cache: None,
         }
+    }
+
+    pub fn set_monitor_reply_scope_for_turn(
+        &mut self,
+        task_id: String,
+        session_id: String,
+        turn_id: String,
+    ) {
+        self.monitor_reply_scope = Some(MonitorReplyScope {
+            task_id,
+            session_id,
+            turn_id,
+        });
     }
 
     /// Replaces the active tool runner. Use this from tests or remote
@@ -403,6 +431,11 @@ impl AppState {
     pub fn with_tool_runner(mut self, runner: Arc<dyn ToolRunner>) -> Self {
         self.tool_runner = runner;
         self
+    }
+
+    /// Sets trusted exact media discovery entries for workflow tool execution.
+    pub fn set_exact_media_discovery_cache(&mut self, cache: ExactMediaDiscoveryCache) {
+        self.exact_media_discovery_cache = Some(cache);
     }
 
     /// Returns true and clears both the command-driven flag and the
@@ -462,6 +495,7 @@ impl AppState {
                     state.session.display_name = Some(name);
                 }
                 TranscriptEvent::GitDiffSnapshot { .. } => {}
+                TranscriptEvent::TurnBoundary { .. } => {}
                 TranscriptEvent::TranscriptRewritten { rewrite } => {
                     state.apply_transcript_rewrite(&rewrite);
                 }

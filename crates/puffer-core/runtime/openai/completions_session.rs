@@ -492,6 +492,7 @@ mod reasoning_fields_tests {
             headers: Default::default(),
             query_params: Default::default(),
             discovery: None,
+            media: None,
             models: Vec::new(),
             chat_completions_path: None,
         };

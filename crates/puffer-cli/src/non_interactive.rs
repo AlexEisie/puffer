@@ -845,6 +845,7 @@ mod tests {
             query_params: IndexMap::new(),
             chat_completions_path: None,
             discovery: None,
+            media: None,
             models: vec![ModelDescriptor {
                 id: "gpt-5.4".to_string(),
                 display_name: "GPT-5.4".to_string(),

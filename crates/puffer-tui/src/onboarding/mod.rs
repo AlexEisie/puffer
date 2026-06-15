@@ -717,6 +717,7 @@ mod tests {
                 display_name_field: None,
                 headers: Default::default(),
             }),
+            media: None,
             models: vec![ModelDescriptor {
                 id: "gpt-5".to_string(),
                 display_name: "GPT-5".to_string(),

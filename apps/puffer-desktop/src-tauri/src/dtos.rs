@@ -1,8 +1,10 @@
 use puffer_session_store::{
     AttachmentState, MessageActor, SessionStore, StoredAttachment, StoredAttachmentKind,
 };
+use puffer_provider_registry::{AxisRole, ControlKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// Describes one session row rendered in the desktop sidebar.
@@ -98,6 +100,29 @@ pub(crate) struct ChatAttachmentDto {
     pub extension: String,
     pub kind: String,
     pub state: String,
+    pub source: ChatAttachmentSourceDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ChatAttachmentSourceDto {
+    LocalFile {
+        path: String,
+    },
+    RemoteUrl {
+        url: String,
+    },
+    GeneratedMedia {
+        #[serde(rename = "jobId")]
+        job_id: String,
+        #[serde(rename = "artifactId")]
+        artifact_id: String,
+        index: usize,
+        #[serde(rename = "localPath", skip_serializing_if = "Option::is_none")]
+        local_path: Option<String>,
+        #[serde(rename = "remoteSourceUrl", skip_serializing_if = "Option::is_none")]
+        remote_source_url: Option<String>,
+    },
 }
 
 impl ChatAttachmentDto {
@@ -122,6 +147,12 @@ impl ChatAttachmentDto {
                 StoredAttachmentKind::File => "file".to_string(),
             },
             state: state.to_string(),
+            source: ChatAttachmentSourceDto::LocalFile {
+                path: store
+                    .attachment_original_path(session_id, attachment)
+                    .display()
+                    .to_string(),
+            },
         }
     }
 }
@@ -146,11 +177,16 @@ pub(crate) enum TimelineItemDto {
         text: String,
         attachments: Vec<ChatAttachmentDto>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
     },
     AssistantMessage {
         id: String,
         text: String,
+        attachments: Vec<ChatAttachmentDto>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
     },
@@ -158,12 +194,16 @@ pub(crate) enum TimelineItemDto {
         id: String,
         text: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
     },
     Command {
         id: String,
         command_name: String,
         command_args: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
     },
@@ -175,6 +215,8 @@ pub(crate) enum TimelineItemDto {
         input_text: String,
         input_json: Option<Value>,
         output_text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,11 +230,15 @@ pub(crate) enum TimelineItemDto {
         reason: String,
         input_text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
     },
     DiffSnapshot {
         id: String,
         snapshot: DiffSummaryDto,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
     },
 }
 
@@ -361,11 +407,57 @@ pub(crate) struct SettingsConfigDto {
     pub default_model: Option<String>,
     pub openai_base_url: Option<String>,
     pub theme: String,
+    pub media: MediaSettingsDto,
     pub mascot_id: String,
     pub mascot_display_name: String,
     pub mascot_enabled: bool,
     pub ui_no_alt_screen: bool,
     pub ui_tmux_golden_mode: bool,
+}
+
+/// Describes persisted image and video generation defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaSettingsDto {
+    pub image: Option<MediaGenerationSettingsDto>,
+    pub video: Option<MediaGenerationSettingsDto>,
+}
+
+/// Describes one persisted media generation default.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaGenerationSettingsDto {
+    pub provider_id: String,
+    pub logical_model_id: String,
+    pub selections: BTreeMap<String, String>,
+}
+
+/// Describes one verified media generation capability.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaCapabilityInfoDto {
+    pub provider_id: String,
+    pub provider_display_name: String,
+    pub model_id: String,
+    pub model_display_name: String,
+    pub kind: String,
+    pub operation: String,
+    pub adapter: String,
+    pub axes: Vec<MediaCapabilityAxisDto>,
+    pub status: String,
+    pub source: String,
+    pub reason: Option<String>,
+    pub checked_at_ms: u64,
+}
+
+/// Describes one selectable media axis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaCapabilityAxisDto {
+    pub id: String,
+    pub label: String,
+    pub role: AxisRole,
+    pub control: ControlKind,
 }
 
 /// Describes aggregate loaded resource counts.

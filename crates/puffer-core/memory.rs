@@ -610,6 +610,8 @@ mod tests {
         let result = execute_tool(
             &mut state,
             &resources,
+            &ProviderRegistry::new(),
+            &AuthStore::default(),
             &registry,
             definition,
             temp.path(),
@@ -989,6 +991,7 @@ mod tests {
             headers: Default::default(),
             query_params: Default::default(),
             discovery: None,
+            media: None,
             models: vec![ModelDescriptor {
                 id: "claude-sonnet-4-5".to_string(),
                 display_name: "Claude Sonnet 4.5".to_string(),

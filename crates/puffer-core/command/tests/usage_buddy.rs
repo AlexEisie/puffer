@@ -38,6 +38,7 @@ fn usage_command_reports_runtime_and_resource_counts() {
             display_name_field: Some("display_name".to_string()),
             headers: Default::default(),
         }),
+        media: None,
         models: vec![puffer_provider_registry::ModelDescriptor {
             id: "claude-sonnet-4-5".to_string(),
             display_name: "Claude Sonnet 4.5".to_string(),
@@ -369,6 +370,7 @@ fn anthropic_provider() -> ProviderDescriptor {
             display_name_field: Some("display_name".to_string()),
             headers: Default::default(),
         }),
+        media: None,
         models: vec![puffer_provider_registry::ModelDescriptor {
             id: "claude-sonnet-4-5".to_string(),
             display_name: "Claude Sonnet 4.5".to_string(),
@@ -395,6 +397,7 @@ fn openai_provider() -> ProviderDescriptor {
         headers: Default::default(),
         query_params: Default::default(),
         discovery: None,
+        media: None,
         models: vec![puffer_provider_registry::ModelDescriptor {
             id: "gpt-5".to_string(),
             display_name: "GPT-5".to_string(),

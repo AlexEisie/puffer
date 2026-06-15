@@ -16,13 +16,15 @@
 //! Wire protocol for Telegram (newline-delimited JSON on stdin/stdout):
 //!
 //! Stdin:
+//!   {"action":"login_qr","api_id":<i32?>,"api_hash":<str?>}
+//!   {"action":"login_qr_wait","timeout_seconds":<u64?>}
 //!   {"action":"login_start","phone":"+1...","api_id":<i32?>,"api_hash":<str?>}
 //!   {"action":"submit_code","code":"12345"}
 //!   {"action":"submit_password","password":"..."}
 //!   {"action":"exit"}
 //!
 //! Stdout: control events emitted by `puffer-subscriber-telegram-user`
-//! (kinds `login_awaiting_code`, `login_awaiting_password`,
+//! (kinds `login_qr`, `login_awaiting_code`, `login_awaiting_password`,
 //! `login_complete`, `login_error`) plus any malformed-input errors as
 //! `kind:"connect_error"` events.
 
@@ -32,14 +34,14 @@ use puffer_config::ConfigPaths;
 use puffer_subscriber_email::{save_email_config, EmailConfig};
 use puffer_subscriber_runtime::Event;
 use puffer_subscriber_telegram_user::{
-    login_start, login_submit_code, login_submit_password, Client, CodeSubmitOutcome, LoginState,
-    SkillEnv,
+    login_start, login_submit_code, login_submit_password, qr_login_start, qr_login_wait, Client,
+    CodeSubmitOutcome, LoginState, QrLoginOutcome, QrLoginState, SkillEnv,
 };
 use puffer_subscriptions::{ConnectionRecord, ConnectionStore};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const TELEGRAM_CONNECTOR_SLUG: &str = "telegram-login";
 const EMAIL_CONNECTOR_SLUG: &str = "email";
@@ -56,6 +58,16 @@ pub(crate) fn run_connect_command(paths: &ConfigPaths, command: ConnectCommand) 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum TelegramAction {
+    LoginQr {
+        #[serde(default)]
+        api_id: Option<i32>,
+        #[serde(default)]
+        api_hash: Option<String>,
+    },
+    LoginQrWait {
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
+    },
     LoginStart {
         phone: String,
         #[serde(default)]
@@ -77,7 +89,16 @@ fn run_telegram_repl(paths: &ConfigPaths, connection_slug: &str) -> Result<()> {
     std::fs::create_dir_all(&state_dir)
         .with_context(|| format!("create telegram state dir {}", state_dir.display()))?;
     let env = SkillEnv {
-        session_path: state_dir.join("telegram.session"),
+        // Login writes to a STAGING session, never directly to the live session
+        // the resident subscriber loads — see telegram_login_staging_path /
+        // promote_staged_session (agentenv/monorepo#551).
+        session_path: telegram_login_staging_path(&state_dir),
+        // The login flow promotes staging onto this live path BEFORE emitting
+        // `login_complete`. GUI hosts (bobo) treat that event as terminal and
+        // may reap this process right after reading it, so the promote must
+        // already be durable by then — `finalize_login` below is only a
+        // fallback for older flows.
+        live_session_path: Some(telegram_live_session_path(&state_dir)),
         state_dir,
         topic: connection_slug.to_string(),
         workspace_config_dir: Some(paths.workspace_config_dir.clone()),
@@ -91,8 +112,56 @@ fn run_telegram_repl(paths: &ConfigPaths, connection_slug: &str) -> Result<()> {
     runtime.block_on(telegram_repl_loop(env, paths.clone()))
 }
 
+/// The durable session file the resident `__subscriber telegram-user` process
+/// loads on startup/resume. `connect telegram` must NOT overwrite this with a
+/// half-finished login: writing a pre-auth (or abandoned) session here makes
+/// the subscriber resume as `not_signed_in` and flip the connection to
+/// `Degraded` (agentenv/monorepo#551).
+fn telegram_live_session_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("telegram.session")
+}
+
+/// Staging session the connect/login flow writes to. It is promoted onto the
+/// live session path only once a login fully completes, so an abandoned login
+/// (e.g. the user never enters the code, or SMS never arrives) leaves the
+/// subscriber's authorized session untouched.
+fn telegram_login_staging_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("login-staging.session")
+}
+
+/// Atomically promotes the staged login session onto the live session path
+/// after a successful login. No-op if nothing was staged.
+fn promote_staged_session(staging: &Path, live: &Path) -> Result<()> {
+    if !staging.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = live.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create session parent dir {}", parent.display()))?;
+    }
+    std::fs::rename(staging, live).with_context(|| {
+        format!(
+            "promote session {} -> {}",
+            staging.display(),
+            live.display()
+        )
+    })
+}
+
+/// Finalizes a completed login: promote the staged session onto the live path
+/// (so the subscriber picks up the freshly authorized session) and register
+/// the connection record.
+fn finalize_login(env: &SkillEnv, paths: &ConfigPaths) -> Result<()> {
+    promote_staged_session(
+        &env.session_path,
+        &telegram_live_session_path(&env.state_dir),
+    )?;
+    register_telegram_connection(paths, &env.topic)
+}
+
 async fn telegram_repl_loop(env: SkillEnv, paths: ConfigPaths) -> Result<()> {
     let mut state = LoginState::new();
+    let mut qr_state: Option<QrLoginState> = None;
     let mut client: Option<Client> = None;
     let stdin = std::io::stdin();
     let mut reader = BufReader::new(stdin.lock());
@@ -117,15 +186,43 @@ async fn telegram_repl_loop(env: SkillEnv, paths: ConfigPaths) -> Result<()> {
             }
         };
         match parsed {
+            TelegramAction::LoginQr { api_id, api_hash } => {
+                client = None;
+                match qr_login_start(&env, &mut state, &mut qr_state, api_id, api_hash).await {
+                    Ok(QrLoginOutcome::Pending) => {}
+                    Ok(QrLoginOutcome::AwaitingPassword(c)) => client = Some(c),
+                    Ok(QrLoginOutcome::Complete(_c)) => {
+                        finalize_login(&env, &paths)?;
+                        break;
+                    }
+                    Err(err) => emit_local_error(&env.topic, &format!("login_qr error: {err}"))?,
+                }
+            }
+            TelegramAction::LoginQrWait { timeout_seconds } => {
+                match qr_login_wait(&env, &mut state, &mut qr_state, timeout_seconds).await {
+                    Ok(QrLoginOutcome::Pending) => {}
+                    Ok(QrLoginOutcome::AwaitingPassword(c)) => client = Some(c),
+                    Ok(QrLoginOutcome::Complete(_c)) => {
+                        finalize_login(&env, &paths)?;
+                        break;
+                    }
+                    Err(err) => {
+                        emit_local_error(&env.topic, &format!("login_qr_wait error: {err}"))?
+                    }
+                }
+            }
             TelegramAction::LoginStart {
                 phone,
                 api_id,
                 api_hash,
-            } => match login_start(&env, &mut state, phone, api_id, api_hash).await {
-                Ok(Some(c)) => client = Some(c),
-                Ok(None) => client = None,
-                Err(err) => emit_local_error(&env.topic, &format!("login_start error: {err}"))?,
-            },
+            } => {
+                qr_state = None;
+                match login_start(&env, &mut state, phone, api_id, api_hash).await {
+                    Ok(Some(c)) => client = Some(c),
+                    Ok(None) => client = None,
+                    Err(err) => emit_local_error(&env.topic, &format!("login_start error: {err}"))?,
+                }
+            }
             TelegramAction::SubmitCode { code } => {
                 let Some(c) = client.as_ref() else {
                     emit_local_error(&env.topic, "no active client; send login_start first")?;
@@ -133,7 +230,7 @@ async fn telegram_repl_loop(env: SkillEnv, paths: ConfigPaths) -> Result<()> {
                 };
                 match login_submit_code(&env, &mut state, c, code).await {
                     Ok(CodeSubmitOutcome::Complete) => {
-                        register_telegram_connection(&paths, &env.topic)?;
+                        finalize_login(&env, &paths)?;
                         break;
                     }
                     // The subscriber already emitted `login_awaiting_password`
@@ -154,7 +251,7 @@ async fn telegram_repl_loop(env: SkillEnv, paths: ConfigPaths) -> Result<()> {
                 };
                 match login_submit_password(&env, &mut state, c, password).await {
                     Ok(true) => {
-                        register_telegram_connection(&paths, &env.topic)?;
+                        finalize_login(&env, &paths)?;
                         break;
                     }
                     // Subscriber emitted the matching control event already.
@@ -167,6 +264,10 @@ async fn telegram_repl_loop(env: SkillEnv, paths: ConfigPaths) -> Result<()> {
             TelegramAction::Exit => break,
         }
     }
+    // Abandoned/partial logins leave a staging session behind; drop it so it
+    // can't be mistaken for a real session later. A completed login already
+    // renamed staging onto the live path, so this is a no-op in that case.
+    let _ = std::fs::remove_file(&env.session_path);
     Ok(())
 }
 
@@ -315,6 +416,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn login_staging_path_differs_from_live_session() {
+        let dir = Path::new("/tmp/telegram-accounts/telegram-user");
+        assert_ne!(
+            telegram_login_staging_path(dir),
+            telegram_live_session_path(dir),
+            "login must stage to a separate file, never the live session (#551)"
+        );
+    }
+
+    #[test]
+    fn completed_login_promotes_staging_onto_live() {
+        let temp = tempfile::tempdir().unwrap();
+        let live = telegram_live_session_path(temp.path());
+        let staging = telegram_login_staging_path(temp.path());
+        std::fs::write(&live, b"stale-or-absent").unwrap();
+        std::fs::write(&staging, b"freshly-authorized-session").unwrap();
+
+        promote_staged_session(&staging, &live).unwrap();
+
+        assert_eq!(std::fs::read(&live).unwrap(), b"freshly-authorized-session");
+        assert!(
+            !staging.exists(),
+            "staging is renamed onto live, not left behind"
+        );
+    }
+
+    #[test]
+    fn promote_is_noop_when_nothing_staged() {
+        // #551: an abandoned login never stages a completed session, so a later
+        // promote must leave the subscriber's authorized live session intact.
+        let temp = tempfile::tempdir().unwrap();
+        let live = telegram_live_session_path(temp.path());
+        std::fs::write(&live, b"authorized-subscriber-session").unwrap();
+        let staging = telegram_login_staging_path(temp.path());
+
+        promote_staged_session(&staging, &live).unwrap();
+
+        assert_eq!(
+            std::fs::read(&live).unwrap(),
+            b"authorized-subscriber-session"
+        );
+    }
+
+    #[test]
     fn telegram_default_state_dir_uses_account_root() {
         let temp = tempfile::tempdir().unwrap();
         let paths = paths(temp.path());
@@ -336,6 +481,29 @@ mod tests {
             telegram_state_dir(&paths, "tg-alt"),
             paths.user_config_dir.join("telegram-accounts/tg-alt")
         );
+    }
+
+    #[test]
+    fn telegram_repl_parses_qr_login_actions() {
+        let start: TelegramAction =
+            serde_json::from_str(r#"{"action":"login_qr","api_id":123,"api_hash":"hash"}"#)
+                .unwrap();
+        match start {
+            TelegramAction::LoginQr { api_id, api_hash } => {
+                assert_eq!(api_id, Some(123));
+                assert_eq!(api_hash.as_deref(), Some("hash"));
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+
+        let wait: TelegramAction =
+            serde_json::from_str(r#"{"action":"login_qr_wait","timeout_seconds":10}"#).unwrap();
+        match wait {
+            TelegramAction::LoginQrWait { timeout_seconds } => {
+                assert_eq!(timeout_seconds, Some(10));
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
     }
 
     fn paths(root: &std::path::Path) -> ConfigPaths {

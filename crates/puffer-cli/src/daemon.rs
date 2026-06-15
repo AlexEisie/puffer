@@ -21,10 +21,12 @@
 
 use anyhow::{Context, Result};
 use axum::{
+    body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        Path as AxumPath, Query, State,
     },
+    http::{header, HeaderMap, HeaderValue, Response, StatusCode},
     response::IntoResponse,
     routing::get,
     Router,
@@ -32,17 +34,24 @@ use axum::{
 use futures::{sink::SinkExt, stream::StreamExt};
 use indexmap::IndexMap;
 use puffer_config::{
-    ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, ProxyConfig, ProxyEndpoint,
-    ProxyScheme, PufferConfig,
+    ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, MediaConfig,
+    MediaGenerationConfig, ProxyConfig, ProxyEndpoint, ProxyScheme, PufferConfig,
 };
 use puffer_core::{
     command_surface, default_effort_level, dispatch_command, enter_plan_mode, execute_connect_flow,
-    execute_user_turn_streaming_with_permissions_and_cancel, provider_preference_family,
+    execute_user_turn_streaming_with_prompt_tools_and_cancel, provider_preference_family,
     supported_effort_levels, with_user_question_prompt_handler, AppState,
     BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
     BrowserPermissionPromptTargetClass, CancelToken, MessageRole, ModelPreferenceFamily,
     PermissionPromptAction, PermissionPromptRequest, ToolCallRequest, ToolInvocation,
     TurnStreamEvent, UserQuestionPromptRequest, UserQuestionPromptResponse,
+};
+use puffer_media::{
+    discover_exact_media_capabilities, generate_exact_media_with_cache,
+    generated_video_access_metadata_by_artifact, list_exact_media_capabilities_with_cache,
+    read_generated_media_preview_by_artifact, ExactMediaDiscoveryCache,
+    ExactMediaGenerationRequest, GeneratedVideoAccessMetadata, GeneratedVideoAccessMetadataResult,
+    MediaCapabilityView,
 };
 use puffer_provider_openai::{
     build_realtime_client_secret_request,
@@ -55,6 +64,7 @@ use puffer_provider_registry::{
 use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
 use puffer_session_store::{
     MessageActor, SessionMetadata, SessionStore, StoredAttachment, TranscriptEvent,
+    TurnBoundaryState,
 };
 use puffer_transport_anthropic::{
     parse_authorization_input as parse_anthropic_authorization_input, ANTHROPIC_API_BASE_URL,
@@ -71,7 +81,9 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::auth_credentials::{
@@ -101,9 +113,10 @@ use crate::daemon_ui_state::{
 };
 use crate::desktop_api;
 use crate::desktop_api_types::{
-    ExternalCredentialDto, FolderGroupDto, McpServerDto, ModelDescriptorDto, ProxyEndpointInputDto,
-    ProxyTestResultDto, RepoActionResultDto, RepoStatusDto, SaveProxySettingsParams,
-    SessionDetailDto, SettingsSnapshotDto, ThinkingOptionDto,
+    ExternalCredentialDto, FolderGroupDto, McpServerDto, MediaCapabilityAxisDto,
+    MediaCapabilityInfoDto, ModelDescriptorDto, ProxyEndpointInputDto, ProxyTestResultDto,
+    RepoActionResultDto, RepoStatusDto, SaveProxySettingsParams, SessionDetailDto,
+    SettingsSnapshotDto, ThinkingOptionDto,
 };
 
 const PROTOCOL_VERSION: &str = "1";
@@ -117,6 +130,62 @@ pub(crate) struct Handshake {
     pub(crate) token: String,
     pub(crate) protocol_version: String,
     pub(crate) workspace_root: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerateMediaParams {
+    kind: String,
+    prompt: String,
+    #[serde(default)]
+    count: Option<u8>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerateMediaArtifactResult {
+    artifact_id: String,
+    index: usize,
+    path: String,
+    mime_type: String,
+    size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_source_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerateMediaResult {
+    job_id: String,
+    requested_count: u8,
+    artifacts: Vec<GenerateMediaArtifactResult>,
+    kind: String,
+    provider_id: String,
+    model_id: String,
+    status: String,
+    prompt: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedMediaPreviewParams {
+    session_id: String,
+    artifact_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedVideoAccessParams {
+    session_id: String,
+    artifact_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct GeneratedVideoTicket {
+    path: std::path::PathBuf,
+    mime_type: String,
+    size: u64,
+    expires_at_ms: u64,
 }
 
 pub(crate) struct DaemonOptions {
@@ -182,6 +251,10 @@ async fn run_async(options: DaemonOptions) -> Result<()> {
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        .route(
+            "/media/generated-video/:ticket",
+            get(generated_video_handler),
+        )
         .with_state(state.clone());
 
     let addr: SocketAddr = bind.parse().context("bind address")?;
@@ -256,6 +329,87 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
+fn daemon_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+const GENERATED_VIDEO_TICKET_TTL_MS: u64 = 10 * 60 * 1000;
+
+fn generated_video_ticket_path(ticket: &str) -> String {
+    format!("/media/generated-video/{ticket}")
+}
+
+/// Map a workspace file path to a `<video>`-playable MIME type by extension,
+/// or `None` for anything we don't preview. `.ogg` is excluded on purpose: it
+/// is commonly an audio container and audio is out of scope.
+fn file_media_mime_type(path: &std::path::Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "ogv" => "video/ogg",
+        "mov" => "video/quicktime",
+        _ => return None,
+    })
+}
+
+fn random_ticket() -> String {
+    let mut buf = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut buf);
+    hex(&buf)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeneratedVideoRangeError {
+    Invalid,
+    Unsatisfiable,
+}
+
+fn parse_single_byte_range(
+    header: &str,
+    size: u64,
+) -> std::result::Result<Option<(u64, u64)>, GeneratedVideoRangeError> {
+    let header = header.trim();
+    if header.is_empty() {
+        return Ok(None);
+    }
+    let Some(range) = header.strip_prefix("bytes=") else {
+        return Err(GeneratedVideoRangeError::Invalid);
+    };
+    if range.contains(',') || size == 0 {
+        return Err(GeneratedVideoRangeError::Unsatisfiable);
+    }
+    let Some((start, end)) = range.split_once('-') else {
+        return Err(GeneratedVideoRangeError::Invalid);
+    };
+    if start.is_empty() {
+        let suffix_len = end
+            .parse::<u64>()
+            .map_err(|_| GeneratedVideoRangeError::Invalid)?;
+        if suffix_len == 0 {
+            return Err(GeneratedVideoRangeError::Unsatisfiable);
+        }
+        let start = size.saturating_sub(suffix_len);
+        return Ok(Some((start, size - 1)));
+    }
+    let start = start
+        .parse::<u64>()
+        .map_err(|_| GeneratedVideoRangeError::Invalid)?;
+    let end = if end.is_empty() {
+        size - 1
+    } else {
+        end.parse::<u64>()
+            .map_err(|_| GeneratedVideoRangeError::Invalid)?
+    };
+    if start >= size || end < start {
+        return Err(GeneratedVideoRangeError::Unsatisfiable);
+    }
+    Ok(Some((start, end.min(size - 1))))
+}
+
 // ---------------------------------------------------------------------------
 // DaemonState — the shared runtime inputs + in-flight turn registry.
 // ---------------------------------------------------------------------------
@@ -288,6 +442,8 @@ pub(crate) struct DaemonState {
     pub(crate) local_models: crate::daemon_local_model::LocalModelInstaller,
     disable_auto_title: bool,
     yolo: bool,
+    media_discovery_cache: Arc<Mutex<Option<ExactMediaDiscoveryCache>>>,
+    generated_video_tickets: Arc<Mutex<HashMap<String, GeneratedVideoTicket>>>,
     /// Transcript replay buffer — a bounded ring of recent session / clone /
     /// workspace events. On a fresh WebSocket connection we replay these
     /// so UIs that disconnected mid-turn don't miss deltas. Size capped at
@@ -298,6 +454,8 @@ pub(crate) struct DaemonState {
     /// window so a runaway browser checkout can't keep running once the user's
     /// app has gone away (issue #600).
     live_connections: Arc<AtomicUsize>,
+    /// Monitor reply action sessions stay source-bound across follow-up turns.
+    monitor_reply_sessions: Arc<Mutex<HashMap<String, String>>>,
 }
 
 const RECENT_EVENT_CAPACITY: usize = 500;
@@ -349,6 +507,44 @@ impl DaemonState {
             &inputs.session_store,
         )?;
         Ok(serde_json::to_value(snapshot)?)
+    }
+
+    fn prune_expired_generated_video_tickets(&self, now_ms: u64) {
+        self.generated_video_tickets
+            .lock()
+            .unwrap()
+            .retain(|_, ticket| ticket.expires_at_ms > now_ms);
+    }
+
+    fn insert_generated_video_ticket(
+        &self,
+        metadata: GeneratedVideoAccessMetadata,
+    ) -> (String, GeneratedVideoTicket) {
+        let now_ms = daemon_now_ms();
+        self.prune_expired_generated_video_tickets(now_ms);
+        let token = random_ticket();
+        let ticket = GeneratedVideoTicket {
+            path: metadata.path,
+            mime_type: metadata.mime_type,
+            size: metadata.byte_count,
+            expires_at_ms: now_ms + GENERATED_VIDEO_TICKET_TTL_MS,
+        };
+        self.generated_video_tickets
+            .lock()
+            .unwrap()
+            .insert(token.clone(), ticket.clone());
+        (token, ticket)
+    }
+
+    fn generated_video_ticket(&self, token: &str) -> Option<GeneratedVideoTicket> {
+        let now_ms = daemon_now_ms();
+        self.prune_expired_generated_video_tickets(now_ms);
+        self.generated_video_tickets
+            .lock()
+            .unwrap()
+            .get(token)
+            .filter(|ticket| ticket.expires_at_ms > now_ms)
+            .cloned()
     }
 }
 
@@ -411,8 +607,11 @@ impl DaemonState {
             local_models: crate::daemon_local_model::LocalModelInstaller::new(),
             disable_auto_title,
             yolo,
+            media_discovery_cache: Arc::new(Mutex::new(None)),
+            generated_video_tickets: Arc::new(Mutex::new(HashMap::new())),
             recent_events: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_EVENT_CAPACITY))),
             live_connections: Arc::new(AtomicUsize::new(0)),
+            monitor_reply_sessions: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -499,27 +698,46 @@ impl DaemonState {
                     .collect::<IndexMap<_, _>>(),
             );
         }
-        if discover_all {
+        let stale_discovery_provider_ids = if discover_all {
             if let Ok(client) = proxy_discovery_client(&config) {
                 let _ =
                     providers.discover_and_merge_all_with_discovery_client(&auth_store, &client);
             } else {
                 let _ = providers.discover_and_merge_all(&auth_store);
             }
+            Vec::new()
         } else {
             // Even on the fast path we apply the on-disk discovery cache
             // — that's a synchronous file read, no network — so callers
             // like `create_session` can resolve previously-discovered
             // model names without paying for a fresh network round-trip.
-            let _stale = providers.apply_discovery_cache();
-        }
+            providers.apply_discovery_cache()
+        };
         let session_store = SessionStore::from_paths(&self.paths)?;
         Ok(RuntimeInputs {
             resources,
             providers,
             auth_store,
             session_store,
+            stale_discovery_provider_ids,
         })
+    }
+
+    fn exact_media_discovery_cache(&self, inputs: &RuntimeInputs) -> ExactMediaDiscoveryCache {
+        let now_ms = daemon_now_ms();
+        if let Some(cache) = self
+            .media_discovery_cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|cache| cache.is_fresh_at(now_ms))
+            .cloned()
+        {
+            return cache;
+        }
+        let cache = discover_exact_media_capabilities(&inputs.providers, &inputs.auth_store);
+        *self.media_discovery_cache.lock().unwrap() = Some(cache.clone());
+        cache
     }
 }
 
@@ -529,6 +747,7 @@ pub(crate) struct RuntimeInputs {
     pub(crate) providers: ProviderRegistry,
     pub(crate) auth_store: AuthStore,
     pub(crate) session_store: SessionStore,
+    pub(crate) stale_discovery_provider_ids: Vec<String>,
 }
 
 fn proxy_discovery_client(
@@ -676,6 +895,65 @@ pub(crate) enum ServerEnvelope {
 pub(crate) struct RpcError {
     pub(crate) code: String,
     pub(crate) message: String,
+}
+
+// Streams a ticketed media file with HTTP Range support. Tickets are minted by
+// `create_generated_video_access` (chat-generated videos) AND
+// `create_file_media_access` (arbitrary in-workspace video files for the Files
+// pane); both validate the path before inserting, so a ticket never escapes the
+// workspace. The route name is historical — kept to avoid churning a tested path.
+async fn generated_video_handler(
+    State(state): State<Arc<DaemonState>>,
+    AxumPath(ticket): AxumPath<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(ticket) = state.generated_video_ticket(&ticket) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let file = match tokio::fs::File::open(&ticket.path).await {
+        Ok(file) => file,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let size = match file.metadata().await {
+        Ok(metadata) => metadata.len(),
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let range_header = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let range = match parse_single_byte_range(range_header, size) {
+        Ok(range) => range,
+        Err(GeneratedVideoRangeError::Unsatisfiable) => {
+            return StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+        }
+        Err(GeneratedVideoRangeError::Invalid) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let mut builder = Response::builder()
+        .header(header::CONTENT_TYPE, ticket.mime_type)
+        .header(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    let (body, content_length) = if let Some((start, end)) = range {
+        builder = builder
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"));
+        let mut file = file;
+        if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        let length = end - start + 1;
+        (
+            Body::from_stream(ReaderStream::new(file.take(length))),
+            length,
+        )
+    } else {
+        builder = builder.status(StatusCode::OK);
+        (Body::from_stream(ReaderStream::new(file)), size)
+    };
+    builder
+        .header(header::CONTENT_LENGTH, content_length.to_string())
+        .body(body)
+        .unwrap()
+        .into_response()
 }
 
 async fn ws_handler(
@@ -1022,6 +1300,23 @@ async fn dispatch_request(
         "list_provider_models" => {
             respond!(detached!(|s, p| handle_list_provider_models(&s, &p)))
         }
+        "list_media_capabilities" => {
+            respond!(detached!(|s, p| handle_list_media_capabilities(&s, &p)))
+        }
+        "generate_media" => respond!(detached!(|s, p| handle_generate_media(&s, &p))),
+        "read_generated_media_preview" => {
+            respond!(detached!(|s, p| handle_read_generated_media_preview(
+                &s, &p
+            )))
+        }
+        "create_generated_video_access" => {
+            respond!(detached!(|s, p| handle_create_generated_video_access(
+                &s, &p
+            )))
+        }
+        "create_file_media_access" => {
+            respond!(detached!(|s, p| handle_create_file_media_access(&s, &p)))
+        }
         "save_proxy_settings" => respond!(detached!(|s, p| handle_save_proxy_settings(&s, &p))),
         "save_secret" => respond!(detached!(|s, p| handle_save_secret(&s, &p))),
         "delete_secret" => respond!(detached!(|s, p| handle_delete_secret(&s, &p))),
@@ -1033,6 +1328,11 @@ async fn dispatch_request(
         "contacts_search" => {
             respond!(detached!(|s, p| {
                 crate::daemon_contacts::handle_contacts_search(s.config_paths(), &p)
+            }))
+        }
+        "contacts_refresh" => {
+            respond!(detached!(|s, p| {
+                crate::daemon_contacts::handle_contacts_refresh(s.config_paths(), &p)
             }))
         }
         "contacts_context" => {
@@ -1158,8 +1458,17 @@ async fn dispatch_request(
         "monitor_task_ignore" | "task_monitor_ignore" => respond!(
             crate::daemon_workflows::handle_monitor_task_ignore(&state.paths, &params)
         ),
+        "monitor_rule_add" | "task_monitor_rule_add" => respond!(
+            crate::daemon_workflows::handle_monitor_rule_add(&state.paths, &params)
+        ),
+        "monitor_rule_delete" | "task_monitor_rule_delete" => respond!(
+            crate::daemon_workflows::handle_monitor_rule_delete(&state.paths, &params)
+        ),
         "monitor_task_complete" | "task_monitor_complete" => respond!(
             crate::daemon_workflows::handle_monitor_task_complete(&state.paths, &params)
+        ),
+        "monitor_reply_send" | "task_monitor_reply_send" => respond!(
+            crate::daemon_workflows::handle_monitor_reply_send(&state.paths, &params)
         ),
         "monitor_memory_save" | "task_monitor_memory_save" => respond!(
             crate::daemon_workflows::handle_monitor_memory_save(&state.paths, &params)
@@ -1383,6 +1692,45 @@ fn apply_session_routing_to_detail(
     Ok(())
 }
 
+fn apply_session_runtime_turn_state(
+    state: &DaemonState,
+    session_store: &SessionStore,
+    detail: &mut SessionDetailDto,
+) -> Result<()> {
+    let session_uuid = Uuid::parse_str(&detail.session_id).context("invalid session id")?;
+    let record = session_store.load_session(session_uuid)?;
+    detail.active_turn_id = active_turn_id_for_session(state, session_uuid, &record.events);
+    Ok(())
+}
+
+fn active_turn_id_for_session(
+    state: &DaemonState,
+    session_uuid: Uuid,
+    events: &[TranscriptEvent],
+) -> Option<Option<String>> {
+    if let Some(turn_id) = state
+        .turns
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|(turn_id, handle)| {
+            (handle.session_uuid == Some(session_uuid)).then(|| turn_id.clone())
+        })
+    {
+        return Some(Some(turn_id));
+    }
+
+    if events.is_empty()
+        || events
+            .iter()
+            .any(|event| matches!(event, TranscriptEvent::TurnBoundary { .. }))
+    {
+        return Some(None);
+    }
+
+    None
+}
+
 fn handle_load_desktop_pins(state: &DaemonState) -> Result<Value> {
     let pins = load_pin_state(&state.paths.user_config_dir)?;
     Ok(serde_json::to_value(pins)?)
@@ -1486,6 +1834,7 @@ fn handle_load_session_detail(state: &DaemonState, params: &Value) -> Result<Val
     let session_store = SessionStore::from_paths(&state.paths)?;
     let mut detail: SessionDetailDto =
         desktop_api::load_session_detail(&session_store, session_id)?;
+    apply_session_runtime_turn_state(state, &session_store, &mut detail)?;
     apply_session_routing_to_detail(state, &mut detail)?;
     Ok(serde_json::to_value(detail)?)
 }
@@ -1517,6 +1866,7 @@ fn handle_rename_session(state: &DaemonState, params: &Value) -> Result<Value> {
     });
     let mut detail: SessionDetailDto =
         desktop_api::load_session_detail(&session_store, session_id)?;
+    apply_session_runtime_turn_state(state, &session_store, &mut detail)?;
     apply_session_routing_to_detail(state, &mut detail)?;
     Ok(serde_json::to_value(detail)?)
 }
@@ -1530,6 +1880,7 @@ fn handle_delete_session(state: &DaemonState, params: &Value) -> Result<Value> {
     let session_uuid = Uuid::parse_str(session_id).context("invalid sessionId")?;
     let session_store = SessionStore::from_paths(&state.paths)?;
     session_store.delete_session(session_uuid)?;
+    crate::attachment_bridge::cleanup_session_attachments(session_uuid);
     state.publish_event(ServerEnvelope::Event {
         event: "workspace:sessions:changed".to_string(),
         payload: json!({
@@ -1565,6 +1916,7 @@ fn handle_set_session_tags(state: &DaemonState, params: &Value) -> Result<Value>
     });
     let mut detail: SessionDetailDto =
         desktop_api::load_session_detail(&session_store, session_id)?;
+    apply_session_runtime_turn_state(state, &session_store, &mut detail)?;
     apply_session_routing_to_detail(state, &mut detail)?;
     Ok(serde_json::to_value(detail)?)
 }
@@ -1585,6 +1937,7 @@ fn handle_delete_project(state: &DaemonState, params: &Value) -> Result<Value> {
     for session in sessions {
         if desktop_api::session_group_root(&session.cwd) == target {
             session_store.delete_session(session.id)?;
+            crate::attachment_bridge::cleanup_session_attachments(session.id);
             removed += 1;
         }
     }
@@ -2171,18 +2524,33 @@ fn handle_list_provider_models(state: &DaemonState, params: &Value) -> Result<Va
     let provider_id = canonical_desktop_provider_id(requested_provider_id);
     let mut inputs = state.build_runtime_inputs_without_discovery()?;
     let config = state.config.lock().unwrap().clone();
-    if let Ok(client) = proxy_discovery_client(&config) {
-        inputs
-            .providers
-            .discover_and_merge_provider_with_discovery_client(
-                &provider_id,
-                &inputs.auth_store,
-                &client,
-            )?;
-    } else {
-        inputs
-            .providers
-            .discover_and_merge_provider(&provider_id, &inputs.auth_store)?;
+    let needs_fresh_discovery = inputs
+        .stale_discovery_provider_ids
+        .iter()
+        .any(|id| id == &provider_id);
+    if needs_fresh_discovery {
+        let discovery_result = if let Ok(client) = proxy_discovery_client(&config) {
+            inputs
+                .providers
+                .discover_and_merge_provider_with_discovery_client(
+                    &provider_id,
+                    &inputs.auth_store,
+                    &client,
+                )
+        } else {
+            inputs
+                .providers
+                .discover_and_merge_provider(&provider_id, &inputs.auth_store)
+        };
+        match discovery_result {
+            Ok(()) => {}
+            Err(_error) => {
+                // The model picker must stay usable while a provider's live
+                // discovery endpoint is slow or unavailable. Cached/static
+                // models were already applied by
+                // `build_runtime_inputs_without_discovery`.
+            }
+        }
     }
     let entry = inputs
         .providers
@@ -2197,6 +2565,228 @@ fn handle_list_provider_models(state: &DaemonState, params: &Value) -> Result<Va
         .map(|model| model_descriptor_dto(family, model))
         .collect();
     Ok(json!({ "providerId": provider_id, "models": models }))
+}
+
+fn handle_list_media_capabilities(state: &DaemonState, params: &Value) -> Result<Value> {
+    let kind = optional_trimmed_value(params, &["kind"]);
+    let inputs = state.build_runtime_inputs_without_discovery()?;
+    let discovery_cache = state.exact_media_discovery_cache(&inputs);
+    Ok(json!({
+        "capabilities": list_media_capabilities(
+            &inputs.providers,
+            &inputs.auth_store,
+            kind.as_deref(),
+            &discovery_cache
+        )
+    }))
+}
+
+fn list_media_capabilities(
+    providers: &ProviderRegistry,
+    auth_store: &AuthStore,
+    kind: Option<&str>,
+    discovery_cache: &ExactMediaDiscoveryCache,
+) -> Vec<MediaCapabilityInfoDto> {
+    list_exact_media_capabilities_with_cache(providers, auth_store, kind, discovery_cache)
+        .into_iter()
+        .map(media_capability_info_dto)
+        .collect()
+}
+
+fn media_capability_info_dto(capability: MediaCapabilityView) -> MediaCapabilityInfoDto {
+    MediaCapabilityInfoDto {
+        provider_id: capability.provider_id,
+        provider_display_name: capability.provider_display_name,
+        model_id: capability.model_id,
+        model_display_name: capability.model_display_name,
+        kind: capability.kind,
+        operation: capability.operation,
+        adapter: capability.adapter,
+        axes: capability
+            .axes
+            .into_iter()
+            .map(|axis| MediaCapabilityAxisDto {
+                id: axis.id,
+                label: axis.label,
+                role: axis.role.as_str().to_string(),
+                control: serde_json::to_value(axis.control).unwrap_or(Value::Null),
+            })
+            .collect(),
+        status: capability.status,
+        source: capability.source,
+        reason: capability.reason,
+        checked_at_ms: capability.checked_at_ms,
+    }
+}
+
+fn handle_generate_media(state: &DaemonState, params: &Value) -> Result<Value> {
+    let input: GenerateMediaParams =
+        serde_json::from_value(params.clone()).context("invalid media generation params")?;
+    let kind = input.kind.trim().to_lowercase();
+    if kind != "image" && kind != "video" {
+        anyhow::bail!("unsupported media kind `{kind}`");
+    }
+    let prompt = input.prompt.trim().to_string();
+    if prompt.is_empty() {
+        anyhow::bail!("/{kind} requires a prompt");
+    }
+    let count = input.count;
+    generate_media_job(state, &kind, prompt, count)
+}
+
+fn generate_media_job(
+    state: &DaemonState,
+    kind: &str,
+    prompt: String,
+    count: Option<u8>,
+) -> Result<Value> {
+    let config = state.config_snapshot();
+    let selection = media_selection_for_kind(config.media, kind)?;
+    let inputs = state.build_runtime_inputs_without_discovery()?;
+    let discovery_cache = state.exact_media_discovery_cache(&inputs);
+    let generation = generate_exact_media_with_cache(
+        &inputs.providers,
+        &inputs.auth_store,
+        &state.paths.workspace_root,
+        exact_media_generation_request(kind, prompt.clone(), count, selection)?,
+        &discovery_cache,
+    )?;
+    let artifacts = generation
+        .artifacts
+        .into_iter()
+        .map(|artifact| GenerateMediaArtifactResult {
+            artifact_id: artifact.artifact_id,
+            index: artifact.index,
+            path: artifact.path.display().to_string(),
+            mime_type: artifact.mime_type,
+            size: artifact.byte_count,
+            remote_source_url: artifact.remote_source_url,
+        })
+        .collect();
+    let result = GenerateMediaResult {
+        job_id: generation.job_id,
+        requested_count: generation.requested_count,
+        artifacts,
+        kind: generation.kind,
+        provider_id: generation.provider_id,
+        model_id: generation.model_id,
+        status: generation.status,
+        prompt,
+    };
+    Ok(serde_json::to_value(result)?)
+}
+
+fn media_selection_for_kind(media: MediaConfig, kind: &str) -> Result<MediaGenerationConfig> {
+    match kind {
+        "image" => media.image,
+        "video" => media.video,
+        _ => anyhow::bail!("unsupported media kind `{kind}`"),
+    }
+    .ok_or_else(|| anyhow::anyhow!("{kind} media provider/model is not configured"))
+}
+
+fn exact_media_generation_request(
+    kind: &str,
+    prompt: String,
+    count: Option<u8>,
+    selection: MediaGenerationConfig,
+) -> Result<ExactMediaGenerationRequest> {
+    let missing_context = format!("{kind} media provider/model is not configured");
+    // `model_id` carries the logical model; `parameters` carries the axis
+    // selections. The runtime resolves these into a concrete upstream model id,
+    // adapter, and request parameters.
+    Ok(ExactMediaGenerationRequest {
+        kind: kind.to_string(),
+        provider_id: non_empty_media_field(&selection.provider_id, "provider_id")
+            .context(missing_context.clone())?,
+        model_id: non_empty_media_field(&selection.logical_model_id, "logical_model_id")
+            .context(missing_context)?,
+        operation: "generate".to_string(),
+        prompt,
+        image_references: Vec::new(),
+        parameters: selection.selections,
+        count,
+    })
+}
+
+fn non_empty_media_field(value: &str, field: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("media selection `{field}` is empty");
+    }
+    Ok(trimmed.to_string())
+}
+
+fn handle_read_generated_media_preview(state: &DaemonState, params: &Value) -> Result<Value> {
+    let input: GeneratedMediaPreviewParams =
+        serde_json::from_value(params.clone()).context("invalid generated media preview params")?;
+    let session_store = SessionStore::from_paths(&state.paths)?;
+    let cwd = desktop_api::load_session_cwd(&session_store, &input.session_id)?;
+    let result = read_generated_media_preview_by_artifact(&cwd, &input.artifact_id);
+    Ok(serde_json::to_value(result)?)
+}
+
+/// Insert a streaming ticket for `metadata` and render the `available` JSON
+/// response shared by `create_generated_video_access` and
+/// `create_file_media_access` (both mint tickets for the same range handler).
+fn generated_video_ticket_response(
+    state: &DaemonState,
+    metadata: GeneratedVideoAccessMetadata,
+) -> Value {
+    let (token, ticket) = state.insert_generated_video_ticket(metadata);
+    json!({
+        "state": "available",
+        "path": generated_video_ticket_path(&token),
+        "mimeType": ticket.mime_type,
+        "size": ticket.size,
+        "expiresAtMs": ticket.expires_at_ms
+    })
+}
+
+fn handle_create_generated_video_access(state: &DaemonState, params: &Value) -> Result<Value> {
+    let input: GeneratedVideoAccessParams =
+        serde_json::from_value(params.clone()).context("invalid generated video access params")?;
+    let session_store = SessionStore::from_paths(&state.paths)?;
+    let cwd = desktop_api::load_session_cwd(&session_store, &input.session_id)?;
+    let result = generated_video_access_metadata_by_artifact(&cwd, &input.artifact_id);
+    let GeneratedVideoAccessMetadataResult::Available(metadata) = result else {
+        return Ok(match result {
+            GeneratedVideoAccessMetadataResult::Missing => json!({ "state": "missing" }),
+            GeneratedVideoAccessMetadataResult::Unsupported => json!({ "state": "unsupported" }),
+            GeneratedVideoAccessMetadataResult::Available(_) => unreachable!(),
+        });
+    };
+    Ok(generated_video_ticket_response(state, metadata))
+}
+
+fn handle_create_file_media_access(state: &DaemonState, params: &Value) -> Result<Value> {
+    let raw_path = params
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("missing path"))?;
+    // Reuse the same allowed-roots + canonicalization check read_file uses, so
+    // a ticket can never point outside the workspace. Any failure (escape,
+    // nonexistent, not absolute) collapses to "missing".
+    let canonical = match crate::daemon_files::validate_path(state, raw_path) {
+        Ok(path) => path,
+        Err(_) => return Ok(json!({ "state": "missing" })),
+    };
+    let metadata = match std::fs::metadata(&canonical) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        _ => return Ok(json!({ "state": "missing" })),
+    };
+    let Some(mime_type) = file_media_mime_type(&canonical) else {
+        return Ok(json!({ "state": "unsupported" }));
+    };
+    Ok(generated_video_ticket_response(
+        state,
+        GeneratedVideoAccessMetadata {
+            path: canonical,
+            mime_type: mime_type.to_string(),
+            byte_count: metadata.len(),
+            remote_source_url: None,
+        },
+    ))
 }
 
 const DEFAULT_REALTIME_MODEL: &str = "gpt-realtime-2";
@@ -2576,6 +3166,14 @@ fn handle_update_config(state: &DaemonState, params: &Value) -> Result<Value> {
                     Value::String(s) if s.trim().is_empty() => None,
                     Value::String(s) => Some(s.clone()),
                     _ => anyhow::bail!("openaiBaseUrl must be string or null"),
+                };
+            }
+            "media" => {
+                guard.media = if value.is_null() {
+                    MediaConfig::default()
+                } else {
+                    serde_json::from_value(value.clone())
+                        .context("media must be an object with image and video settings")?
                 };
             }
             other => anyhow::bail!("update_config: unknown key `{other}`"),
@@ -3443,6 +4041,47 @@ fn arm_disconnect_cancel_watchdog(state: Arc<DaemonState>) {
 
 const CANCELLED_TURN_MESSAGE: &str = "Interrupted by user.";
 
+fn append_turn_boundary(
+    session_store: &SessionStore,
+    session_uuid: Uuid,
+    turn_id: &str,
+    state: TurnBoundaryState,
+) -> Result<()> {
+    session_store.append_event(
+        session_uuid,
+        TranscriptEvent::TurnBoundary {
+            turn_id: turn_id.to_string(),
+            state,
+        },
+    )
+}
+
+fn append_turn_started(
+    session_store: &SessionStore,
+    session_uuid: Uuid,
+    turn_id: &str,
+) -> Result<()> {
+    append_turn_boundary(
+        session_store,
+        session_uuid,
+        turn_id,
+        TurnBoundaryState::Started,
+    )
+}
+
+fn append_turn_finished(
+    session_store: &SessionStore,
+    session_uuid: Uuid,
+    turn_id: &str,
+) -> Result<()> {
+    append_turn_boundary(
+        session_store,
+        session_uuid,
+        turn_id,
+        TurnBoundaryState::Finished,
+    )
+}
+
 fn report_cancelled_turn(
     state: &DaemonState,
     session_uuid: Uuid,
@@ -3460,6 +4099,7 @@ fn report_cancelled_turn(
     }
     let session_store = SessionStore::from_paths(&state.paths)?;
     if !user_prompt_persisted.swap(true, Ordering::SeqCst) {
+        append_turn_started(&session_store, session_uuid, turn_id)?;
         session_store.append_event(
             session_uuid,
             TranscriptEvent::UserMessage {
@@ -3477,6 +4117,7 @@ fn report_cancelled_turn(
             actor: None,
         },
     )?;
+    append_turn_finished(&session_store, session_uuid, turn_id)?;
     publish_turn_error_event(
         state,
         channel,
@@ -3794,6 +4435,11 @@ fn turn_browser_tab_context(
     state: &DaemonState,
     browser_root_session_id: &str,
 ) -> crate::daemon_browser::BrowserCurrentTabContext {
+    // Reconcile user-opened native tabs into the registry first, so the per-turn
+    // browser status reflects a page the user opened without the agent (#649).
+    state
+        .browsers
+        .sync_native_tabs(&state.event_sender(), browser_root_session_id, 960, 720);
     let primary = state.browsers.current_tab_context(browser_root_session_id);
     if primary.has_active_tab() {
         return primary;
@@ -3806,6 +4452,251 @@ fn turn_browser_tab_context(
         cli
     } else {
         primary
+    }
+}
+
+const MONITOR_REPLY_ACTION_PROMPT_SCOPE: &str = "monitor-reply-action";
+const MONITOR_ACTION_PROMPT_PREFIX: &str = "Act on monitored task ";
+
+#[derive(Clone, Debug)]
+struct MonitorReplyTurnScope {
+    task_id: String,
+    session_id: String,
+    turn_id: String,
+    prompt_tool_scope: &'static str,
+}
+
+fn resolve_monitor_reply_turn_scope(
+    state: &DaemonState,
+    params: &Value,
+    message: &str,
+    session_id: &str,
+    turn_id: &str,
+) -> Result<Option<MonitorReplyTurnScope>> {
+    let Some(prompt_task_id) = parse_monitor_action_prompt_task_id(message) else {
+        if monitor_action_task_id_param(params).is_some() {
+            anyhow::bail!("monitorActionTaskId requires a monitor action prompt");
+        }
+        return resolve_existing_monitor_reply_session_scope(state, session_id, turn_id);
+    };
+    let Some(explicit_task_id) = monitor_action_task_id_param(params) else {
+        anyhow::bail!("human-gated monitor action prompt requires matching monitorActionTaskId");
+    };
+    if explicit_task_id != prompt_task_id {
+        anyhow::bail!(
+            "monitorActionTaskId `{explicit_task_id}` does not match prompt task `{prompt_task_id}`"
+        );
+    }
+
+    let task = load_monitor_task_for_scope(&state.paths, &prompt_task_id)?;
+    if !monitor_task_is_human_gated(&task) {
+        return Ok(None);
+    }
+    if !monitor_task_has_delivery_target(&task) {
+        anyhow::bail!("monitor task `{prompt_task_id}` is missing a source delivery target");
+    }
+    state
+        .monitor_reply_sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.to_string(), prompt_task_id.clone());
+
+    Ok(Some(MonitorReplyTurnScope {
+        task_id: prompt_task_id,
+        session_id: session_id.to_string(),
+        turn_id: turn_id.to_string(),
+        prompt_tool_scope: MONITOR_REPLY_ACTION_PROMPT_SCOPE,
+    }))
+}
+
+fn resolve_existing_monitor_reply_session_scope(
+    state: &DaemonState,
+    session_id: &str,
+    turn_id: &str,
+) -> Result<Option<MonitorReplyTurnScope>> {
+    let mut scoped_task_id = state
+        .monitor_reply_sessions
+        .lock()
+        .unwrap()
+        .get(session_id)
+        .cloned();
+    if scoped_task_id.is_none() {
+        scoped_task_id = recover_monitor_reply_task_id_from_transcript(state, session_id)?;
+        if let Some(task_id) = &scoped_task_id {
+            state
+                .monitor_reply_sessions
+                .lock()
+                .unwrap()
+                .insert(session_id.to_string(), task_id.clone());
+        }
+    }
+    let Some(task_id) = scoped_task_id else {
+        return Ok(None);
+    };
+
+    let task = match load_monitor_task_for_scope(&state.paths, &task_id) {
+        Ok(task) => task,
+        Err(_) => {
+            state
+                .monitor_reply_sessions
+                .lock()
+                .unwrap()
+                .remove(session_id);
+            return Ok(None);
+        }
+    };
+    if monitor_task_is_terminal(&task) || !monitor_task_is_human_gated(&task) {
+        state
+            .monitor_reply_sessions
+            .lock()
+            .unwrap()
+            .remove(session_id);
+        return Ok(None);
+    }
+    if !monitor_task_has_delivery_target(&task) {
+        anyhow::bail!("monitor task `{task_id}` is missing a source delivery target");
+    }
+
+    Ok(Some(MonitorReplyTurnScope {
+        task_id,
+        session_id: session_id.to_string(),
+        turn_id: turn_id.to_string(),
+        prompt_tool_scope: MONITOR_REPLY_ACTION_PROMPT_SCOPE,
+    }))
+}
+
+fn recover_monitor_reply_task_id_from_transcript(
+    state: &DaemonState,
+    session_id: &str,
+) -> Result<Option<String>> {
+    let Ok(session_uuid) = Uuid::parse_str(session_id) else {
+        return Ok(None);
+    };
+    let Ok(session_store) = SessionStore::from_paths(&state.paths) else {
+        return Ok(None);
+    };
+    let Ok(record) = session_store.load_session(session_uuid) else {
+        return Ok(None);
+    };
+
+    Ok(record.events.iter().rev().find_map(|event| {
+        let TranscriptEvent::UserMessage { text, .. } = event else {
+            return None;
+        };
+        parse_monitor_action_prompt_task_id(text)
+    }))
+}
+
+fn parse_monitor_action_prompt_task_id(message: &str) -> Option<String> {
+    let first_line = message.lines().next()?.trim();
+    let rest = first_line.strip_prefix(MONITOR_ACTION_PROMPT_PREFIX)?;
+    let task_id = rest.split_once(':').map(|(id, _)| id).unwrap_or(rest);
+    non_empty_str(task_id).map(ToString::to_string)
+}
+
+fn monitor_action_task_id_param(params: &Value) -> Option<String> {
+    params
+        .get("monitorActionTaskId")
+        .or_else(|| params.get("monitor_action_task_id"))
+        .and_then(Value::as_str)
+        .and_then(non_empty_str)
+        .map(ToString::to_string)
+}
+
+fn load_monitor_task_for_scope(paths: &ConfigPaths, task_id: &str) -> Result<Value> {
+    let path = monitor_tasks_path_for_scope(paths);
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let store: Value = serde_json::from_str(&raw)
+        .with_context(|| format!("invalid monitor task store {}", path.display()))?;
+    store
+        .get("tasks")
+        .and_then(Value::as_array)
+        .and_then(|tasks| {
+            tasks.iter().find(|task| {
+                task_string(task, &["task_id", "taskId", "id"]).as_deref() == Some(task_id)
+            })
+        })
+        .cloned()
+        .with_context(|| format!("monitor task `{task_id}` not found"))
+}
+
+fn monitor_tasks_path_for_scope(paths: &ConfigPaths) -> std::path::PathBuf {
+    paths
+        .workspace_config_dir
+        .join("runtime")
+        .join("claude_workflow")
+        .join("monitor_tasks.json")
+}
+
+fn monitor_task_is_human_gated(task: &Value) -> bool {
+    let Some(metadata) = task.get("metadata").and_then(Value::as_object) else {
+        return false;
+    };
+    let policy = metadata
+        .get("completion_policy")
+        .or_else(|| metadata.get("completionPolicy"));
+    let mode = policy.and_then(|policy| {
+        policy
+            .get("mode")
+            .and_then(Value::as_str)
+            .or_else(|| policy.as_str())
+    });
+    matches!(mode, Some("draft_then_approve" | "send_to_source"))
+        || policy
+            .and_then(|policy| {
+                policy
+                    .get("requires_human_approval")
+                    .or_else(|| policy.get("requiresHumanApproval"))
+                    .and_then(Value::as_bool)
+            })
+            .unwrap_or(false)
+        || monitor_task_has_delivery_target(task)
+}
+
+fn monitor_task_has_delivery_target(task: &Value) -> bool {
+    task.pointer("/metadata/source_context/delivery_target/chat_id")
+        .or_else(|| task.pointer("/metadata/sourceContext/deliveryTarget/chatId"))
+        .or_else(|| task.pointer("/metadata/sourceContext/deliveryTarget/chat_id"))
+        .or_else(|| task.pointer("/metadata/source_context/deliveryTarget/chatId"))
+        .and_then(value_to_non_empty_string)
+        .is_some()
+        || task
+            .pointer("/metadata/monitor_connector")
+            .or_else(|| task.pointer("/metadata/monitorConnector"))
+            .and_then(Value::as_str)
+            .is_some_and(|connector| connector.contains("telegram"))
+            && task
+                .pointer("/metadata/chat_id")
+                .or_else(|| task.pointer("/metadata/chatId"))
+                .and_then(value_to_non_empty_string)
+                .is_some()
+}
+
+fn monitor_task_is_terminal(task: &Value) -> bool {
+    matches!(
+        task.get("status").and_then(Value::as_str),
+        Some("completed") | Some("cancelled")
+    )
+}
+
+fn task_string(task: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| task.get(*key).and_then(Value::as_str))
+        .and_then(non_empty_str)
+        .map(ToString::to_string)
+}
+
+fn non_empty_str(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn value_to_non_empty_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => non_empty_str(value).map(ToString::to_string),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
     }
 }
 
@@ -3856,6 +4747,8 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             }
         }
     };
+    let monitor_reply_scope =
+        resolve_monitor_reply_turn_scope(&state, &params, &message, &session_id, &turn_id)?;
 
     let pending: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<PermissionPromptAction>>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -3914,6 +4807,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let turn_options_for_thread = turn_options.clone();
     let turn_mode_for_thread = turn_mode;
     let staged_attachments_for_thread = staged_attachments.clone();
+    let monitor_reply_scope_for_thread = monitor_reply_scope.clone();
     std::thread::spawn(move || {
         setup_state.publish_event(ServerEnvelope::Event {
             event: channel_thread.clone(),
@@ -4023,6 +4917,13 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         }
         let cfg_for_turn = setup_state.config.lock().unwrap().clone();
         let mut app_state = AppState::from_session_record(cfg_for_turn.clone(), record);
+        if let Some(scope) = &monitor_reply_scope_for_thread {
+            app_state.set_monitor_reply_scope_for_turn(
+                scope.task_id.clone(),
+                scope.session_id.clone(),
+                scope.turn_id.clone(),
+            );
+        }
         // Issue #560: reconcile the model's view of the browser with the real
         // tab registry every turn, instead of letting it trust stale
         // `connected:true` tool output replayed from the transcript.
@@ -4093,6 +4994,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             setup_state.turns.lock().unwrap().remove(&turn_id_thread);
             return;
         }
+        app_state.set_exact_media_discovery_cache(setup_state.exact_media_discovery_cache(&inputs));
         let runner = crate::runner_selection::select_tool_runner(
             &cfg_for_turn,
             &inputs.resources,
@@ -4134,10 +5036,35 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 .append_event(session_uuid, app_state.snapshot_event());
         }
 
+        // Materialize uploaded attachments to agent-readable temp paths and
+        // build the model-facing message that references them. The persisted
+        // transcript event below keeps the original text so the UI is
+        // unchanged; `model_input` must be used at BOTH push_message and the
+        // turn call so `transcript_to_items` dedups to a single user message.
+        // `push_message` stores `model_input` in the in-memory `app_state`, so
+        // the path-annotated text (not the UI text) is what later continuation
+        // turns re-send as history — intentional and benign: the `/tmp` paths
+        // are deterministic and never rendered in the UI, which always replays
+        // the original `UserMessage` event.
+        let materialized = crate::attachment_bridge::materialize_attachments(
+            &inputs.session_store,
+            session_uuid,
+            &staged_attachments_for_thread,
+        );
+        let model_input =
+            crate::attachment_bridge::build_model_input(&message_for_thread, &materialized);
+
         // Persist the user message before the turn starts so a crash
         // doesn't silently drop it.
-        app_state.push_message(MessageRole::User, message_for_thread.clone());
+        app_state.push_message(MessageRole::User, model_input.clone());
         if !user_prompt_persisted_thread.swap(true, Ordering::SeqCst) {
+            let _ = inputs.session_store.append_event(
+                session_uuid,
+                TranscriptEvent::TurnBoundary {
+                    turn_id: turn_id_thread.clone(),
+                    state: TurnBoundaryState::Started,
+                },
+            );
             let _ = inputs.session_store.append_event(
                 session_uuid,
                 TranscriptEvent::UserMessage {
@@ -4281,6 +5208,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                     attempt,
                     max_attempts,
                     error,
+                    kind,
                 } => {
                     let mut progress = ev_progress.lock().unwrap();
                     let checkpoint = progress
@@ -4298,6 +5226,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         "attempt": attempt,
                         "maxAttempts": max_attempts,
                         "error": error,
+                        "kind": kind.as_str(),
                     })
                 }
             };
@@ -4374,12 +5303,15 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
 
         let mut auth_store = inputs.auth_store.clone();
         let outcome = with_user_question_prompt_handler(on_user_question, || {
-            execute_user_turn_streaming_with_permissions_and_cancel(
+            execute_user_turn_streaming_with_prompt_tools_and_cancel(
                 &mut app_state,
                 &inputs.resources,
                 &inputs.providers,
                 &mut auth_store,
-                &message_for_thread,
+                &model_input,
+                monitor_reply_scope_for_thread
+                    .as_ref()
+                    .map(|scope| scope.prompt_tool_scope),
                 None,
                 &cancel,
                 on_event,
@@ -4429,6 +5361,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         trace,
                     );
                 }
+                let _ = append_turn_finished(&inputs.session_store, session_uuid, &turn_id_thread);
                 let _ = inputs
                     .session_store
                     .append_event(session_uuid, app_state.snapshot_event());
@@ -4474,6 +5407,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         actor: Some(stream_actor.clone()),
                     },
                 );
+                let _ = append_turn_finished(&inputs.session_store, session_uuid, &turn_id_thread);
                 publish_turn_error_event(
                     &setup_state,
                     &channel_thread,
@@ -4781,6 +5715,46 @@ async fn start_connector_setup_turn(state: Arc<DaemonState>, params: Value) -> R
             payload: json!({"type": "turn-start", "turnId": turn_id_thread.clone()}),
         });
 
+        #[cfg(unix)]
+        if crate::daemon_wechat_browser_setup::connect_args_are_wechat(&connect_args) {
+            let outcome = crate::daemon_wechat_browser_setup::execute_wechat_setup(
+                setup_state.clone(),
+                channel_thread.clone(),
+                turn_id_thread.clone(),
+                connect_args.clone(),
+                next_req_id.clone(),
+                pending_questions.clone(),
+                cancel_thread.clone(),
+            );
+            match outcome {
+                Ok(assistant_text) => {
+                    setup_state.publish_event(ServerEnvelope::Event {
+                        event: channel_thread.clone(),
+                        payload: json!({
+                            "type": "turn-complete",
+                            "turnId": turn_id_thread.clone(),
+                            "assistantText": assistant_text,
+                        }),
+                    });
+                }
+                Err(error) => {
+                    if !(cancel_thread.is_cancelled()
+                        && cancel_reported_thread.load(Ordering::SeqCst))
+                    {
+                        publish_sessionless_turn_error_event(
+                            &setup_state,
+                            &channel_thread,
+                            &turn_id_thread,
+                            format!("{error:#}"),
+                            None,
+                        );
+                    }
+                }
+            }
+            setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+            return;
+        }
+
         if crate::daemon_gcal_browser_setup::connect_args_are_gcal_browser(&connect_args) {
             let outcome = crate::daemon_gcal_browser_setup::execute_gcal_browser_setup(
                 setup_state.clone(),
@@ -5076,6 +6050,9 @@ fn publish_sessionless_turn_error_event(
 ///     cryptic transport-level message.
 ///   * `cancelled` — agent loop bailed because `CancelToken::cancel`
 ///     fired. Mirrors the bail string `"cancelled"`.
+///   * `model_gateway_unavailable` — the OpenAI-compatible model endpoint
+///     was unreachable or reset the TCP connection before returning a
+///     response. The raw transport chain remains in `errorRaw`.
 ///   * `provider_stream_closed` — provider SSE closed before the OpenAI
 ///     Responses stream emitted `response.completed`.
 ///   * `other` — anything we haven't classified.
@@ -5083,6 +6060,21 @@ fn classify_turn_error(err: &anyhow::Error) -> (String, &'static str) {
     // anyhow walks the chain via Display when you `format!("{:#}", err)`
     let chain = format!("{err:#}");
     let lower = chain.to_ascii_lowercase();
+    if lower.contains("failed to parse sse response")
+        || lower.contains("stream closed before response.completed")
+        || lower.contains("idle timeout waiting for sse")
+    {
+        return (chain, "provider_stream_closed");
+    }
+    if is_model_gateway_transport_error(&lower) {
+        return (
+            "the model gateway is temporarily unavailable or reset the connection before \
+             responding. retry in a few seconds; if it keeps failing, check the model gateway \
+             status or switch models."
+                .to_string(),
+            "model_gateway_unavailable",
+        );
+    }
     if lower.contains("tcp connect error")
         || lower.contains("connection refused")
         || lower.contains("connect: connection refused")
@@ -5098,13 +6090,22 @@ fn classify_turn_error(err: &anyhow::Error) -> (String, &'static str) {
     if lower == "cancelled" || lower.contains(": cancelled") {
         return (chain, "cancelled");
     }
-    if lower.contains("failed to parse sse response")
-        || lower.contains("stream closed before response.completed")
-        || lower.contains("idle timeout waiting for sse")
-    {
-        return (chain, "provider_stream_closed");
-    }
     (chain, "other")
+}
+
+fn is_model_gateway_transport_error(lower: &str) -> bool {
+    let is_model_endpoint = lower.contains("/v1/responses") || lower.contains("/chat/completions");
+    if !is_model_endpoint {
+        return false;
+    }
+    lower.contains("error sending request")
+        || lower.contains("connection reset")
+        || lower.contains("connection refused")
+        || lower.contains("connect")
+        || lower.contains("dns")
+        || lower.contains("tls")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -5360,35 +6361,47 @@ fn apply_daemon_yolo_mode(app_state: &mut AppState) {
 mod tests {
     use super::{
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
-        browser_permission_payload_json, cancel_all_active_turns, connector_setup_connect_args,
-        connector_setup_id, desktop_latency_ms, handle_create_openai_realtime_client_secret,
-        handle_create_session, handle_import_external_credential,
-        handle_list_lambda_skill_libraries, handle_list_permissions, handle_list_provider_models,
+        browser_permission_payload_json, browser_status_for_turn, cancel_all_active_turns,
+        connector_setup_connect_args, connector_setup_id, daemon_now_ms, desktop_latency_ms,
+        file_media_mime_type, generated_video_handler, handle_create_file_media_access,
+        handle_create_generated_video_access, handle_create_openai_realtime_client_secret,
+        handle_create_session, handle_generate_media, handle_import_external_credential,
+        handle_list_lambda_skill_libraries, handle_list_media_capabilities,
+        handle_list_permissions, handle_list_provider_models, handle_load_session_detail,
         handle_local_model_status, handle_login_with_api_key, handle_logout_provider,
-        handle_remove_lambda_skill_library, handle_save_lambda_skill_library,
-        handle_save_permissions, handle_save_proxy_settings, handle_set_lambda_skill_approval,
-        handle_set_lambda_skill_enabled, model_descriptor_dto, permission_review_payload_json,
+        handle_read_generated_media_preview, handle_remove_lambda_skill_library,
+        handle_save_lambda_skill_library, handle_save_permissions, handle_save_proxy_settings,
+        handle_set_lambda_skill_approval, handle_set_lambda_skill_enabled, handle_update_config,
+        model_descriptor_dto, parse_single_byte_range, permission_review_payload_json,
         realtime_session_config_from_params, report_cancelled_turn, requires_explicit_subscription,
-        browser_status_for_turn, resolve_create_session_model_id, run_off_runtime,
-        session_used_browser_tool, start_connector_setup_turn, turn_browser_tab_context,
-        CancelToken, ConnectionGuard, DaemonState, ServerEnvelope, TurnHandle, TurnProgress,
-        TurnRequestOptions,
+        resolve_create_session_model_id, run_off_runtime, session_used_browser_tool,
+        start_connector_setup_turn, turn_browser_tab_context, CancelToken, ConnectionGuard,
+        DaemonState, GenerateMediaArtifactResult, GenerateMediaResult, GeneratedVideoRangeError,
+        GeneratedVideoTicket, ServerEnvelope, TurnHandle, TurnProgress, TurnRequestOptions,
+    };
+    use axum::{
+        extract::{Path as AxumPath, State},
+        http::{header, HeaderMap, HeaderValue, StatusCode},
+        response::IntoResponse,
     };
     use indexmap::IndexMap;
     use puffer_config::{
-        ensure_workspace_dirs, load_config, ConfigPaths, ProxyConfig, ProxyEndpoint, ProxyScheme,
-        PufferConfig,
+        ensure_workspace_dirs, load_config, ConfigPaths, MediaGenerationConfig, ProxyConfig,
+        ProxyEndpoint, ProxyScheme, PufferConfig,
     };
     use puffer_core::{AppState, ModelPreferenceFamily, ToolCallRequest, ToolInvocation};
     use puffer_provider_registry::{
         AuthStore, Modality, ModelDescriptor, ProviderDescriptor, ProviderRegistry,
     };
-    use puffer_session_store::{SessionMetadata, SessionStore, TranscriptEvent};
-    use serde_json::json;
-    use std::collections::HashMap;
+    use puffer_session_store::{SessionMetadata, SessionStore, TranscriptEvent, TurnBoundaryState};
+    use serde_json::{json, Value};
+    use std::collections::{BTreeMap, HashMap};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::thread;
     use uuid::Uuid;
 
     fn discovery_cache_env_lock() -> MutexGuard<'static, ()> {
@@ -5396,6 +6409,43 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn generate_media_result_serializes_artifacts_array() {
+        let result = GenerateMediaResult {
+            job_id: "job-1".to_string(),
+            requested_count: 2,
+            artifacts: vec![
+                GenerateMediaArtifactResult {
+                    artifact_id: "artifact-1".to_string(),
+                    index: 0,
+                    path: "/tmp/image-1.png".to_string(),
+                    mime_type: "image/png".to_string(),
+                    size: 10,
+                    remote_source_url: None,
+                },
+                GenerateMediaArtifactResult {
+                    artifact_id: "artifact-2".to_string(),
+                    index: 1,
+                    path: "/tmp/image-2.png".to_string(),
+                    mime_type: "image/png".to_string(),
+                    size: 11,
+                    remote_source_url: None,
+                },
+            ],
+            kind: "image".to_string(),
+            provider_id: "openai".to_string(),
+            model_id: "gpt-image-1".to_string(),
+            status: "succeeded".to_string(),
+            prompt: "draw".to_string(),
+        };
+        let value = serde_json::to_value(result).unwrap();
+
+        assert!(value.get("artifactId").is_none());
+        assert!(value.get("path").is_none());
+        assert_eq!(value["requestedCount"], 2);
+        assert_eq!(value["artifacts"].as_array().unwrap().len(), 2);
     }
 
     #[test]
@@ -5516,7 +6566,8 @@ mod tests {
     }
 
     struct PufferHomeEnvGuard {
-        previous: Option<std::ffi::OsString>,
+        previous_home: Option<std::ffi::OsString>,
+        previous_puffer_home: Option<std::ffi::OsString>,
         _temp: tempfile::TempDir,
         _lock: MutexGuard<'static, ()>,
     }
@@ -5524,11 +6575,14 @@ mod tests {
     impl PufferHomeEnvGuard {
         fn set() -> Self {
             let lock = discovery_cache_env_lock();
-            let previous = std::env::var_os("PUFFER_HOME");
+            let previous_home = std::env::var_os("HOME");
+            let previous_puffer_home = std::env::var_os("PUFFER_HOME");
             let temp = tempfile::tempdir().expect("temp puffer home");
+            std::env::set_var("HOME", temp.path());
             std::env::set_var("PUFFER_HOME", temp.path());
             Self {
-                previous,
+                previous_home,
+                previous_puffer_home,
                 _temp: temp,
                 _lock: lock,
             }
@@ -5537,11 +6591,288 @@ mod tests {
 
     impl Drop for PufferHomeEnvGuard {
         fn drop(&mut self) {
-            match self.previous.as_ref() {
+            match self.previous_home.as_ref() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.previous_puffer_home.as_ref() {
                 Some(value) => std::env::set_var("PUFFER_HOME", value),
                 None => std::env::remove_var("PUFFER_HOME"),
             }
         }
+    }
+
+    struct OpenAiEnvGuard {
+        openai_api_key: Option<std::ffi::OsString>,
+        puffer_openai_api_key: Option<std::ffi::OsString>,
+    }
+
+    impl OpenAiEnvGuard {
+        fn set_puffer_key(value: &str) -> Self {
+            let guard = Self {
+                openai_api_key: std::env::var_os("OPENAI_API_KEY"),
+                puffer_openai_api_key: std::env::var_os("PUFFER_OPENAI_API_KEY"),
+            };
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::set_var("PUFFER_OPENAI_API_KEY", value);
+            guard
+        }
+    }
+
+    impl Drop for OpenAiEnvGuard {
+        fn drop(&mut self) {
+            match self.openai_api_key.as_ref() {
+                Some(value) => std::env::set_var("OPENAI_API_KEY", value),
+                None => std::env::remove_var("OPENAI_API_KEY"),
+            }
+            match self.puffer_openai_api_key.as_ref() {
+                Some(value) => std::env::set_var("PUFFER_OPENAI_API_KEY", value),
+                None => std::env::remove_var("PUFFER_OPENAI_API_KEY"),
+            }
+        }
+    }
+
+    fn spawn_image_generation_server() -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let address = listener.local_addr().expect("address");
+        let handle = thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if started.elapsed() > std::time::Duration::from_secs(2) {
+                            return String::new();
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("generation request: {error}"),
+                }
+            };
+            let mut buffer = [0_u8; 8192];
+            let size = stream.read(&mut buffer).expect("read request");
+            let request_text = String::from_utf8_lossy(&buffer[..size]).to_string();
+            let body = json!({
+                "data": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("response");
+            request_text
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn spawn_discovered_chat_image_generation_server() -> (String, thread::JoinHandle<Vec<String>>)
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let address = listener.local_addr().expect("address");
+        let handle = thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let mut requests = Vec::new();
+            while requests.len() < 2 {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buffer = [0_u8; 8192];
+                        let size = stream.read(&mut buffer).expect("read request");
+                        let request_text = String::from_utf8_lossy(&buffer[..size]).to_string();
+                        let body = if request_text.starts_with("GET /models") {
+                            json!({
+                                "data": [{
+                                    "id": "openrouter/image-chat",
+                                    "name": "Image Chat",
+                                    "architecture": {"output_modalities": ["text", "image"]}
+                                }]
+                            })
+                            .to_string()
+                        } else {
+                            json!({
+                                "choices": [{
+                                    "message": {
+                                        "images": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
+                                    }
+                                }]
+                            })
+                            .to_string()
+                        };
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        stream.write_all(response.as_bytes()).expect("response");
+                        requests.push(request_text);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if started.elapsed() > std::time::Duration::from_secs(2) {
+                            return requests;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("media request: {error}"),
+                }
+            }
+            requests
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn write_openrouter_resource_override(paths: &ConfigPaths, base_url: &str) {
+        let providers_dir = paths.workspace_config_dir.join("resources/providers");
+        std::fs::create_dir_all(&providers_dir).expect("provider resources dir");
+        std::fs::write(
+            providers_dir.join("openrouter.yaml"),
+            format!(
+                r#"id: openrouter
+display_name: OpenRouter
+base_url: {base_url}
+default_api: openai-completions
+auth_modes:
+  - api_key
+media:
+  image:
+    discovery:
+      adapter: trusted_image_output
+      path: /models
+      query:
+        output_modalities: image
+    execution:
+      adapter: chat_image_output
+      path: /chat/completions
+models:
+  - id: auto
+    display_name: Auto
+    provider: openrouter
+    api: openai-completions
+    context_window: 200000
+    max_output_tokens: 16384
+"#
+            ),
+        )
+        .expect("write openrouter override");
+    }
+
+    fn write_replicate_video_resource_override(paths: &ConfigPaths) {
+        let providers_dir = paths.workspace_config_dir.join("resources/providers");
+        std::fs::create_dir_all(&providers_dir).expect("provider resources dir");
+        std::fs::write(
+            providers_dir.join("replicate.yaml"),
+            r#"id: replicate
+display_name: Replicate
+base_url: https://api.replicate.com
+default_api: openai-completions
+auth_modes:
+  - api_key
+media:
+  video:
+    discovery:
+      adapter: static
+    execution:
+      adapter: replicate_video
+      path: /v1/predictions
+    models:
+      - id: owner/model-version
+        display_name: Video Model
+        operations:
+          - generate
+        axes:
+          - { id: aspect_ratio, label: Aspect ratio, role: param, control: !enum { values: ["16:9", "9:16"], default: "16:9" }, request_field: aspect_ratio }
+          - { id: duration_seconds, label: Duration, role: param, control: !enum { values: ["5", "8"], default: "5" }, request_field: duration }
+        variants: { model_id: owner/model-version }
+models: []
+"#,
+        )
+        .expect("write replicate override");
+    }
+
+    fn write_relaydance_video_resource_override(paths: &ConfigPaths) {
+        let providers_dir = paths.workspace_config_dir.join("resources/providers");
+        std::fs::create_dir_all(&providers_dir).expect("provider resources dir");
+        std::fs::write(
+            providers_dir.join("relaydance.yaml"),
+            r#"id: relaydance
+display_name: Relaydance
+base_url: https://relaydance.com
+default_api: openai-completions
+auth_modes:
+  - api_key
+media:
+  video:
+    discovery:
+      adapter: static
+    execution:
+      adapter: relaydance_video
+      path: /v1/video/generations
+    models:
+      - id: doubao-seedance-2-0-720p
+        display_name: Seedance 2.0
+        operations:
+          - generate
+        axes:
+          - { id: duration_seconds, label: Duration, role: param, control: !enum { values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"], default: "5" }, request_field: seconds }
+          - { id: resolution, label: Resolution, role: param, control: !enum { values: ["480p", "720p", "1080p"], default: "720p" }, request_field: metadata.resolution }
+          - { id: aspect_ratio, label: Aspect ratio, role: param, control: !enum { values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"], default: "16:9" }, request_field: metadata.ratio }
+        variants: { model_id: doubao-seedance-2-0-720p }
+models: []
+"#,
+        )
+        .expect("write relaydance override");
+    }
+
+    fn daemon_state_with_relaydance_video_capability(
+    ) -> (PufferHomeEnvGuard, tempfile::TempDir, DaemonState) {
+        let home_guard = PufferHomeEnvGuard::set();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        write_relaydance_video_resource_override(&paths);
+        let mut auth_store = AuthStore::default();
+        auth_store.set_api_key("relaydance", "sk-test");
+        auth_store
+            .save(&paths.user_config_dir.join("auth.json"))
+            .expect("save auth");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+        (home_guard, temp, state)
+    }
+
+    fn daemon_state_with_replicate_video_capability(
+    ) -> (PufferHomeEnvGuard, tempfile::TempDir, DaemonState) {
+        let home_guard = PufferHomeEnvGuard::set();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        write_replicate_video_resource_override(&paths);
+        let mut auth_store = AuthStore::default();
+        auth_store.set_api_key("replicate", "sk-test");
+        auth_store
+            .save(&paths.user_config_dir.join("auth.json"))
+            .expect("save auth");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+        (home_guard, temp, state)
     }
 
     /// End-to-end through the real `browser_open` RPC handler + a real
@@ -5637,6 +6968,115 @@ mod tests {
             .expect("daemon state")
     }
 
+    fn insert_session_turn(state: &DaemonState, session_id: Uuid, turn_id: &str) {
+        let cancel = CancelToken::new();
+        let mut handle = empty_turn_handle(cancel);
+        handle.session_id = Some(session_id.to_string());
+        handle.session_uuid = Some(session_id);
+        handle.channel = format!("session:{session_id}:event");
+        state
+            .turns
+            .lock()
+            .unwrap()
+            .insert(turn_id.to_string(), handle);
+    }
+
+    #[test]
+    fn load_session_detail_reports_active_turn_from_registry() {
+        let state = test_daemon_state();
+        let session_store = SessionStore::from_paths(&state.paths).unwrap();
+        let session = session_store
+            .create_session(state.cwd_path().to_path_buf())
+            .unwrap();
+        insert_session_turn(&state, session.id, "t-live");
+
+        let detail = handle_load_session_detail(
+            &state,
+            &json!({
+                "sessionId": session.id.to_string(),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(detail.get("activeTurnId"), Some(&json!("t-live")));
+    }
+
+    #[test]
+    fn load_session_detail_does_not_infer_active_turn_from_started_boundary() {
+        let state = test_daemon_state();
+        let session_store = SessionStore::from_paths(&state.paths).unwrap();
+        let session = session_store
+            .create_session(state.cwd_path().to_path_buf())
+            .unwrap();
+        session_store
+            .append_event(
+                session.id,
+                TranscriptEvent::TurnBoundary {
+                    turn_id: "persisted-start-only".to_string(),
+                    state: TurnBoundaryState::Started,
+                },
+            )
+            .unwrap();
+        session_store
+            .append_event(
+                session.id,
+                TranscriptEvent::UserMessage {
+                    text: "hello".to_string(),
+                    attachments: Vec::new(),
+                    actor: None,
+                },
+            )
+            .unwrap();
+
+        let detail = handle_load_session_detail(
+            &state,
+            &json!({
+                "sessionId": session.id.to_string(),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(detail.get("activeTurnId"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn load_session_detail_omits_active_turn_for_legacy_transcript_without_boundaries() {
+        let state = test_daemon_state();
+        let session_store = SessionStore::from_paths(&state.paths).unwrap();
+        let session = session_store
+            .create_session(state.cwd_path().to_path_buf())
+            .unwrap();
+        session_store
+            .append_event(
+                session.id,
+                TranscriptEvent::UserMessage {
+                    text: "legacy prompt".to_string(),
+                    attachments: Vec::new(),
+                    actor: None,
+                },
+            )
+            .unwrap();
+        session_store
+            .append_event(
+                session.id,
+                TranscriptEvent::AssistantMessage {
+                    text: "legacy answer".to_string(),
+                    actor: None,
+                },
+            )
+            .unwrap();
+
+        let detail = handle_load_session_detail(
+            &state,
+            &json!({
+                "sessionId": session.id.to_string(),
+            }),
+        )
+        .unwrap();
+
+        assert!(detail.get("activeTurnId").is_none());
+    }
+
     fn bash_invocation(command: &str) -> TranscriptEvent {
         TranscriptEvent::ToolInvocation {
             call_id: "c1".to_string(),
@@ -5680,11 +7120,13 @@ mod tests {
         assert!(!session_used_browser_tool(&[bash_invocation(
             "git branch --list"
         )]));
-        assert!(!session_used_browser_tool(&[TranscriptEvent::UserMessage {
-            text: "please open the browser".to_string(),
-            attachments: Vec::new(),
-            actor: None,
-        }]));
+        assert!(!session_used_browser_tool(&[
+            TranscriptEvent::UserMessage {
+                text: "please open the browser".to_string(),
+                attachments: Vec::new(),
+                actor: None,
+            }
+        ]));
     }
 
     /// The gate must parse per shell segment: compound/env-prefixed commands
@@ -5771,7 +7213,10 @@ mod tests {
         let live = BrowserCurrentTabContext::from_tab(&live_tab);
         let status =
             browser_status_for_turn(&live, false).expect("live tab injects even without history");
-        assert!(status.contains("https://example.com/cart"), "status: {status}");
+        assert!(
+            status.contains("https://example.com/cart"),
+            "status: {status}"
+        );
     }
 
     /// Core of the client-disconnect watchdog (issue #600): orphaned interactive
@@ -5859,6 +7304,994 @@ mod tests {
         assert!(status["checks"]
             .as_array()
             .is_some_and(|checks| !checks.is_empty()));
+    }
+
+    #[test]
+    fn media_capabilities_handler_returns_openai_image_capability() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let mut auth_store = AuthStore::default();
+        auth_store.set_api_key("codex", "sk-test");
+        auth_store
+            .save(&paths.user_config_dir.join("auth.json"))
+            .expect("save auth");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let response =
+            handle_list_media_capabilities(&state, &json!({"kind": "image"})).expect("response");
+        let capabilities = response["capabilities"].as_array().expect("capabilities");
+        let ids = capabilities
+            .iter()
+            .map(|capability| capability["modelId"].as_str().expect("model id"))
+            .collect::<Vec<_>>();
+
+        assert!(ids.contains(&"gpt-image-1"));
+        assert!(!ids.contains(&"auto"));
+        assert!(capabilities.iter().all(|capability| {
+            capability["providerId"] == "openai"
+                && capability["kind"] == "image"
+                && capability["operation"] == "generate"
+                && capability["adapter"] == "images_json"
+                && capability["status"] == "available"
+        }));
+        let gpt_image = capabilities
+            .iter()
+            .find(|capability| capability["modelId"] == "gpt-image-1")
+            .expect("gpt-image-1 capability");
+        let axes = gpt_image["axes"].as_array().expect("axes");
+        assert!(axes
+            .iter()
+            .all(|axis| axis.get("requestField").is_none() && axis.get("wireType").is_none()));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "mode"
+                && axis["label"] == "Mode"
+                && axis["role"] == "param"
+                && axis["control"]["enum"]["default"] == "1K SD"
+        }));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "ratio"
+                && axis["label"] == "Ratio"
+                && axis["control"]["enum"]["default"] == "Auto"
+        }));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "output"
+                && axis["label"] == "Output"
+                && axis["control"]["range"]["min"] == 1.0
+                && axis["control"]["range"]["max"] == 9.0
+        }));
+    }
+
+    #[test]
+    fn media_capabilities_handler_hides_openai_without_auth_store_even_with_env_key() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let _openai_env_guard = OpenAiEnvGuard::set_puffer_key("sk-test");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let response =
+            handle_list_media_capabilities(&state, &json!({"kind": "image"})).expect("response");
+        let capabilities = response["capabilities"].as_array().expect("capabilities");
+
+        assert!(capabilities.is_empty());
+    }
+
+    #[test]
+    fn media_capabilities_handler_hides_openai_without_auth_store_even_with_codex_file() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let codex_auth_path = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .expect("home")
+            .join(".codex")
+            .join("auth.json");
+        std::fs::create_dir_all(codex_auth_path.parent().expect("codex auth parent"))
+            .expect("codex auth dir");
+        std::fs::write(&codex_auth_path, "{}").expect("codex auth file");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let response =
+            handle_list_media_capabilities(&state, &json!({"kind": "image"})).expect("response");
+        let capabilities = response["capabilities"].as_array().expect("capabilities");
+
+        assert!(capabilities.is_empty());
+    }
+
+    #[test]
+    fn media_capabilities_handler_exposes_worldrouter_image_models() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let mut auth_store = AuthStore::default();
+        auth_store.set_api_key("worldrouter", "sk-test");
+        auth_store
+            .save(&paths.user_config_dir.join("auth.json"))
+            .expect("save auth");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let response =
+            handle_list_media_capabilities(&state, &json!({"kind": "image"})).expect("response");
+        let capabilities = response["capabilities"].as_array().expect("capabilities");
+        let models_by_id = capabilities
+            .iter()
+            .map(|capability| {
+                (
+                    capability["modelId"].as_str().expect("model id"),
+                    capability["adapter"].as_str().expect("adapter"),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(
+            models_by_id,
+            std::collections::BTreeMap::from([
+                ("gemini-2.5-flash-image", "gemini_generate_content"),
+                ("gemini-3-pro-image-preview", "gemini_generate_content"),
+                ("gemini-3.1-flash-image-preview", "gemini_generate_content"),
+                ("gpt-image-2", "images_json"),
+            ])
+        );
+        assert!(capabilities
+            .iter()
+            .all(|capability| capability["status"] == "available"));
+    }
+
+    #[test]
+    fn media_capabilities_handler_returns_connected_static_cloud_image_providers() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let mut auth_store = AuthStore::default();
+        for provider in [
+            "byteplus",
+            "zhipu",
+            "xai",
+            "vercel-ai-gateway",
+            "worldrouter",
+        ] {
+            auth_store.set_api_key(provider, "sk-test");
+        }
+        auth_store
+            .save(&paths.user_config_dir.join("auth.json"))
+            .expect("save auth");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let response =
+            handle_list_media_capabilities(&state, &json!({"kind": "image"})).expect("response");
+        let capabilities = response["capabilities"].as_array().expect("capabilities");
+        let provider_ids = capabilities
+            .iter()
+            .map(|capability| capability["providerId"].as_str().expect("provider id"))
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(provider_ids.contains("byteplus"));
+        assert!(provider_ids.contains("zhipu"));
+        assert!(provider_ids.contains("xai"));
+        assert!(provider_ids.contains("vercel-ai-gateway"));
+        assert!(provider_ids.contains("worldrouter"));
+        assert!(capabilities
+            .iter()
+            .all(|capability| capability["status"] == "available"));
+    }
+
+    #[test]
+    fn daemon_list_media_capabilities_returns_video_capability() {
+        let (_home_guard, _temp, state) = daemon_state_with_replicate_video_capability();
+
+        let response =
+            handle_list_media_capabilities(&state, &json!({"kind": "video"})).expect("response");
+        let capabilities = response["capabilities"].as_array().expect("capabilities");
+
+        let capability = capabilities
+            .iter()
+            .find(|capability| capability["providerId"] == "replicate")
+            .expect("replicate video capability");
+
+        assert_eq!(capability["adapter"], "replicate_video");
+        assert_eq!(capability["status"], "available");
+        assert!(capability.get("parameters").is_none());
+        assert!(capability.get("defaults").is_none());
+
+        let axes = capability["axes"].as_array().expect("axes");
+        assert!(axes
+            .iter()
+            .all(|axis| axis.get("requestField").is_none() && axis.get("wireType").is_none()));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "aspect_ratio"
+                && axis["label"] == "Ratio"
+                && axis["role"] == "param"
+                && axis["control"]["enum"]["default"] == "16:9"
+        }));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "duration_seconds"
+                && axis["label"] == "Duration"
+                && axis["control"]["enum"]["default"] == "5"
+        }));
+    }
+
+    #[test]
+    fn daemon_list_media_capabilities_returns_relaydance_video_capability() {
+        let (_home_guard, _temp, state) = daemon_state_with_relaydance_video_capability();
+
+        let response =
+            handle_list_media_capabilities(&state, &json!({"kind": "video"})).expect("response");
+        let capabilities = response["capabilities"].as_array().expect("capabilities");
+
+        let capability = capabilities
+            .iter()
+            .find(|capability| capability["providerId"] == "relaydance")
+            .expect("relaydance video capability");
+        assert!(capability.get("parameters").is_none());
+        assert!(capability.get("defaults").is_none());
+        let axes = capability["axes"].as_array().expect("axes");
+        assert!(axes
+            .iter()
+            .all(|axis| axis.get("requestField").is_none() && axis.get("wireType").is_none()));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "resolution"
+                && axis["label"] == "Mode"
+                && axis["control"]["enum"]["default"] == "720p"
+        }));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "aspect_ratio"
+                && axis["label"] == "Ratio"
+                && axis["control"]["enum"]["default"] == "16:9"
+        }));
+    }
+
+    #[test]
+    fn daemon_generate_media_requires_available_video_model_setting() {
+        let (_home_guard, _temp, state) = daemon_state_with_replicate_video_capability();
+        {
+            let mut config = state.config.lock().unwrap();
+            config.media.video = Some(MediaGenerationConfig {
+                provider_id: "replicate".to_string(),
+                logical_model_id: "owner/unknown-model".to_string(),
+                selections: BTreeMap::from([
+                    ("aspect_ratio".to_string(), "16:9".to_string()),
+                    ("duration_seconds".to_string(), "5".to_string()),
+                ]),
+            });
+        }
+
+        let error = handle_generate_media(&state, &json!({"kind": "video", "prompt": "animate"}))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("unknown media model"), "{error}");
+    }
+
+    #[test]
+    fn generate_media_rejects_stale_image_config_before_http_request() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let mut auth_store = AuthStore::default();
+        auth_store.set_api_key("openai", "sk-test");
+        auth_store
+            .save(&paths.user_config_dir.join("auth.json"))
+            .expect("save auth");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+        {
+            let mut config = state.config.lock().unwrap();
+            config.openai_base_url = Some("http://127.0.0.1:9".to_string());
+            config.media.image = Some(MediaGenerationConfig {
+                provider_id: "openai".to_string(),
+                logical_model_id: "stale-image".to_string(),
+                selections: BTreeMap::new(),
+            });
+        }
+
+        let error =
+            handle_generate_media(&state, &json!({"kind": "image", "prompt": "draw an icon"}))
+                .expect_err("stale config should fail");
+
+        assert!(error.to_string().contains("stale-image"), "{error}");
+    }
+
+    #[test]
+    fn generate_media_returns_succeeded_image_artifact_metadata() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let (base_url, server) = spawn_image_generation_server();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let mut auth_store = AuthStore::default();
+        auth_store.set_api_key("openai", "sk-test");
+        auth_store
+            .save(&paths.user_config_dir.join("auth.json"))
+            .expect("save auth");
+        let state = DaemonState::load(
+            workspace_root.clone(),
+            paths,
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+        {
+            let mut config = state.config.lock().unwrap();
+            config.openai_base_url = Some(base_url);
+            config.media.image = Some(MediaGenerationConfig {
+                provider_id: "openai".to_string(),
+                logical_model_id: "gpt-image-1".to_string(),
+                selections: BTreeMap::from([
+                    ("mode".to_string(), "1K SD".to_string()),
+                    ("ratio".to_string(), "1:1".to_string()),
+                    ("output".to_string(), "1".to_string()),
+                ]),
+            });
+        }
+
+        let response =
+            handle_generate_media(&state, &json!({"kind": "image", "prompt": "draw an icon"}))
+                .expect("generation response");
+
+        let request_text = server.join().expect("server");
+        assert!(request_text.contains("\"model\":\"gpt-image-1\""));
+        assert!(request_text.contains("\"size\":\"1024x1024\""));
+        assert_eq!(response["status"], "succeeded");
+        assert_eq!(response["providerId"], "openai");
+        assert_eq!(response["modelId"], "gpt-image-1");
+        assert!(response.get("artifactId").is_none());
+        assert!(response.get("path").is_none());
+        assert_eq!(response["requestedCount"], 1);
+        let artifact = &response["artifacts"][0];
+        assert!(artifact["artifactId"].as_str().is_some());
+        let path = artifact["path"].as_str().expect("artifact path");
+        assert!(path.contains(".puffer/media/images"));
+        assert_eq!(std::fs::read(path).expect("artifact bytes"), b"image-bytes");
+        assert!(workspace_root.join(".puffer/media/jobs").is_dir());
+        assert!(workspace_root
+            .join(".puffer/media/artifact-sidecars")
+            .is_dir());
+    }
+
+    fn test_state_with_paths(paths: ConfigPaths) -> DaemonState {
+        DaemonState::load(
+            paths.workspace_root.clone(),
+            paths,
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state")
+    }
+
+    fn write_generated_image_artifact(
+        workspace: &std::path::Path,
+        artifact_id: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) {
+        let image_dir = workspace.join(".puffer/media/images").join(artifact_id);
+        std::fs::create_dir_all(&image_dir).unwrap();
+        let image_path = image_dir.join(filename);
+        std::fs::write(&image_path, bytes).unwrap();
+        let sidecar_dir = workspace.join(".puffer/media/artifact-sidecars");
+        std::fs::create_dir_all(&sidecar_dir).unwrap();
+        std::fs::write(
+            sidecar_dir.join(format!("{artifact_id}.json")),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": artifact_id,
+                "jobId": "job-1",
+                "kind": "image",
+                "path": image_path,
+                "mimeType": "image/jpeg",
+                "byteCount": bytes.len(),
+                "metadata": {},
+                "createdAtMs": 1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_generated_video_artifact(
+        workspace: &std::path::Path,
+        artifact_id: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) -> std::path::PathBuf {
+        let video_dir = workspace.join(".puffer/media/videos").join(artifact_id);
+        std::fs::create_dir_all(&video_dir).unwrap();
+        let video_path = video_dir.join(filename);
+        std::fs::write(&video_path, bytes).unwrap();
+        let sidecar_dir = workspace.join(".puffer/media/artifact-sidecars");
+        std::fs::create_dir_all(&sidecar_dir).unwrap();
+        std::fs::write(
+            sidecar_dir.join(format!("{artifact_id}.json")),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": artifact_id,
+                "jobId": "job-video-1",
+                "kind": "video",
+                "path": video_path,
+                "mimeType": "video/mp4",
+                "byteCount": bytes.len(),
+                "metadata": {},
+                "createdAtMs": 1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        video_path
+    }
+
+    fn write_generated_video_artifact_with_poster(
+        workspace: &std::path::Path,
+        artifact_id: &str,
+        filename: &str,
+        bytes: &[u8],
+        poster_bytes: &[u8],
+    ) {
+        let video_dir = workspace.join(".puffer/media/videos").join(artifact_id);
+        std::fs::create_dir_all(&video_dir).unwrap();
+        let video_path = video_dir.join(filename);
+        std::fs::write(&video_path, bytes).unwrap();
+        let poster_dir = workspace.join(".puffer/media/artifacts").join(artifact_id);
+        std::fs::create_dir_all(&poster_dir).unwrap();
+        let poster_path = poster_dir.join("poster.jpg");
+        std::fs::write(&poster_path, poster_bytes).unwrap();
+        let sidecar_dir = workspace.join(".puffer/media/artifact-sidecars");
+        std::fs::create_dir_all(&sidecar_dir).unwrap();
+        std::fs::write(
+            sidecar_dir.join(format!("{artifact_id}.json")),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": artifact_id,
+                "jobId": "job-video-1",
+                "kind": "video",
+                "path": video_path,
+                "mimeType": "video/mp4",
+                "byteCount": bytes.len(),
+                "metadata": {},
+                "preview": {
+                    "kind": "poster",
+                    "state": "available",
+                    "path": poster_path,
+                    "mimeType": "image/jpeg",
+                    "byteCount": poster_bytes.len()
+                },
+                "createdAtMs": 1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn read_generated_media_preview_resolves_session_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        let session_store = SessionStore::from_paths(&paths).unwrap();
+        let workspace = temp.path().join("other-workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let session = session_store.create_session(workspace.clone()).unwrap();
+        write_generated_image_artifact(&workspace, "artifact-1", "image.jpeg", b"\xff\xd8\xff\xd9");
+        let state = test_state_with_paths(paths);
+
+        let response = handle_read_generated_media_preview(
+            &state,
+            &serde_json::json!({
+                "sessionId": session.id.to_string(),
+                "artifactId": "artifact-1"
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(response["state"], "available");
+        assert_eq!(response["mimeType"], "image/jpeg");
+    }
+
+    #[test]
+    fn read_generated_media_preview_returns_video_poster_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        let session_store = SessionStore::from_paths(&paths).unwrap();
+        let workspace = temp.path().join("other-workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let session = session_store.create_session(workspace.clone()).unwrap();
+        write_generated_video_artifact_with_poster(
+            &workspace,
+            "artifact-video-1",
+            "generated.mp4",
+            b"mp4-bytes",
+            b"\xff\xd8\xff\xd9",
+        );
+        let state = test_state_with_paths(paths);
+
+        let response = handle_read_generated_media_preview(
+            &state,
+            &serde_json::json!({
+                "sessionId": session.id.to_string(),
+                "artifactId": "artifact-video-1"
+            }),
+        )
+        .unwrap();
+        let bytes: Vec<u8> = serde_json::from_value(response["bytes"].clone()).unwrap();
+
+        assert_eq!(response["state"], "available");
+        assert_eq!(response["mimeType"], "image/jpeg");
+        assert_eq!(bytes, b"\xff\xd8\xff\xd9");
+    }
+
+    #[test]
+    fn file_media_mime_type_maps_video_extensions() {
+        use std::path::Path;
+        assert_eq!(
+            file_media_mime_type(Path::new("/a/clip.mp4")),
+            Some("video/mp4")
+        );
+        assert_eq!(
+            file_media_mime_type(Path::new("/a/clip.m4v")),
+            Some("video/mp4")
+        );
+        assert_eq!(
+            file_media_mime_type(Path::new("/a/clip.webm")),
+            Some("video/webm")
+        );
+        assert_eq!(
+            file_media_mime_type(Path::new("/a/clip.ogv")),
+            Some("video/ogg")
+        );
+        assert_eq!(
+            file_media_mime_type(Path::new("/a/clip.MOV")),
+            Some("video/quicktime")
+        );
+        assert_eq!(file_media_mime_type(Path::new("/a/song.ogg")), None);
+        assert_eq!(file_media_mime_type(Path::new("/a/notes.txt")), None);
+        assert_eq!(file_media_mime_type(Path::new("/a/noext")), None);
+    }
+
+    #[test]
+    fn create_file_media_access_returns_ticket_for_video() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        let workspace_root = paths.workspace_root.clone();
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let clip = workspace_root.join("clip.mp4");
+        std::fs::write(&clip, b"mp4-bytes").unwrap();
+        let state = test_state_with_paths(paths);
+
+        let response = handle_create_file_media_access(
+            &state,
+            &serde_json::json!({ "path": clip.display().to_string() }),
+        )
+        .unwrap();
+
+        assert_eq!(response["state"], "available");
+        assert_eq!(response["mimeType"], "video/mp4");
+        assert_eq!(response["size"], 9);
+        assert!(response["expiresAtMs"].as_u64().unwrap() > daemon_now_ms());
+        let path = response["path"].as_str().expect("ticket path");
+        assert!(path.starts_with("/media/generated-video/"));
+    }
+
+    #[test]
+    fn create_file_media_access_rejects_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        let dir = paths.workspace_root.join("clip.mp4");
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = test_state_with_paths(paths);
+
+        let response = handle_create_file_media_access(
+            &state,
+            &serde_json::json!({ "path": dir.display().to_string() }),
+        )
+        .unwrap();
+        assert_eq!(response["state"], "missing");
+    }
+
+    #[test]
+    fn create_file_media_access_rejects_non_video() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        let workspace_root = paths.workspace_root.clone();
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let doc = workspace_root.join("notes.txt");
+        std::fs::write(&doc, b"hello").unwrap();
+        let state = test_state_with_paths(paths);
+
+        let response = handle_create_file_media_access(
+            &state,
+            &serde_json::json!({ "path": doc.display().to_string() }),
+        )
+        .unwrap();
+        assert_eq!(response["state"], "unsupported");
+    }
+
+    #[test]
+    fn create_file_media_access_rejects_missing_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        let missing = paths.workspace_root.join("nope.mp4");
+        let state = test_state_with_paths(paths);
+
+        let response = handle_create_file_media_access(
+            &state,
+            &serde_json::json!({ "path": missing.display().to_string() }),
+        )
+        .unwrap();
+        assert_eq!(response["state"], "missing");
+    }
+
+    #[test]
+    fn create_generated_video_access_returns_ticket_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        let session_store = SessionStore::from_paths(&paths).unwrap();
+        let workspace = temp.path().join("other-workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let session = session_store.create_session(workspace.clone()).unwrap();
+        write_generated_video_artifact(
+            &workspace,
+            "artifact-video-1",
+            "generated.mp4",
+            b"mp4-bytes",
+        );
+        let state = test_state_with_paths(paths);
+
+        let response = handle_create_generated_video_access(
+            &state,
+            &serde_json::json!({
+                "sessionId": session.id.to_string(),
+                "artifactId": "artifact-video-1"
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(response["state"], "available");
+        assert_eq!(response["mimeType"], "video/mp4");
+        assert_eq!(response["size"], 9);
+        assert!(response["expiresAtMs"].as_u64().unwrap() > daemon_now_ms());
+        let path = response["path"].as_str().expect("ticket path");
+        assert!(path.starts_with("/media/generated-video/"));
+        assert!(response.get("url").is_none());
+        assert!(!path.contains("token"));
+    }
+
+    #[test]
+    fn generated_video_range_parser_supports_closed_open_and_suffix_ranges() {
+        assert_eq!(
+            parse_single_byte_range("bytes=2-5", 10).unwrap(),
+            Some((2, 5))
+        );
+        assert_eq!(
+            parse_single_byte_range("bytes=4-", 10).unwrap(),
+            Some((4, 9))
+        );
+        assert_eq!(
+            parse_single_byte_range("bytes=-3", 10).unwrap(),
+            Some((7, 9))
+        );
+        assert_eq!(parse_single_byte_range("", 10).unwrap(), None);
+    }
+
+    #[test]
+    fn generated_video_range_parser_rejects_unsatisfiable_ranges() {
+        assert!(matches!(
+            parse_single_byte_range("bytes=20-30", 10),
+            Err(GeneratedVideoRangeError::Unsatisfiable)
+        ));
+        assert!(matches!(
+            parse_single_byte_range("bytes=8-2", 10),
+            Err(GeneratedVideoRangeError::Unsatisfiable)
+        ));
+    }
+
+    #[test]
+    fn generated_video_ticket_lookup_prunes_expired_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state_with_paths(ConfigPaths::discover(temp.path()));
+        state.generated_video_tickets.lock().unwrap().insert(
+            "expired".to_string(),
+            GeneratedVideoTicket {
+                path: temp.path().join("missing.mp4"),
+                mime_type: "video/mp4".to_string(),
+                size: 0,
+                expires_at_ms: daemon_now_ms().saturating_sub(1),
+            },
+        );
+
+        assert!(state.generated_video_ticket("expired").is_none());
+        assert!(state.generated_video_tickets.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn generated_video_handler_serves_full_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = Arc::new(test_state_with_paths(ConfigPaths::discover(temp.path())));
+        let video_path = temp.path().join("generated.mp4");
+        std::fs::write(&video_path, b"0123456789").unwrap();
+        state.generated_video_tickets.lock().unwrap().insert(
+            "ticket-full".to_string(),
+            GeneratedVideoTicket {
+                path: video_path,
+                mime_type: "video/mp4".to_string(),
+                size: 10,
+                expires_at_ms: daemon_now_ms() + 60_000,
+            },
+        );
+
+        let response = generated_video_handler(
+            State(state),
+            AxumPath("ticket-full".to_string()),
+            HeaderMap::new(),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "video/mp4"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"0123456789");
+    }
+
+    #[tokio::test]
+    async fn generated_video_handler_serves_single_range() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = Arc::new(test_state_with_paths(ConfigPaths::discover(temp.path())));
+        let video_path = temp.path().join("generated.mp4");
+        std::fs::write(&video_path, b"0123456789").unwrap();
+        state.generated_video_tickets.lock().unwrap().insert(
+            "ticket-1".to_string(),
+            GeneratedVideoTicket {
+                path: video_path,
+                mime_type: "video/mp4".to_string(),
+                size: 10,
+                expires_at_ms: daemon_now_ms() + 60_000,
+            },
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, HeaderValue::from_static("bytes=2-5"));
+
+        let response =
+            generated_video_handler(State(state), AxumPath("ticket-1".to_string()), headers)
+                .await
+                .into_response();
+
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.headers().get(header::CONTENT_RANGE).unwrap(),
+            "bytes 2-5/10"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"2345");
+    }
+
+    #[test]
+    fn read_generated_media_preview_returns_png_bytes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let session_store = SessionStore::from_paths(&paths).expect("session store");
+        let session = session_store
+            .create_session(workspace_root.clone())
+            .expect("create session");
+        write_generated_image_artifact(
+            &workspace_root,
+            "artifact-1",
+            "generated.png",
+            b"\x89PNG\r\n\x1a\nimage-bytes",
+        );
+        let state = test_state_with_paths(paths);
+
+        let response = handle_read_generated_media_preview(
+            &state,
+            &json!({
+                "sessionId": session.id.to_string(),
+                "artifactId": "artifact-1"
+            }),
+        )
+        .expect("preview response");
+        let bytes: Vec<u8> = serde_json::from_value(response["bytes"].clone()).expect("bytes");
+
+        assert_eq!(response["state"], "available");
+        assert_eq!(response["mimeType"], "image/png");
+        assert_eq!(bytes, b"\x89PNG\r\n\x1a\nimage-bytes");
+        assert!(response.get("path").is_none());
+    }
+
+    #[test]
+    fn generate_media_uses_discovery_cache_for_chat_image_output_models() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let (base_url, server) = spawn_discovered_chat_image_generation_server();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        write_openrouter_resource_override(&paths, &base_url);
+        let mut auth_store = AuthStore::default();
+        auth_store.set_api_key("openrouter", "sk-test");
+        auth_store
+            .save(&paths.user_config_dir.join("auth.json"))
+            .expect("save auth");
+        let state = DaemonState::load(
+            workspace_root.clone(),
+            paths,
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+        {
+            let mut config = state.config.lock().unwrap();
+            config.media.image = Some(MediaGenerationConfig {
+                provider_id: "openrouter".to_string(),
+                logical_model_id: "openrouter/image-chat".to_string(),
+                selections: BTreeMap::new(),
+            });
+        }
+        let listed =
+            handle_list_media_capabilities(&state, &json!({"kind": "image"})).expect("list");
+        assert!(listed["capabilities"]
+            .as_array()
+            .is_some_and(|capabilities| {
+                capabilities.iter().any(|capability| {
+                    capability["providerId"] == "openrouter"
+                        && capability["modelId"] == "openrouter/image-chat"
+                        && capability["adapter"] == "chat_image_output"
+                        && capability["source"] == "provider_discovery"
+                })
+            }));
+
+        let response =
+            handle_generate_media(&state, &json!({"kind": "image", "prompt": "draw an icon"}))
+                .expect("generation response");
+
+        let requests = server.join().expect("server");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("GET /models?output_modalities=image HTTP/1.1"));
+        assert!(requests[1].starts_with("POST /chat/completions HTTP/1.1"));
+        assert!(requests[1].contains("\"model\":\"openrouter/image-chat\""));
+        assert_eq!(response["status"], "succeeded");
+        assert_eq!(response["providerId"], "openrouter");
+        assert_eq!(response["modelId"], "openrouter/image-chat");
+        assert_eq!(response["requestedCount"], 1);
+        let path = response["artifacts"][0]["path"]
+            .as_str()
+            .expect("artifact path");
+        assert!(path.contains(".puffer/media/images"));
+        assert_eq!(std::fs::read(path).expect("artifact bytes"), b"image-bytes");
+    }
+
+    #[test]
+    fn update_config_accepts_media_defaults() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let response = handle_update_config(
+            &state,
+            &json!({
+                "media": {
+                    "image": {
+                        "providerId": "openai",
+                        "logicalModelId": "gpt-image-1",
+                        "selections": {
+                            "mode": "1K SD",
+                            "ratio": "3:2",
+                            "output": "2"
+                        }
+                    },
+                    "video": null
+                }
+            }),
+        )
+        .expect("update config");
+
+        assert_eq!(
+            response["config"]["media"],
+            json!({
+                "image": {
+                    "providerId": "openai",
+                    "logicalModelId": "gpt-image-1",
+                    "selections": {
+                        "mode": "1K SD",
+                        "ratio": "3:2",
+                        "output": "2"
+                    }
+                },
+                "video": null
+            })
+        );
+
+        let response =
+            handle_update_config(&state, &json!({"media": null})).expect("reset media config");
+
+        assert_eq!(
+            response["config"]["media"],
+            json!({
+                "image": null,
+                "video": null
+            })
+        );
     }
 
     #[test]
@@ -5976,6 +8409,42 @@ mod tests {
                 }
             }
             panic!("discovery server was not contacted");
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn spawn_failing_discovery_server() -> (String, std::thread::JoinHandle<()>) {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind failing discovery server");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking failing discovery server");
+        let address = listener
+            .local_addr()
+            .expect("failing discovery server address");
+        let handle = std::thread::spawn(move || {
+            for _ in 0..100 {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        read_discovery_http_request(&mut stream)
+                            .expect("read failing discovery request");
+                        let body = r#"{"error":"temporarily unavailable"}"#;
+                        let response = format!(
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        std::io::Write::write_all(&mut stream, response.as_bytes())
+                            .expect("write failing discovery response");
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept failing discovery request: {error}"),
+                }
+            }
+            panic!("failing discovery server was not contacted");
         });
         (format!("http://{address}"), handle)
     }
@@ -6555,6 +9024,7 @@ mod tests {
 
     #[test]
     fn list_provider_models_uses_fresh_discovery_over_static_models() {
+        let _cache_guard = DiscoveryCacheEnvGuard::set();
         let (openai_base_url, server) = spawn_openai_discovery_server();
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
@@ -6584,6 +9054,81 @@ mod tests {
         assert!(
             !model_ids.contains(&"gpt-5"),
             "fresh discovery should remove stale static models: {response}"
+        );
+    }
+
+    #[test]
+    fn list_provider_models_keeps_static_models_when_fresh_discovery_fails() {
+        let _cache_guard = DiscoveryCacheEnvGuard::set();
+        let (openai_base_url, server) = spawn_failing_discovery_server();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+        state.config.lock().unwrap().openai_base_url = Some(openai_base_url);
+
+        let response = handle_list_provider_models(&state, &json!({ "providerId": "codex" }))
+            .expect("list provider models");
+
+        server.join().expect("failing discovery server");
+        let model_ids = response["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter_map(|model| model.get("id").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(response["providerId"], "openai");
+        assert!(
+            model_ids.contains(&"gpt-5"),
+            "static models should remain available after fresh discovery failure: {response}"
+        );
+    }
+
+    #[test]
+    fn list_provider_models_does_not_fire_network_discovery_when_cache_is_fresh() {
+        let _cache_guard = DiscoveryCacheEnvGuard::set();
+        prewarm_discovery_cache("openai", "gpt-cached-discovered");
+        let (openai_base_url, server) = spawn_unexpected_discovery_server();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+        state.config.lock().unwrap().openai_base_url = Some(openai_base_url);
+
+        let start = std::time::Instant::now();
+        let response = handle_list_provider_models(&state, &json!({ "providerId": "codex" }))
+            .expect("list provider models");
+        let elapsed = start.elapsed();
+
+        server.join().expect("unexpected discovery server panicked");
+        let model_ids = response["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter_map(|model| model.get("id").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "list_provider_models took {elapsed:?} despite a fresh discovery cache"
+        );
+        assert_eq!(response["providerId"], "openai");
+        assert!(
+            model_ids.contains(&"gpt-cached-discovered"),
+            "cached discovery should be returned synchronously: {response}"
         );
     }
 
@@ -7322,6 +9867,44 @@ mod tests {
         let (msg, cat) = classify_turn_error(&err);
         assert_eq!(cat, "other");
         assert!(msg.contains("HTTP 503"));
+    }
+
+    #[test]
+    fn classify_turn_error_distinguishes_model_gateway_transport_reset() {
+        use super::classify_turn_error;
+
+        let err = anyhow::anyhow!(
+            "error sending request for url \
+             (https://infer-api-test-46cc90.worldrouter.ai/v1/responses): \
+             client error (Connect): Connection reset by peer (os error 54)"
+        )
+        .context("request to https://infer-api-test-46cc90.worldrouter.ai/v1/responses failed");
+
+        let (msg, cat) = classify_turn_error(&err);
+
+        assert_eq!(cat, "model_gateway_unavailable", "{msg}");
+        assert!(msg.contains("model gateway"), "{msg}");
+        assert!(msg.contains("retry"), "{msg}");
+        assert!(!msg.contains("infer-api-test-46cc90"), "{msg}");
+        assert!(!msg.contains("os error 54"), "{msg}");
+
+        let err = anyhow::anyhow!("tcp connect error: Connection refused")
+            .context("request to https://infer-api-test-46cc90.worldrouter.ai/v1/responses failed");
+        let (msg, cat) = classify_turn_error(&err);
+        assert_eq!(cat, "model_gateway_unavailable", "{msg}");
+    }
+
+    #[test]
+    fn classify_turn_error_keeps_sse_idle_timeout_as_stream_closed() {
+        use super::classify_turn_error;
+
+        let err = anyhow::anyhow!("idle timeout waiting for sse")
+            .context("failed to parse SSE response from https://example.test/v1/responses");
+
+        let (msg, cat) = classify_turn_error(&err);
+
+        assert_eq!(cat, "provider_stream_closed", "{msg}");
+        assert!(msg.contains("idle timeout waiting for sse"), "{msg}");
     }
 
     #[test]
@@ -8375,6 +10958,7 @@ input_schema:
             headers: IndexMap::new(),
             query_params: IndexMap::new(),
             discovery: None,
+            media: None,
             models: models
                 .iter()
                 .map(|model| ModelDescriptor {
