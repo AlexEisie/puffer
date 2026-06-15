@@ -314,10 +314,16 @@ pub(super) fn execute_task_update(
         }));
         updated_fields.push("status");
     }
-    // Stamp completed_via on monitor tasks when the agent drives completion.
+    // Stamp completed_via on monitor tasks when THIS call transitioned the task
+    // into completed.  Checking status_change (Some with to=="completed")) prevents
+    // clobbering an existing completed_via when a subsequent update only touches
+    // metadata or other fields on an already-completed task.
     // This mirrors the daemon's human-approval path (handle_monitor_task_complete)
     // which also records completed_via as a top-level field.
-    if task.status == "completed"
+    if status_change
+        .as_ref()
+        .and_then(|sc| sc["to"].as_str())
+        == Some("completed")
         && (tp == monitor_tasks_path(&store_cwd) || is_monitor_task_metadata(&task.metadata))
     {
         let via = parsed
@@ -2168,6 +2174,57 @@ mod tests {
             task_json["completed_via"],
             "agent_report:incoming",
             "incoming-direction completion must record the incoming label"
+        );
+    }
+
+    #[test]
+    fn task_update_does_not_restamp_completed_via_on_metadata_only_update() {
+        // GIVEN a monitor task that was already completed with completed_via = "reply"
+        // (set directly in the store, as the daemon's reply-completion path would do)
+        let (mut state, tmp) = make_state();
+        let task_id = create_plain_monitor_task(&mut state, tmp.path());
+
+        // Directly stamp completed status + completed_via in the store (bypass TaskUpdate)
+        let path = monitor_tasks_path(tmp.path());
+        {
+            let mut store = load_store::<TaskStore>(&path).unwrap();
+            let task = store
+                .tasks
+                .iter_mut()
+                .find(|t| t.task_id == task_id)
+                .unwrap();
+            task.status = "completed".to_string();
+            task.completed_via = Some("reply".to_string());
+            save_store(&path, &store).unwrap();
+        }
+
+        // WHEN execute_task_update is called with only a metadata content change
+        // (no status field — task is already completed)
+        execute_task_update(
+            &mut state,
+            tmp.path(),
+            json!({
+                "taskId": task_id,
+                "metadata": { "some_label": "extra-context" }
+            }),
+        )
+        .unwrap();
+
+        // THEN completed_via is NOT clobbered — it remains "reply"
+        let store_raw = std::fs::read_to_string(&path).unwrap();
+        let store: Value = serde_json::from_str(&store_raw).unwrap();
+        let task_json = store["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["task_id"].as_str() == Some(&task_id))
+            .expect("task must be in monitor store");
+
+        assert_eq!(task_json["status"], "completed");
+        assert_eq!(
+            task_json["completed_via"],
+            "reply",
+            "completed_via must not be clobbered by a metadata-only update on an already-completed task"
         );
     }
 }

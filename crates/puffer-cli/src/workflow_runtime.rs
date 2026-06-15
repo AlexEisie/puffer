@@ -751,7 +751,6 @@ const TRIAGE_OUTGOING_EXCLUDED_TOOLS: &[&str] = &["TaskCreate"];
 /// This helper is the single source of truth for the exclusion logic — it
 /// is called both from tests and from `run_task_agent_prompt_for_session`,
 /// so the two cannot drift apart.
-#[cfg_attr(not(test), allow(dead_code))]
 fn triage_excluded_tools_for_direction(is_outgoing: bool) -> Vec<String> {
     if is_outgoing {
         TRIAGE_OUTGOING_EXCLUDED_TOOLS
