@@ -442,11 +442,19 @@ Puffer task creation protocol
 2. If the event matches ignore memory, do not create a task. Do not edit memory or subscription filters.
 3. Muted or silent notification events are filtered before this agent runs. If an event payload still says `notification_muted` or `notification_silent`, do not create a task.
 4. For candidate items scored 1, 2, or 3, do not call TaskList, TaskCreate, or TaskUpdate.
-5. For candidate items scored 4 or 5, use TaskList first to avoid duplicates. Use TaskCreate for new tasks and TaskUpdate for materially changed existing monitor tasks.
+5. For candidate items scored 4 or 5, use TaskList first to avoid duplicates. Use TaskCreate for new tasks and TaskUpdate for materially changed existing monitor tasks. For ordinary content edits, update content fields only and leave `status` unchanged. Task completion is governed by the Completion protocol below.
 6. Every monitor TaskCreate MUST include `receivedAt` from the workflow trigger's RFC3339 `receivedAt` field and an RFC3339 `expiresAt` chosen from the event urgency. If no better deadline is evident, set `expiresAt` 24 hours after `receivedAt`.
 7. Every monitor TaskCreate MUST include metadata with `_monitor: true`, `monitor_connection: "{connection_slug}"`, `monitor_connector: "{connector_slug}"`, and `monitor_memory_path: "{}"`.
 8. Every monitor TaskCreate SHOULD include `actions`: an array of objects with `actionName` and `actionPrompt`, and `possibleIgnoreReasons`: a short array of suggested ignore reasons.
 9. Keep action prompts ready to send to the current coding agent. Include enough source context from the connector event for the agent to act without rereading the whole stream.
+
+Completion protocol
+- The workflow trigger has a `direction` field: `incoming` (a message from a contact) or `outgoing` (a message I sent myself).
+- When the current message indicates that an existing open monitor task in THIS conversation has been done/handled/resolved, complete that task with TaskUpdate with `status: completed`. Match the conversation by the task metadata identity fields (e.g. `chat_id`) you previously stored.
+- First TaskList; only complete a task you can see in this conversation. If several are open and the message is ambiguous, complete none. If the message is a reply quoting an earlier message, prefer the task whose stored source matches that quote.
+- A message like "not done yet" / "还没" must NOT complete a task.
+- If `direction` is `outgoing`: you may ONLY complete or update existing tasks — never create a task from my own message.
+- Some tasks are human-gated reply tasks; TaskUpdate will refuse to complete those and that is expected — leave them for human approval.
 
 Do not send connector replies unless a selected action later asks for it."#,
         memory_path.display(),
@@ -590,6 +598,24 @@ mod tests {
         assert!(prompt.contains("If the source message is mixed-language"));
         assert!(prompt.contains("English source messages"));
         assert!(prompt.contains("Preserve explicit product names"));
+    }
+
+    #[test]
+    fn monitor_prompt_allows_direction_aware_completion() {
+        let prompt = monitor_triage_prompt(
+            "telegram-user",
+            "telegram-login",
+            "Personal Telegram",
+            Path::new("/tmp/memory.md"),
+        );
+        // The blanket "never change status" rule is gone…
+        assert!(!prompt.contains("never change its `status`"));
+        // …replaced by an explicit completion rule keyed on trigger direction.
+        assert!(prompt.contains("Completion protocol"));
+        assert!(prompt.contains("`direction`"));
+        assert!(prompt.contains("TaskUpdate with `status: completed`"));
+        // Outgoing must never create tasks.
+        assert!(prompt.contains("never create a task"));
     }
 
     #[test]
