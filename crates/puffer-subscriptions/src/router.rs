@@ -524,6 +524,7 @@ pub fn process_envelope_batch_result(
     dispatcher: &Arc<dyn ActionDispatcher>,
     classifier: &Arc<dyn Classifier>,
     stats: Option<&RouterStats>,
+    gate: &Arc<dyn SelfMessageGate>,
 ) -> EnvelopeProcessResult {
     let mut result = EnvelopeProcessResult::default();
     let envelopes: Vec<&EventEnvelope> = envelopes
@@ -539,6 +540,36 @@ pub fn process_envelope_batch_result(
         }
         let mut triage_batch = Vec::new();
         for envelope in &envelopes {
+            // Self/outgoing events SHORT-CIRCUIT the normal filter chain
+            // (dedup/contact/classify) on the batch path too. classify can be an
+            // LLM call, so gating before it is essential (#569). Mirror the
+            // single-envelope self-branch: gate-drop skips the (spec,event);
+            // gate-allow dispatches immediately and bypasses the remaining
+            // filters (and is never batched into the triage agent).
+            if event_is_self(&envelope.event) {
+                let topic_matches = spec.connection_slug == envelope.event.topic
+                    || spec
+                        .connector_slug
+                        .as_deref()
+                        .is_some_and(|connector_slug| connector_slug == envelope.event.topic);
+                if !topic_matches {
+                    continue;
+                }
+                if !gate.should_dispatch_self_message(&envelope.event) {
+                    log_router_skip(&spec, envelope, "self_no_open_task");
+                    continue;
+                }
+                result.matched = true;
+                dispatch_one_matched_envelope(
+                    &spec,
+                    envelope,
+                    history_store,
+                    dispatcher,
+                    stats,
+                    &mut result,
+                );
+                continue;
+            }
             let Some(prefiltered) =
                 prefilter_envelope_for_spec(&spec, envelope, history_store, classifier)
             else {

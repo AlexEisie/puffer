@@ -1019,6 +1019,7 @@ impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
             &self.dispatcher,
             &self.classifier,
             None,
+            &self.self_gate,
         );
         if result.failed > 0 {
             anyhow::bail!(

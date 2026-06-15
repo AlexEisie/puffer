@@ -186,6 +186,119 @@ mod tests {
     }
 
     #[test]
+    fn batch_outgoing_event_with_dropping_gate_is_not_dispatched_or_classified() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store.create(monitor_binding_with_classify_prompt()).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(CountingDispatcher {
+            calls: calls.clone(),
+        });
+        let classifier: Arc<dyn Classifier> = Arc::new(PanicClassifier);
+        let gate = drop_all_gate();
+
+        let result = process_envelope_batch_result(
+            &[outgoing_envelope()],
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            None,
+            &gate,
+        );
+
+        assert!(!result.matched, "dropped self message must not match on batch path");
+        assert_eq!(result.acted, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            0,
+            "dispatcher must not run"
+        );
+    }
+
+    #[test]
+    fn batch_outgoing_event_with_allowing_gate_is_dispatched_without_classify() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store.create(monitor_binding_with_classify_prompt()).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(CountingDispatcher {
+            calls: calls.clone(),
+        });
+        let classifier: Arc<dyn Classifier> = Arc::new(PanicClassifier);
+        let gate: Arc<dyn SelfMessageGate> = Arc::new(AllowAllSelfGate);
+
+        let result = process_envelope_batch_result(
+            &[outgoing_envelope()],
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            None,
+            &gate,
+        );
+
+        assert!(result.matched, "allowed self message must match on batch path");
+        assert_eq!(result.acted, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            1,
+            "dispatcher runs exactly once"
+        );
+        // PanicClassifier never panicked => classify was bypassed for self event.
+    }
+
+    #[test]
+    fn batch_incoming_event_is_unaffected_by_gate() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        // No classify_prompt so the normal incoming path dispatches without an
+        // LLM classify (and the NullClassifier would Pass anyway).
+        let mut spec = monitor_binding_with_classify_prompt();
+        spec.classify_prompt = None;
+        store.create(spec).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(CountingDispatcher {
+            calls: calls.clone(),
+        });
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
+        let gate = drop_all_gate();
+
+        let incoming = EventEnvelope {
+            envelope_id: "env-incoming".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: None,
+                text: "please file the report".into(),
+                payload: serde_json::json!({"is_outgoing": false, "chat_id": 42}),
+            },
+        };
+
+        let result = process_envelope_batch_result(
+            &[incoming],
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            None,
+            &gate,
+        );
+
+        assert!(
+            result.matched,
+            "incoming event still dispatches through batch path with drop gate"
+        );
+        assert_eq!(result.acted, 1);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
     fn case_insensitive_regex_matches() {
         let filter = FilterSpec::Tagged(TaggedFilterSpec::Regex {
             pattern: r"\bIoC\b".into(),
@@ -405,6 +518,7 @@ mod tests {
             &dispatcher_trait,
             &classifier,
             None,
+            &drop_all_gate(),
         );
 
         assert!(result.matched);
@@ -641,6 +755,7 @@ mod tests {
             &dispatcher_trait,
             &classifier,
             None,
+            &drop_all_gate(),
         );
 
         assert!(result.matched);
