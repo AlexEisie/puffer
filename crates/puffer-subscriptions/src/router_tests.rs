@@ -320,7 +320,9 @@ mod tests {
         assert!(prompts[0].contains("telegram_server_history_cache"));
         assert!(prompts[0].contains("subscriber_diagnostics"));
         assert!(prompts[0].contains("ambiguous short messages"));
-        assert!(prompts[0].contains("never change its status"));
+        assert!(!MONITOR_RUNTIME_LANGUAGE_POLICY.contains("never change its status"));
+        assert!(MONITOR_RUNTIME_LANGUAGE_POLICY.contains("status: completed"));
+        assert!(MONITOR_RUNTIME_LANGUAGE_POLICY.contains("direction"));
         match store.get("monitor-telegram-user").unwrap().action {
             ActionSpec::TriageAgent { prompt, .. } => assert_eq!(prompt, "legacy monitor prompt"),
             _ => panic!("expected triage agent"),
