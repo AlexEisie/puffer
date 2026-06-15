@@ -267,6 +267,7 @@ pub(super) fn execute_task_update(
     if parsed.status.as_deref() == Some("completed")
         && monitor_task_is_human_gated(task)
         && !metadata_marks_monitor_ignored(metadata_update.as_ref())
+        && !state.monitor_triage_turn
     {
         bail!(
             "monitor task `{}` must be completed through its monitor action after human approval",
@@ -2102,10 +2103,58 @@ mod tests {
     }
 
     #[test]
+    fn triage_turn_completes_human_gated_monitor_task() {
+        // GIVEN a human-gated telegram monitor task (telegram connector + chat_id)
+        let (mut state, tmp) = make_state();
+        let task_id = create_telegram_monitor_task(&mut state, tmp.path());
+
+        // Confirm it IS human-gated
+        let task = load_monitor_task(tmp.path(), &task_id).unwrap().unwrap();
+        assert!(
+            monitor_task_is_human_gated(&task),
+            "test setup: task should be human-gated"
+        );
+
+        // AND a state that is running inside a monitor triage turn
+        state.monitor_triage_turn = true;
+
+        // WHEN execute_task_update completes it
+        execute_task_update(
+            &mut state,
+            tmp.path(),
+            json!({
+                "taskId": task_id,
+                "status": "completed"
+            }),
+        )
+        .expect("triage turn must be allowed to complete a human-gated monitor task");
+
+        // THEN it persists status=completed with completed_via stamped
+        let path = monitor_tasks_path(tmp.path());
+        let store_raw = std::fs::read_to_string(&path).unwrap();
+        let store: Value = serde_json::from_str(&store_raw).unwrap();
+        let task_json = store["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["task_id"].as_str() == Some(&task_id))
+            .expect("task must be in monitor store");
+
+        assert_eq!(task_json["status"], "completed");
+        assert_eq!(task_json["completed_via"], "agent_report");
+    }
+
+    #[test]
     fn task_update_still_refuses_human_gated_monitor_completion() {
         // GIVEN a human-gated monitor task (telegram connector + chat_id triggers the gate)
         let (mut state, tmp) = make_state();
         let task_id = create_telegram_monitor_task(&mut state, tmp.path());
+
+        // AND a NON-triage caller (default monitor_triage_turn = false)
+        assert!(
+            !state.monitor_triage_turn,
+            "test setup: a non-triage caller must keep monitor_triage_turn = false"
+        );
 
         // Confirm it IS human-gated
         let task = load_monitor_task(tmp.path(), &task_id).unwrap().unwrap();

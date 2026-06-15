@@ -308,6 +308,12 @@ impl ProcessWorkflowRunner {
         let snapshot = self.runtime_snapshot();
         let mut state = self.new_task_app_state_with_snapshot(cwd, model, &snapshot)?;
         state.prompt_cache_key_override = Some(session_key.to_string());
+        // This is the monitor triage turn: a conversational "done" signal in the
+        // chat is itself the human action, and TaskUpdate only marks the task
+        // complete (it never sends a reply). Let the triage agent complete
+        // human-gated monitor tasks; the reply-approval gate stays enforced on the
+        // separate reply-send path.
+        state.monitor_triage_turn = true;
         let mut auth_store = snapshot.auth_store.clone();
         let mut usage = None;
         // Post-lock stamp: history's run window starts at router dispatch, so

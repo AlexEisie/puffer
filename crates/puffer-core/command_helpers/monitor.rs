@@ -454,7 +454,7 @@ Completion protocol
 - First TaskList; only complete a task you can see in this conversation. If several are open and the message is ambiguous, complete none. If the message is a reply quoting an earlier message, prefer the task whose stored source matches that quote.
 - A message like "not done yet" / "还没" must NOT complete a task.
 - If `direction` is `outgoing`: you may ONLY complete or update existing tasks — never create a task from my own message.
-- Some tasks are human-gated reply tasks; TaskUpdate will refuse to complete those and that is expected — leave them for human approval.
+- Completing a task only marks it done and never sends a reply, so you may complete tasks that have a reply/delivery target too.
 
 Do not send connector replies unless a selected action later asks for it."#,
         memory_path.display(),

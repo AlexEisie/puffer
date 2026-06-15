@@ -272,6 +272,11 @@ pub struct AppState {
     /// Request-scoped monitor reply binding. Set by daemon-validated monitor
     /// action turns so `MonitorReplyDraft` cannot write arbitrary tasks.
     pub(crate) monitor_reply_scope: Option<MonitorReplyScope>,
+    /// True while a monitor triage turn is running. Lets the triage agent complete
+    /// human-gated monitor tasks from a conversational "done" signal (the message
+    /// is the human action); TaskUpdate never sends a reply, so the reply-approval
+    /// gate does not apply to mark-done.
+    pub monitor_triage_turn: bool,
     /// Wall-clock timestamp of the most recent committed assistant message.
     /// Set by `push_message` when role == Assistant. Consumed by the
     /// microcompact time-based trigger to mirror Claude Code's "gap since
@@ -393,6 +398,7 @@ impl AppState {
             last_input_tokens: None,
             pentest_in_scope_origin: None,
             monitor_reply_scope: None,
+            monitor_triage_turn: false,
             last_assistant_at: None,
             last_cache_hit_ratio: None,
             session_cache_hit_ratio: None,
