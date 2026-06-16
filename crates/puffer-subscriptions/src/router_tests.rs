@@ -298,8 +298,14 @@ mod tests {
             },
         };
 
-        let result =
-            process_envelope_result(&envelope, &store, None, &dispatcher_trait, &classifier, None);
+        let result = process_envelope_result(
+            &envelope,
+            &store,
+            None,
+            &dispatcher_trait,
+            &classifier,
+            None,
+        );
 
         assert!(result.matched);
         assert_eq!(result.acted, 1);
@@ -310,6 +316,12 @@ mod tests {
         assert!(prompts[0].contains("For Chinese source text"));
         assert!(prompts[0].contains("subject, description, actions[].actionPrompt"));
         assert!(prompts[0].contains("exactly as written in the current source event text"));
+        assert!(prompts[0].contains("conversation_context"));
+        assert!(prompts[0].contains("telegram_server_history_cache"));
+        assert!(prompts[0].contains("subscriber_diagnostics"));
+        assert!(prompts[0].contains("ambiguous short messages"));
+        assert!(prompts[0].contains("Same chat/contact is not enough"));
+        assert!(prompts[0].contains("replace or clear `metadata.actions`"));
         assert!(prompts[0].contains("never change its status"));
         match store.get("monitor-telegram-user").unwrap().action {
             ActionSpec::TriageAgent { prompt, .. } => assert_eq!(prompt, "legacy monitor prompt"),
@@ -375,8 +387,14 @@ mod tests {
             },
         };
 
-        let result =
-            process_envelope_result(&envelope, &store, None, &dispatcher_trait, &classifier, None);
+        let result = process_envelope_result(
+            &envelope,
+            &store,
+            None,
+            &dispatcher_trait,
+            &classifier,
+            None,
+        );
 
         assert!(result.matched);
         assert_eq!(result.acted, 1);
@@ -467,6 +485,7 @@ mod tests {
         assert_eq!(prompts.len(), 1);
         assert!(prompts[0].contains("legacy batch prompt"));
         assert!(prompts[0].contains("Monitor source-language runtime guard"));
+        assert!(prompts[0].contains("Same chat/contact is not enough"));
     }
 
     #[test]
@@ -887,7 +906,10 @@ mod tests {
             &classifier,
             None,
         );
-        assert!(second.matched, "failed message must be retried, not dedup-skipped");
+        assert!(
+            second.matched,
+            "failed message must be retried, not dedup-skipped"
+        );
         assert_eq!(second.acted, 1, "retry succeeds and creates the task");
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 2, "dispatched twice");
         // Now Completed → future replays are suppressed.
