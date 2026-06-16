@@ -41,6 +41,9 @@ test("provider cards describe model families instead of model counts", async ({ 
   const googleCard = page.locator(".provider-card").filter({ hasText: "Google" }).last();
   await expect(googleCard).toContainText("Gemini models for quick, structured responses.");
   await expect(googleCard).not.toContainText(/\b\d+ models?\b/);
+  const googleIconBox = await googleCard.locator('img[src="/service-icons/google.svg"]').boundingBox();
+  expect(googleIconBox?.width).toBeGreaterThanOrEqual(29);
+  expect(googleIconBox?.height).toBeGreaterThanOrEqual(29);
 
   await googleCard.getByRole("button", { name: "Add connect" }).click();
   const modal = page.getByRole("dialog", { name: "Connect Google" });

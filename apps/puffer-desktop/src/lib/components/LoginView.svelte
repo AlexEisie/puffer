@@ -811,6 +811,10 @@
     object-fit: contain;
     display: block;
   }
+  .logo img[src="/service-icons/google.svg"] {
+    width: 30px;
+    height: 30px;
+  }
   .head-text {
     display: grid;
     gap: 0.1rem;
