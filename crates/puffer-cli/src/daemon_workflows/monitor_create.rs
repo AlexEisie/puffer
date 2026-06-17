@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 const RESEARCH_ACTION_PROMPT_GUIDANCE: &str = "\n\nResearch action prompt guidance:\n- For any Research action, actionPrompt must define the specific research question, include source chat/contact context, cap web research to at most 3 web searches and 8 total research/tool steps, avoid repeated equivalent queries, prefer official or primary sources, and tell the action agent to stop once it has enough evidence for a concise reply.";
 const TASK_UPDATE_SOURCE_ISOLATION_POLICY: &str = "\n\nTaskUpdate source isolation policy:\n- Same chat/contact is not enough to call something a duplicate. If the current source event asks a new question, changes topic, or creates a separate request, create a new monitor task even when another task from the same sender is still pending.\n- If TaskUpdate changes an existing monitor task's subject, description, or activeForm, metadata MUST include monitor_envelope_id copied from the current workflow trigger and MUST replace or clear actions. Never leave action prompts from the previous source message attached to updated task text.";
+const TASK_FIELD_GUIDANCE: &str = "\n\nMonitor task field guidance\n- Write the subject as a next-step title for the user, not a neutral summary of the message. Prefer imperative verbs such as Reply, Review, Approve, Decide, Confirm, Schedule, Pay, Update, or Investigate.\n- The subject should answer \"what should I do next?\" without requiring the user to open the description. For example, use \"Reply with Friday availability\" instead of \"Friday availability question\".\n- Write the description to explain why this needs attention, who or what triggered it, any exact deadline/value that matters, and the concrete next step. Keep it concise, but include enough context for the user or action agent to act.\n- For awareness-only score-4 items, phrase the subject around the required user follow-up or decision. If there is no follow-up, decision, risk, deadline, or changed commitment, do not create a task.\n- Action names should be concrete user choices, and action prompts should carry the selected next step forward rather than merely summarize the source event.";
 
 #[derive(Debug, Deserialize)]
 struct MonitorCreateParams {
@@ -464,6 +465,7 @@ fn monitor_triage_prompt(
         contact_ids
     );
     prompt.push_str(TASK_UPDATE_SOURCE_ISOLATION_POLICY);
+    prompt.push_str(TASK_FIELD_GUIDANCE);
     prompt.push_str(RESEARCH_ACTION_PROMPT_GUIDANCE);
     prompt
 }
@@ -566,6 +568,9 @@ mod tests {
         assert!(prompt.contains("Do not add any metadata field named"));
         assert!(prompt.contains("Research action prompt guidance"));
         assert!(prompt.contains("TaskUpdate source isolation policy"));
+        assert!(prompt.contains("Monitor task field guidance"));
+        assert!(prompt.contains("what should I do next?"));
+        assert!(prompt.contains("Reply with Friday availability"));
         assert!(prompt.contains("Same chat/contact is not enough"));
         assert!(prompt.contains("replace or clear actions"));
         assert!(prompt.contains("avoid repeated equivalent queries"));

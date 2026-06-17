@@ -813,6 +813,10 @@ export type WorkflowMonitorHistoryMessage = {
   status: string;
   started_at_ms: number;
   ended_at_ms: number;
+  digest_batch_id?: string | null;
+  digest_batch_count?: number | null;
+  digest_batch_position?: number | null;
+  digest_outcome_shared?: boolean | null;
 };
 
 export type WorkflowFilterRule = Record<string, unknown>;

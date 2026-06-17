@@ -166,39 +166,19 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
         model: Option<&str>,
         triggers: Vec<serde_json::Value>,
     ) -> Result<WorkflowActionOutput> {
-        let mut summaries = Vec::new();
-        let mut usage = None;
-        let mut turn_window: Option<(i128, i128)> = None;
-        for trigger in triggers {
-            let trigger = enrich_monitor_trigger_context(&self.paths, trigger)?;
-            let triggers = vec![trigger];
-            let prompt = render_triage_batch_prompt(prompt, &triggers)?;
-            let session_key = triage_session_key(model, &triggers);
-            let output = self.run_task_agent_prompt_for_session(prompt, model, &session_key)?;
-            if let (Some(started), Some(ended)) =
-                (output.turn_started_at_ms, output.turn_ended_at_ms)
-            {
-                turn_window = Some(match turn_window {
-                    Some((first, _)) => (first, ended),
-                    None => (started, ended),
-                });
-            }
-            // Server-owned grounding: stamp the trigger's verbatim event text
-            // onto any monitor task the triage turn created for this envelope.
-            // The agent only paraphrases the message into task fields, so
-            // without this the original wording (numbers, times, amounts) is
-            // unrecoverable downstream (agentenv/monorepo#619).
-            if let Err(error) = record_monitor_source_text(&self.paths, &triggers[0]) {
+        let triggers = triggers
+            .into_iter()
+            .map(|trigger| enrich_monitor_trigger_context(&self.paths, trigger))
+            .collect::<Result<Vec<_>>>()?;
+        let prompt = render_triage_batch_prompt(prompt, &triggers)?;
+        let session_key = triage_session_key(model, &triggers);
+        let output = self.run_task_agent_prompt_for_session(prompt, model, &session_key)?;
+        for trigger in &triggers {
+            // Server-owned grounding: stamp each trigger's verbatim event text
+            // onto any monitor task the triage turn created for that envelope.
+            if let Err(error) = record_monitor_source_text(&self.paths, trigger) {
                 tracing::warn!(%error, "failed to record verbatim monitor source text");
             }
-            summaries.push(output.summary);
-            if let Some(next_usage) = output.usage {
-                merge_usage(&mut usage, next_usage);
-            }
-        }
-        let mut output = WorkflowActionOutput::with_usage(summaries.join("\n"), usage);
-        if let Some((started, ended)) = turn_window {
-            output = output.with_turn_window(started, ended);
         }
         Ok(output)
     }
@@ -386,15 +366,24 @@ fn merge_usage(total: &mut Option<ActionUsage>, next: ActionUsage) {
 }
 
 fn render_triage_batch_prompt(prompt: &str, triggers: &[serde_json::Value]) -> Result<String> {
-    if triggers.len() != 1 {
-        anyhow::bail!(
-            "monitor triage prompt rendering is single-envelope only; got {} triggers",
-            triggers.len()
-        );
-    }
-    let trigger = serde_json::to_string_pretty(&triggers[0])?;
+    let trigger_label = if triggers.len() == 1 {
+        "Workflow trigger"
+    } else {
+        "Hourly monitor digest triggers"
+    };
+    let trigger = if triggers.len() == 1 {
+        serde_json::to_string_pretty(&triggers[0])?
+    } else {
+        serde_json::to_string_pretty(triggers)?
+    };
+    let digest_guidance = if triggers.len() == 1 {
+        String::new()
+    } else {
+        "\n\nHourly digest policy:\n- Treat the triggers below as one conversation/time-window, not as independent task requests.\n- First infer the conversation-level intent, then create only consolidated tasks that still require attention.\n- Treat greetings, acknowledgements, casual chatter, and informational messages as context/noise unless they change the next action.\n- Do not create a separate task for each short question or each individual message.\n- Task subjects must be imperative next actions, not topic summaries. Prefer \"Review PR #404 and decide the triage approach\" over \"PR #404 discussion\".\n- Task descriptions must explain why the action is needed, cite the source request/context, and state the concrete next step.\n- When creating a task, copy the most relevant trigger's `envelope_id` into `metadata.monitor_envelope_id` so source grounding can be attached."
+            .to_string()
+    };
     Ok(format!(
-        "{prompt}\n\nWorkflow trigger:\n```json\n{trigger}\n```"
+        "{prompt}{digest_guidance}\n\n{trigger_label}:\n```json\n{trigger}\n```"
     ))
 }
 
@@ -1275,15 +1264,19 @@ mod tests {
     }
 
     #[test]
-    fn render_triage_batch_prompt_rejects_multiple_triggers() {
+    fn render_triage_batch_prompt_renders_multiple_triggers_as_digest() {
         let triggers = vec![
             json!({"connection_id": "telegram-user", "text": "first"}),
             json!({"connection_id": "telegram-user", "text": "second"}),
         ];
 
-        let error = render_triage_batch_prompt("Monitor prompt", &triggers).unwrap_err();
+        let prompt = render_triage_batch_prompt("Monitor prompt", &triggers).unwrap();
 
-        assert!(error.to_string().contains("single-envelope only"));
+        assert!(prompt.contains("Hourly monitor digest triggers:"));
+        assert!(prompt.contains("Do not create a separate task for each short question"));
+        assert!(prompt.contains("Task subjects must be imperative next actions"));
+        assert!(prompt.contains("\"first\""));
+        assert!(prompt.contains("\"second\""));
     }
 
     #[test]
