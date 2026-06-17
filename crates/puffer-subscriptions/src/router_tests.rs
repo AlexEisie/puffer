@@ -604,6 +604,8 @@ mod tests {
         assert!(prompts[0].contains("telegram_server_history_cache"));
         assert!(prompts[0].contains("subscriber_diagnostics"));
         assert!(prompts[0].contains("ambiguous short messages"));
+        assert!(prompts[0].contains("Same chat/contact is not enough"));
+        assert!(prompts[0].contains("replace or clear `metadata.actions`"));
         assert!(!MONITOR_RUNTIME_LANGUAGE_POLICY.contains("never change its status"));
         assert!(MONITOR_RUNTIME_LANGUAGE_POLICY.contains("status: completed"));
         assert!(MONITOR_RUNTIME_LANGUAGE_POLICY.contains("direction"));
@@ -764,6 +766,7 @@ mod tests {
         assert_eq!(prompts.len(), 1);
         assert!(prompts[0].contains("legacy batch prompt"));
         assert!(prompts[0].contains("Monitor source-language runtime guard"));
+        assert!(prompts[0].contains("Same chat/contact is not enough"));
     }
 
     #[test]
