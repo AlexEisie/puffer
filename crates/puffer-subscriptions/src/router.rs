@@ -146,6 +146,7 @@ async fn run(
     stats: Arc<RouterStats>,
 ) {
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_EVENT_PROCESSORS));
+    let debounce = crate::router_debounce::MonitorDebounce::new();
     loop {
         tokio::select! {
             _ = shutdown_rx.changed() => break,
@@ -155,15 +156,25 @@ async fn run(
                     continue;
                 }
                 stats.events_seen.fetch_add(1, Ordering::Relaxed);
-                spawn_envelope_processor(
-                    envelope,
+                if !debounce.enqueue(
+                    envelope.clone(),
                     store.clone(),
                     history_store.clone(),
                     dispatcher.clone(),
                     classifier.clone(),
                     stats.clone(),
                     permits.clone(),
-                );
+                ) {
+                    spawn_envelope_processor(
+                        envelope,
+                        store.clone(),
+                        history_store.clone(),
+                        dispatcher.clone(),
+                        classifier.clone(),
+                        stats.clone(),
+                        permits.clone(),
+                    );
+                }
             }
         }
     }

@@ -31,6 +31,7 @@ mod manager;
 mod protocol;
 mod proxy;
 mod router;
+mod router_debounce;
 mod spec;
 mod store;
 mod subscriber_manifest;
