@@ -365,6 +365,16 @@ fn merge_usage(total: &mut Option<ActionUsage>, next: ActionUsage) {
         .saturating_add(next.cache_creation_tokens);
 }
 
+fn workflow_runner_lock(lock: &Mutex<()>) -> MutexGuard<'_, ()> {
+    match lock.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("workflow runner lock was poisoned; recovering for next action");
+            poisoned.into_inner()
+        }
+    }
+}
+
 fn render_triage_batch_prompt(prompt: &str, triggers: &[serde_json::Value]) -> Result<String> {
     let trigger_label = if triggers.len() == 1 {
         "Workflow trigger"
