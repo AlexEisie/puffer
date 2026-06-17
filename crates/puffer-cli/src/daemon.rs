@@ -680,6 +680,9 @@ impl DaemonState {
         }
         let config = self.config.lock().unwrap().clone();
         providers.apply_openai_base_url_override(config.openai_base_url.as_deref());
+        if let Some(display_name) = config.openai_display_name.as_deref() {
+            providers.set_openai_display_name(display_name);
+        }
         if !config.openai_headers.is_empty() {
             providers.set_openai_headers(
                 config
@@ -3166,6 +3169,14 @@ fn handle_update_config(state: &DaemonState, params: &Value) -> Result<Value> {
                     Value::String(s) if s.trim().is_empty() => None,
                     Value::String(s) => Some(s.clone()),
                     _ => anyhow::bail!("openaiBaseUrl must be string or null"),
+                };
+            }
+            "openaiDisplayName" | "openai_display_name" => {
+                guard.openai_display_name = match value {
+                    Value::Null => None,
+                    Value::String(s) if s.trim().is_empty() => None,
+                    Value::String(s) => Some(s.trim().to_string()),
+                    _ => anyhow::bail!("openaiDisplayName must be string or null"),
                 };
             }
             "media" => {
