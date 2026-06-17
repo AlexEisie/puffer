@@ -1029,6 +1029,19 @@ impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
         }
         Ok(())
     }
+
+    fn debounce_key(
+        &self,
+        _connector_slug: &str,
+        _connection_slug: &str,
+        envelope: &EventEnvelope,
+    ) -> Option<String> {
+        crate::router_debounce::monitor_debounce_key(envelope, &self.store)
+    }
+
+    fn debounce_delay(&self) -> Option<std::time::Duration> {
+        Some(crate::router_debounce::MONITOR_DEBOUNCE_DELAY)
+    }
 }
 
 impl ManagerConnectorEventProcessor {

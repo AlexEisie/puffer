@@ -75,6 +75,17 @@ impl ProviderRegistry {
         }
     }
 
+    /// Sets the built-in `openai` provider display name to the provided value.
+    pub fn set_openai_display_name(&mut self, display_name: impl Into<String>) {
+        let display_name = display_name.into();
+        if display_name.trim().is_empty() {
+            return;
+        }
+        if let Some(provider) = self.providers.get_mut("openai") {
+            provider.descriptor.display_name = display_name;
+        }
+    }
+
     /// Replaces the built-in `openai` provider's static header map.
     pub fn set_openai_headers(&mut self, headers: impl Into<indexmap::IndexMap<String, String>>) {
         if let Some(provider) = self.providers.get_mut("openai") {

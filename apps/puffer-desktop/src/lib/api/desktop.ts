@@ -2648,6 +2648,7 @@ export type ConfigPatch = {
   defaultModel?: string | null;
   theme?: string;
   openaiBaseUrl?: string | null;
+  openaiDisplayName?: string | null;
   media?: MediaSettings;
 };
 
