@@ -139,6 +139,7 @@ type FakeSettingsConfig = {
   defaultProvider: string | null;
   defaultModel: string | null;
   openaiBaseUrl: string | null;
+  openaiDisplayName: string | null;
   media: FakeMediaSettings;
 };
 
@@ -574,6 +575,7 @@ export class FakeDaemon {
     defaultProvider: "codex",
     defaultModel: "test-model",
     openaiBaseUrl: null,
+    openaiDisplayName: null,
     media: defaultMediaSettings()
   };
   private secrets: JsonRecord[] = [];
@@ -2445,6 +2447,10 @@ export class FakeDaemon {
       this.settingsConfig.openaiBaseUrl =
         typeof params.openaiBaseUrl === "string" ? params.openaiBaseUrl : null;
     }
+    if ("openaiDisplayName" in params) {
+      this.settingsConfig.openaiDisplayName =
+        typeof params.openaiDisplayName === "string" ? params.openaiDisplayName : null;
+    }
     if ("media" in params) {
       this.settingsConfig.media = normalizeMediaSettings(params.media);
     }
@@ -2703,6 +2709,7 @@ export class FakeDaemon {
         defaultProvider: this.settingsConfig.defaultProvider,
         defaultModel: this.settingsConfig.defaultModel,
         openaiBaseUrl: this.settingsConfig.openaiBaseUrl,
+        openaiDisplayName: this.settingsConfig.openaiDisplayName,
         theme: "system",
         media: cloneMediaSettings(this.settingsConfig.media),
         mascotId: "puffer",

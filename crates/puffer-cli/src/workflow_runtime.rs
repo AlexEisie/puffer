@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 use time::{OffsetDateTime, UtcOffset};
@@ -95,7 +95,7 @@ struct WorkflowRuntimeSnapshot {
 
 impl WorkflowActionRunner for ProcessWorkflowRunner {
     fn run_workflow(&self, slug: &str, trigger: serde_json::Value) -> Result<WorkflowActionOutput> {
-        let _guard = self.lock.lock().unwrap();
+        let _guard = workflow_runner_lock(&self.lock);
         let store = WorkflowStore::new(&self.paths.workspace_config_dir);
         let definition = store
             .get(slug)?
@@ -127,7 +127,7 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
         input: serde_json::Value,
         _trigger: serde_json::Value,
     ) -> Result<WorkflowActionOutput> {
-        let _guard = self.lock.lock().unwrap();
+        let _guard = workflow_runner_lock(&self.lock);
         let cwd = self.paths.workspace_root.clone();
         let snapshot = self.runtime_snapshot();
         let mut state = self.new_app_state_with_snapshot(cwd.clone(), None, &snapshot)?;
@@ -268,7 +268,7 @@ impl ProcessWorkflowRunner {
         model: Option<&str>,
         session_key: &str,
     ) -> Result<WorkflowActionOutput> {
-        let _guard = self.lock.lock().unwrap();
+        let _guard = workflow_runner_lock(&self.lock);
         let cwd = self.paths.workspace_root.clone();
         // Fresh agent state per triage turn. A long-lived session shared by
         // every turn on the same connection let earlier messages contaminate
@@ -1017,6 +1017,9 @@ fn apply_task_agent_model_default(state: &mut AppState, providers: &ProviderRegi
 
 fn apply_config_provider_overrides(providers: &mut ProviderRegistry, config: &PufferConfig) {
     providers.apply_openai_base_url_override(config.openai_base_url.as_deref());
+    if let Some(display_name) = config.openai_display_name.as_deref() {
+        providers.set_openai_display_name(display_name);
+    }
     if !config.openai_headers.is_empty() {
         providers.set_openai_headers(
             config
@@ -1287,6 +1290,8 @@ mod tests {
 
         assert!(prompt.contains("Workflow trigger:"));
         assert!(prompt.contains("\"first\""));
+        assert!(prompt.contains("\"connection_id\""));
+        assert!(!prompt.contains("[\n  {"));
     }
 
     #[test]

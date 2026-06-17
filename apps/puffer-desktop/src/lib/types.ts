@@ -330,6 +330,7 @@ export type SettingsConfig = {
   defaultProvider: string | null;
   defaultModel: string | null;
   openaiBaseUrl: string | null;
+  openaiDisplayName: string | null;
   theme: string;
   media: MediaSettings;
   mascotId: string;
