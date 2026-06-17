@@ -241,6 +241,112 @@ mod tests {
     }
 
     #[test]
+    fn monitor_debounce_key_uses_stable_conversation_scope() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store
+            .create(WorkflowBindingSpec {
+                slug: "monitor-telegram-user".into(),
+                description: "Monitor telegram-user for actionable tasks".into(),
+                connection_slug: "telegram-user".into(),
+                connector_slug: Some("telegram-login".into()),
+                status: WorkflowBindingStatus::Enabled,
+                filter: None,
+                ignore_filters: Vec::new(),
+                contact_ids: Vec::new(),
+                classify_prompt: None,
+                classify_model: None,
+                action: ActionSpec::TriageAgent {
+                    prompt: "triage".into(),
+                    model: None,
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+        let envelope = EventEnvelope {
+            envelope_id: "env-1".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: Some("42:1".into()),
+                text: "first".into(),
+                payload: serde_json::json!({"chat_id": 42, "message":"first"}),
+            },
+        };
+
+        assert_eq!(
+            crate::router_debounce::monitor_debounce_key(&envelope, &store).as_deref(),
+            Some("telegram-user:chat_id=42")
+        );
+    }
+
+    #[test]
+    fn monitor_debounce_key_skips_topics_with_immediate_workflows() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store
+            .create(WorkflowBindingSpec {
+                slug: "monitor-telegram-user".into(),
+                description: "Monitor telegram-user for actionable tasks".into(),
+                connection_slug: "telegram-user".into(),
+                connector_slug: Some("telegram-login".into()),
+                status: WorkflowBindingStatus::Enabled,
+                filter: None,
+                ignore_filters: Vec::new(),
+                contact_ids: Vec::new(),
+                classify_prompt: None,
+                classify_model: None,
+                action: ActionSpec::TriageAgent {
+                    prompt: "triage".into(),
+                    model: None,
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+        store
+            .create(WorkflowBindingSpec {
+                slug: "forward-telegram-user".into(),
+                description: "Forward telegram messages".into(),
+                connection_slug: "telegram-user".into(),
+                connector_slug: Some("telegram-login".into()),
+                status: WorkflowBindingStatus::Enabled,
+                filter: None,
+                ignore_filters: Vec::new(),
+                contact_ids: Vec::new(),
+                classify_prompt: None,
+                classify_model: None,
+                action: ActionSpec::ForwardMessage {
+                    platform: "telegram".into(),
+                    target: "@ops".into(),
+                    template: None,
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+        let envelope = EventEnvelope {
+            envelope_id: "env-1".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: Some("42:1".into()),
+                text: "first".into(),
+                payload: serde_json::json!({"chat_id": 42, "message":"first"}),
+            },
+        };
+
+        assert_eq!(
+            crate::router_debounce::monitor_debounce_key(&envelope, &store),
+            None
+        );
+    }
+
+    #[test]
     fn monitor_triage_dispatch_adds_runtime_language_guard_to_legacy_prompt() {
         struct PromptRecordingDispatcher {
             prompts: StdMutex<Vec<String>>,
