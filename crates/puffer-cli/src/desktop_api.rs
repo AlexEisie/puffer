@@ -404,6 +404,7 @@ pub(crate) fn load_settings_snapshot(
             default_provider: config.default_provider.clone(),
             default_model: config.default_model.clone(),
             openai_base_url: config.openai_base_url.clone(),
+            openai_display_name: config.openai_display_name.clone(),
             theme: config.theme.clone(),
             media: media_settings_dto(config),
             mascot_id: config.mascot.id.clone(),

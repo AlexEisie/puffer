@@ -530,6 +530,7 @@ pub(crate) struct SettingsConfigDto {
     pub(crate) default_provider: Option<String>,
     pub(crate) default_model: Option<String>,
     pub(crate) openai_base_url: Option<String>,
+    pub(crate) openai_display_name: Option<String>,
     pub(crate) theme: String,
     pub(crate) media: MediaSettingsDto,
     pub(crate) mascot_id: String,
