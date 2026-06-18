@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 const RESEARCH_ACTION_PROMPT_GUIDANCE: &str = "\n\nResearch action prompt guidance:\n- For any Research action, actionPrompt must define the specific research question, include source chat/contact context, cap web research to at most 3 web searches and 8 total research/tool steps, avoid repeated equivalent queries, prefer official or primary sources, and tell the action agent to stop once it has enough evidence for a concise reply.";
 const TASK_UPDATE_SOURCE_ISOLATION_POLICY: &str = "\n\nTaskUpdate source isolation policy:\n- Same chat/contact is not enough to call something a duplicate. If the current source event asks a new question, changes topic, or creates a separate request, create a new monitor task even when another task from the same sender is still pending.\n- If TaskUpdate changes an existing monitor task's subject, description, or activeForm, metadata MUST include monitor_envelope_id copied from the current workflow trigger and MUST replace or clear actions. Never leave action prompts from the previous source message attached to updated task text.";
+const TASK_FIELD_GUIDANCE: &str = "\n\nMonitor task field guidance\n- Write the subject as a next-step title for the user, not a neutral summary of the message. Prefer imperative verbs such as Reply, Review, Approve, Decide, Confirm, Schedule, Pay, Update, or Investigate.\n- The subject should answer \"what should I do next?\" without requiring the user to open the description. For example, use \"Reply with Friday availability\" instead of \"Friday availability question\".\n- Write the description to explain why this needs attention, who or what triggered it, any exact deadline/value that matters, and the concrete next step. Keep it concise, but include enough context for the user or action agent to act.\n- For awareness-only score-4 items, phrase the subject around the required user follow-up or decision. If there is no follow-up, decision, risk, deadline, or changed commitment, do not create a task.\n- Action names should be concrete user choices, and action prompts should carry the selected next step forward rather than merely summarize the source event.";
 
 /// Creates monitor workflows for one or more connector connections.
 pub(crate) fn handle_monitor_command(
@@ -462,6 +463,7 @@ Do not send connector replies unless a selected action later asks for it."#,
         memory_path.display()
     );
     prompt.push_str(TASK_UPDATE_SOURCE_ISOLATION_POLICY);
+    prompt.push_str(TASK_FIELD_GUIDANCE);
     prompt.push_str(RESEARCH_ACTION_PROMPT_GUIDANCE);
     prompt
 }
@@ -499,6 +501,8 @@ Apply this personal triage policy to historical messages:
 - If the source message is mixed-language and you cannot identify a primary language, use the user's preferred language or owner language from available profile/context. If no user language is available, preserve the source's dominant actionable language and do not default to English only because this prompt is English.
 - English source messages follow the same source-primary-language rule: English source messages should create English task fields and reply prompts.
 - Preserve explicit product names, person names, company names, file names, commands, URLs, quoted text, and domain terms exactly; translate only surrounding explanatory prose.
+- Write task subjects as next-step titles for the user, not neutral message summaries. The subject should answer "what should I do next?" without requiring the user to open the description.
+- Write descriptions with the source context, why it needs attention, and the concrete next step.
 
 Read monitor memory `{}` first and skip ignored examples. Skip muted or silent notifications. Avoid duplicates by calling TaskList first.
 
@@ -595,6 +599,9 @@ mod tests {
         assert!(prompt.contains("expiresAt"));
         assert!(prompt.contains("Research action prompt guidance"));
         assert!(prompt.contains("TaskUpdate source isolation policy"));
+        assert!(prompt.contains("Monitor task field guidance"));
+        assert!(prompt.contains("what should I do next?"));
+        assert!(prompt.contains("Reply with Friday availability"));
         assert!(prompt.contains("Same chat/contact is not enough"));
         assert!(prompt.contains("replace or clear actions"));
         assert!(prompt.contains("avoid repeated equivalent queries"));

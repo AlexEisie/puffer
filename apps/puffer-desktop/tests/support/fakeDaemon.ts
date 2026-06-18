@@ -947,7 +947,52 @@ export class FakeDaemon {
         ],
         status: "completed",
         started_at_ms: now - 15_500,
-        ended_at_ms: now - 15_000
+        ended_at_ms: now - 15_000,
+        digest_batch_id: "digest-test",
+        digest_batch_count: 2,
+        digest_batch_position: 1,
+        digest_outcome_shared: true
+      },
+      {
+        idx: 2,
+        run_id: "run-monitor-2",
+        workflow_slug: "monitor-telegram-user",
+        connection_slug: "telegram-user",
+        connector_slug: "telegram-login",
+        envelope_id: "env-monitor-2",
+        received_at_ms: now - 15_900,
+        topic: "telegram-user",
+        kind: "message",
+        dedup_key: "msg-2",
+        summary: "Telegram from Alice: thanks",
+        text: "thanks",
+        payload: {
+          chat_title: "Support",
+          sender_username: "alice",
+          message: "thanks"
+        },
+        action_log: [
+          {
+            action: "triage_agent",
+            status: "completed",
+            summary: "Created monitor task monitor-1.",
+            started_at_ms: now - 15_500,
+            ended_at_ms: now - 15_000,
+            usage: {
+              input_tokens: 40,
+              output_tokens: 8,
+              cache_read_tokens: 10,
+              cache_creation_tokens: 0
+            }
+          }
+        ],
+        status: "completed",
+        started_at_ms: now - 15_500,
+        ended_at_ms: now - 15_000,
+        digest_batch_id: "digest-test",
+        digest_batch_count: 2,
+        digest_batch_position: 2,
+        digest_outcome_shared: true
       }
     ]
   };

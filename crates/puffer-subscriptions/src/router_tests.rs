@@ -491,8 +491,8 @@ mod tests {
                     kind: "message".into(),
                     control: false,
                     dedup_key: Some("chat:1".into()),
-                    text: "first".into(),
-                    payload: serde_json::json!({"message":"first"}),
+                    text: "please review first".into(),
+                    payload: serde_json::json!({"message":"please review first"}),
                 },
             },
             EventEnvelope {
@@ -504,8 +504,8 @@ mod tests {
                     kind: "message".into(),
                     control: false,
                     dedup_key: Some("chat:2".into()),
-                    text: "second".into(),
-                    payload: serde_json::json!({"message":"second"}),
+                    text: "please review second".into(),
+                    payload: serde_json::json!({"message":"please review second"}),
                 },
             },
         ];
@@ -526,7 +526,10 @@ mod tests {
         assert_eq!(result.failed, 0);
         assert_eq!(
             dispatcher.batches.lock().unwrap().as_slice(),
-            &[vec!["first".to_string(), "second".to_string()]]
+            &[vec![
+                "please review first".to_string(),
+                "please review second".to_string()
+            ]]
         );
     }
 

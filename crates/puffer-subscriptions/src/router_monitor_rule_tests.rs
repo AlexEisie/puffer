@@ -847,7 +847,7 @@ mod monitor_rule_tests {
         let (_recording, dispatcher) = recording_dispatcher();
         let envelope = event(
             "matrix-delete",
-            "noise",
+            "please review this noise",
             serde_json::json!({"chat_kind": "user"}),
         );
 
