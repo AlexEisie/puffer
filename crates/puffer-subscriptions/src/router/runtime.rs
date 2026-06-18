@@ -6,6 +6,7 @@ use super::{
 use crate::action::{ActionDispatcher, BuiltinActionDispatcher};
 use crate::classify::{Classifier, NullClassifier};
 use crate::history::WorkflowHistoryStore;
+use crate::self_gate::{DropAllSelfGate, SelfMessageGate};
 use crate::store::WorkflowBindingStore;
 use puffer_subscriber_runtime::{EventBus, EventEnvelope, EventReceiver};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,8 +63,17 @@ impl SubscriptionRouter {
         history_store: Option<Arc<WorkflowHistoryStore>>,
         dispatcher: Arc<dyn ActionDispatcher>,
         classifier: Arc<dyn Classifier>,
+        gate: Arc<dyn SelfMessageGate>,
     ) -> Self {
-        Self::spawn_with_monitor_digest(bus, store, history_store, dispatcher, classifier, None)
+        Self::spawn_with_monitor_digest(
+            bus,
+            store,
+            history_store,
+            dispatcher,
+            classifier,
+            gate,
+            None,
+        )
     }
 
     /// Spawns the router task with an optional delayed monitor digest queue.
@@ -73,6 +83,7 @@ impl SubscriptionRouter {
         history_store: Option<Arc<WorkflowHistoryStore>>,
         dispatcher: Arc<dyn ActionDispatcher>,
         classifier: Arc<dyn Classifier>,
+        gate: Arc<dyn SelfMessageGate>,
         monitor_digest: Option<MonitorDigestQueue>,
     ) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -86,6 +97,7 @@ impl SubscriptionRouter {
                 history_store,
                 dispatcher,
                 classifier,
+                gate,
                 monitor_digest,
                 shutdown_rx,
                 stats_for_task,
@@ -108,6 +120,7 @@ impl SubscriptionRouter {
             None,
             Arc::new(BuiltinActionDispatcher::new()),
             Arc::new(NullClassifier),
+            Arc::new(DropAllSelfGate),
         )
     }
 
@@ -131,6 +144,7 @@ async fn run(
     history_store: Option<Arc<WorkflowHistoryStore>>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    gate: Arc<dyn SelfMessageGate>,
     monitor_digest: Option<MonitorDigestQueue>,
     mut shutdown_rx: watch::Receiver<bool>,
     stats: Arc<RouterStats>,
@@ -151,6 +165,7 @@ async fn run(
                     history_store.clone(),
                     dispatcher.clone(),
                     classifier.clone(),
+                    gate.clone(),
                     monitor_digest.clone(),
                     stats.clone(),
                     permits.clone(),
@@ -166,6 +181,7 @@ fn spawn_envelope_processor(
     history_store: Option<Arc<WorkflowHistoryStore>>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    gate: Arc<dyn SelfMessageGate>,
     monitor_digest: Option<MonitorDigestQueue>,
     stats: Arc<RouterStats>,
     permits: Arc<Semaphore>,
@@ -185,6 +201,7 @@ fn spawn_envelope_processor(
             history_store,
             dispatcher,
             classifier,
+            gate,
             monitor_digest,
             stats.clone(),
         )
@@ -201,6 +218,7 @@ async fn process_envelope_blocking(
     history_store: Option<Arc<WorkflowHistoryStore>>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    gate: Arc<dyn SelfMessageGate>,
     monitor_digest: Option<MonitorDigestQueue>,
     stats: Arc<RouterStats>,
 ) -> EnvelopeProcessResult {
@@ -212,6 +230,7 @@ async fn process_envelope_blocking(
             history_store.as_deref(),
             &dispatcher,
             &classifier,
+            &gate,
             monitor_digest.as_ref(),
             Some(stats_for_processing.as_ref()),
         )

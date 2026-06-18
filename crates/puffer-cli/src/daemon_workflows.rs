@@ -8,6 +8,7 @@ mod monitor_ignore_result;
 mod monitor_memory;
 mod monitor_reply_send;
 mod monitor_rules;
+mod monitor_self_gate;
 mod monitor_task_complete;
 mod monitor_task_ignore;
 mod planned;
@@ -21,6 +22,7 @@ pub(crate) use monitor_history::handle_monitor_history_list;
 pub(crate) use monitor_memory::handle_monitor_memory_save;
 pub(crate) use monitor_reply_send::handle_monitor_reply_send;
 pub(crate) use monitor_rules::{handle_monitor_rule_add, handle_monitor_rule_delete};
+pub(crate) use monitor_self_gate::MonitorSelfGate;
 pub(crate) use monitor_task_complete::handle_monitor_task_complete;
 pub(crate) use monitor_task_ignore::handle_monitor_task_ignore;
 

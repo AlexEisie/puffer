@@ -13,6 +13,7 @@ use crate::router::{
     process_envelope_batch_result_with_monitor_digest, process_envelope_result_with_monitor_digest,
     MonitorDigestQueue,
 };
+use crate::self_gate::SelfMessageGate;
 use crate::spec::ActionSpec;
 use crate::store::SubscriptionStore;
 use anyhow::Result;
@@ -26,6 +27,7 @@ pub(super) struct ManagerConnectorEventProcessor {
     proxy_store: Arc<AgentProxyStore>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    self_gate: Arc<dyn SelfMessageGate>,
     monitor_digest: MonitorDigestQueue,
 }
 
@@ -37,6 +39,7 @@ impl ManagerConnectorEventProcessor {
         proxy_store: Arc<AgentProxyStore>,
         dispatcher: Arc<dyn ActionDispatcher>,
         classifier: Arc<dyn Classifier>,
+        self_gate: Arc<dyn SelfMessageGate>,
         monitor_digest: MonitorDigestQueue,
     ) -> Self {
         Self {
@@ -46,6 +49,7 @@ impl ManagerConnectorEventProcessor {
             proxy_store,
             dispatcher,
             classifier,
+            self_gate,
             monitor_digest,
         }
     }
@@ -142,6 +146,7 @@ impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
             Some(&self.history_store),
             &self.dispatcher,
             &self.classifier,
+            &self.self_gate,
             Some(&self.monitor_digest),
             None,
         );
@@ -169,6 +174,7 @@ impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
             Some(&self.history_store),
             &self.dispatcher,
             &self.classifier,
+            &self.self_gate,
             Some(&self.monitor_digest),
             None,
         );

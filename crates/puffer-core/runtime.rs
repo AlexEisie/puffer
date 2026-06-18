@@ -204,6 +204,12 @@ struct TurnRequestOptions<'a> {
     /// process-wide handle without lifetime gymnastics.
     observability: Option<puffer_observability::ObservabilityHandle>,
     lightweight_context: bool,
+    /// Tool ids to exclude from the model-visible tool list for this turn.
+    /// Applied as a post-filter after the provider assembles its tool
+    /// definitions, so it works regardless of provider and does not
+    /// require an allowlist enumeration of every other tool. Used by the
+    /// monitor triage runner to withhold `TaskCreate` on outgoing turns.
+    excluded_tools: Vec<String>,
 }
 
 /// Cooperative cancellation handle threaded through the agent loop and
@@ -409,13 +415,8 @@ pub fn execute_user_prompt_without_tools(
         auth_store,
         input,
         TurnRequestOptions {
-            structured_output: None,
             tool_filter: Some(RequestToolFilter::empty_static()),
-            reflection: None,
-            cancel: None,
-            max_turns: None,
-            observability: None,
-            lightweight_context: false,
+            ..TurnRequestOptions::default()
         },
     )
 }
@@ -462,13 +463,8 @@ pub(crate) fn execute_user_prompt_with_tool_filter(
         auth_store,
         input,
         TurnRequestOptions {
-            structured_output: None,
             tool_filter,
-            reflection: None,
-            cancel: None,
-            max_turns: None,
-            observability: None,
-            lightweight_context: false,
+            ..TurnRequestOptions::default()
         },
     )
 }
@@ -587,12 +583,7 @@ pub fn execute_user_prompt_with_structured_output(
         input,
         TurnRequestOptions {
             structured_output: Some(structured_output),
-            tool_filter: None,
-            reflection: None,
-            cancel: None,
-            max_turns: None,
-            observability: None,
-            lightweight_context: false,
+            ..TurnRequestOptions::default()
         },
     )
 }
@@ -714,12 +705,7 @@ where
             input,
             TurnRequestOptions {
                 structured_output,
-                tool_filter: None,
-                reflection: None,
-                cancel: None,
-                max_turns: None,
-                observability: None,
-                lightweight_context: false,
+                ..TurnRequestOptions::default()
             },
             &mut on_event,
         )
@@ -756,12 +742,8 @@ where
             input,
             TurnRequestOptions {
                 structured_output,
-                tool_filter: None,
-                reflection: None,
                 cancel: Some(cancel),
-                max_turns: None,
-                observability: None,
-                lightweight_context: false,
+                ..TurnRequestOptions::default()
             },
             &mut on_event,
         )
@@ -801,11 +783,8 @@ where
             TurnRequestOptions {
                 structured_output,
                 tool_filter: tool_filter.as_ref(),
-                reflection: None,
                 cancel: Some(cancel),
-                max_turns: None,
-                observability: None,
-                lightweight_context: false,
+                ..TurnRequestOptions::default()
             },
             &mut on_event,
         )
@@ -834,12 +813,7 @@ where
         input,
         TurnRequestOptions {
             structured_output: Some(structured_output),
-            tool_filter: None,
-            reflection: None,
-            cancel: None,
-            max_turns: None,
-            observability: None,
-            lightweight_context: false,
+            ..TurnRequestOptions::default()
         },
         &mut on_event,
     )
@@ -870,13 +844,38 @@ where
         auth_store,
         input,
         TurnRequestOptions {
-            structured_output: None,
-            tool_filter: None,
-            reflection: None,
             cancel: Some(cancel),
-            max_turns: None,
-            observability: None,
-            lightweight_context: false,
+            ..TurnRequestOptions::default()
+        },
+        &mut on_event,
+    )
+}
+
+/// Executes one user prompt with streaming events, withholding named tools from
+/// the model-visible tool list for this turn. Used by the monitor triage runner
+/// to suppress `TaskCreate` on outgoing message turns so the agent can only
+/// complete or update existing tasks.
+pub fn execute_user_prompt_streaming_excluding_tools<F>(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
+    input: &str,
+    excluded_tools: Vec<String>,
+    mut on_event: F,
+) -> Result<TurnExecution>
+where
+    F: FnMut(TurnStreamEvent),
+{
+    execute_user_prompt_streaming_with_options(
+        state,
+        resources,
+        providers,
+        auth_store,
+        input,
+        TurnRequestOptions {
+            excluded_tools,
+            ..TurnRequestOptions::default()
         },
         &mut on_event,
     )
@@ -902,13 +901,8 @@ where
         auth_store,
         input,
         TurnRequestOptions {
-            structured_output: None,
-            tool_filter: None,
             reflection: Some(reflection),
-            cancel: None,
-            max_turns: None,
-            observability: None,
-            lightweight_context: false,
+            ..TurnRequestOptions::default()
         },
         &mut on_event,
     )

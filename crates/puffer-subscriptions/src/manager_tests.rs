@@ -140,6 +140,7 @@ fn monitor_events_flush_as_delayed_digest_batch() {
         manager.proxy_store.clone(),
         manager.dispatcher.clone(),
         manager.classifier.clone(),
+        manager.self_gate.clone(),
         manager.monitor_digest.clone(),
     );
     let envelopes = vec![

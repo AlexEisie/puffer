@@ -3,6 +3,7 @@ mod language_guard_tests {
     use super::*;
     use crate::action::ActionResult;
     use crate::classify::NullClassifier;
+    use crate::self_gate::{DropAllSelfGate, SelfMessageGate};
     use crate::spec::{ActionSpec, WorkflowBindingSpec};
     use puffer_subscriber_runtime::{Event, EventEnvelope};
     use std::sync::Arc;
@@ -23,6 +24,10 @@ mod language_guard_tests {
                 other => ActionResult::failure(format!("unexpected action: {other:?}")),
             }
         }
+    }
+
+    fn drop_all_gate() -> Arc<dyn SelfMessageGate> {
+        Arc::new(DropAllSelfGate)
     }
 
     fn triage_binding(slug: &str, description: &str, prompt: &str) -> WorkflowBindingSpec {
@@ -87,6 +92,7 @@ mod language_guard_tests {
             &dispatcher_trait,
             &classifier,
             None,
+            &drop_all_gate(),
         );
 
         assert!(result.matched);
@@ -104,7 +110,9 @@ mod language_guard_tests {
         assert!(prompts[0].contains("ambiguous short messages"));
         assert!(prompts[0].contains("Same chat/contact is not enough"));
         assert!(prompts[0].contains("replace or clear `metadata.actions`"));
-        assert!(prompts[0].contains("never change its status"));
+        assert!(!MONITOR_RUNTIME_LANGUAGE_POLICY.contains("never change its status"));
+        assert!(MONITOR_RUNTIME_LANGUAGE_POLICY.contains("status: completed"));
+        assert!(MONITOR_RUNTIME_LANGUAGE_POLICY.contains("direction"));
         match store.get("monitor-telegram-user").unwrap().action {
             ActionSpec::TriageAgent { prompt, .. } => assert_eq!(prompt, "legacy monitor prompt"),
             _ => panic!("expected triage agent"),
@@ -148,6 +156,7 @@ mod language_guard_tests {
             &dispatcher_trait,
             &classifier,
             None,
+            &drop_all_gate(),
         );
 
         assert!(result.matched);
@@ -208,6 +217,7 @@ mod language_guard_tests {
             &dispatcher_trait,
             &classifier,
             None,
+            &drop_all_gate(),
         );
 
         assert!(result.matched);

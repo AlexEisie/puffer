@@ -8,6 +8,7 @@ use crate::history::{
     now_ms, DedupDecision, WorkflowActionLog, WorkflowBindingRunStatus, WorkflowHistoryStore,
     MAX_FAILED_ATTEMPTS,
 };
+use crate::self_gate::{SelfMessageGate, SELF_MESSAGE_KIND};
 use crate::spec::{
     filter_matches, ActionSpec, FilterSpec, WorkflowBindingSpec, WorkflowBindingStatus,
 };
@@ -37,7 +38,7 @@ const MONITOR_RUNTIME_LANGUAGE_POLICY: &str = r#"Monitor source-language runtime
 - When the source message contains critical values, quote the relevant sentence verbatim inside the task description instead of paraphrasing it.
 - If the trigger payload contains `conversation_context`, read it before deciding what the current source event means. `conversation_context.source=telegram_server_history_cache` means bounded recent Telegram server-history messages from the same direct chat before the current trigger; `conversation_context.source=subscriber_diagnostics` means best-effort observed subscriber diagnostics that may have gaps. Use context only to disambiguate ambiguous short messages and reply intent; do not create tasks from prior context alone, do not assume diagnostics context is complete or immediately adjacent, and do not replace the current source event's numbers, deadlines, or asks with prior-message details.
 - Same chat/contact is not enough to call something a duplicate. If the current source event asks a new question, changes topic, or creates a separate request, create a new monitor task even when another task from the same sender is still pending.
-- When updating an existing monitor task with TaskUpdate, never change its status; task lifecycle is owned by the daemon and user actions.
+- Task lifecycle: for ordinary content edits via TaskUpdate, leave status unchanged. The workflow trigger carries a direction field (incoming = a contact's message, outgoing = my own). When the current message clearly indicates an existing open monitor task in THIS conversation is done/handled/resolved, complete that task with TaskUpdate status: completed. Resolution is broader than "I did it": a decisive decision, refusal, or dismissal also completes it (e.g. outgoing "不给你擦"/"不弄了" — deciding not to act still closes the loop), and an incoming contact report that it is done completes the matching task too (e.g. "擦完了"/"已处理"). Match the conversation by stored identity like chat_id; TaskList first; if ambiguous among several, complete none UNLESS the message quotes/replies to a specific earlier message (a quote is not ambiguous — match it to that task); deferrals like "还没"/"等下"/"晚点再说" never complete. If direction is outgoing, only complete or update existing tasks — never create one. You may complete a task even if it has a reply/delivery target — completing only marks it done and never sends a reply.
 - When TaskUpdate changes an existing monitor task's subject, description, or activeForm, include `metadata.monitor_envelope_id` copied from the current workflow trigger and replace or clear `metadata.actions` so stale action prompts from the prior source cannot reach the executor."#;
 
 /// Summary of processing one event envelope against workflow bindings.
@@ -59,6 +60,7 @@ pub fn process_envelope(
     dispatcher: &Arc<dyn ActionDispatcher>,
     classifier: &Arc<dyn Classifier>,
     stats: Option<&RouterStats>,
+    gate: &Arc<dyn SelfMessageGate>,
 ) -> bool {
     process_envelope_result(
         envelope,
@@ -67,6 +69,7 @@ pub fn process_envelope(
         dispatcher,
         classifier,
         stats,
+        gate,
     )
     .matched
 }
@@ -79,6 +82,7 @@ pub fn process_envelope_result(
     dispatcher: &Arc<dyn ActionDispatcher>,
     classifier: &Arc<dyn Classifier>,
     stats: Option<&RouterStats>,
+    gate: &Arc<dyn SelfMessageGate>,
 ) -> EnvelopeProcessResult {
     process_envelope_result_with_monitor_digest(
         envelope,
@@ -86,6 +90,7 @@ pub fn process_envelope_result(
         history_store,
         dispatcher,
         classifier,
+        gate,
         None,
         stats,
     )
@@ -98,6 +103,7 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
     history_store: Option<&WorkflowHistoryStore>,
     dispatcher: &Arc<dyn ActionDispatcher>,
     classifier: &Arc<dyn Classifier>,
+    gate: &Arc<dyn SelfMessageGate>,
     monitor_digest: Option<&MonitorDigestQueue>,
     stats: Option<&RouterStats>,
 ) -> EnvelopeProcessResult {
@@ -125,6 +131,26 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
         topic_matched_any = true;
         if spec.status == WorkflowBindingStatus::Paused {
             log_router_skip(&spec, envelope, "binding_paused");
+            continue;
+        }
+        if event_is_self(&envelope.event) {
+            // Self/outgoing events SHORT-CIRCUIT the normal filter chain
+            // (dedup/contact/classify). classify can be an LLM call, so gating
+            // before it is essential (#569). The gate is cheap and injected so
+            // the router holds no monitor/task knowledge.
+            if !gate.should_dispatch_self_message(&envelope.event) {
+                log_router_skip(&spec, envelope, "self_no_open_task");
+                continue;
+            }
+            result.matched = true;
+            dispatch_one_matched_envelope(
+                &spec,
+                envelope,
+                history_store,
+                dispatcher,
+                stats,
+                &mut result,
+            );
             continue;
         }
         if event_dedup_key_seen(history_store, &spec, envelope) {
@@ -330,6 +356,7 @@ pub fn process_envelope_batch_result(
     dispatcher: &Arc<dyn ActionDispatcher>,
     classifier: &Arc<dyn Classifier>,
     stats: Option<&RouterStats>,
+    gate: &Arc<dyn SelfMessageGate>,
 ) -> EnvelopeProcessResult {
     process_envelope_batch_result_with_monitor_digest(
         envelopes,
@@ -337,6 +364,7 @@ pub fn process_envelope_batch_result(
         history_store,
         dispatcher,
         classifier,
+        gate,
         None,
         stats,
     )
@@ -349,6 +377,7 @@ pub(crate) fn process_envelope_batch_result_with_monitor_digest(
     history_store: Option<&WorkflowHistoryStore>,
     dispatcher: &Arc<dyn ActionDispatcher>,
     classifier: &Arc<dyn Classifier>,
+    gate: &Arc<dyn SelfMessageGate>,
     monitor_digest: Option<&MonitorDigestQueue>,
     stats: Option<&RouterStats>,
 ) -> EnvelopeProcessResult {
@@ -366,6 +395,36 @@ pub(crate) fn process_envelope_batch_result_with_monitor_digest(
         }
         let mut triage_batch = Vec::new();
         for envelope in &envelopes {
+            // Self/outgoing events SHORT-CIRCUIT the normal filter chain
+            // (dedup/contact/classify) on the batch path too. classify can be an
+            // LLM call, so gating before it is essential (#569). Mirror the
+            // single-envelope self-branch: gate-drop skips the (spec,event);
+            // gate-allow dispatches immediately and bypasses the remaining
+            // filters (and is never batched into the triage agent).
+            if event_is_self(&envelope.event) {
+                let topic_matches = spec.connection_slug == envelope.event.topic
+                    || spec
+                        .connector_slug
+                        .as_deref()
+                        .is_some_and(|connector_slug| connector_slug == envelope.event.topic);
+                if !topic_matches {
+                    continue;
+                }
+                if !gate.should_dispatch_self_message(&envelope.event) {
+                    log_router_skip(&spec, envelope, "self_no_open_task");
+                    continue;
+                }
+                result.matched = true;
+                dispatch_one_matched_envelope(
+                    &spec,
+                    envelope,
+                    history_store,
+                    dispatcher,
+                    stats,
+                    &mut result,
+                );
+                continue;
+            }
             let Some(prefiltered) =
                 prefilter_envelope_for_spec(&spec, envelope, history_store, classifier)
             else {
@@ -825,6 +884,13 @@ fn monitor_language_guarded_prompt(prompt: &str) -> String {
 
 fn payload_bool(payload: &Value, key: &str) -> bool {
     payload.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// Whether an event is the user's own self/outgoing message. The telegram path
+/// carries `payload.is_outgoing == true`; a future connector may instead tag the
+/// event kind as [`SELF_MESSAGE_KIND`].
+fn event_is_self(event: &puffer_subscriber_runtime::Event) -> bool {
+    event.kind == SELF_MESSAGE_KIND || payload_bool(&event.payload, "is_outgoing")
 }
 
 /// Free-standing helper used by tests and by future explicit "test this

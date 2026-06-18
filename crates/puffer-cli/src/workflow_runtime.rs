@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use puffer_config::{load_config, ConfigPaths, PufferConfig};
 use puffer_core::{
     execute_tool_action_once, execute_user_turn_streaming,
-    execute_user_turn_streaming_without_tools, AppState, TurnStreamEvent,
+    execute_user_turn_streaming_excluding_tools, execute_user_turn_streaming_without_tools,
+    AppState, TurnStreamEvent,
 };
 use puffer_provider_registry::{canonical_provider_id, AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
@@ -170,9 +171,19 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
             .into_iter()
             .map(|trigger| enrich_monitor_trigger_context(&self.paths, trigger))
             .collect::<Result<Vec<_>>>()?;
+        // Outgoing-only bursts run in completion mode (the session excludes
+        // task-creation tools); any incoming message keeps creation enabled.
+        let is_outgoing = triggers.iter().all(|trigger| {
+            trigger
+                .get("payload")
+                .and_then(|p| p.get("is_outgoing"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        });
         let prompt = render_triage_batch_prompt(prompt, &triggers)?;
         let session_key = triage_session_key(model, &triggers);
-        let output = self.run_task_agent_prompt_for_session(prompt, model, &session_key)?;
+        let output =
+            self.run_task_agent_prompt_for_session(prompt, model, &session_key, is_outgoing)?;
         for trigger in &triggers {
             // Server-owned grounding: stamp each trigger's verbatim event text
             // onto any monitor task the triage turn created for that envelope.
@@ -267,6 +278,7 @@ impl ProcessWorkflowRunner {
         prompt: String,
         model: Option<&str>,
         session_key: &str,
+        is_outgoing: bool,
     ) -> Result<WorkflowActionOutput> {
         let _guard = workflow_runner_lock(&self.lock);
         let cwd = self.paths.workspace_root.clone();
@@ -280,31 +292,64 @@ impl ProcessWorkflowRunner {
         let snapshot = self.runtime_snapshot();
         let mut state = self.new_task_app_state_with_snapshot(cwd, model, &snapshot)?;
         state.prompt_cache_key_override = Some(session_key.to_string());
+        // This is the monitor triage turn: a conversational "done" signal in the
+        // chat is itself the human action, and TaskUpdate only marks the task
+        // complete (it never sends a reply). Let the triage agent complete
+        // human-gated monitor tasks; the reply-approval gate stays enforced on the
+        // separate reply-send path.
+        state.monitor_triage_turn = true;
         let mut auth_store = snapshot.auth_store.clone();
         let mut usage = None;
         // Post-lock stamp: history's run window starts at router dispatch, so
         // this is what separates queue/lock wait from actual turn time.
         let turn_started_at_ms = now_unix_ms();
-        let output = execute_user_turn_streaming(
-            &mut state,
-            &self.resources,
-            &snapshot.providers,
-            &mut auth_store,
-            &prompt,
-            |event| {
-                if let TurnStreamEvent::Usage(report) = event {
-                    merge_usage(
-                        &mut usage,
-                        ActionUsage {
-                            input_tokens: report.input_tokens,
-                            output_tokens: report.output_tokens,
-                            cache_read_tokens: report.cache_read_tokens,
-                            cache_creation_tokens: report.cache_creation_tokens,
-                        },
-                    );
-                }
-            },
-        )?;
+        // On outgoing turns the agent must not create new tasks — derive the
+        // exclusion from the shared constant so test and runtime stay in sync.
+        let excluded_tools = triage_excluded_tools_for_direction(is_outgoing);
+        let output = if excluded_tools.is_empty() {
+            execute_user_turn_streaming(
+                &mut state,
+                &self.resources,
+                &snapshot.providers,
+                &mut auth_store,
+                &prompt,
+                |event| {
+                    if let TurnStreamEvent::Usage(report) = event {
+                        merge_usage(
+                            &mut usage,
+                            ActionUsage {
+                                input_tokens: report.input_tokens,
+                                output_tokens: report.output_tokens,
+                                cache_read_tokens: report.cache_read_tokens,
+                                cache_creation_tokens: report.cache_creation_tokens,
+                            },
+                        );
+                    }
+                },
+            )?
+        } else {
+            execute_user_turn_streaming_excluding_tools(
+                &mut state,
+                &self.resources,
+                &snapshot.providers,
+                &mut auth_store,
+                &prompt,
+                excluded_tools,
+                |event| {
+                    if let TurnStreamEvent::Usage(report) = event {
+                        merge_usage(
+                            &mut usage,
+                            ActionUsage {
+                                input_tokens: report.input_tokens,
+                                output_tokens: report.output_tokens,
+                                cache_read_tokens: report.cache_read_tokens,
+                                cache_creation_tokens: report.cache_creation_tokens,
+                            },
+                        );
+                    }
+                },
+            )?
+        };
         Ok(
             WorkflowActionOutput::with_usage(output.assistant_text, usage)
                 .with_turn_window(turn_started_at_ms, now_unix_ms()),
@@ -381,10 +426,32 @@ fn render_triage_batch_prompt(prompt: &str, triggers: &[serde_json::Value]) -> R
     } else {
         "Hourly monitor digest triggers"
     };
-    let trigger = if triggers.len() == 1 {
-        serde_json::to_string_pretty(&triggers[0])?
+    // Stamp each trigger with its direction (incoming/outgoing) so the triage
+    // agent can apply the completion protocol to the right messages.
+    let with_direction: Vec<serde_json::Value> = triggers
+        .iter()
+        .map(|trigger| {
+            let mut trigger = trigger.clone();
+            let is_outgoing = trigger
+                .get("payload")
+                .and_then(|p| p.get("is_outgoing"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if let Some(obj) = trigger.as_object_mut() {
+                obj.insert(
+                    "direction".to_string(),
+                    serde_json::Value::String(
+                        if is_outgoing { "outgoing" } else { "incoming" }.to_string(),
+                    ),
+                );
+            }
+            trigger
+        })
+        .collect();
+    let trigger = if with_direction.len() == 1 {
+        serde_json::to_string_pretty(&with_direction[0])?
     } else {
-        serde_json::to_string_pretty(triggers)?
+        serde_json::to_string_pretty(&with_direction)?
     };
     let digest_guidance = if triggers.len() == 1 {
         String::new()
@@ -686,6 +753,54 @@ fn telegram_context_sender_label(payload: &Value, is_outgoing: bool) -> String {
                 "sender".to_string()
             }
         })
+}
+
+/// Tools withheld from the model-visible list on outgoing triage turns.
+/// On outgoing turns the agent must only complete or update existing tasks;
+/// creating new tasks from the user's own messages is not permitted.
+const TRIAGE_OUTGOING_EXCLUDED_TOOLS: &[&str] = &["TaskCreate"];
+
+/// Returns the tool names that the triage agent would see for a given
+/// message direction. Incoming turns expose the full tool set; outgoing
+/// turns suppress `TaskCreate` via [`TRIAGE_OUTGOING_EXCLUDED_TOOLS`] so
+/// the agent can only complete or update tasks, not create new ones.
+///
+/// This helper is the single source of truth for the exclusion logic — it
+/// is called both from tests and from `run_task_agent_prompt_for_session`,
+/// so the two cannot drift apart.
+fn triage_excluded_tools_for_direction(is_outgoing: bool) -> Vec<String> {
+    if is_outgoing {
+        TRIAGE_OUTGOING_EXCLUDED_TOOLS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Returns the tool NAMES that the triage turn would expose for the given
+/// direction. Derives the excluded set from the real exclusion logic
+/// (`triage_excluded_tools_for_direction`) rather than a separate list.
+/// Used by unit tests to assert direction-aware tool visibility without
+/// requiring a live LLM call.
+#[cfg(test)]
+fn triage_turn_tool_names(is_outgoing: bool) -> Vec<String> {
+    // The test workspace does not have bundled resources loaded, so we
+    // use a representative base list that includes the task tools the
+    // triage agent actually uses. This mirrors the real code path:
+    // `TaskCreate`, `TaskList`, and `TaskUpdate` are always loaded from
+    // resources/tools at runtime; the exclusion is applied on top.
+    let base_tool_names: Vec<String> = vec![
+        "TaskCreate".to_string(),
+        "TaskList".to_string(),
+        "TaskUpdate".to_string(),
+    ];
+    let excluded = triage_excluded_tools_for_direction(is_outgoing);
+    base_tool_names
+        .into_iter()
+        .filter(|name| !excluded.contains(name))
+        .collect()
 }
 
 /// Current Unix time in milliseconds (i128, matching workflow history).
@@ -1878,5 +1993,41 @@ mod tests {
         let trigger = json!({ "envelope_id": "env-1", "text": "hello" });
 
         super::record_monitor_source_text(&paths, &trigger).unwrap();
+    }
+
+    #[test]
+    fn outgoing_turn_excludes_task_create_tool() {
+        let tools = super::triage_turn_tool_names(true);
+        assert!(!tools.iter().any(|t| t == "TaskCreate"));
+        assert!(tools.iter().any(|t| t == "TaskUpdate"));
+        assert!(tools.iter().any(|t| t == "TaskList"));
+    }
+
+    #[test]
+    fn incoming_turn_includes_task_create_tool() {
+        let tools = super::triage_turn_tool_names(false);
+        assert!(tools.iter().any(|t| t == "TaskCreate"));
+    }
+
+    #[test]
+    fn triage_prompt_includes_direction_from_payload() {
+        let triggers = vec![json!({
+            "connection_id": "telegram-user",
+            "text": "done",
+            "payload": { "is_outgoing": true, "chat_id": 42 }
+        })];
+        let prompt = render_triage_batch_prompt("Monitor prompt", &triggers).unwrap();
+        assert!(prompt.contains("\"direction\""));
+        assert!(prompt.contains("outgoing"));
+    }
+
+    #[test]
+    fn triage_prompt_direction_defaults_incoming() {
+        let triggers = vec![json!({
+            "connection_id": "telegram-user", "text": "hi",
+            "payload": { "is_outgoing": false, "chat_id": 7 }
+        })];
+        let prompt = render_triage_batch_prompt("Monitor prompt", &triggers).unwrap();
+        assert!(prompt.contains("incoming"));
     }
 }

@@ -3,6 +3,7 @@ mod monitor_rule_tests {
     use super::*;
     use crate::action::{ActionResult, BuiltinActionDispatcher};
     use crate::classify::NullClassifier;
+    use crate::self_gate::{DropAllSelfGate, SelfMessageGate};
     use crate::spec::{ActionSpec, TaggedFilterSpec, WorkflowBindingSpec};
     use crate::{
         compile_event_field_rule, EventField, EventFieldRule, EventFieldType, EventOperator,
@@ -13,6 +14,10 @@ mod monitor_rule_tests {
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
     use tempfile::tempdir;
+
+    fn drop_all_gate() -> Arc<dyn SelfMessageGate> {
+        Arc::new(DropAllSelfGate)
+    }
 
     #[test]
     fn keyword_ignore_filter_suppresses_matching_text() {
@@ -71,9 +76,10 @@ mod monitor_rule_tests {
             &dispatcher,
             &classifier,
             None,
+            &drop_all_gate(),
         );
         let passed =
-            process_envelope_result(&non_matching, &store, None, &dispatcher, &classifier, None);
+            process_envelope_result(&non_matching, &store, None, &dispatcher, &classifier, None, &drop_all_gate());
 
         assert!(!ignored.matched);
         assert_eq!(ignored.acted, 0);
@@ -141,9 +147,9 @@ mod monitor_rule_tests {
             ..base.clone()
         };
 
-        let skipped = process_envelope_result(&base, &store, None, &dispatcher, &classifier, None);
+        let skipped = process_envelope_result(&base, &store, None, &dispatcher, &classifier, None, &drop_all_gate());
         let passed =
-            process_envelope_result(&matching, &store, None, &dispatcher, &classifier, None);
+            process_envelope_result(&matching, &store, None, &dispatcher, &classifier, None, &drop_all_gate());
 
         assert!(!skipped.matched);
         assert_eq!(skipped.acted, 0);
@@ -558,6 +564,7 @@ mod monitor_rule_tests {
             &dispatcher,
             &classifier,
             None,
+            &drop_all_gate(),
         );
         let missed = process_envelope_result(
             &event(
@@ -570,6 +577,7 @@ mod monitor_rule_tests {
             &dispatcher,
             &classifier,
             None,
+            &drop_all_gate(),
         );
         assert!(matched.matched);
         assert_eq!(matched.acted, 1);
@@ -601,6 +609,7 @@ mod monitor_rule_tests {
             &dispatcher,
             &classifier,
             None,
+            &drop_all_gate(),
         );
         let passed = process_envelope_result(
             &event(
@@ -613,6 +622,7 @@ mod monitor_rule_tests {
             &dispatcher,
             &classifier,
             None,
+            &drop_all_gate(),
         );
         assert!(!skipped.matched);
         assert_eq!(skipped.acted, 0);
@@ -644,6 +654,7 @@ mod monitor_rule_tests {
             &dispatcher,
             &classifier,
             None,
+            &drop_all_gate(),
         );
         assert!(gmail_passed.matched);
         assert_eq!(gmail_passed.acted, 1);
@@ -667,6 +678,7 @@ mod monitor_rule_tests {
             &dispatcher,
             &classifier,
             None,
+            &drop_all_gate(),
         );
         assert!(!exclude_wins.matched);
         assert_eq!(exclude_wins.acted, 0);
@@ -693,6 +705,7 @@ mod monitor_rule_tests {
             &dispatcher,
             &classifier,
             None,
+            &drop_all_gate(),
         );
         assert!(gmail_with_telegram_payload.matched);
         assert_eq!(gmail_with_telegram_payload.acted, 1);
@@ -772,6 +785,7 @@ mod monitor_rule_tests {
                     &dispatcher,
                     &classifier,
                     None,
+                    &drop_all_gate(),
                 );
                 let nonmatching = process_envelope_result(
                     &event(
@@ -784,6 +798,7 @@ mod monitor_rule_tests {
                     &dispatcher,
                     &classifier,
                     None,
+                    &drop_all_gate(),
                 );
 
                 let expected_matching =
@@ -837,7 +852,7 @@ mod monitor_rule_tests {
         );
 
         let suppressed =
-            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None);
+            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None, &drop_all_gate());
         assert!(!suppressed.matched);
         assert_eq!(suppressed.acted, 0);
 
@@ -845,7 +860,7 @@ mod monitor_rule_tests {
         store.upsert(binding).unwrap();
 
         let passed =
-            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None);
+            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None, &drop_all_gate());
         assert!(passed.matched);
         assert_eq!(passed.acted, 1);
     }

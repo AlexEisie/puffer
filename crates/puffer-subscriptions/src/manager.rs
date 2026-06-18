@@ -18,6 +18,7 @@ use crate::proxy::{
     handle_agent_proxy_event as decide_agent_proxy_event, AgentProxyDecision, AgentProxyStore,
 };
 use crate::router::{MonitorDigestQueue, SubscriptionRouter};
+use crate::self_gate::{DropAllSelfGate, SelfMessageGate};
 use crate::store::SubscriptionStore;
 use anyhow::Result;
 use puffer_subscriber_runtime::{
@@ -90,6 +91,7 @@ pub struct SubscriptionManagerBuilder {
     proxy_store_path: PathBuf,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    self_gate: Arc<dyn SelfMessageGate>,
     auth_checker: Option<Arc<dyn ConnectionAuthChecker>>,
     monitor_digest_interval: Duration,
 }
@@ -124,6 +126,10 @@ impl SubscriptionManagerBuilder {
             proxy_store_path,
             dispatcher: Arc::new(BuiltinActionDispatcher::new()),
             classifier: Arc::new(NullClassifier),
+            // Default MUST drop self messages so absent wiring == master
+            // behaviour (outgoing never acted on); the real monitor gate is
+            // installed by the daemon in a later task.
+            self_gate: Arc::new(DropAllSelfGate),
             auth_checker: None,
             monitor_digest_interval: monitor_digest_interval_from_env(),
         }
@@ -171,6 +177,12 @@ impl SubscriptionManagerBuilder {
         self
     }
 
+    /// Override the self/outgoing message gate. Defaults to [`DropAllSelfGate`].
+    pub fn with_self_gate(mut self, gate: Arc<dyn SelfMessageGate>) -> Self {
+        self.self_gate = gate;
+        self
+    }
+
     /// Override the process-provided connection auth checker.
     pub fn with_connection_auth_checker(mut self, checker: Arc<dyn ConnectionAuthChecker>) -> Self {
         self.auth_checker = Some(checker);
@@ -202,6 +214,7 @@ impl SubscriptionManagerBuilder {
         let proxy_store = Arc::new(AgentProxyStore::load(&self.proxy_store_path)?);
         let dispatcher = self.dispatcher.clone();
         let classifier = self.classifier.clone();
+        let self_gate = self.self_gate.clone();
         let monitor_digest = MonitorDigestQueue::new(
             handle.clone(),
             dispatcher.clone(),
@@ -221,6 +234,7 @@ impl SubscriptionManagerBuilder {
                 watch_connection_health_events(health_bus, health_connection_store).await;
             })
         };
+        let gate_for_router = self_gate.clone();
         let router = {
             let _runtime_guard = handle.enter();
             SubscriptionRouter::spawn_with_monitor_digest(
@@ -229,6 +243,7 @@ impl SubscriptionManagerBuilder {
                 Some(history_for_router),
                 dispatcher_for_router,
                 classifier_for_router,
+                gate_for_router,
                 Some(monitor_digest.clone()),
             )
         };
@@ -242,6 +257,7 @@ impl SubscriptionManagerBuilder {
             proxy_store,
             dispatcher,
             classifier,
+            self_gate,
             monitor_digest,
             auth_checker: self.auth_checker,
             router: Mutex::new(Some(router)),
@@ -276,6 +292,7 @@ pub struct SubscriptionManager {
     proxy_store: Arc<AgentProxyStore>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    self_gate: Arc<dyn SelfMessageGate>,
     monitor_digest: MonitorDigestQueue,
     auth_checker: Option<Arc<dyn ConnectionAuthChecker>>,
     router: Mutex<Option<SubscriptionRouter>>,
@@ -452,6 +469,7 @@ impl SubscriptionManager {
                         self.proxy_store.clone(),
                         self.dispatcher.clone(),
                         self.classifier.clone(),
+                        self.self_gate.clone(),
                         self.monitor_digest.clone(),
                     ));
                 if let Some(handle) = block_on_manager_handle(

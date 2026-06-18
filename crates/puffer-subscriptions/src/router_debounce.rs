@@ -4,6 +4,7 @@ use crate::action::ActionDispatcher;
 use crate::classify::Classifier;
 use crate::history::WorkflowHistoryStore;
 use crate::router::{process_envelope_batch_result, RouterStats};
+use crate::self_gate::SelfMessageGate;
 use crate::spec::{ActionSpec, WorkflowBindingStatus};
 use crate::store::WorkflowBindingStore;
 use puffer_subscriber_runtime::EventEnvelope;
@@ -42,6 +43,7 @@ impl MonitorDebounce {
         history_store: Option<Arc<WorkflowHistoryStore>>,
         dispatcher: Arc<dyn ActionDispatcher>,
         classifier: Arc<dyn Classifier>,
+        gate: Arc<dyn SelfMessageGate>,
         stats: Arc<RouterStats>,
         permits: Arc<Semaphore>,
     ) -> bool {
@@ -66,6 +68,7 @@ impl MonitorDebounce {
                     history_store,
                     dispatcher,
                     classifier,
+                    gate,
                     stats,
                     permits,
                 )
@@ -82,6 +85,7 @@ impl MonitorDebounce {
         history_store: Option<Arc<WorkflowHistoryStore>>,
         dispatcher: Arc<dyn ActionDispatcher>,
         classifier: Arc<dyn Classifier>,
+        gate: Arc<dyn SelfMessageGate>,
         stats: Arc<RouterStats>,
         permits: Arc<Semaphore>,
     ) {
@@ -115,6 +119,7 @@ impl MonitorDebounce {
                     &dispatcher,
                     &classifier,
                     Some(stats_for_processing.as_ref()),
+                    &gate,
                 )
             })
             .await;
