@@ -1,4 +1,4 @@
-use crate::model::{Modality, ModelDiscoveryConfig, ProviderDescriptor};
+use crate::model::Modality;
 use serde_json::Value;
 
 const INPUT_MODALITY_PATHS: &[&str] = &[
@@ -14,19 +14,15 @@ const OUTPUT_MODALITY_PATHS: &[&str] = &[
 ];
 
 /// Infers input modalities for one discovered model.
-pub(crate) fn infer_input_modalities(
-    _provider: &ProviderDescriptor,
-    _discovery: &ModelDiscoveryConfig,
-    item: &Value,
-    model_id: &str,
-) -> Vec<Modality> {
-    if is_non_chat_media_model(model_id, item) {
+pub(crate) fn infer_input_modalities(item: &Value, model_id: &str) -> Vec<Modality> {
+    let normalized = normalized_model_id(model_id);
+    if item_declares_media_output(item) || contains_non_chat_marker(&normalized) {
         return text_only();
     }
     if item_declares_image_input(item) {
         return text_image();
     }
-    if family_accepts_image_input(model_id) {
+    if family_accepts_image_input(&normalized) {
         return text_image();
     }
     text_only()
@@ -64,10 +60,6 @@ fn modality_path_contains(item: &Value, path: &str, needle: &str) -> bool {
         })
 }
 
-fn is_non_chat_media_model(model_id: &str, item: &Value) -> bool {
-    item_declares_media_output(item) || contains_non_chat_marker(&normalized_model_id(model_id))
-}
-
 fn contains_non_chat_marker(model_id: &str) -> bool {
     [
         "image",
@@ -94,8 +86,7 @@ fn contains_non_chat_marker(model_id: &str) -> bool {
 }
 
 fn family_accepts_image_input(model_id: &str) -> bool {
-    let normalized = normalized_model_id(model_id);
-    let family = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
+    let family = model_id.rsplit('/').next().unwrap_or(model_id);
     is_claude_chat_family(family) || is_gemini_chat_family(family) || is_qwen_vision_family(family)
 }
 
@@ -124,51 +115,15 @@ fn contains_qwen_vision_marker(model_id: &str) -> bool {
         || model_id.contains(".vl")
         || model_id.contains("vl-")
         || model_id.contains("vl_")
-        || model_id.ends_with("-vl")
-        || model_id.ends_with("_vl")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::AuthMode;
-    use crate::model::ModelDiscoveryFormat;
-    use indexmap::IndexMap;
     use serde_json::json;
 
-    fn provider() -> ProviderDescriptor {
-        ProviderDescriptor {
-            id: "worldrouter".to_string(),
-            display_name: "WorldRouter".to_string(),
-            base_url: "https://inference-api.worldrouter.ai/v1".to_string(),
-            default_api: "openai-completions".to_string(),
-            auth_modes: vec![AuthMode::ApiKey],
-            headers: IndexMap::new(),
-            query_params: IndexMap::new(),
-            discovery: Some(discovery()),
-            media: None,
-            models: Vec::new(),
-            chat_completions_path: Some("/chat/completions".to_string()),
-        }
-    }
-
-    fn discovery() -> ModelDiscoveryConfig {
-        ModelDiscoveryConfig {
-            path: "/models".to_string(),
-            response: ModelDiscoveryFormat::OpenAiModels,
-            api: "openai-completions".to_string(),
-            context_window: 200_000,
-            max_output_tokens: 16_384,
-            supports_reasoning: true,
-            items_field: "data".to_string(),
-            id_field: "id".to_string(),
-            display_name_field: None,
-            headers: IndexMap::new(),
-        }
-    }
-
     fn infer(model_id: &str, item: Value) -> Vec<Modality> {
-        infer_input_modalities(&provider(), &discovery(), &item, model_id)
+        infer_input_modalities(&item, model_id)
     }
 
     #[test]

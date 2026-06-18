@@ -289,7 +289,7 @@ fn parse_discovered_models(
             max_output_tokens: discovery.max_output_tokens,
             supports_reasoning: discovery.supports_reasoning,
             compat: discovery_model_compat(provider, discovery),
-            input: infer_input_modalities(provider, discovery, item, id),
+            input: infer_input_modalities(item, id),
             cost: None,
         });
     }
@@ -394,7 +394,7 @@ fn parse_codex_discovered_models(
             max_output_tokens: discovery.max_output_tokens,
             supports_reasoning,
             compat: None,
-            input: infer_input_modalities(provider, discovery, item, id),
+            input: infer_input_modalities(item, id),
             cost: None,
         });
     }
