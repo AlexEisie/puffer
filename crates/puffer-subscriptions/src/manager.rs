@@ -15,11 +15,9 @@ use crate::contacts::contact_ids_for_connector;
 use crate::history::WorkflowHistoryStore;
 use crate::protocol::{ConnectorActionRequest, ConnectorActionResponse};
 use crate::proxy::{
-    builtin_agent_proxy, handle_agent_proxy_event as decide_agent_proxy_event, AgentProxyDecision,
-    AgentProxyStore,
+    handle_agent_proxy_event as decide_agent_proxy_event, AgentProxyDecision, AgentProxyStore,
 };
-use crate::router::{process_envelope_batch_result, process_envelope_result, SubscriptionRouter};
-use crate::spec::ActionSpec;
+use crate::router::{MonitorDigestQueue, SubscriptionRouter};
 use crate::store::SubscriptionStore;
 use anyhow::Result;
 use puffer_subscriber_runtime::{
@@ -35,6 +33,8 @@ use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
 const CONNECTOR_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const MONITOR_DIGEST_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const MONITOR_DIGEST_INTERVAL_SECONDS_ENV: &str = "PUFFER_MONITOR_DIGEST_INTERVAL_SECONDS";
 /// WeChat's `act` path drives the LIVE client with deliberate human-like pacing
 /// (think-time, a length-scaled compose pause, simulated mouse paths, navigate +
 /// verify + delivery check), so a single real send legitimately takes ~40-60s —
@@ -45,7 +45,10 @@ const WECHAT_ACTION_TIMEOUT: Duration = Duration::from_secs(150);
 const COMMAND_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const COMMAND_RESTART_RESENDS: usize = 2;
 
+mod connector_processor;
 mod contact_methods;
+
+use connector_processor::ManagerConnectorEventProcessor;
 
 enum ConnectionContactScope {
     All,
@@ -88,6 +91,7 @@ pub struct SubscriptionManagerBuilder {
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
     auth_checker: Option<Arc<dyn ConnectionAuthChecker>>,
+    monitor_digest_interval: Duration,
 }
 
 impl SubscriptionManagerBuilder {
@@ -121,6 +125,7 @@ impl SubscriptionManagerBuilder {
             dispatcher: Arc::new(BuiltinActionDispatcher::new()),
             classifier: Arc::new(NullClassifier),
             auth_checker: None,
+            monitor_digest_interval: monitor_digest_interval_from_env(),
         }
     }
 
@@ -172,6 +177,12 @@ impl SubscriptionManagerBuilder {
         self
     }
 
+    /// Override the monitor digest interval. Production defaults to one hour.
+    pub fn with_monitor_digest_interval(mut self, interval: Duration) -> Self {
+        self.monitor_digest_interval = interval;
+        self
+    }
+
     /// Loads the store and spawns the router on the supplied Tokio runtime.
     pub fn build(self, handle: Handle) -> Result<SubscriptionManager> {
         let store = Arc::new(SubscriptionStore::load(&self.store_path)?);
@@ -191,6 +202,12 @@ impl SubscriptionManagerBuilder {
         let proxy_store = Arc::new(AgentProxyStore::load(&self.proxy_store_path)?);
         let dispatcher = self.dispatcher.clone();
         let classifier = self.classifier.clone();
+        let monitor_digest = MonitorDigestQueue::new(
+            handle.clone(),
+            dispatcher.clone(),
+            history_store.clone(),
+            self.monitor_digest_interval,
+        );
         let bus = self.bus.clone();
         let store_for_router = store.clone();
         let history_for_router = history_store.clone();
@@ -206,12 +223,13 @@ impl SubscriptionManagerBuilder {
         };
         let router = {
             let _runtime_guard = handle.enter();
-            SubscriptionRouter::spawn(
+            SubscriptionRouter::spawn_with_monitor_digest(
                 bus,
                 store_for_router,
                 Some(history_for_router),
                 dispatcher_for_router,
                 classifier_for_router,
+                Some(monitor_digest.clone()),
             )
         };
         let manager = SubscriptionManager {
@@ -224,6 +242,7 @@ impl SubscriptionManagerBuilder {
             proxy_store,
             dispatcher,
             classifier,
+            monitor_digest,
             auth_checker: self.auth_checker,
             router: Mutex::new(Some(router)),
             health_watcher: Mutex::new(Some(health_watcher)),
@@ -234,6 +253,15 @@ impl SubscriptionManagerBuilder {
         manager.refresh_connection_consumers()?;
         Ok(manager)
     }
+}
+
+fn monitor_digest_interval_from_env() -> Duration {
+    std::env::var(MONITOR_DIGEST_INTERVAL_SECONDS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(MONITOR_DIGEST_INTERVAL)
 }
 
 /// Process-wide subscription manager. Owns the bus, store, router task,
@@ -248,6 +276,7 @@ pub struct SubscriptionManager {
     proxy_store: Arc<AgentProxyStore>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    monitor_digest: MonitorDigestQueue,
     auth_checker: Option<Arc<dyn ConnectionAuthChecker>>,
     router: Mutex<Option<SubscriptionRouter>>,
     health_watcher: Mutex<Option<JoinHandle<()>>>,
@@ -416,14 +445,15 @@ impl SubscriptionManager {
                 let slug = connection.slug.clone();
                 let cursor = connection.cursor.clone();
                 let processor: Arc<dyn ConnectorEventProcessor> =
-                    Arc::new(ManagerConnectorEventProcessor {
-                        store: self.store.clone(),
-                        connection_store: self.connection_store.clone(),
-                        history_store: self.history_store.clone(),
-                        proxy_store: self.proxy_store.clone(),
-                        dispatcher: self.dispatcher.clone(),
-                        classifier: self.classifier.clone(),
-                    });
+                    Arc::new(ManagerConnectorEventProcessor::new(
+                        self.store.clone(),
+                        self.connection_store.clone(),
+                        self.history_store.clone(),
+                        self.proxy_store.clone(),
+                        self.dispatcher.clone(),
+                        self.classifier.clone(),
+                        self.monitor_digest.clone(),
+                    ));
                 if let Some(handle) = block_on_manager_handle(
                     &self.handle,
                     ConnectorStreamHandle::spawn(
@@ -781,6 +811,11 @@ impl SubscriptionManager {
             let _ =
                 block_on_manager_handle(&self.handle, async move { Ok(router.shutdown().await) });
         }
+        let monitor_digest = self.monitor_digest.clone();
+        let _ = block_on_manager_handle(&self.handle, async move {
+            monitor_digest.flush().await;
+            Ok(())
+        });
         let handles: Vec<_> = self
             .subscribers
             .lock()
@@ -945,159 +980,6 @@ async fn send_command_before_deadline(
                 }
                 return Err(error);
             }
-        }
-    }
-}
-
-struct ManagerConnectorEventProcessor {
-    store: Arc<SubscriptionStore>,
-    connection_store: Arc<ConnectionStore>,
-    history_store: Arc<WorkflowHistoryStore>,
-    proxy_store: Arc<AgentProxyStore>,
-    dispatcher: Arc<dyn ActionDispatcher>,
-    classifier: Arc<dyn Classifier>,
-}
-
-impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
-    fn process_connector_event(
-        &self,
-        connector_slug: &str,
-        connection_slug: &str,
-        envelope: &EventEnvelope,
-    ) -> Result<()> {
-        self.process_agent_proxy(connector_slug, connection_slug, envelope)?;
-        let result = process_envelope_result(
-            envelope,
-            &self.store,
-            Some(&self.history_store),
-            &self.dispatcher,
-            &self.classifier,
-            None,
-        );
-        if result.failed > 0 {
-            anyhow::bail!(
-                "{} workflow action(s) failed while processing connector event",
-                result.failed
-            );
-        }
-        Ok(())
-    }
-
-    fn process_connector_events(
-        &self,
-        connector_slug: &str,
-        connection_slug: &str,
-        envelopes: &[EventEnvelope],
-    ) -> Result<()> {
-        for envelope in envelopes {
-            self.process_agent_proxy(connector_slug, connection_slug, envelope)?;
-        }
-        let result = process_envelope_batch_result(
-            envelopes,
-            &self.store,
-            Some(&self.history_store),
-            &self.dispatcher,
-            &self.classifier,
-            None,
-        );
-        if result.failed > 0 {
-            anyhow::bail!(
-                "{} workflow action(s) failed while processing connector event batch",
-                result.failed
-            );
-        }
-        Ok(())
-    }
-
-    fn debounce_key(
-        &self,
-        _connector_slug: &str,
-        _connection_slug: &str,
-        envelope: &EventEnvelope,
-    ) -> Option<String> {
-        crate::router_debounce::monitor_debounce_key(envelope, &self.store)
-    }
-
-    fn debounce_delay(&self) -> Option<std::time::Duration> {
-        Some(crate::router_debounce::MONITOR_DEBOUNCE_DELAY)
-    }
-}
-
-impl ManagerConnectorEventProcessor {
-    fn process_agent_proxy(
-        &self,
-        connector_slug: &str,
-        connection_slug: &str,
-        envelope: &EventEnvelope,
-    ) -> Result<()> {
-        match decide_agent_proxy_event(
-            connector_slug,
-            connection_slug,
-            &envelope.event.payload,
-            &self.proxy_store,
-        )? {
-            AgentProxyDecision::Ignore => Ok(()),
-            AgentProxyDecision::ConnectorAction { action, input } => {
-                self.dispatch_connector_action(connector_slug, &action, input, envelope)
-            }
-            AgentProxyDecision::BindAgent { reply, .. } => {
-                let _ = self.connection_store.update(connection_slug, |record| {
-                    record.set_has_consumer(true);
-                });
-                if let Some(input) = reply {
-                    self.dispatch_connector_action(
-                        connector_slug,
-                        "send_message",
-                        input,
-                        envelope,
-                    )?;
-                }
-                Ok(())
-            }
-            AgentProxyDecision::RouteToAgent {
-                target,
-                message,
-                binding,
-            } => {
-                let Some(proxy) = builtin_agent_proxy(connector_slug) else {
-                    return Ok(());
-                };
-                let prompt = proxy.route_prompt(&target, &message);
-                let result = self.dispatcher.dispatch(
-                    &ActionSpec::TriageAgent {
-                        prompt,
-                        model: None,
-                    },
-                    envelope,
-                );
-                if !result.success {
-                    anyhow::bail!("{}", result.summary);
-                }
-                let input = proxy.render_agent_reply(&result.summary, &binding);
-                self.dispatch_connector_action(connector_slug, "send_message", input, envelope)
-            }
-        }
-    }
-
-    fn dispatch_connector_action(
-        &self,
-        connector_slug: &str,
-        action: &str,
-        input: serde_json::Value,
-        envelope: &EventEnvelope,
-    ) -> Result<()> {
-        let result = self.dispatcher.dispatch(
-            &ActionSpec::ConnectorAct {
-                connector_slug: connector_slug.to_string(),
-                action: action.to_string(),
-                input,
-            },
-            envelope,
-        );
-        if result.success {
-            Ok(())
-        } else {
-            anyhow::bail!("{}", result.summary)
         }
     }
 }

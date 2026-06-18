@@ -503,7 +503,7 @@ mod tests {
     #[test]
     fn bundled_contains_field_rules_match_case_insensitively() {
         for (schema_slug, schema) in all_bundled_monitor_schemas() {
-            let mut checked = 0;
+            let mut checked = schema.text_fields.len();
             for field in schema
                 .fields
                 .iter()

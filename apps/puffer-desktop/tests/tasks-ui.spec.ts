@@ -74,7 +74,8 @@ test("tasks history shows received monitor messages and agent outcomes", async (
   await expect(dialog.getByLabel("Received messages").getByRole("button", {
     name: /Telegram from Alice/
   })).toBeVisible();
-  await expect(dialog.getByLabel("Agent history")).toContainText("Triage agent");
+  await expect(dialog.getByLabel("Agent history")).toContainText("Shared digest outcome for message 1 of 2");
+  await expect(dialog.getByLabel("Agent history")).toContainText("Digest triage");
   await expect(dialog.getByLabel("Agent history")).toContainText("Created monitor task monitor-1.");
   await expect(dialog.getByLabel("Agent history")).toContainText("38 tokens");
   await expect(dialog.getByLabel("Agent history")).toContainText("No ignored task or ignore analysis");
