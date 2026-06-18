@@ -96,9 +96,7 @@ fn contains_non_chat_marker(model_id: &str) -> bool {
 fn family_accepts_image_input(model_id: &str) -> bool {
     let normalized = normalized_model_id(model_id);
     let family = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
-    is_claude_chat_family(family)
-        || is_gemini_chat_family(family)
-        || is_qwen_vision_family(family)
+    is_claude_chat_family(family) || is_gemini_chat_family(family) || is_qwen_vision_family(family)
 }
 
 fn normalized_model_id(model_id: &str) -> String {
@@ -229,6 +227,9 @@ mod tests {
 
     #[test]
     fn broad_openai_names_do_not_infer_image_input() {
-        assert_eq!(infer("openai/gpt-5.4-nano", json!({})), vec![Modality::Text]);
+        assert_eq!(
+            infer("openai/gpt-5.4-nano", json!({})),
+            vec![Modality::Text]
+        );
     }
 }
