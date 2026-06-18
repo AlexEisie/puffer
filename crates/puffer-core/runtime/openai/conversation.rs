@@ -2391,6 +2391,7 @@ mod tests {
             tool_id: None,
             tool_input: None,
             success: Some(false),
+            attachments: Vec::new(),
         });
         let items = transcript_to_items(&state, "");
         // Find the FunctionCallOutput
