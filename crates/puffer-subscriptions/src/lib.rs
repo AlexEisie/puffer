@@ -28,9 +28,12 @@ mod contacts;
 mod event_schema;
 mod history;
 mod manager;
+mod monitor_trace;
 mod protocol;
 mod proxy;
 mod router;
+mod router_debounce;
+mod self_gate;
 mod spec;
 mod store;
 mod subscriber_manifest;
@@ -41,8 +44,8 @@ mod telegram_e2e_tests;
 pub use action::{
     install_connector_action_executor, install_outbound, install_workflow_runner,
     installed_workflow_runner, ActionDispatcher, ActionResult, ActionUsage,
-    BuiltinActionDispatcher, ConnectorActionExecutor, Outbound, WorkflowActionOutput,
-    WorkflowActionRunner,
+    BuiltinActionDispatcher, ConnectorActionExecutor, Outbound, TriageDecision,
+    TriageDecisionOutcome, WorkflowActionOutput, WorkflowActionRunner,
 };
 pub use catalog::{
     builtin_connector_template, builtin_connector_templates, suggested_connection_slug,
@@ -74,6 +77,10 @@ pub use history::{
 pub use manager::{
     ConnectionAuthChecker, ConnectionAuthStatus, SubscriptionManager, SubscriptionManagerBuilder,
 };
+pub use monitor_trace::{
+    MonitorTraceIdentity, MonitorTraceMessage, MonitorTraceStage, MonitorTraceStageStatus,
+    MonitorTraceStatus, MonitorTraceStore, MonitorTraceStoreError,
+};
 pub use protocol::{
     ConnectorActionRequest, ConnectorActionResponse, ConnectorSubscribeCommand,
     ConnectorSubscribeFrame,
@@ -86,6 +93,7 @@ pub use router::{
     prefilter_passes, process_envelope, process_envelope_batch_result, process_envelope_result,
     EnvelopeProcessResult, RouterStats, SubscriptionRouter,
 };
+pub use self_gate::{DropAllSelfGate, SelfMessageGate, SELF_MESSAGE_KIND};
 pub use spec::{
     filter_matches, render_value_templates, validate_action_spec, validate_spec, ActionGraphNode,
     ActionSpec, FilterSpec, PrefilterSpec, SubscriptionSpec, SubscriptionStatus, TaggedFilterSpec,

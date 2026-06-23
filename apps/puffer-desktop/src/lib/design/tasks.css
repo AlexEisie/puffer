@@ -764,6 +764,17 @@
   font-family: var(--font-mono);
 }
 
+.pf-task-history-digest-note {
+  min-width: 0;
+  border: 1px solid color-mix(in oklab, var(--border) 70%, var(--accent));
+  border-radius: 7px;
+  padding: 8px 10px;
+  color: var(--muted-foreground);
+  background: color-mix(in oklab, var(--accent) 8%, var(--background));
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .pf-task-history-agent-card {
   min-width: 0;
   border: 1px solid var(--border);

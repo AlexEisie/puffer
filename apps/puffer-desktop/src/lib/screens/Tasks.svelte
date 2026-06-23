@@ -723,8 +723,23 @@
       message.kind ?? "message",
       historyDeliveryLabel(message),
       historyLagLabel(message),
+      historyDigestSidebarLabel(message),
       `#${message.idx}`
     ].filter(Boolean).join(" · ");
+  }
+
+  function historyDigestSidebarLabel(message: WorkflowMonitorHistoryMessage): string | null {
+    const count = message.digest_batch_count;
+    if (!message.digest_outcome_shared || !count || count <= 1) return null;
+    return `digest ${count} msgs`;
+  }
+
+  function historyDigestDetailLabel(message: WorkflowMonitorHistoryMessage): string | null {
+    const count = message.digest_batch_count;
+    if (!message.digest_outcome_shared || !count || count <= 1) return null;
+    const position = message.digest_batch_position;
+    const ordinal = position && position > 0 ? `message ${position} of ${count}` : `${count} messages`;
+    return `Shared digest outcome for ${ordinal}. The triage result used the whole batch, not just this message.`;
   }
 
   function numericPayloadValue(payload: Record<string, unknown> | null | undefined, key: string): number | null {
@@ -739,7 +754,9 @@
   }
 
   function historyActionLabel(action: WorkflowMonitorHistoryAction): string {
-    if (action.action === "triage_agent") return "Triage agent";
+    if (action.action === "triage_agent") return selectedHistoryMessage?.digest_outcome_shared
+      ? "Digest triage agent"
+      : "Triage agent";
     if (action.action === "monitor_ignore_filter") return "Ignore filter";
     if (action.action === "monitor_muted_skip") return "Muted notification";
     if (action.action === "monitor_filter_skip") return "Trigger filter";
@@ -1409,10 +1426,15 @@
                 </div>
                 <code>{selectedHistoryMessage.envelope_id ?? selectedHistoryMessage.run_id}</code>
               </div>
+              {#if historyDigestDetailLabel(selectedHistoryMessage)}
+                <div class="pf-task-history-digest-note">
+                  {historyDigestDetailLabel(selectedHistoryMessage)}
+                </div>
+              {/if}
 
               <section class="pf-task-history-agent-card">
                 <div class="pf-task-config-section-head">
-                  <strong>Triage agent</strong>
+                  <strong>{selectedHistoryMessage.digest_outcome_shared ? "Digest triage" : "Triage agent"}</strong>
                   <span>{selectedHistoryTriageActions.length} outcome{selectedHistoryTriageActions.length === 1 ? "" : "s"}</span>
                 </div>
                 {#if selectedHistoryTriageActions.length === 0}

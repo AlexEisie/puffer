@@ -28,7 +28,7 @@ use crate::desktop_api_types::{
     ExternalCredentialDto, FolderGroupDto, MediaGenerationSettingsDto, MediaSettingsDto,
     NetworkProxySettingsDto, ProviderSummaryDto, RepoActionResultDto, RepoPullRequestDto,
     RepoStatusDto, ResourceCountsDto, SanitizedProxyEndpointDto, SecretSummaryDto,
-    SecretsSettingsDto, SessionDetailDto, SessionGroupsPageDto, SessionListItemDto,
+    SecretSourceDto, SecretsSettingsDto, SessionDetailDto, SessionGroupsPageDto, SessionListItemDto,
     SettingsConfigDto, SettingsSessionSummaryDto, SettingsSnapshotDto, TimelineItemDto,
 };
 
@@ -404,6 +404,7 @@ pub(crate) fn load_settings_snapshot(
             default_provider: config.default_provider.clone(),
             default_model: config.default_model.clone(),
             openai_base_url: config.openai_base_url.clone(),
+            openai_display_name: config.openai_display_name.clone(),
             theme: config.theme.clone(),
             media: media_settings_dto(config),
             mascot_id: config.mascot.id.clone(),
@@ -516,10 +517,19 @@ fn secrets_settings_dto(paths: &ConfigPaths) -> Result<SecretsSettingsDto> {
         .into_iter()
         .map(secret_summary_dto)
         .collect::<Vec<_>>();
+    let sources = puffer_secrets::available_browser_sources()
+        .into_iter()
+        .map(|source| SecretSourceDto {
+            id: source.id,
+            label: source.label,
+            available: source.available,
+        })
+        .collect();
     Ok(SecretsSettingsDto {
         store_file: store_file.display().to_string(),
         key_source: secret_key_source().to_string(),
         chrome_import_supported: cfg!(target_os = "macos"),
+        sources,
         items,
     })
 }

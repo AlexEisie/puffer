@@ -21,6 +21,8 @@ mod daemon_files;
 mod daemon_fs_watch;
 mod daemon_gcal_browser_setup;
 mod daemon_gmail_browser_setup;
+#[path = "daemon_lark_browser_setup.rs"]
+mod daemon_lark_browser_setup;
 mod daemon_lambda_skills;
 mod daemon_local_model;
 mod daemon_lsp;
@@ -44,6 +46,10 @@ mod gmail_browser_log;
 mod heartbeat;
 mod internal_tools;
 mod lark_connector;
+#[path = "lark_browser.rs"]
+mod lark_browser;
+#[path = "lark_browser_script.rs"]
+mod lark_browser_script;
 mod media_internal_tools;
 mod non_interactive;
 mod project_metadata;
@@ -159,6 +165,9 @@ fn main() -> Result<()> {
         );
     }
     providers.apply_openai_base_url_override(config.openai_base_url.as_deref());
+    if let Some(display_name) = config.openai_display_name.as_deref() {
+        providers.set_openai_display_name(display_name);
+    }
     if !config.openai_headers.is_empty() {
         providers.set_openai_headers(
             config
@@ -476,6 +485,17 @@ fn main() -> Result<()> {
             &paths,
         ),
         Some(Command::Tool { command }) => run_tool_command(command, &resources, &cwd),
+        Some(Command::WinChromeImport { args }) => {
+            #[cfg(target_os = "windows")]
+            {
+                puffer_secrets::win_chrome_import::dispatch(&args)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = args;
+                anyhow::bail!("__win-chrome-import is Windows-only")
+            }
+        }
         Some(Command::Remote {
             target,
             cwd,
@@ -1370,6 +1390,7 @@ fn run_subscriber(id: &str) -> Result<()> {
             "email" => puffer_subscriber_email::run().await,
             "gcal-browser" => crate::gcal_browser::run_subscriber().await,
             "gmail-browser" => crate::gmail_browser::run_subscriber().await,
+            "lark-browser" => crate::lark_browser::run_subscriber().await,
             other => Err(anyhow::anyhow!(
                 "unknown subscriber id `{other}`; this puffer build does not bundle a driver for it"
             )),

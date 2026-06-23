@@ -330,6 +330,7 @@ export type SettingsConfig = {
   defaultProvider: string | null;
   defaultModel: string | null;
   openaiBaseUrl: string | null;
+  openaiDisplayName: string | null;
   theme: string;
   media: MediaSettings;
   mascotId: string;
@@ -499,10 +500,19 @@ export type SecretSummary = {
   updatedAtMs: number;
 };
 
+export type SecretSource = {
+  id: string;
+  label: string;
+  available: boolean;
+};
+
 export type SecretsSettings = {
   storeFile: string;
   keySource: string;
+  /** Back-compat: legacy macOS Chrome import flag. Prefer `sources`. */
   chromeImportSupported: boolean;
+  /** All browser import sources and whether each is currently available. */
+  sources: SecretSource[];
   items: SecretSummary[];
 };
 
@@ -587,6 +597,9 @@ export type ChromeSecretsImportResult = {
   settings: SettingsSnapshot;
   report: ChromeImportReport;
 };
+
+/** Result of importing saved credentials from any browser source. */
+export type BrowserSecretsImportResult = ChromeSecretsImportResult;
 
 export type OpenAIRealtimeClientSecretOptions = {
   providerId?: string;
@@ -813,6 +826,10 @@ export type WorkflowMonitorHistoryMessage = {
   status: string;
   started_at_ms: number;
   ended_at_ms: number;
+  digest_batch_id?: string | null;
+  digest_batch_count?: number | null;
+  digest_batch_position?: number | null;
+  digest_outcome_shared?: boolean | null;
 };
 
 export type WorkflowFilterRule = Record<string, unknown>;

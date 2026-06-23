@@ -139,6 +139,7 @@ type FakeSettingsConfig = {
   defaultProvider: string | null;
   defaultModel: string | null;
   openaiBaseUrl: string | null;
+  openaiDisplayName: string | null;
   media: FakeMediaSettings;
 };
 
@@ -574,6 +575,7 @@ export class FakeDaemon {
     defaultProvider: "codex",
     defaultModel: "test-model",
     openaiBaseUrl: null,
+    openaiDisplayName: null,
     media: defaultMediaSettings()
   };
   private secrets: JsonRecord[] = [];
@@ -945,7 +947,52 @@ export class FakeDaemon {
         ],
         status: "completed",
         started_at_ms: now - 15_500,
-        ended_at_ms: now - 15_000
+        ended_at_ms: now - 15_000,
+        digest_batch_id: "digest-test",
+        digest_batch_count: 2,
+        digest_batch_position: 1,
+        digest_outcome_shared: true
+      },
+      {
+        idx: 2,
+        run_id: "run-monitor-2",
+        workflow_slug: "monitor-telegram-user",
+        connection_slug: "telegram-user",
+        connector_slug: "telegram-login",
+        envelope_id: "env-monitor-2",
+        received_at_ms: now - 15_900,
+        topic: "telegram-user",
+        kind: "message",
+        dedup_key: "msg-2",
+        summary: "Telegram from Alice: thanks",
+        text: "thanks",
+        payload: {
+          chat_title: "Support",
+          sender_username: "alice",
+          message: "thanks"
+        },
+        action_log: [
+          {
+            action: "triage_agent",
+            status: "completed",
+            summary: "Created monitor task monitor-1.",
+            started_at_ms: now - 15_500,
+            ended_at_ms: now - 15_000,
+            usage: {
+              input_tokens: 40,
+              output_tokens: 8,
+              cache_read_tokens: 10,
+              cache_creation_tokens: 0
+            }
+          }
+        ],
+        status: "completed",
+        started_at_ms: now - 15_500,
+        ended_at_ms: now - 15_000,
+        digest_batch_id: "digest-test",
+        digest_batch_count: 2,
+        digest_batch_position: 2,
+        digest_outcome_shared: true
       }
     ]
   };
@@ -1555,6 +1602,12 @@ export class FakeDaemon {
         return this.deleteSecret(request.params);
       case "import_chrome_secrets":
         return this.importChromeSecrets();
+      case "import_browser_secrets":
+        return this.importBrowserSecrets(request.params);
+      case "list_secret_sources":
+        return { sources: this.secretSources() };
+      case "import_onepassword_export":
+        return this.importBrowserSecrets({ source: "1password" });
       case "test_proxy":
         return this.testProxy(request.params);
       case "list_permissions":
@@ -2400,6 +2453,10 @@ export class FakeDaemon {
       this.settingsConfig.openaiBaseUrl =
         typeof params.openaiBaseUrl === "string" ? params.openaiBaseUrl : null;
     }
+    if ("openaiDisplayName" in params) {
+      this.settingsConfig.openaiDisplayName =
+        typeof params.openaiDisplayName === "string" ? params.openaiDisplayName : null;
+    }
     if ("media" in params) {
       this.settingsConfig.media = normalizeMediaSettings(params.media);
     }
@@ -2526,16 +2583,30 @@ export class FakeDaemon {
   }
 
   private importChromeSecrets(): JsonRecord {
+    return this.importBrowserSecrets({ source: "chrome" });
+  }
+
+  private secretSources(): JsonRecord[] {
+    return [
+      { id: "chrome", label: "Chrome", available: true },
+      { id: "firefox", label: "Firefox", available: false },
+      { id: "1password", label: "1Password", available: false }
+    ];
+  }
+
+  private importBrowserSecrets(params: JsonRecord | undefined): JsonRecord {
+    const source = typeof params?.source === "string" ? params.source : "chrome";
+    const label = source === "chrome" ? "Chrome" : source;
     const now = Date.now();
     this.secrets = [
       ...this.secrets,
       {
-        id: `sec_chrome_${now}`,
-        label: "Chrome developer@example.com @ example.test",
+        id: `sec_${source}_${now}`,
+        label: `${label} developer@example.com @ example.test`,
         description: "example.test",
         username: "developer@example.com",
         origin: "https://example.test",
-        source: "chrome",
+        source,
         createdAtMs: now,
         updatedAtMs: now
       }
@@ -2658,6 +2729,7 @@ export class FakeDaemon {
         defaultProvider: this.settingsConfig.defaultProvider,
         defaultModel: this.settingsConfig.defaultModel,
         openaiBaseUrl: this.settingsConfig.openaiBaseUrl,
+        openaiDisplayName: this.settingsConfig.openaiDisplayName,
         theme: "system",
         media: cloneMediaSettings(this.settingsConfig.media),
         mascotId: "puffer",
@@ -2715,6 +2787,7 @@ export class FakeDaemon {
         storeFile: "/tmp/home/.puffer/secrets.json",
         keySource: "local-key-file",
         chromeImportSupported: true,
+        sources: this.secretSources(),
         items: this.secrets.map((secret) => ({ ...secret }))
       },
       browserProfiles: []
