@@ -13,13 +13,13 @@ use crate::connector_process;
 use crate::connector_stream::{ConnectorEventProcessor, ConnectorStreamHandle};
 use crate::contacts::contact_ids_for_connector;
 use crate::history::WorkflowHistoryStore;
+use crate::monitor_trace::MonitorTraceStore;
 use crate::protocol::{ConnectorActionRequest, ConnectorActionResponse};
 use crate::proxy::{
-    builtin_agent_proxy, handle_agent_proxy_event as decide_agent_proxy_event, AgentProxyDecision,
-    AgentProxyStore,
+    handle_agent_proxy_event as decide_agent_proxy_event, AgentProxyDecision, AgentProxyStore,
 };
-use crate::router::{process_envelope_batch_result, process_envelope_result, SubscriptionRouter};
-use crate::spec::ActionSpec;
+use crate::router::{MonitorDigestQueue, SubscriptionRouter};
+use crate::self_gate::{DropAllSelfGate, SelfMessageGate};
 use crate::store::SubscriptionStore;
 use anyhow::Result;
 use puffer_subscriber_runtime::{
@@ -35,6 +35,8 @@ use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
 const CONNECTOR_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const MONITOR_DIGEST_INTERVAL: Duration = Duration::from_secs(60);
+const MONITOR_DIGEST_INTERVAL_SECONDS_ENV: &str = "PUFFER_MONITOR_DIGEST_INTERVAL_SECONDS";
 /// WeChat's `act` path drives the LIVE client with deliberate human-like pacing
 /// (think-time, a length-scaled compose pause, simulated mouse paths, navigate +
 /// verify + delivery check), so a single real send legitimately takes ~40-60s —
@@ -45,7 +47,10 @@ const WECHAT_ACTION_TIMEOUT: Duration = Duration::from_secs(150);
 const COMMAND_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const COMMAND_RESTART_RESENDS: usize = 2;
 
+mod connector_processor;
 mod contact_methods;
+
+use connector_processor::ManagerConnectorEventProcessor;
 
 enum ConnectionContactScope {
     All,
@@ -84,10 +89,13 @@ pub struct SubscriptionManagerBuilder {
     connector_store_path: PathBuf,
     connection_store_path: PathBuf,
     history_store_path: PathBuf,
+    monitor_trace_store_path: PathBuf,
     proxy_store_path: PathBuf,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    self_gate: Arc<dyn SelfMessageGate>,
     auth_checker: Option<Arc<dyn ConnectionAuthChecker>>,
+    monitor_digest_interval: Duration,
 }
 
 impl SubscriptionManagerBuilder {
@@ -107,6 +115,10 @@ impl SubscriptionManagerBuilder {
             .parent()
             .map(|parent| parent.join("workflow_history.json"))
             .unwrap_or_else(|| PathBuf::from("workflow_history.json"));
+        let monitor_trace_store_path = store_path
+            .parent()
+            .map(|parent| parent.join("monitor_trace.json"))
+            .unwrap_or_else(|| PathBuf::from("monitor_trace.json"));
         let proxy_store_path = store_path
             .parent()
             .map(|parent| parent.join("agent_proxy_bindings.json"))
@@ -117,10 +129,16 @@ impl SubscriptionManagerBuilder {
             connector_store_path,
             connection_store_path,
             history_store_path,
+            monitor_trace_store_path,
             proxy_store_path,
             dispatcher: Arc::new(BuiltinActionDispatcher::new()),
             classifier: Arc::new(NullClassifier),
+            // Default MUST drop self messages so absent wiring == master
+            // behaviour (outgoing never acted on); the real monitor gate is
+            // installed by the daemon in a later task.
+            self_gate: Arc::new(DropAllSelfGate),
             auth_checker: None,
+            monitor_digest_interval: monitor_digest_interval_from_env(),
         }
     }
 
@@ -154,6 +172,12 @@ impl SubscriptionManagerBuilder {
         self
     }
 
+    /// Override the monitor trace store path.
+    pub fn with_monitor_trace_store_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.monitor_trace_store_path = path.into();
+        self
+    }
+
     /// Override the agent proxy binding store path.
     pub fn with_proxy_store_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.proxy_store_path = path.into();
@@ -166,9 +190,21 @@ impl SubscriptionManagerBuilder {
         self
     }
 
+    /// Override the self/outgoing message gate. Defaults to [`DropAllSelfGate`].
+    pub fn with_self_gate(mut self, gate: Arc<dyn SelfMessageGate>) -> Self {
+        self.self_gate = gate;
+        self
+    }
+
     /// Override the process-provided connection auth checker.
     pub fn with_connection_auth_checker(mut self, checker: Arc<dyn ConnectionAuthChecker>) -> Self {
         self.auth_checker = Some(checker);
+        self
+    }
+
+    /// Override the monitor digest interval. Production defaults to one minute.
+    pub fn with_monitor_digest_interval(mut self, interval: Duration) -> Self {
+        self.monitor_digest_interval = interval;
         self
     }
 
@@ -178,6 +214,8 @@ impl SubscriptionManagerBuilder {
         let connector_store = Arc::new(ConnectorCatalogStore::load(&self.connector_store_path)?);
         let connection_store = Arc::new(ConnectionStore::load(&self.connection_store_path)?);
         let history_store = Arc::new(WorkflowHistoryStore::load(&self.history_store_path)?);
+        let monitor_trace_store =
+            Arc::new(MonitorTraceStore::load(&self.monitor_trace_store_path)?);
         // Root cause D: reclaim runs left `Running` by a previous process (crash/kill
         // before completion) so their messages are no longer dedup-blocked forever.
         // Must run before the router starts consuming live events.
@@ -191,9 +229,18 @@ impl SubscriptionManagerBuilder {
         let proxy_store = Arc::new(AgentProxyStore::load(&self.proxy_store_path)?);
         let dispatcher = self.dispatcher.clone();
         let classifier = self.classifier.clone();
+        let self_gate = self.self_gate.clone();
+        let monitor_digest = MonitorDigestQueue::new(
+            handle.clone(),
+            dispatcher.clone(),
+            history_store.clone(),
+            monitor_trace_store.clone(),
+            self.monitor_digest_interval,
+        );
         let bus = self.bus.clone();
         let store_for_router = store.clone();
         let history_for_router = history_store.clone();
+        let trace_for_router = monitor_trace_store.clone();
         let dispatcher_for_router = dispatcher.clone();
         let classifier_for_router = classifier.clone();
         let health_bus = self.bus.clone();
@@ -204,14 +251,18 @@ impl SubscriptionManagerBuilder {
                 watch_connection_health_events(health_bus, health_connection_store).await;
             })
         };
+        let gate_for_router = self_gate.clone();
         let router = {
             let _runtime_guard = handle.enter();
-            SubscriptionRouter::spawn(
+            SubscriptionRouter::spawn_with_monitor_digest(
                 bus,
                 store_for_router,
                 Some(history_for_router),
                 dispatcher_for_router,
                 classifier_for_router,
+                gate_for_router,
+                Some(monitor_digest.clone()),
+                Some(trace_for_router),
             )
         };
         let manager = SubscriptionManager {
@@ -221,9 +272,12 @@ impl SubscriptionManagerBuilder {
             connector_store,
             connection_store,
             history_store,
+            monitor_trace_store,
             proxy_store,
             dispatcher,
             classifier,
+            self_gate,
+            monitor_digest,
             auth_checker: self.auth_checker,
             router: Mutex::new(Some(router)),
             health_watcher: Mutex::new(Some(health_watcher)),
@@ -236,6 +290,15 @@ impl SubscriptionManagerBuilder {
     }
 }
 
+fn monitor_digest_interval_from_env() -> Duration {
+    std::env::var(MONITOR_DIGEST_INTERVAL_SECONDS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(MONITOR_DIGEST_INTERVAL)
+}
+
 /// Process-wide subscription manager. Owns the bus, store, router task,
 /// and the set of supervised subscriber children.
 pub struct SubscriptionManager {
@@ -245,9 +308,12 @@ pub struct SubscriptionManager {
     connector_store: Arc<ConnectorCatalogStore>,
     connection_store: Arc<ConnectionStore>,
     history_store: Arc<WorkflowHistoryStore>,
+    monitor_trace_store: Arc<MonitorTraceStore>,
     proxy_store: Arc<AgentProxyStore>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    self_gate: Arc<dyn SelfMessageGate>,
+    monitor_digest: MonitorDigestQueue,
     auth_checker: Option<Arc<dyn ConnectionAuthChecker>>,
     router: Mutex<Option<SubscriptionRouter>>,
     health_watcher: Mutex<Option<JoinHandle<()>>>,
@@ -275,6 +341,11 @@ impl SubscriptionManager {
     /// Returns the underlying direct workflow history store.
     pub fn history_store(&self) -> Arc<WorkflowHistoryStore> {
         self.history_store.clone()
+    }
+
+    /// Returns the message-centric monitor trace store.
+    pub fn monitor_trace_store(&self) -> Arc<MonitorTraceStore> {
+        self.monitor_trace_store.clone()
     }
 
     /// Returns the underlying agent proxy binding store.
@@ -416,14 +487,17 @@ impl SubscriptionManager {
                 let slug = connection.slug.clone();
                 let cursor = connection.cursor.clone();
                 let processor: Arc<dyn ConnectorEventProcessor> =
-                    Arc::new(ManagerConnectorEventProcessor {
-                        store: self.store.clone(),
-                        connection_store: self.connection_store.clone(),
-                        history_store: self.history_store.clone(),
-                        proxy_store: self.proxy_store.clone(),
-                        dispatcher: self.dispatcher.clone(),
-                        classifier: self.classifier.clone(),
-                    });
+                    Arc::new(ManagerConnectorEventProcessor::new(
+                        self.store.clone(),
+                        self.connection_store.clone(),
+                        self.history_store.clone(),
+                        self.monitor_trace_store.clone(),
+                        self.proxy_store.clone(),
+                        self.dispatcher.clone(),
+                        self.classifier.clone(),
+                        self.self_gate.clone(),
+                        self.monitor_digest.clone(),
+                    ));
                 if let Some(handle) = block_on_manager_handle(
                     &self.handle,
                     ConnectorStreamHandle::spawn(
@@ -781,6 +855,11 @@ impl SubscriptionManager {
             let _ =
                 block_on_manager_handle(&self.handle, async move { Ok(router.shutdown().await) });
         }
+        let monitor_digest = self.monitor_digest.clone();
+        let _ = block_on_manager_handle(&self.handle, async move {
+            monitor_digest.flush().await;
+            Ok(())
+        });
         let handles: Vec<_> = self
             .subscribers
             .lock()
@@ -945,146 +1024,6 @@ async fn send_command_before_deadline(
                 }
                 return Err(error);
             }
-        }
-    }
-}
-
-struct ManagerConnectorEventProcessor {
-    store: Arc<SubscriptionStore>,
-    connection_store: Arc<ConnectionStore>,
-    history_store: Arc<WorkflowHistoryStore>,
-    proxy_store: Arc<AgentProxyStore>,
-    dispatcher: Arc<dyn ActionDispatcher>,
-    classifier: Arc<dyn Classifier>,
-}
-
-impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
-    fn process_connector_event(
-        &self,
-        connector_slug: &str,
-        connection_slug: &str,
-        envelope: &EventEnvelope,
-    ) -> Result<()> {
-        self.process_agent_proxy(connector_slug, connection_slug, envelope)?;
-        let result = process_envelope_result(
-            envelope,
-            &self.store,
-            Some(&self.history_store),
-            &self.dispatcher,
-            &self.classifier,
-            None,
-        );
-        if result.failed > 0 {
-            anyhow::bail!(
-                "{} workflow action(s) failed while processing connector event",
-                result.failed
-            );
-        }
-        Ok(())
-    }
-
-    fn process_connector_events(
-        &self,
-        connector_slug: &str,
-        connection_slug: &str,
-        envelopes: &[EventEnvelope],
-    ) -> Result<()> {
-        for envelope in envelopes {
-            self.process_agent_proxy(connector_slug, connection_slug, envelope)?;
-        }
-        let result = process_envelope_batch_result(
-            envelopes,
-            &self.store,
-            Some(&self.history_store),
-            &self.dispatcher,
-            &self.classifier,
-            None,
-        );
-        if result.failed > 0 {
-            anyhow::bail!(
-                "{} workflow action(s) failed while processing connector event batch",
-                result.failed
-            );
-        }
-        Ok(())
-    }
-}
-
-impl ManagerConnectorEventProcessor {
-    fn process_agent_proxy(
-        &self,
-        connector_slug: &str,
-        connection_slug: &str,
-        envelope: &EventEnvelope,
-    ) -> Result<()> {
-        match decide_agent_proxy_event(
-            connector_slug,
-            connection_slug,
-            &envelope.event.payload,
-            &self.proxy_store,
-        )? {
-            AgentProxyDecision::Ignore => Ok(()),
-            AgentProxyDecision::ConnectorAction { action, input } => {
-                self.dispatch_connector_action(connector_slug, &action, input, envelope)
-            }
-            AgentProxyDecision::BindAgent { reply, .. } => {
-                let _ = self.connection_store.update(connection_slug, |record| {
-                    record.set_has_consumer(true);
-                });
-                if let Some(input) = reply {
-                    self.dispatch_connector_action(
-                        connector_slug,
-                        "send_message",
-                        input,
-                        envelope,
-                    )?;
-                }
-                Ok(())
-            }
-            AgentProxyDecision::RouteToAgent {
-                target,
-                message,
-                binding,
-            } => {
-                let Some(proxy) = builtin_agent_proxy(connector_slug) else {
-                    return Ok(());
-                };
-                let prompt = proxy.route_prompt(&target, &message);
-                let result = self.dispatcher.dispatch(
-                    &ActionSpec::TriageAgent {
-                        prompt,
-                        model: None,
-                    },
-                    envelope,
-                );
-                if !result.success {
-                    anyhow::bail!("{}", result.summary);
-                }
-                let input = proxy.render_agent_reply(&result.summary, &binding);
-                self.dispatch_connector_action(connector_slug, "send_message", input, envelope)
-            }
-        }
-    }
-
-    fn dispatch_connector_action(
-        &self,
-        connector_slug: &str,
-        action: &str,
-        input: serde_json::Value,
-        envelope: &EventEnvelope,
-    ) -> Result<()> {
-        let result = self.dispatcher.dispatch(
-            &ActionSpec::ConnectorAct {
-                connector_slug: connector_slug.to_string(),
-                action: action.to_string(),
-                input,
-            },
-            envelope,
-        );
-        if result.success {
-            Ok(())
-        } else {
-            anyhow::bail!("{}", result.summary)
         }
     }
 }

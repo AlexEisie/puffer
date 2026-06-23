@@ -408,8 +408,19 @@ pub(crate) struct BrowserCaptchaSolverDto {
 pub(crate) struct SecretsSettingsDto {
     pub(crate) store_file: String,
     pub(crate) key_source: String,
+    /// Back-compat: true when the legacy macOS Chrome import is supported.
     pub(crate) chrome_import_supported: bool,
+    /// All browser import sources and whether each is currently available.
+    pub(crate) sources: Vec<SecretSourceDto>,
     pub(crate) items: Vec<SecretSummaryDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretSourceDto {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) available: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -530,6 +541,7 @@ pub(crate) struct SettingsConfigDto {
     pub(crate) default_provider: Option<String>,
     pub(crate) default_model: Option<String>,
     pub(crate) openai_base_url: Option<String>,
+    pub(crate) openai_display_name: Option<String>,
     pub(crate) theme: String,
     pub(crate) media: MediaSettingsDto,
     pub(crate) mascot_id: String,

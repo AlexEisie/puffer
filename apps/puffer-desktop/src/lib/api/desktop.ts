@@ -38,6 +38,7 @@ import type {
   MediaKind,
   MessageActor,
   MessageAttachment,
+  MonitorRuleAddRequest,
   OpenAIRealtimeClientSecret,
   OpenAIRealtimeClientSecretOptions,
   TimelineItem,
@@ -1086,6 +1087,54 @@ export async function importChromeSecrets(): Promise<ChromeSecretsImportResult> 
   });
 }
 
+/**
+ * Imports saved credentials from one source (chrome|firefox|1password).
+ * 1password imports every accessible vault.
+ */
+export async function importBrowserSecrets(
+  source: string
+): Promise<ChromeSecretsImportResult> {
+  const params = { source };
+  if (canReachDaemon()) {
+    const client = await ensureLocalDaemonClient();
+    return client.request<BackendChromeSecretsImportResult>("import_browser_secrets", params);
+  }
+  if (!canInvokeTauri()) {
+    return {
+      settings: mockSettingsSnapshot,
+      report: { imported: 0, skipped: 0, errors: [`${source} import requires the desktop backend.`] }
+    };
+  }
+  return invoke<BackendChromeSecretsImportResult>("backend_request", {
+    method: "import_browser_secrets",
+    params
+  });
+}
+
+/**
+ * Imports 1Password logins from a `.1pux` export file (no `op` CLI needed),
+ * every vault in the file.
+ */
+export async function importOnePasswordExport(
+  path: string
+): Promise<ChromeSecretsImportResult> {
+  const params = { path };
+  if (canReachDaemon()) {
+    const client = await ensureLocalDaemonClient();
+    return client.request<BackendChromeSecretsImportResult>("import_onepassword_export", params);
+  }
+  if (!canInvokeTauri()) {
+    return {
+      settings: mockSettingsSnapshot,
+      report: { imported: 0, skipped: 0, errors: ["1Password export import requires the desktop backend."] }
+    };
+  }
+  return invoke<BackendChromeSecretsImportResult>("backend_request", {
+    method: "import_onepassword_export",
+    params
+  });
+}
+
 export interface TelegramRelationshipReport {
   chatId: number;
   name: string;
@@ -1577,19 +1626,23 @@ export async function saveMonitorMemory(connectionSlug: string, content: string)
 }
 
 /** Add one include or exclude monitor rule and return the refreshed workflow snapshot. */
-export async function addMonitorRule(params: {
-  connection_slug: string;
-  mode: "exclude" | "include";
-  keywords: string[];
-  case_insensitive?: boolean;
-}): Promise<WorkflowSnapshot> {
+export async function addMonitorRule(params: MonitorRuleAddRequest): Promise<WorkflowSnapshot> {
   const client = await ensureLocalDaemonClient();
-  return client.request<WorkflowSnapshot>("task_monitor_rule_add", {
+  const payload: Record<string, unknown> = {
     connection_slug: params.connection_slug,
     mode: params.mode,
-    keywords: params.keywords,
-    case_insensitive: params.case_insensitive ?? true
-  });
+    kind: params.kind
+  };
+  if (params.kind === "keyword") {
+    payload.keywords = params.keywords;
+    payload.operator = params.operator ?? "contains";
+    payload.case_insensitive = params.case_insensitive ?? true;
+  } else {
+    payload.field = params.field;
+    payload.operator = params.operator;
+    payload.value = params.value ?? null;
+  }
+  return client.request<WorkflowSnapshot>("task_monitor_rule_add", payload);
 }
 
 /** Delete one displayed include or exclude monitor rule. */
@@ -2654,6 +2707,7 @@ export type ConfigPatch = {
   defaultModel?: string | null;
   theme?: string;
   openaiBaseUrl?: string | null;
+  openaiDisplayName?: string | null;
   media?: MediaSettings;
 };
 

@@ -9,7 +9,11 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::OnceLock;
 use tempfile::tempdir;
+
+static MONITOR_DIGEST_ENV_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
 
 #[test]
 fn agent_proxy_binding_counts_as_connection_consumer() {
@@ -67,6 +71,156 @@ fn agent_proxy_binding_counts_as_connection_consumer() {
     );
 
     manager.shutdown();
+}
+
+#[test]
+fn monitor_events_flush_as_delayed_digest_batch() {
+    struct RecordingDispatcher {
+        batches: StdMutex<Vec<Vec<String>>>,
+    }
+
+    impl ActionDispatcher for RecordingDispatcher {
+        fn dispatch(&self, _action: &ActionSpec, _envelope: &EventEnvelope) -> ActionResult {
+            panic!("monitor digest should use batch dispatch")
+        }
+
+        fn dispatch_batch(
+            &self,
+            _action: &ActionSpec,
+            envelopes: &[EventEnvelope],
+        ) -> ActionResult {
+            self.batches.lock().unwrap().push(
+                envelopes
+                    .iter()
+                    .map(|envelope| envelope.event.text.clone())
+                    .collect(),
+            );
+            ActionResult::success("digest triaged")
+        }
+    }
+
+    let temp = tempdir().unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(1)
+        .build()
+        .unwrap();
+    let dispatcher = Arc::new(RecordingDispatcher {
+        batches: StdMutex::new(Vec::new()),
+    });
+    let manager = SubscriptionManagerBuilder::new(temp.path().join("subscriptions.json"))
+        .with_dispatcher(dispatcher.clone())
+        .with_monitor_digest_interval(std::time::Duration::from_millis(25))
+        .build(runtime.handle().clone())
+        .unwrap();
+    manager
+        .store()
+        .create(WorkflowBindingSpec {
+            slug: "monitor-telegram-user".into(),
+            description: "Monitor telegram-user for actionable tasks".into(),
+            connection_slug: "telegram-user".into(),
+            connector_slug: Some("telegram-login".into()),
+            status: WorkflowBindingStatus::Enabled,
+            filter: None,
+            ignore_filters: Vec::new(),
+            contact_ids: Vec::new(),
+            classify_prompt: None,
+            classify_model: None,
+            action: ActionSpec::TriageAgent {
+                prompt: "triage".into(),
+                model: None,
+            },
+            created_at_ms: 0,
+        })
+        .unwrap();
+    let processor = ManagerConnectorEventProcessor::new(
+        manager.store.clone(),
+        manager.connection_store.clone(),
+        manager.history_store.clone(),
+        manager.monitor_trace_store.clone(),
+        manager.proxy_store.clone(),
+        manager.dispatcher.clone(),
+        manager.classifier.clone(),
+        manager.self_gate.clone(),
+        manager.monitor_digest.clone(),
+    );
+    let envelopes = vec![
+        manager_test_event("env-1", "please review the first update today"),
+        manager_test_event("env-2", "can you confirm the second plan?"),
+    ];
+
+    processor
+        .process_connector_events("telegram-login", "telegram-user", &envelopes)
+        .unwrap();
+
+    assert!(dispatcher.batches.lock().unwrap().is_empty());
+    runtime.block_on(async {
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    });
+    assert_eq!(
+        dispatcher.batches.lock().unwrap().as_slice(),
+        &[vec![
+            "please review the first update today".to_string(),
+            "can you confirm the second plan?".to_string()
+        ]]
+    );
+    manager.shutdown();
+}
+
+#[test]
+fn monitor_digest_interval_can_be_overridden_for_local_testing() {
+    let _guard = MONITOR_DIGEST_ENV_LOCK
+        .get_or_init(|| StdMutex::new(()))
+        .lock()
+        .unwrap();
+    let previous = std::env::var_os(MONITOR_DIGEST_INTERVAL_SECONDS_ENV);
+    std::env::set_var(MONITOR_DIGEST_INTERVAL_SECONDS_ENV, "300");
+
+    assert_eq!(
+        monitor_digest_interval_from_env(),
+        std::time::Duration::from_secs(300)
+    );
+
+    if let Some(previous) = previous {
+        std::env::set_var(MONITOR_DIGEST_INTERVAL_SECONDS_ENV, previous);
+    } else {
+        std::env::remove_var(MONITOR_DIGEST_INTERVAL_SECONDS_ENV);
+    }
+}
+
+#[test]
+fn monitor_digest_interval_defaults_to_one_minute() {
+    let _guard = MONITOR_DIGEST_ENV_LOCK
+        .get_or_init(|| StdMutex::new(()))
+        .lock()
+        .unwrap();
+    let previous = std::env::var_os(MONITOR_DIGEST_INTERVAL_SECONDS_ENV);
+    std::env::remove_var(MONITOR_DIGEST_INTERVAL_SECONDS_ENV);
+
+    assert_eq!(
+        monitor_digest_interval_from_env(),
+        std::time::Duration::from_secs(60)
+    );
+
+    if let Some(previous) = previous {
+        std::env::set_var(MONITOR_DIGEST_INTERVAL_SECONDS_ENV, previous);
+    }
+}
+
+fn manager_test_event(envelope_id: &str, text: &str) -> EventEnvelope {
+    EventEnvelope {
+        envelope_id: envelope_id.into(),
+        subscriber_id: "telegram-user".into(),
+        received_at_ms: 0,
+        event: Event {
+            topic: "telegram-user".into(),
+            kind: "message".into(),
+            control: false,
+            dedup_key: Some(envelope_id.into()),
+            text: text.into(),
+            payload: json!({ "message": text }),
+        },
+    }
 }
 
 #[test]

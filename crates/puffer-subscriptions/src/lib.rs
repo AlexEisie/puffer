@@ -25,11 +25,15 @@ mod connector_process;
 mod connector_stream;
 mod contact_history;
 mod contacts;
+mod event_schema;
 mod history;
 mod manager;
+mod monitor_trace;
 mod protocol;
 mod proxy;
 mod router;
+mod router_debounce;
+mod self_gate;
 mod spec;
 mod store;
 mod subscriber_manifest;
@@ -40,8 +44,8 @@ mod telegram_e2e_tests;
 pub use action::{
     install_connector_action_executor, install_outbound, install_workflow_runner,
     installed_workflow_runner, ActionDispatcher, ActionResult, ActionUsage,
-    BuiltinActionDispatcher, ConnectorActionExecutor, Outbound, WorkflowActionOutput,
-    WorkflowActionRunner,
+    BuiltinActionDispatcher, ConnectorActionExecutor, Outbound, TriageDecision,
+    TriageDecisionOutcome, WorkflowActionOutput, WorkflowActionRunner,
 };
 pub use catalog::{
     builtin_connector_template, builtin_connector_templates, suggested_connection_slug,
@@ -62,12 +66,20 @@ pub use contacts::{
     DISCORD_CONTACT_PREFIX, GOOGLE_CONTACT_PREFIX, LARK_CONTACT_PREFIX, MATRIX_CONTACT_PREFIX,
     SLACK_CONTACT_PREFIX, TELEGRAM_CONTACT_PREFIX,
 };
+pub use event_schema::{
+    compile_event_field_rule, load_event_schema_from_dir, validate_event_schema, EventField,
+    EventFieldRule, EventFieldType, EventFieldValue, EventOperator, EventSchema, EventTextField,
+};
 pub use history::{
     now_ms, WorkflowActionLog, WorkflowBindingRun, WorkflowBindingRunStatus, WorkflowHistoryStore,
     WorkflowHistoryStoreError,
 };
 pub use manager::{
     ConnectionAuthChecker, ConnectionAuthStatus, SubscriptionManager, SubscriptionManagerBuilder,
+};
+pub use monitor_trace::{
+    MonitorTraceIdentity, MonitorTraceMessage, MonitorTraceStage, MonitorTraceStageStatus,
+    MonitorTraceStatus, MonitorTraceStore, MonitorTraceStoreError,
 };
 pub use protocol::{
     ConnectorActionRequest, ConnectorActionResponse, ConnectorSubscribeCommand,
@@ -81,6 +93,7 @@ pub use router::{
     prefilter_passes, process_envelope, process_envelope_batch_result, process_envelope_result,
     EnvelopeProcessResult, RouterStats, SubscriptionRouter,
 };
+pub use self_gate::{DropAllSelfGate, SelfMessageGate, SELF_MESSAGE_KIND};
 pub use spec::{
     filter_matches, render_value_templates, validate_action_spec, validate_spec, ActionGraphNode,
     ActionSpec, FilterSpec, PrefilterSpec, SubscriptionSpec, SubscriptionStatus, TaggedFilterSpec,
@@ -90,8 +103,8 @@ pub use store::{
     SubscriptionStore, SubscriptionStoreError, WorkflowBindingStore, WorkflowBindingStoreError,
 };
 pub use subscriber_manifest::{
-    connection_subscriber_manifest, connection_subscriber_manifest_exists,
-    connection_workflow_trigger_supported, connector_runtime_hints,
-    connector_workflow_trigger_supported, direct_subscriber_manifest, find_subscriber_manifest,
-    SubscriberManifestRoots,
+    connection_subscriber_manifest, connection_subscriber_manifest_dir,
+    connection_subscriber_manifest_exists, connection_workflow_trigger_supported,
+    connector_runtime_hints, connector_workflow_trigger_supported, direct_subscriber_manifest,
+    find_subscriber_manifest, SubscriberManifestRoots,
 };
