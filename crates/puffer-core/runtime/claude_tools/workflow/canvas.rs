@@ -117,7 +117,7 @@ fn interactive_node_type(node_type: &str) -> bool {
     matches!(
         node_type,
         "toggle" | "singleSelect" | "multiSelect" | "slider" | "barSelect" | "textInput"
-            | "textarea" | "editableTable" | "mediaPicker"
+            | "textarea" | "editableTable" | "mediaPicker" | "dependentSelect"
     )
 }
 
@@ -129,7 +129,9 @@ fn default_value_for_node(node_type: &str, object: &Map<String, Value>) -> Value
         "toggle" => Value::Bool(false),
         "multiSelect" => Value::Array(Vec::new()),
         "slider" => object.get("min").cloned().unwrap_or_else(|| json!(0)),
-        "singleSelect" | "barSelect" => first_option_id(object).unwrap_or(Value::Null),
+        "singleSelect" | "barSelect" | "dependentSelect" => {
+            first_option_id(object).unwrap_or(Value::Null)
+        }
         "textInput" | "textarea" => Value::String(String::new()),
         "editableTable" => object
             .get("rows")
@@ -554,6 +556,24 @@ mod tests {
         assert_eq!(values["pickOne"], Value::Null);
         assert_eq!(values["pickExplicitFalse"], Value::Null);
         assert_eq!(values["pickMany"], json!([]));
+    }
+
+    #[test]
+    fn initial_values_seed_dependent_select_first_option() {
+        let spec = json!({
+            "body": [
+                { "type": "singleSelect", "id": "imgProvider",
+                  "options": [{ "id": "byteplus", "label": "BytePlus" }] },
+                { "type": "dependentSelect", "id": "imgModel", "dependsOn": "imgProvider",
+                  "options": [
+                      { "id": "seedream", "label": "Seedream", "group": "byteplus" },
+                      { "id": "other", "label": "Other", "group": "elsewhere" }
+                  ] }
+            ]
+        });
+        let values = initial_canvas_values(&spec);
+        assert_eq!(values["imgProvider"], json!("byteplus"));
+        assert_eq!(values["imgModel"], json!("seedream"));
     }
 
     #[test]
