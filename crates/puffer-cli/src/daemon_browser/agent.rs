@@ -141,7 +141,7 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
                 ensure_target_tab(state, &root_session_id, params, width, height)?;
             state.browsers.arm_agent_recording(&backend_id);
             state.browsers.reload(&backend_id)?;
-            Ok(json!({ "ok": true }))
+            Ok(state.browsers.post_action_snapshot(&backend_id, json!({ "ok": true }), true))
         }
         "back" | "forward" => {
             let (_, backend_id) =
@@ -153,7 +153,7 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
                 BrowserHistoryDirection::Forward
             };
             state.browsers.history(&backend_id, direction)?;
-            Ok(json!({ "ok": true }))
+            Ok(state.browsers.post_action_snapshot(&backend_id, json!({ "ok": true }), true))
         }
         "snapshot" => {
             let (_, backend_id) =
@@ -189,7 +189,7 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
                 network_idle_duration(params),
                 navigation_timeout(params),
             )?;
-            Ok(json!({ "ok": true }))
+            Ok(state.browsers.post_action_snapshot(&backend_id, json!({ "ok": true }), false))
         }
         "screenshot" => {
             let (tab_id, backend_id) =
@@ -238,7 +238,7 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state.browsers.arm_agent_recording(&backend_id);
             let target = required_string(params, "ref")?;
             state.browsers.agent_click(&backend_id, &target)?;
-            Ok(json!({ "ok": true }))
+            Ok(state.browsers.post_action_snapshot(&backend_id, json!({ "ok": true }), true))
         }
         "dblclick" => {
             let (_, backend_id) =
@@ -246,7 +246,7 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state.browsers.arm_agent_recording(&backend_id);
             let target = required_string(params, "ref")?;
             state.browsers.agent_double_click(&backend_id, &target)?;
-            Ok(json!({ "ok": true }))
+            Ok(state.browsers.post_action_snapshot(&backend_id, json!({ "ok": true }), true))
         }
         "hover" => {
             let (_, backend_id) =
@@ -254,7 +254,7 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state.browsers.arm_agent_recording(&backend_id);
             let target = required_string(params, "ref")?;
             state.browsers.agent_hover(&backend_id, &target)?;
-            Ok(json!({ "ok": true }))
+            Ok(state.browsers.post_action_snapshot(&backend_id, json!({ "ok": true }), false))
         }
         "focus_ref" => {
             let (_, backend_id) =
@@ -262,7 +262,7 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state.browsers.arm_agent_recording(&backend_id);
             let target = required_string(params, "ref")?;
             state.browsers.agent_focus(&backend_id, &target)?;
-            Ok(json!({ "ok": true }))
+            Ok(state.browsers.post_action_snapshot(&backend_id, json!({ "ok": true }), false))
         }
         "type" => {
             let (_, backend_id) =
@@ -276,7 +276,7 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state
                 .browsers
                 .input(&backend_id, BrowserInputEvent::Text { text })?;
-            Ok(json!({ "ok": true }))
+            Ok(state.browsers.post_action_snapshot(&backend_id, json!({ "ok": true }), false))
         }
         "insertText" => {
             let (_, backend_id) =
@@ -286,7 +286,7 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state
                 .browsers
                 .input(&backend_id, BrowserInputEvent::Text { text })?;
-            Ok(json!({ "ok": true }))
+            Ok(state.browsers.post_action_snapshot(&backend_id, json!({ "ok": true }), false))
         }
         "fill" => {
             let (_, backend_id) =
@@ -294,7 +294,8 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state.browsers.arm_agent_recording(&backend_id);
             let target = required_string(params, "ref")?;
             let text = required_string(params, "text")?;
-            state.browsers.agent_fill(&backend_id, &target, &text)
+            let outcome = state.browsers.agent_fill(&backend_id, &target, &text)?;
+            Ok(state.browsers.post_action_snapshot(&backend_id, outcome, false))
         }
         "select" => {
             let (_, backend_id) =
@@ -303,7 +304,7 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             let target = required_string(params, "ref")?;
             let value = required_string(params, "value")?;
             state.browsers.agent_select(&backend_id, &target, &value)?;
-            Ok(json!({ "ok": true }))
+            Ok(state.browsers.post_action_snapshot(&backend_id, json!({ "ok": true }), false))
         }
         "upload" => {
             let (_, backend_id) =
@@ -312,7 +313,7 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             let target = required_string(params, "ref")?;
             let files = required_string_array(params, "files")?;
             state.browsers.agent_upload(&backend_id, &target, files)?;
-            Ok(json!({ "ok": true }))
+            Ok(state.browsers.post_action_snapshot(&backend_id, json!({ "ok": true }), false))
         }
         "check" => {
             let (_, backend_id) =
@@ -320,7 +321,7 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state.browsers.arm_agent_recording(&backend_id);
             let target = required_string(params, "ref")?;
             state.browsers.agent_check(&backend_id, &target)?;
-            Ok(json!({ "ok": true }))
+            Ok(state.browsers.post_action_snapshot(&backend_id, json!({ "ok": true }), false))
         }
         "uncheck" => {
             let (_, backend_id) =
@@ -328,7 +329,7 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state.browsers.arm_agent_recording(&backend_id);
             let target = required_string(params, "ref")?;
             state.browsers.agent_uncheck(&backend_id, &target)?;
-            Ok(json!({ "ok": true }))
+            Ok(state.browsers.post_action_snapshot(&backend_id, json!({ "ok": true }), false))
         }
         "press" => {
             let (_, backend_id) =
@@ -336,7 +337,7 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state.browsers.arm_agent_recording(&backend_id);
             let key = required_string(params, "key")?;
             state.browsers.agent_press(&backend_id, &key)?;
-            Ok(json!({ "ok": true }))
+            Ok(state.browsers.post_action_snapshot(&backend_id, json!({ "ok": true }), true))
         }
         "keydown" => {
             let (_, backend_id) =
@@ -361,7 +362,7 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             let direction = required_string(params, "direction")?;
             let px = optional_u32(params, "px").unwrap_or(600);
             state.browsers.agent_scroll(&backend_id, &direction, px)?;
-            Ok(json!({ "ok": true }))
+            Ok(state.browsers.post_action_snapshot(&backend_id, json!({ "ok": true }), false))
         }
         "scrollIntoView" => {
             let (_, backend_id) =
@@ -371,7 +372,7 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state
                 .browsers
                 .agent_scroll_into_view(&backend_id, &target)?;
-            Ok(json!({ "ok": true }))
+            Ok(state.browsers.post_action_snapshot(&backend_id, json!({ "ok": true }), false))
         }
         "evaluate" | "eval" => {
             let (_, backend_id) =
