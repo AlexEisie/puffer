@@ -117,6 +117,7 @@ fn interactive_node_type(node_type: &str) -> bool {
     matches!(
         node_type,
         "toggle" | "singleSelect" | "multiSelect" | "slider" | "barSelect" | "textInput"
+            | "textarea" | "editableTable" | "mediaPicker"
     )
 }
 
@@ -129,7 +130,15 @@ fn default_value_for_node(node_type: &str, object: &Map<String, Value>) -> Value
         "multiSelect" => Value::Array(Vec::new()),
         "slider" => object.get("min").cloned().unwrap_or_else(|| json!(0)),
         "singleSelect" | "barSelect" => first_option_id(object).unwrap_or(Value::Null),
-        "textInput" => Value::String(String::new()),
+        "textInput" | "textarea" => Value::String(String::new()),
+        "editableTable" => object.get("rows").cloned().unwrap_or_else(|| json!([])),
+        "mediaPicker" => {
+            if object.get("multi") == Some(&Value::Bool(true)) {
+                json!([])
+            } else {
+                Value::Null
+            }
+        }
         _ => Value::Null,
     }
 }
@@ -520,6 +529,21 @@ mod tests {
         assert_eq!(values["run-tests"], true);
         assert_eq!(values["areas"], json!(["auth"]));
         assert_eq!(values["confidence"], 10);
+    }
+
+    #[test]
+    fn initial_values_cover_new_primitives() {
+        let spec = json!({ "body": [
+            { "type": "textarea", "id": "script" },
+            { "type": "editableTable", "id": "sb", "rows": [["shot-001","x"]] },
+            { "type": "mediaPicker", "id": "pickOne" },
+            { "type": "mediaPicker", "id": "pickMany", "multi": true },
+        ]});
+        let values = initial_canvas_values(&spec);
+        assert_eq!(values["script"], json!(""));
+        assert_eq!(values["sb"], json!([["shot-001","x"]]));
+        assert_eq!(values["pickOne"], Value::Null);
+        assert_eq!(values["pickMany"], json!([]));
     }
 
     #[test]
