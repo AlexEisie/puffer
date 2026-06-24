@@ -419,6 +419,15 @@
     resize: vertical;
     font: inherit;
   }
+  :global(.ic-et-cell) {
+    width: 100%;
+    font: inherit;
+    border: 0;
+    background: transparent;
+  }
+  :global(.ic-et-actions) {
+    white-space: nowrap;
+  }
   :global(.ic-code) {
     margin: 0;
     max-height: 260px;

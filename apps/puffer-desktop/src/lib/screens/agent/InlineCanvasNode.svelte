@@ -91,6 +91,33 @@
 
   const componentType = $derived(text(node.type));
   const id = $derived(nodeId());
+
+  function curRows(): unknown[][] {
+    return Array.isArray(values[id]) ? (values[id] as unknown[][]) : [];
+  }
+  function commitRows(next: unknown[][]) {
+    onChange(id, next);
+  }
+  function updateCell(r: number, c: number, v: string) {
+    const next = curRows().map((row) => [...row]);
+    next[r][c] = v;
+    commitRows(next);
+  }
+  function addRow() {
+    const next = curRows();
+    const width = next[0]?.length ?? 1;
+    commitRows([...next.map((row) => [...row]), Array(width).fill("")]);
+  }
+  function removeRow(r: number) {
+    commitRows(curRows().filter((_, i) => i !== r));
+  }
+  function moveRow(r: number, d: number) {
+    const next = curRows().map((row) => [...row]);
+    const t = r + d;
+    if (t < 0 || t >= next.length) return;
+    [next[r], next[t]] = [next[t], next[r]];
+    commitRows(next);
+  }
 </script>
 
 {#if componentType === "section"}
@@ -236,6 +263,31 @@
       oninput={(event) => onChange(id, event.currentTarget.value)}
     ></textarea>
   </label>
+{:else if componentType === "editableTable"}
+  <div class="ic-editable-table">
+    <table class="ic-table">
+      <thead><tr>
+        {#each Array.isArray(node.columns) ? node.columns : [] as col, i (`etc-${i}`)}<th>{text(col)}</th>{/each}
+        <th></th>
+      </tr></thead>
+      <tbody>
+        {#each curRows() as row, r (`etr-${r}`)}
+          <tr>
+            {#each row as cell, c (`etcell-${c}`)}
+              <td><input class="ic-et-cell" value={text(cell)}
+                oninput={(e) => updateCell(r, c, e.currentTarget.value)} /></td>
+            {/each}
+            <td class="ic-et-actions">
+              <button type="button" onclick={() => moveRow(r, -1)} aria-label="Move up">↑</button>
+              <button type="button" onclick={() => moveRow(r, 1)} aria-label="Move down">↓</button>
+              <button type="button" onclick={() => removeRow(r)} aria-label="Delete">✕</button>
+            </td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+    <button type="button" class="ic-et-add" onclick={addRow}>+ Add row</button>
+  </div>
 {:else if componentType === "finding"}
   <article class={`ic-finding severity-${text(node.severity || "info")}`}>
     <div class="ic-finding-head">
