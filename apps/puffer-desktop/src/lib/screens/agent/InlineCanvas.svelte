@@ -4,6 +4,8 @@
   import CanvasSubmitButton from "./CanvasSubmitButton.svelte";
   import InlineCanvasNode from "./InlineCanvasNode.svelte";
   import { initialValues } from "./inlineCanvasInitialValues";
+  import { hasMediaModelSelect, selectionComplete } from "./mediaModelSelect";
+  import { canRegenerate, regeneratePrompt, type SubmitState } from "./canvasRegenerate";
 
   type CanvasSpec = Record<string, unknown>;
   type Props = {
@@ -17,13 +19,21 @@
 
   let values = $state<Record<string, unknown>>({});
   let saveState = $state<"idle" | "saving" | "saved" | "error">("idle");
-  let submitState = $state<"idle" | "submitting" | "submitted" | "error">("idle");
+  let submitState = $state<SubmitState>("idle");
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingPatch: Record<string, unknown> = {};
   let lastSubmittedSignature: string | null = null;
   let statusMessage = $state<string | null>(null);
   let destroyed = false;
   const canSubmitCanvas = $derived(Boolean(onSubmitCanvasState && sessionId && canvasId));
+  // Deterministic gate: a mediaModelSelect canvas cannot submit until both models are chosen.
+  const mediaGateBlocks = $derived(hasMediaModelSelect(spec) && !selectionComplete(values));
+  const mediaGateMessage = "Select both an image and a video model to continue.";
+  let regenerating = $state(false);
+  const regenerable = $derived(spec.regenerable === true);
+  const regenerateEnabled = $derived(
+    canRegenerate({ regenerable, canSubmit: canSubmitCanvas, regenerating, submitState })
+  );
 
   $effect(() => {
     values = initialValues(spec);
@@ -109,6 +119,30 @@
     }
   }
 
+  async function regenerateCanvas() {
+    if (!onSubmitCanvasState || !canvasId || !sessionId) return;
+    regenerating = true;
+    statusMessage = null;
+    // The draft is being discarded — drop any queued autosave instead of flushing it.
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    pendingPatch = {};
+    try {
+      const accepted = await onSubmitCanvasState(regeneratePrompt(canvasId));
+      if (destroyed) return;
+      if (accepted === false) {
+        statusMessage = "Could not reach the agent to regenerate. Try again.";
+      }
+    } catch {
+      if (destroyed) return;
+      statusMessage = "Unable to request a regenerated draft.";
+    } finally {
+      if (!destroyed) regenerating = false;
+    }
+  }
+
   async function savePendingPatch(): Promise<boolean> {
     if (!sessionId || !canvasId || Object.keys(pendingPatch).length === 0) return saveState !== "error";
     const patchToSave = pendingPatch;
@@ -168,11 +202,21 @@
     {/each}
     {#if onSubmitCanvasState}
       <div class="inline-canvas-selection-actions">
+        {#if regenerable && canSubmitCanvas}
+          <button
+            type="button"
+            class="inline-canvas-regenerate"
+            onclick={regenerateCanvas}
+            disabled={!regenerateEnabled}
+          >
+            {regenerating ? "Regenerating…" : "Regenerate"}
+          </button>
+        {/if}
         <CanvasSubmitButton
           {saveState}
           {submitState}
-          disabled={!canSubmitCanvas}
-          message={statusMessage}
+          disabled={!canSubmitCanvas || mediaGateBlocks || regenerating}
+          message={statusMessage ?? (mediaGateBlocks ? mediaGateMessage : null)}
           onSubmit={submitCanvasState}
         />
       </div>
@@ -231,8 +275,26 @@
     padding: 12px 14px 14px;
   }
   .inline-canvas-selection-actions {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
     border-top: 1px solid var(--border);
     padding-top: 10px;
+  }
+  .inline-canvas-regenerate {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--foreground);
+    cursor: pointer;
+    font: inherit;
+    font-size: var(--pf-chat-meta-size);
+    font-weight: 600;
+    padding: 4px 10px;
+  }
+  .inline-canvas-regenerate:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
   }
   :global(.ic-section) {
     display: flex;
@@ -373,6 +435,11 @@
     display: grid;
     gap: 6px;
     min-width: 0;
+  }
+  :global(.ic-media-model-select) {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
   }
   :global(.ic-toggle) {
     display: flex;
