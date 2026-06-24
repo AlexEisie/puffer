@@ -414,6 +414,11 @@
     padding: 0 8px;
     font: inherit;
   }
+  :global(.ic-textarea) {
+    width: 100%;
+    resize: vertical;
+    font: inherit;
+  }
   :global(.ic-code) {
     margin: 0;
     max-height: 260px;

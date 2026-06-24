@@ -225,6 +225,17 @@
       oninput={(event) => onChange(id, event.currentTarget.value)}
     />
   </label>
+{:else if componentType === "textarea"}
+  <label class="ic-control">
+    <span class="ic-control-label">{text(node.label ?? node.id)}</span>
+    <textarea
+      class="ic-textarea"
+      rows={numeric(node.rows, 8)}
+      placeholder={text(node.placeholder)}
+      value={text(values[id])}
+      oninput={(event) => onChange(id, event.currentTarget.value)}
+    ></textarea>
+  </label>
 {:else if componentType === "finding"}
   <article class={`ic-finding severity-${text(node.severity || "info")}`}>
     <div class="ic-finding-head">
