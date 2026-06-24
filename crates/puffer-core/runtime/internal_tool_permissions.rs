@@ -131,6 +131,14 @@ fn execute_internal_tool_request_result(
                 }),
             );
         }
+        "mediacapabilities" => {
+            return crate::runtime::claude_tools::workflow::media_capabilities::execute_media_capabilities(
+                providers,
+                auth_store,
+                discovery_cache,
+                request.input,
+            );
+        }
         other => anyhow::bail!("unknown internal executable tool `{other}`"),
     };
     crate::runtime::claude_tools::execute_workflow_tool(
@@ -193,6 +201,7 @@ fn resolve_internal_tool_permission_result(
 ) -> anyhow::Result<InternalToolPermissionResponse> {
     match canonical_tool_name(&request.tool_id).as_str() {
         "browser" => resolve_browser_permission(state, resources, registry, cwd, request.input),
+        "mediacapabilities" => Ok(InternalToolPermissionResponse::allow()),
         "email"
         | "imagegeneration"
         | "requestuserbrowseraction"
