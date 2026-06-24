@@ -1,5 +1,6 @@
 <script lang="ts">
   import InlineCanvasNode from "./InlineCanvasNode.svelte";
+  import { filterDependentOptions, resolveDependentValue } from "./dependentSelect";
 
   type CanvasNode = Record<string, unknown>;
   type CanvasOption = { id?: string; label?: string };
@@ -38,6 +39,17 @@
             label: typeof item.label === "string" ? item.label : undefined
           }))
       : [];
+  }
+
+  function dependentOptions(target: CanvasNode): { id?: string; label?: string; group?: string }[] {
+    const raw = Array.isArray(target.options) ? target.options : [];
+    return raw
+      .filter((item): item is CanvasNode => typeof item === "object" && item !== null)
+      .map((item) => ({
+        id: typeof item.id === "string" ? item.id : undefined,
+        label: typeof item.label === "string" ? item.label : undefined,
+        group: typeof item.group === "string" ? item.group : undefined,
+      }));
   }
 
   function rows(value: unknown): unknown[][] {
@@ -247,6 +259,26 @@
       {/each}
     </div>
   </div>
+{:else if componentType === "dependentSelect"}
+  {@const dependsOn = typeof node.dependsOn === "string" ? node.dependsOn : ""}
+  {@const visible = filterDependentOptions(dependentOptions(node), values[dependsOn])}
+  {@const effective = resolveDependentValue(values[id], visible)}
+  <div class="ic-control">
+    <div class="ic-control-label">{text(node.label ?? node.id)}</div>
+    <select
+      class="ic-select"
+      value={effective}
+      disabled={visible.length === 0}
+      onchange={(event) => onChange(id, event.currentTarget.value)}
+    >
+      {#each visible as option (`${id}-${option.id ?? option.label}`)}
+        <option value={option.id ?? option.label}>{option.label ?? option.id}</option>
+      {/each}
+    </select>
+  </div>
+  {#if effective !== text(values[id])}
+    {(onChange(id, effective), "")}
+  {/if}
 {:else if componentType === "slider"}
   <label class="ic-control">
     <span class="ic-control-label">{text(node.label ?? node.id)}</span>
