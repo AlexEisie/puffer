@@ -46,6 +46,33 @@ Pick a short kebab slug `<id>` from the drama title. Put project files under
 `.puffer/media/drama/<id>/`. Generated image/video artifacts are written by the tools
 to `.puffer/media/images|videos/` — you only reference them, never relocate them.
 
+0. **Models (gate before any credit-consuming stage).** Confirm the image and video
+   provider/model up front. Both are mandatory.
+
+   First fetch connected capabilities (only providers/models the user has connected appear):
+
+   ```bash
+   puffer internal-tool media-capabilities --kind image
+   puffer internal-tool media-capabilities --kind video
+   ```
+
+   Each returns `{ "kind", "capabilities": [{ "providerId","providerDisplayName","modelId","modelDisplayName","status" }] }`.
+   **If either list is empty**, stop and tell the user to connect a provider for that kind in
+   settings, then retry — do not render the Canvas and do not proceed (both models are required and
+   Stage 0 runs before the script, so a kind with no provider can never be satisfied later).
+
+   Otherwise render `Canvas` with `canvasId = canvas-drama-<id>-stage0` and a `card` titled "Models":
+   - `singleSelect` `id:"imgProvider"`, options = distinct `{id:providerId,label:providerDisplayName}` for image.
+   - `dependentSelect` `id:"imgModel"`, `dependsOn:"imgProvider"`, options = one `{id:modelId,label:modelDisplayName,group:providerId}` per image capability.
+   - `singleSelect` `id:"vidProvider"` and `dependentSelect` `id:"vidModel"` `dependsOn:"vidProvider"`, built the same way from the video list.
+   Order options so each provider's models follow that provider; seed each `value` with the first
+   available so the draft is valid on first paint. Then **end the turn**.
+
+   In the next turn read back with `CanvasState` (same canvasId): `values` carries
+   `{imgProvider,imgModel,vidProvider,vidModel}`. **Validate**: if `imgModel` or `vidModel` is empty,
+   stop and report that both image and video models must be selected (direct the user to settings if a
+   kind has no options). Record the four values in `manifest.json` for Stages 3/4.
+
 1. **Script.** If the prompt already contains a script (or names a script file), use it
    directly (no gate needed). Otherwise draft one, then gate it: render
    `Canvas` with `canvasId = canvas-drama-<id>-stage1` and spec
@@ -75,7 +102,7 @@ to `.puffer/media/images|videos/` — you only reference them, never relocate th
    - If present, use those URLs directly as `--image-reference` in stage 4. Do NOT
      generate images.
    - If absent and the user wants character-consistent shots, generate each character
-     once with `imagegen --prompt "<character sheet>" --count 1`. Make the character art
+     once with `imagegen --prompt "<character sheet>" --count 1 --provider <imgProvider> --model <imgModel>`. Make the character art
      stylized / non-photorealistic (cartoon, 3D render, illustration): image-to-video
      providers (e.g. BytePlus) reject photoreal real-person images on moderation. Read
      the tool result's `remoteSourceUrl` for that artifact (same key the video tool uses):
@@ -95,7 +122,7 @@ to `.puffer/media/images|videos/` — you only reference them, never relocate th
    again instead of advancing.
 
 4. **Per-shot video.** For each shot in storyboard order, run one `videogen` command:
-   - `videogen --prompt "<shot visual + action>"`
+   - `videogen --prompt "<shot visual + action>" --provider <vidProvider> --model <vidModel>`
    - Add `--image-reference <url>` once per `https://`/`asset://` reference the shot uses;
      keep order stable and refer to them as image 1, image 2, … in the prompt.
    - Each `videogen` call blocks until that clip is finished (the tool polls the provider
@@ -156,6 +183,13 @@ not a schema'd artifact:
 
 ## Failure contracts (never paper over)
 
+- If `media-capabilities` returns no connected provider for image or video, stop before rendering
+  Stage 0 and tell the user to connect a provider for that kind in settings; never fall back to
+  text-to-video or to config defaults.
+- If `imgModel` or `vidModel` is empty on read-back, stop and report that both image and video models
+  must be selected before continuing.
+- If the parent runtime is unavailable so `media-capabilities` cannot run (non-desktop), degrade to a
+  text-based confirmation of provider/model and say so plainly; do not skip the confirmation.
 - Do not advance any gated stage on draft values — wait for the stage's confirmation to
   be read back first.
 - If `CanvasState` returns no value for a gated stage (the user did not submit), report

@@ -88,3 +88,24 @@ fn short_drama_skill_requires_action_after_activation() {
     assert!(frontmatter.allowed_tools.contains(&"Write".to_string()));
     assert!(body.contains("Progress-only or promise-only replies are not completion"));
 }
+
+#[test]
+fn short_drama_skill_gates_model_selection_in_stage0() {
+    let body = include_str!("../../../resources/skills/short-drama-generation/SKILL.md");
+    // Stage 0 exists and uses the documented canvasId.
+    assert!(body.contains("canvas-drama-<id>-stage0"));
+    // The four control ids are present.
+    assert!(body.contains("imgProvider"));
+    assert!(body.contains("imgModel"));
+    assert!(body.contains("vidProvider"));
+    assert!(body.contains("vidModel"));
+    // Cascade wiring is documented.
+    assert!(body.contains("dependentSelect"));
+    assert!(body.contains("dependsOn"));
+    // Mandatory + settings prompt contract.
+    assert!(body.contains("media-capabilities"));
+    assert!(body.to_lowercase().contains("settings"));
+    // Per-call selection threads into generation.
+    assert!(body.contains("--provider"));
+    assert!(body.contains("--model"));
+}

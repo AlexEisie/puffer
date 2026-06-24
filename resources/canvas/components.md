@@ -79,6 +79,15 @@ the key in `CanvasState.values`.
 - purpose: one choice from a short option set.
 - use_when: the options are mutually exclusive.
 
+### dependentSelect `{id,label?,dependsOn,options:[{id,label,group}],value?,help?}`
+- purpose: a single-choice dropdown whose options are filtered by another select's value.
+- use_when: a second choice depends on a first (e.g. model depends on provider). Pair it with a
+  `singleSelect` whose `id` equals this node's `dependsOn`; each option's `group` is the parent value
+  it belongs to.
+- avoid_when: the choice is independent → use `singleSelect`.
+- writes back: the chosen option `id` (a string). When the parent changes, the value auto-resets to
+  the first option in the new group.
+
 ### multiSelect `{id,label,options:[{id,label}],value?:string[],help?}`
 - purpose: several independent choices from a short option set.
 - use_when: the user may select more than one area, file, filter, or action.
