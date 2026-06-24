@@ -182,14 +182,13 @@ not a schema'd artifact:
   provider for that kind in Settings — never fall back to text-to-video or to config defaults.
 - If `imgModel` or `vidModel` is empty on read-back, stop and report that both image and video models
   must be selected before continuing.
-- In a non-desktop environment (no Canvas), degrade to a text-based confirmation of provider/model
-  and say so plainly; do not skip the confirmation.
 - Do not advance any gated stage on draft values — wait for the stage's confirmation to
   be read back first.
 - If `CanvasState` returns no value for a gated stage (the user did not submit), report
   "no confirmation received" and stop; do not fall back to the draft.
-- In a non-desktop environment (no inline submit), degrade to text-based per-stage
-  confirmation and say so plainly — do not skip the confirmation.
+- In a non-desktop environment (no Canvas / no inline submit), degrade to text-based
+  per-stage confirmation — including provider/model — and say so plainly; do not skip the
+  confirmation.
 - If a chosen video provider is Relaydance (prompt-only) and the user wants image
   references, report that the configured provider does not support image references.
 - If ffmpeg is unavailable or composition fails, report it plainly and keep the

@@ -47,6 +47,9 @@ fn image_generation_skill_guides_foreground_bash_helper_use() {
     assert!(body.contains("prompt file paths"));
     assert!(body.contains("allowed-tools is guidance"));
     assert!(body.contains("Do not hand-author SVG"));
+    // Per-call provider/model override (added to the CLI) must be documented.
+    assert!(body.contains("--provider"));
+    assert!(body.contains("--model"));
 }
 
 #[test]
@@ -75,6 +78,9 @@ fn video_generation_skill_guides_foreground_bash_helper_use() {
     assert!(body.contains("allowed-tools is guidance"));
     assert!(body.contains("persisted video artifact"));
     assert!(!body.contains("text-to-video only"));
+    // Per-call provider/model override (added to the CLI) must be documented.
+    assert!(body.contains("--provider"));
+    assert!(body.contains("--model"));
 }
 
 #[test]
