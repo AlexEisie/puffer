@@ -53,12 +53,22 @@ to `.puffer/media/images|videos/` — you only reference them, never relocate th
    then end the turn. In the next turn read it back with `CanvasState` (same canvasId)
    and save `values.script` to `.puffer/media/drama/<id>/script.md`.
 
-2. **Storyboard.** If the prompt already contains a shot breakdown, use it. Otherwise
-   break the script into ordered shots (aim for a handful; one beat per shot). Give each
-   shot a stable lowercase id (`shot-001`, `shot-002`, …) and record: subject, action,
-   scene, lighting, camera, style, target duration (seconds), which characters appear,
-   and any stability constraints. These fields become the video prompt — richer shots
-   yield better clips. Save to `.puffer/media/drama/<id>/storyboard.md`.
+2. **Storyboard.** If the prompt already contains a shot breakdown, use it directly.
+   Otherwise break the script into ordered shots (aim for a handful; one beat per shot).
+   Give each shot a stable lowercase id (`shot-001`, `shot-002`, …) and record: subject,
+   action, scene, lighting, camera, style, target duration (seconds), which characters
+   appear, and any stability constraints. These fields become the video prompt — richer
+   shots yield better clips.
+
+   Gate the draft: render `Canvas` with `canvasId = canvas-drama-<id>-stage2` and a
+   `card` containing an `editableTable` with
+   `columns: ["shotId","subject","action","duration","characters"]` and `rows` = the
+   draft shots (one row per shot, column 0 = shotId), then end the turn. In the next
+   turn read it back with `CanvasState`: `values` for the editableTable id (use
+   `id:"storyboard"`) is the confirmed 2D array. In one shot, write
+   `.puffer/media/drama/<id>/storyboard.md` (a markdown table of the confirmed rows) and
+   seed `manifest.json`'s `shots[]` — column 0 is the `shotId`, the remaining columns
+   become the shot's prompt fields.
 
 3. **Character images (reference for video).** Scan the prompt for image references that
    are `https://` or `asset://` URLs.
@@ -75,6 +85,15 @@ to `.puffer/media/images|videos/` — you only reference them, never relocate th
          Do NOT silently fall back to text-to-video.
    - If absent and consistency is not required, run text-to-video in stage 4.
 
+   When you generated candidate images, gate the choice: render `Canvas` with
+   `canvasId = canvas-drama-<id>-stage3`, a `card` containing a `mediaPicker`
+   (`id:"pick"`, `items` = one `{id,url,label}` per generated artifact, using each
+   artifact's `remoteSourceUrl` — or its asset url on desktop — as the `url`) and a
+   `toggle` (`id:"regen"`, label "Regenerate"), then end the turn. In the next turn read
+   it back with `CanvasState`: the picked item's image url becomes stage 4's
+   `--image-reference`; if `values.regen` is true, regenerate the candidates and gate
+   again instead of advancing.
+
 4. **Per-shot video.** For each shot in storyboard order, run one `videogen` command:
    - `videogen --prompt "<shot visual + action>"`
    - Add `--image-reference <url>` once per `https://`/`asset://` reference the shot uses;
@@ -83,8 +102,21 @@ to `.puffer/media/images|videos/` — you only reference them, never relocate th
      to completion), so set an explicit long Bash timeout within the current Bash cap —
      budget per shot, not for the whole drama. One call → one finished clip.
    - Read `path` from the tool result and record it into the manifest (see below).
+   - After running the shots, gate retries: render `Canvas` with
+     `canvasId = canvas-drama-<id>-stage4`, a read-only `table` of per-shot status
+     (shotId, status) and a `multiSelect` (`id:"retry"`, options = the shotIds), then end
+     the turn. In the next turn read it back with `CanvasState` and re-run `videogen` only
+     for the shotIds in `values.retry`; if none are selected, advance.
 
-5. **Compose.** Stitch the successful shot clips in storyboard order with ffmpeg. First
+5. **Compose.** Before composing, gate the final order and mux mode: render `Canvas` with
+   `canvasId = canvas-drama-<id>-stage5`, a `card` containing an `editableTable`
+   (`id:"order"`, `columns: ["shotId"]`, `rows` = the succeeded clips in current order —
+   the user confirms/reorders) and a `singleSelect` (`id:"mux"`, options `copy` /
+   `re-encode`), then end the turn. In the next turn read it back with `CanvasState`:
+   compose in the confirmed `values.order`, preferring stream-copy unless `values.mux` is
+   `re-encode`.
+
+   Stitch the successful shot clips in the confirmed order with ffmpeg. First
    probe ffmpeg: `command -v ffmpeg`. If missing, stop and report — do not fake a file.
    Include only shots whose video succeeded; if none succeeded, skip composition and
    report. Build the concat list with single-quote escaping (each clip line is
@@ -124,6 +156,12 @@ not a schema'd artifact:
 
 ## Failure contracts (never paper over)
 
+- Do not advance any gated stage on draft values — wait for the stage's confirmation to
+  be read back first.
+- If `CanvasState` returns no value for a gated stage (the user did not submit), report
+  "no confirmation received" and stop; do not fall back to the draft.
+- In a non-desktop environment (no inline submit), degrade to text-based per-stage
+  confirmation and say so plainly — do not skip the confirmation.
 - If a chosen video provider is Relaydance (prompt-only) and the user wants image
   references, report that the configured provider does not support image references.
 - If ffmpeg is unavailable or composition fails, report it plainly and keep the
