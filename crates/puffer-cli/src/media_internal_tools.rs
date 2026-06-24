@@ -28,6 +28,12 @@ pub(crate) struct ImageGenerationArgs {
     /// Previous error payload to retry from, encoded as JSON.
     #[arg(long = "retry-from-error-json")]
     pub(crate) retry_from_error_json: Option<String>,
+    /// Generation provider id (overrides the configured default; requires --model).
+    #[arg(long)]
+    pub(crate) provider: Option<String>,
+    /// Logical model id (overrides the configured default; requires --provider).
+    #[arg(long)]
+    pub(crate) model: Option<String>,
 }
 
 /// CLI arguments for `puffer internal-tool video-generation`.
@@ -45,6 +51,12 @@ pub(crate) struct VideoGenerationArgs {
     /// Ordered public https:// image URLs or approved asset:// references.
     #[arg(long = "image-reference")]
     pub(crate) image_references: Vec<String>,
+    /// Generation provider id (overrides the configured default; requires --model).
+    #[arg(long)]
+    pub(crate) provider: Option<String>,
+    /// Logical model id (overrides the configured default; requires --provider).
+    #[arg(long)]
+    pub(crate) model: Option<String>,
 }
 
 /// CLI arguments for `puffer internal-tool media-capabilities`.
@@ -84,6 +96,8 @@ pub(crate) fn image_generation_input(args: &ImageGenerationArgs) -> Result<Value
             parse_json_arg("--retry-from-error-json", raw)?,
         );
     }
+    insert_optional_string(&mut object, "provider", &args.provider);
+    insert_optional_string(&mut object, "model", &args.model);
     Ok(Value::Object(object))
 }
 
@@ -110,6 +124,8 @@ pub(crate) fn video_generation_input(args: &VideoGenerationArgs) -> Result<Value
             ),
         );
     }
+    insert_optional_string(&mut object, "provider", &args.provider);
+    insert_optional_string(&mut object, "model", &args.model);
     Ok(Value::Object(object))
 }
 
@@ -259,12 +275,16 @@ mod tests {
             prompt_reference: None,
             purpose: None,
             retry_from_error_json: Some("{".to_string()),
+            provider: None,
+            model: None,
         };
         let video = VideoGenerationArgs {
             prompt: "clip".to_string(),
             purpose: None,
             parameters_json: Some("{".to_string()),
             image_references: Vec::new(),
+            provider: None,
+            model: None,
         };
 
         assert!(image_generation_input(&image)
@@ -292,6 +312,8 @@ mod tests {
             prompt_reference: None,
             purpose: None,
             retry_from_error_json: None,
+            provider: None,
+            model: None,
         })
         .unwrap_err();
 
@@ -300,6 +322,38 @@ mod tests {
         assert!(error
             .to_string()
             .contains("internal execution endpoint is required but unavailable"));
+    }
+
+    #[test]
+    fn image_input_carries_provider_and_model() {
+        let args = ImageGenerationArgs {
+            prompt: "draw a ship".to_string(),
+            count: 1,
+            aspect: None,
+            prompt_reference: None,
+            purpose: None,
+            retry_from_error_json: None,
+            provider: Some("byteplus".to_string()),
+            model: Some("seedream".to_string()),
+        };
+        let input = image_generation_input(&args).unwrap();
+        assert_eq!(input["provider"], "byteplus");
+        assert_eq!(input["model"], "seedream");
+    }
+
+    #[test]
+    fn video_input_carries_provider_and_model() {
+        let args = VideoGenerationArgs {
+            prompt: "a calm sea".to_string(),
+            purpose: None,
+            parameters_json: None,
+            image_references: Vec::new(),
+            provider: Some("byteplus".to_string()),
+            model: Some("seedance".to_string()),
+        };
+        let input = video_generation_input(&args).unwrap();
+        assert_eq!(input["provider"], "byteplus");
+        assert_eq!(input["model"], "seedance");
     }
 
     #[test]
