@@ -96,6 +96,26 @@ the key in `CanvasState.values`.
 - avoid_when: collecting secrets or long text; use dedicated secret/user input
   tools instead.
 
+### textarea `{id,label?,placeholder?,rows?,value?}`
+- purpose: multiline free-form text editing (a script draft, a long prompt).
+- use_when: the value spans multiple lines and the user should review/edit it inline.
+- avoid_when: a one-line value → use `textInput`.
+- writes back: a string (the edited text).
+
+### editableTable `{id,columns,rows,label?}`
+- purpose: an editable grid the user can edit cell-by-cell plus add, remove, and
+  reorder rows.
+- use_when: the user confirms/edits a list of structured rows (e.g. a storyboard
+  of shots) before the agent acts on it.
+- avoid_when: read-only records → use `table`.
+- writes back: a 2D array (`rows`) reflecting the final edits and order.
+
+### mediaPicker `{id,items:[{id,url,label?}],multi?,value?}`
+- purpose: pick from a grid of images.
+- use_when: the user selects one (or, with `multi:true`, several) generated
+  candidate images.
+- writes back: single → the chosen item `id`; multi → an array of selected ids.
+
 ## Evidence + rich (carry the proof)
 ### finding
 - purpose: one issue/observation that the reader may need to act on. The core
