@@ -125,6 +125,16 @@ the key in `CanvasState.values`.
   candidate images.
 - writes back: single → the chosen item `id`; multi → an array of selected ids.
 
+### mediaModelSelect `{}`
+- purpose: pick the image-gen and video-gen provider/model for a run.
+- use_when: gating the media model choice before any credit-consuming generation (short-drama Stage 0).
+- self-populating: takes no `id` and no `options`. It fetches the connected image/video capabilities
+  itself, seeds each dropdown from the saved global media defaults, shows an in-place "connect a
+  provider in Settings" prompt for any kind with no connected provider, and persists the confirmed
+  choice back to the global media settings.
+- writes back: four fixed keys — `imgProvider`, `imgModel`, `vidProvider`, `vidModel`. Submit is
+  gated until both `imgModel` and `vidModel` are chosen.
+
 ## Evidence + rich (carry the proof)
 ### finding
 - purpose: one issue/observation that the reader may need to act on. The core

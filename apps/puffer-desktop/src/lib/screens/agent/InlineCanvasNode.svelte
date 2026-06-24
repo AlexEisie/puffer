@@ -1,6 +1,15 @@
 <script lang="ts">
   import InlineCanvasNode from "./InlineCanvasNode.svelte";
   import { filterDependentOptions, resolveDependentValue } from "./dependentSelect";
+  import { listMediaCapabilities, loadSettingsSnapshot, updateConfig } from "../../api/desktop";
+  import { availableMediaCapabilities } from "./mediaCapabilityState";
+  import {
+    providerOptions,
+    modelOptions,
+    seedSelection,
+    buildMediaWriteBack,
+  } from "./mediaModelSelect";
+  import type { MediaCapabilityInfo, MediaSettings } from "../../types";
 
   type CanvasNode = Record<string, unknown>;
   type CanvasOption = { id?: string; label?: string };
@@ -151,6 +160,105 @@
       onChange(id, iid);
     }
   }
+
+  // --- mediaModelSelect: self-contained image/video model picker (Stage 0) ---
+  // The node owns four fixed value keys instead of a single `id`.
+  let mediaImgAvailable = $state<MediaCapabilityInfo[]>([]);
+  let mediaVidAvailable = $state<MediaCapabilityInfo[]>([]);
+  let mediaLoaded = $state<MediaSettings | null>(null);
+  let mediaLoading = $state(true);
+  let mediaError = $state<string | null>(null);
+  let mediaFetchStarted = false;
+  let mediaSeeded = false;
+
+  function mediaErrorText(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  function seedMediaKey(key: string, value: string) {
+    // Respect restored/user values: only write a key the canvas does not already carry.
+    if (text(values[key]) === "" && value !== "") onChange(key, value);
+  }
+
+  function seedMediaSelections() {
+    if (mediaSeeded || !mediaLoaded) return;
+    mediaSeeded = true;
+    const img = seedSelection(mediaImgAvailable, mediaLoaded.image);
+    const vid = seedSelection(mediaVidAvailable, mediaLoaded.video);
+    seedMediaKey("imgProvider", img.provider);
+    seedMediaKey("imgModel", img.model);
+    seedMediaKey("vidProvider", vid.provider);
+    seedMediaKey("vidModel", vid.model);
+  }
+
+  function reconcileMediaModel(providerKey: string, modelKey: string, available: MediaCapabilityInfo[]) {
+    const visible = filterDependentOptions(modelOptions(available), values[providerKey]);
+    const effective = resolveDependentValue(values[modelKey], visible);
+    if (effective !== text(values[modelKey])) onChange(modelKey, effective);
+  }
+
+  async function persistMediaSettings(
+    vals: Record<string, unknown>,
+    loaded: MediaSettings,
+  ): Promise<void> {
+    // Sticky default is best-effort: a failed write must not block selection.
+    try {
+      const media = buildMediaWriteBack(vals, loaded);
+      await updateConfig({ media });
+    } catch (error) {
+      mediaError = mediaErrorText(error);
+    }
+  }
+
+  // Fetch capabilities + saved defaults once on mount, then seed the four keys.
+  $effect(() => {
+    if (componentType !== "mediaModelSelect" || mediaFetchStarted) return;
+    mediaFetchStarted = true;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [img, vid, snapshot] = await Promise.all([
+          listMediaCapabilities("image"),
+          listMediaCapabilities("video"),
+          loadSettingsSnapshot(),
+        ]);
+        if (cancelled) return;
+        mediaImgAvailable = availableMediaCapabilities(img, "image");
+        mediaVidAvailable = availableMediaCapabilities(vid, "video");
+        mediaLoaded = snapshot.config.media;
+        seedMediaSelections();
+      } catch (error) {
+        if (!cancelled) mediaError = mediaErrorText(error);
+      } finally {
+        if (!cancelled) mediaLoading = false;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  // Keep each kind's model valid as its provider changes (no render-time writes).
+  $effect(() => {
+    if (componentType !== "mediaModelSelect" || mediaLoading) return;
+    reconcileMediaModel("imgProvider", "imgModel", mediaImgAvailable);
+    reconcileMediaModel("vidProvider", "vidModel", mediaVidAvailable);
+  });
+
+  // Sticky write-back: debounce a single global updateConfig carrying both kinds.
+  $effect(() => {
+    if (componentType !== "mediaModelSelect") return;
+    const vals = {
+      imgProvider: values.imgProvider,
+      imgModel: values.imgModel,
+      vidProvider: values.vidProvider,
+      vidModel: values.vidModel,
+    };
+    const loaded = mediaLoaded;
+    if (!loaded) return;
+    const timer = setTimeout(() => void persistMediaSettings(vals, loaded), 200);
+    return () => clearTimeout(timer);
+  });
 </script>
 
 {#if componentType === "section"}
@@ -384,6 +492,62 @@
         {/each}
       </tbody>
     </table>
+  </div>
+{:else if componentType === "mediaModelSelect"}
+  {#snippet mediaKindBlock(
+    kindLabel: string,
+    kindWord: string,
+    providerKey: string,
+    modelKey: string,
+    available: MediaCapabilityInfo[],
+  )}
+    {#if available.length === 0}
+      <div class="ic-control">
+        <div class="ic-control-label">{kindLabel} model</div>
+        <div class="ic-callout">
+          <span>Connect {kindWord === "image" ? "an" : "a"} {kindWord} provider in Settings to continue.</span>
+        </div>
+      </div>
+    {:else}
+      {@const visibleModels = filterDependentOptions(modelOptions(available), values[providerKey])}
+      {@const effectiveModel = resolveDependentValue(values[modelKey], visibleModels)}
+      <label class="ic-control">
+        <span class="ic-control-label">{kindLabel} provider</span>
+        <select
+          class="ic-select"
+          value={text(values[providerKey])}
+          onchange={(event) => onChange(providerKey, event.currentTarget.value)}
+        >
+          {#each providerOptions(available) as provider (provider.id)}
+            <option value={provider.id}>{provider.label}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="ic-control">
+        <span class="ic-control-label">{kindLabel} model</span>
+        <select
+          class="ic-select"
+          value={effectiveModel}
+          disabled={visibleModels.length === 0}
+          onchange={(event) => onChange(modelKey, event.currentTarget.value)}
+        >
+          {#each visibleModels as option (`${providerKey}-${option.id ?? option.label}`)}
+            <option value={option.id ?? option.label}>{option.label ?? option.id}</option>
+          {/each}
+        </select>
+      </label>
+    {/if}
+  {/snippet}
+  <div class="ic-media-model-select">
+    {#if mediaLoading}
+      <div class="ic-text">Loading media models…</div>
+    {:else}
+      {#if mediaError}
+        <div class="ic-callout"><span>{mediaError}</span></div>
+      {/if}
+      {@render mediaKindBlock("Image", "image", "imgProvider", "imgModel", mediaImgAvailable)}
+      {@render mediaKindBlock("Video", "video", "vidProvider", "vidModel", mediaVidAvailable)}
+    {/if}
   </div>
 {:else}
   <div class="ic-unknown">Unsupported Canvas node: {componentType || "unknown"}</div>

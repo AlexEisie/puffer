@@ -26,6 +26,13 @@ function collectInitial(node: unknown, collected: Record<string, unknown>): void
   const rec = node as CanvasSpec;
   const type = typeof rec.type === "string" ? rec.type : "";
   const id = typeof rec.id === "string" ? rec.id : "";
+  // The mediaModelSelect node owns four fixed keys instead of a single `id`.
+  if (type === "mediaModelSelect") {
+    collected.imgProvider = "";
+    collected.imgModel = "";
+    collected.vidProvider = "";
+    collected.vidModel = "";
+  }
   if (id && INTERACTIVE.includes(type)) collected[id] = defaultValue(type, rec);
   collectInitial(rec.children, collected);
   collectInitial(rec.body, collected);

@@ -26,6 +26,10 @@ describe("initialValues new primitives", () => {
     expect(v.sb).not.toBe(rows);
     expect((v.sb as unknown[][])[0]).not.toBe(rows[0]);
   });
+  it("seeds the four fixed keys for a mediaModelSelect node", () => {
+    const v = initialValues({ body: [{ type: "mediaModelSelect" }] });
+    expect(v).toEqual({ imgProvider: "", imgModel: "", vidProvider: "", vidModel: "" });
+  });
   it("seeds dependentSelect to its first option id", () => {
     const v = initialValues({ body: [
       { type: "singleSelect", id: "p", options: [{ id: "byteplus", label: "BytePlus" }] },
