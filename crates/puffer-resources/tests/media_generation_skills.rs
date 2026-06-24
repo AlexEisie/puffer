@@ -94,18 +94,28 @@ fn short_drama_skill_gates_model_selection_in_stage0() {
     let body = include_str!("../../../resources/skills/short-drama-generation/SKILL.md");
     // Stage 0 exists and uses the documented canvasId.
     assert!(body.contains("canvas-drama-<id>-stage0"));
-    // The four control ids are present.
+    // Stage 0 renders the self-contained node, not hand-built selects.
+    assert!(body.contains("mediaModelSelect"));
+    // The four read-back keys are documented.
     assert!(body.contains("imgProvider"));
     assert!(body.contains("imgModel"));
     assert!(body.contains("vidProvider"));
     assert!(body.contains("vidModel"));
-    // Cascade wiring is documented.
-    assert!(body.contains("dependentSelect"));
-    assert!(body.contains("dependsOn"));
-    // Mandatory + settings prompt contract.
-    assert!(body.contains("media-capabilities"));
+    // The old bash flow and hand-built cascade are gone.
+    assert!(!body.contains("media-capabilities"));
+    assert!(!body.contains("dependentSelect"));
+    // Settings prompt contract for a kind with no provider.
     assert!(body.to_lowercase().contains("settings"));
     // Per-call selection threads into generation.
     assert!(body.contains("--provider"));
     assert!(body.contains("--model"));
+}
+
+#[test]
+fn short_drama_stage1_and_stage2_drafts_are_regenerable() {
+    let body = include_str!("../../../resources/skills/short-drama-generation/SKILL.md");
+    // Both gated draft canvases opt into the Regenerate button.
+    assert!(body.contains("regenerable:true"));
+    // Draft specs use the top-level `body` array the inline renderer requires.
+    assert!(body.contains("body:[{type:\"card\""));
 }

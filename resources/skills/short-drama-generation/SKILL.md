@@ -49,34 +49,29 @@ to `.puffer/media/images|videos/` — you only reference them, never relocate th
 0. **Models (gate before any credit-consuming stage).** Confirm the image and video
    provider/model up front. Both are mandatory.
 
-   First fetch connected capabilities (only providers/models the user has connected appear):
+   Render `Canvas` with `canvasId = canvas-drama-<id>-stage0` whose body is a single
+   `mediaModelSelect` node:
 
-   ```bash
-   puffer internal-tool media-capabilities --kind image
-   puffer internal-tool media-capabilities --kind video
+   ```json
+   { "type": "Canvas", "canvasId": "canvas-drama-<id>-stage0",
+     "spec": { "title": "Models", "body": [ { "type": "mediaModelSelect" } ] } }
    ```
 
-   Each returns `{ "kind", "capabilities": [{ "providerId","providerDisplayName","modelId","modelDisplayName","status" }] }`.
-   **If either list is empty**, stop and tell the user to connect a provider for that kind in
-   settings, then retry — do not render the Canvas and do not proceed (both models are required and
-   Stage 0 runs before the script, so a kind with no provider can never be satisfied later).
-
-   Otherwise render `Canvas` with `canvasId = canvas-drama-<id>-stage0` and a `card` titled "Models":
-   - `singleSelect` `id:"imgProvider"`, options = distinct `{id:providerId,label:providerDisplayName}` for image.
-   - `dependentSelect` `id:"imgModel"`, `dependsOn:"imgProvider"`, options = one `{id:modelId,label:modelDisplayName,group:providerId}` per image capability.
-   - `singleSelect` `id:"vidProvider"` and `dependentSelect` `id:"vidModel"` `dependsOn:"vidProvider"`, built the same way from the video list.
-   Order options so each provider's models follow that provider; seed each `value` with the first
-   available so the draft is valid on first paint. Then **end the turn**.
+   The node is self-populating: it fetches the connected image/video capabilities itself,
+   seeds each dropdown from the currently-saved global media defaults, renders an in-place
+   "connect a provider in Settings" prompt for any kind with no connected provider, and on
+   confirmation persists the choice back to the global media settings. Do **not** fetch
+   capabilities, build options, or branch on empty lists yourself. Then **end the turn**.
 
    In the next turn read back with `CanvasState` (same canvasId): `values` carries
    `{imgProvider,imgModel,vidProvider,vidModel}`. **Validate**: if `imgModel` or `vidModel` is empty,
-   stop and report that both image and video models must be selected (direct the user to settings if a
-   kind has no options). Record the four values in `manifest.json` for Stages 3/4.
+   stop and report that both image and video models must be selected (direct the user to Settings if a
+   kind has no provider). Record the four values in `manifest.json` for Stages 3/4.
 
 1. **Script.** If the prompt already contains a script (or names a script file), use it
    directly (no gate needed). Otherwise draft one, then gate it: render
    `Canvas` with `canvasId = canvas-drama-<id>-stage1` and spec
-   `{type:"card",title:"Script draft",children:[{type:"textarea",id:"script",rows:14,value:"<draft>"}]}`,
+   `{title:"Script draft",regenerable:true,body:[{type:"card",title:"Script draft",children:[{type:"textarea",id:"script",rows:14,value:"<draft>"}]}]}`,
    then end the turn. In the next turn read it back with `CanvasState` (same canvasId)
    and save `values.script` to `.puffer/media/drama/<id>/script.md`.
 
@@ -87,12 +82,11 @@ to `.puffer/media/images|videos/` — you only reference them, never relocate th
    appear, and any stability constraints. These fields become the video prompt — richer
    shots yield better clips.
 
-   Gate the draft: render `Canvas` with `canvasId = canvas-drama-<id>-stage2` and a
-   `card` containing an `editableTable` with
-   `columns: ["shotId","subject","action","duration","characters"]` and `rows` = the
-   draft shots (one row per shot, column 0 = shotId), then end the turn. In the next
-   turn read it back with `CanvasState`: `values` for the editableTable id (use
-   `id:"storyboard"`) is the confirmed 2D array. In one shot, write
+   Gate the draft: render `Canvas` with `canvasId = canvas-drama-<id>-stage2` and spec
+   `{title:"Storyboard",regenerable:true,body:[{type:"card",children:[{type:"editableTable",id:"storyboard",columns:["shotId","subject","action","duration","characters"],rows:<draft shots>}]}]}`
+   (one row per shot, column 0 = shotId), then end the turn. In the next
+   turn read it back with `CanvasState`: `values` for the editableTable id
+   `"storyboard"` is the confirmed 2D array. In one shot, write
    `.puffer/media/drama/<id>/storyboard.md` (a markdown table of the confirmed rows) and
    seed `manifest.json`'s `shots[]` — column 0 is the `shotId`, the remaining columns
    become the shot's prompt fields.
@@ -183,13 +177,13 @@ not a schema'd artifact:
 
 ## Failure contracts (never paper over)
 
-- If `media-capabilities` returns no connected provider for image or video, stop before rendering
-  Stage 0 and tell the user to connect a provider for that kind in settings; never fall back to
-  text-to-video or to config defaults.
+- If a kind has no connected provider, the Stage 0 node shows an in-place "connect a provider in
+  Settings" prompt and that model stays empty; on read-back, stop and tell the user to connect a
+  provider for that kind in Settings — never fall back to text-to-video or to config defaults.
 - If `imgModel` or `vidModel` is empty on read-back, stop and report that both image and video models
   must be selected before continuing.
-- If the parent runtime is unavailable so `media-capabilities` cannot run (non-desktop), degrade to a
-  text-based confirmation of provider/model and say so plainly; do not skip the confirmation.
+- In a non-desktop environment (no Canvas), degrade to a text-based confirmation of provider/model
+  and say so plainly; do not skip the confirmation.
 - Do not advance any gated stage on draft values — wait for the stage's confirmation to
   be read back first.
 - If `CanvasState` returns no value for a gated stage (the user did not submit), report
