@@ -123,12 +123,14 @@
     if (!onSubmitCanvasState || !canvasId || !sessionId) return;
     regenerating = true;
     statusMessage = null;
-    // The draft is being discarded — drop any queued autosave instead of flushing it.
+    // The draft is being discarded — drop any queued autosave instead of flushing it,
+    // and clear its save indicator so the old card doesn't show a stuck "saving"/"error".
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
     }
     pendingPatch = {};
+    saveState = "idle";
     try {
       const accepted = await onSubmitCanvasState(regeneratePrompt(canvasId));
       if (destroyed) return;
