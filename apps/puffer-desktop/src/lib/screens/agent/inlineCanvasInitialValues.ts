@@ -4,20 +4,23 @@ const INTERACTIVE = [
   "textarea", "editableTable", "mediaPicker",
 ];
 
-export function defaultValue(type: string, node: CanvasSpec): unknown {
+function defaultValue(type: string, node: CanvasSpec): unknown {
   if (node.value !== undefined) return node.value;
   if (type === "toggle") return false;
   if (type === "multiSelect") return [];
   if (type === "slider") return typeof node.min === "number" ? node.min : 0;
   if (type === "textInput" || type === "textarea") return "";
-  if (type === "editableTable") return Array.isArray(node.rows) ? node.rows : [];
+  // Copy rows so the seeded value never shares identity with the spec prop.
+  if (type === "editableTable") {
+    return Array.isArray(node.rows) ? node.rows.map((r) => (Array.isArray(r) ? [...r] : r)) : [];
+  }
   if (type === "mediaPicker") return node.multi ? [] : null;
   const options = Array.isArray(node.options) ? node.options : [];
   const first = options.find((i) => typeof i === "object" && i !== null) as CanvasSpec | undefined;
   return first?.id ?? first?.label ?? null;
 }
 
-export function collectInitial(node: unknown, collected: Record<string, unknown>): void {
+function collectInitial(node: unknown, collected: Record<string, unknown>): void {
   if (Array.isArray(node)) { node.forEach((i) => collectInitial(i, collected)); return; }
   if (typeof node !== "object" || node === null) return;
   const rec = node as CanvasSpec;

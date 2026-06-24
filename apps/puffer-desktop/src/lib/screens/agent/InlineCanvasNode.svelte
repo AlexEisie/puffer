@@ -93,7 +93,7 @@
   const id = $derived(nodeId());
 
   function curRows(): unknown[][] {
-    return Array.isArray(values[id]) ? (values[id] as unknown[][]) : [];
+    return rows(values[id]);
   }
   function commitRows(next: unknown[][]) {
     onChange(id, next);
@@ -105,7 +105,8 @@
   }
   function addRow() {
     const next = curRows();
-    const width = next[0]?.length ?? 1;
+    const colCount = Array.isArray(node.columns) ? node.columns.length : 0;
+    const width = Math.max(next[0]?.length ?? colCount, 1);
     commitRows([...next.map((row) => [...row]), Array(width).fill("")]);
   }
   function removeRow(r: number) {
@@ -121,11 +122,14 @@
 
   function isPicked(item: CanvasNode): boolean {
     const v = values[id];
+    if (v === null || v === undefined) return false;
     const iid = text(item.id);
+    if (!iid) return false;
     return Array.isArray(v) ? v.map(text).includes(iid) : text(v) === iid;
   }
   function pick(item: CanvasNode) {
     const iid = text(item.id);
+    if (!iid) return;
     if (node.multi) {
       const set = new Set(Array.isArray(values[id]) ? (values[id] as unknown[]).map(text) : []);
       if (set.has(iid)) set.delete(iid);

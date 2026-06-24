@@ -15,4 +15,15 @@ describe("initialValues new primitives", () => {
     const v = initialValues({ body: [{ type: "toggle", id: "t" }] });
     expect(v).toEqual({ t: false });
   });
+  it("falls back to [] for editableTable without rows", () => {
+    const v = initialValues({ body: [{ type: "editableTable", id: "sb" }] });
+    expect(v).toEqual({ sb: [] });
+  });
+  it("copies editableTable rows so the seed never aliases the spec", () => {
+    const rows = [["a", "b"]];
+    const v = initialValues({ body: [{ type: "editableTable", id: "sb", rows }] });
+    expect(v.sb).toEqual(rows);
+    expect(v.sb).not.toBe(rows);
+    expect((v.sb as unknown[][])[0]).not.toBe(rows[0]);
+  });
 });
