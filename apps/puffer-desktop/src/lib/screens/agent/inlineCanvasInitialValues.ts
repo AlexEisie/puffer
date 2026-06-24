@@ -1,7 +1,7 @@
 type CanvasSpec = Record<string, unknown>;
 const INTERACTIVE = [
   "toggle", "singleSelect", "multiSelect", "slider", "barSelect", "textInput",
-  "textarea", "editableTable", "mediaPicker",
+  "textarea", "editableTable", "mediaPicker", "dependentSelect",
 ];
 
 function defaultValue(type: string, node: CanvasSpec): unknown {

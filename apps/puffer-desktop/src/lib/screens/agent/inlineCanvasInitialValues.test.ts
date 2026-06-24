@@ -26,4 +26,14 @@ describe("initialValues new primitives", () => {
     expect(v.sb).not.toBe(rows);
     expect((v.sb as unknown[][])[0]).not.toBe(rows[0]);
   });
+  it("seeds dependentSelect to its first option id", () => {
+    const v = initialValues({ body: [
+      { type: "singleSelect", id: "p", options: [{ id: "byteplus", label: "BytePlus" }] },
+      { type: "dependentSelect", id: "m", dependsOn: "p", options: [
+        { id: "seedream", label: "Seedream", group: "byteplus" },
+        { id: "other", label: "Other", group: "elsewhere" },
+      ] },
+    ]});
+    expect(v).toEqual({ p: "byteplus", m: "seedream" });
+  });
 });
