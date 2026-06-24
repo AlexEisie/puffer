@@ -131,9 +131,13 @@ fn default_value_for_node(node_type: &str, object: &Map<String, Value>) -> Value
         "slider" => object.get("min").cloned().unwrap_or_else(|| json!(0)),
         "singleSelect" | "barSelect" => first_option_id(object).unwrap_or(Value::Null),
         "textInput" | "textarea" => Value::String(String::new()),
-        "editableTable" => object.get("rows").cloned().unwrap_or_else(|| json!([])),
+        "editableTable" => object
+            .get("rows")
+            .and_then(Value::as_array)
+            .map(|rows| Value::Array(rows.clone()))
+            .unwrap_or_else(|| json!([])),
         "mediaPicker" => {
-            if object.get("multi") == Some(&Value::Bool(true)) {
+            if object.get("multi").and_then(Value::as_bool) == Some(true) {
                 json!([])
             } else {
                 Value::Null
@@ -536,13 +540,19 @@ mod tests {
         let spec = json!({ "body": [
             { "type": "textarea", "id": "script" },
             { "type": "editableTable", "id": "sb", "rows": [["shot-001","x"]] },
+            { "type": "editableTable", "id": "noRows" },
+            { "type": "editableTable", "id": "badRows", "rows": "corrupt" },
             { "type": "mediaPicker", "id": "pickOne" },
+            { "type": "mediaPicker", "id": "pickExplicitFalse", "multi": false },
             { "type": "mediaPicker", "id": "pickMany", "multi": true },
         ]});
         let values = initial_canvas_values(&spec);
         assert_eq!(values["script"], json!(""));
         assert_eq!(values["sb"], json!([["shot-001","x"]]));
+        assert_eq!(values["noRows"], json!([]));
+        assert_eq!(values["badRows"], json!([]));
         assert_eq!(values["pickOne"], Value::Null);
+        assert_eq!(values["pickExplicitFalse"], Value::Null);
         assert_eq!(values["pickMany"], json!([]));
     }
 
