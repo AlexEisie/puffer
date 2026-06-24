@@ -9234,6 +9234,9 @@ models: []
                         }
                     ],
                     "cached_at_ms": now_ms,
+                    // Must match puffer-provider-registry's CAPABILITY_SCHEMA_VERSION,
+                    // or the entry is treated as schema-stale and never applied.
+                    "capability_schema_version": 1,
                 }
             }
         });
