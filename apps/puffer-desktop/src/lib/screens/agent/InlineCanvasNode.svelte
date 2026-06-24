@@ -118,6 +118,23 @@
     [next[r], next[t]] = [next[t], next[r]];
     commitRows(next);
   }
+
+  function isPicked(item: CanvasNode): boolean {
+    const v = values[id];
+    const iid = text(item.id);
+    return Array.isArray(v) ? v.map(text).includes(iid) : text(v) === iid;
+  }
+  function pick(item: CanvasNode) {
+    const iid = text(item.id);
+    if (node.multi) {
+      const set = new Set(Array.isArray(values[id]) ? (values[id] as unknown[]).map(text) : []);
+      if (set.has(iid)) set.delete(iid);
+      else set.add(iid);
+      onChange(id, Array.from(set));
+    } else {
+      onChange(id, iid);
+    }
+  }
 </script>
 
 {#if componentType === "section"}
@@ -287,6 +304,15 @@
       </tbody>
     </table>
     <button type="button" class="ic-et-add" onclick={addRow}>+ Add row</button>
+  </div>
+{:else if componentType === "mediaPicker"}
+  <div class="ic-media-picker">
+    {#each items(node.items) as item, i (`mp-${i}`)}
+      <button type="button" class="ic-media-cell" class:selected={isPicked(item)} onclick={() => pick(item)}>
+        <img src={text(item.url)} alt={text(item.label)} loading="lazy" />
+        {#if item.label}<span>{text(item.label)}</span>{/if}
+      </button>
+    {/each}
   </div>
 {:else if componentType === "finding"}
   <article class={`ic-finding severity-${text(node.severity || "info")}`}>

@@ -428,6 +428,26 @@
   :global(.ic-et-actions) {
     white-space: nowrap;
   }
+  :global(.ic-media-picker) {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 8px;
+  }
+  :global(.ic-media-cell) {
+    padding: 0;
+    border: 2px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    background: none;
+  }
+  :global(.ic-media-cell.selected) {
+    border-color: var(--accent, #4a8);
+  }
+  :global(.ic-media-cell img) {
+    width: 100%;
+    display: block;
+    border-radius: 4px;
+  }
   :global(.ic-code) {
     margin: 0;
     max-height: 260px;
