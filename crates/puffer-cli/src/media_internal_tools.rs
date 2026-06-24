@@ -47,6 +47,14 @@ pub(crate) struct VideoGenerationArgs {
     pub(crate) image_references: Vec<String>,
 }
 
+/// CLI arguments for `puffer internal-tool media-capabilities`.
+#[derive(Debug, Clone, Args)]
+pub(crate) struct MediaCapabilitiesArgs {
+    /// Media kind to list connected capabilities for: image or video.
+    #[arg(long)]
+    pub(crate) kind: String,
+}
+
 /// Runs one image-generation internal CLI request through the parent runtime.
 pub(crate) fn run_image_generation(args: ImageGenerationArgs) -> Result<()> {
     execute_parent_internal_tool("image-generation", image_generation_input(&args)?)
@@ -55,6 +63,11 @@ pub(crate) fn run_image_generation(args: ImageGenerationArgs) -> Result<()> {
 /// Runs one video-generation internal CLI request through the parent runtime.
 pub(crate) fn run_video_generation(args: VideoGenerationArgs) -> Result<()> {
     execute_parent_internal_tool("video-generation", video_generation_input(&args)?)
+}
+
+/// Lists connected media capabilities for one kind through the parent runtime.
+pub(crate) fn run_media_capabilities(args: MediaCapabilitiesArgs) -> Result<()> {
+    execute_parent_internal_tool("media-capabilities", media_capabilities_input(&args))
 }
 
 /// Builds the workflow JSON payload for an image-generation internal request.
@@ -98,6 +111,11 @@ pub(crate) fn video_generation_input(args: &VideoGenerationArgs) -> Result<Value
         );
     }
     Ok(Value::Object(object))
+}
+
+/// Builds the workflow JSON payload for a media-capabilities internal request.
+pub(crate) fn media_capabilities_input(args: &MediaCapabilitiesArgs) -> Value {
+    json!({ "kind": args.kind })
 }
 
 fn execute_parent_internal_tool(tool_id: &str, input: Value) -> Result<()> {
@@ -282,6 +300,15 @@ mod tests {
         assert!(error
             .to_string()
             .contains("internal execution endpoint is required but unavailable"));
+    }
+
+    #[test]
+    fn media_capabilities_cli_builds_kind_input() {
+        let args = MediaCapabilitiesArgs {
+            kind: "image".to_string(),
+        };
+        let input = media_capabilities_input(&args);
+        assert_eq!(input, json!({ "kind": "image" }));
     }
 
     fn restore_env(key: &str, old: Option<OsString>) {
