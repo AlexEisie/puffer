@@ -5,6 +5,8 @@ allowed-tools:
   - Bash
   - Read
   - Write
+  - Canvas
+  - CanvasState
 user-invocable: true
 disable-model-invocation: false
 requires-action: true
@@ -19,14 +21,37 @@ rewrite, summarize, or brainstorm a script do NOT trigger this skill unless the 
 asks to produce the drama. Progress-only or promise-only replies are not completion:
 after starting, either drive the pipeline or report the concrete blocker plainly.
 
+## Gating mechanism (confirm each authored stage before spending credits)
+
+Each stage that authors content (script, storyboard, character images, per-shot
+results, final order) is gated through the existing `Canvas`/`CanvasState` tools so
+the user reviews and edits a draft before you act on it. The mechanism uses no new
+infrastructure — it is render → end-turn → re-entry → read-back:
+
+- In a desktop inline environment, render the draft with `Canvas`, using
+  `canvasId` = `canvas-drama-<id>-stage<N>` (N = the stage number). Then **end the
+  current turn** — do NOT busy-wait or poll inside the skill.
+- The user edits the Canvas and submits; submission automatically starts a new turn.
+  That new turn **first** calls `CanvasState` with the same `canvasId` to read back the
+  confirmed `values`, then writes artifacts and advances to the next stage.
+- **Non-desktop environment** (no inline submit / no turn re-trigger): degrade to
+  text-based per-stage confirmation, stating plainly that there is no visual gating in
+  this environment.
+- Never call `imagegen`/`videogen` and never advance on draft values before the
+  confirmation for that stage has been read back.
+
 ## Pipeline (run in order; skip any stage whose inputs the prompt already supplies)
 
 Pick a short kebab slug `<id>` from the drama title. Put project files under
 `.puffer/media/drama/<id>/`. Generated image/video artifacts are written by the tools
 to `.puffer/media/images|videos/` — you only reference them, never relocate them.
 
-1. **Script.** If the prompt already contains a script (or names a script file), use it.
-   Otherwise write one yourself and save it to `.puffer/media/drama/<id>/script.md`.
+1. **Script.** If the prompt already contains a script (or names a script file), use it
+   directly (no gate needed). Otherwise draft one, then gate it: render
+   `Canvas` with `canvasId = canvas-drama-<id>-stage1` and spec
+   `{type:"card",title:"Script draft",children:[{type:"textarea",id:"script",rows:14,value:"<draft>"}]}`,
+   then end the turn. In the next turn read it back with `CanvasState` (same canvasId)
+   and save `values.script` to `.puffer/media/drama/<id>/script.md`.
 
 2. **Storyboard.** If the prompt already contains a shot breakdown, use it. Otherwise
    break the script into ordered shots (aim for a handful; one beat per shot). Give each
