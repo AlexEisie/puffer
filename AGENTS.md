@@ -211,6 +211,34 @@ Current metadata includes:
 
 Do not replace this with opaque storage.
 
+## Monitor / TaskCreate Guardrails
+
+The monitor/triage subsystem (inbound connector events → monitor tasks → human-approved
+replies/actions) enforces behavioral rules at runtime. These are correctness/safety boundaries, not
+style. Full design: `docs/architecture/monitor-pipeline.md`.
+
+- **Outward actions are human-gated.** A triage/action turn only DRAFTS (`MonitorActionDraft`, or
+  legacy `MonitorReplyDraft`) — it writes a `pending_action`/`pending_reply` and stops. A human
+  approves the draft in the desktop UI; only then does the daemon send the Telegram reply / create
+  the Gmail draft / RSVP the Calendar invite, via the `task_monitor_action_execute` RPC. Never push
+  an outward effect from an agent turn (no connector send tool, no `MonitorReplySend`, no
+  `TaskUpdate status:completed` to force a send). `task_monitor_complete` refuses human-gated tasks.
+- **`TaskCreate` skip is success, not failure.** A `{success:true, skipped:true, reason}` result
+  means the server gate intentionally suppressed the task (already handled in Telegram, duplicate,
+  untrusted source). Do not retry by mutating source metadata.
+- **Source provenance is server-owned.** Create a monitor task only from the *current* workflow /
+  digest trigger envelope. Do not create tasks from `conversation_context` history, and do not write
+  `monitor_connection`, `monitor_connector`, `monitor_envelope_id`, `chat_id`, `source_context`,
+  `monitor`, `pending_action`, or other source/delivery metadata — the daemon stamps these from the
+  selected current envelope. `TaskUpdate` must not mutate them.
+- **Conversation context is for disambiguation only.** Bounded recent history attached to triage is
+  to interpret short/referential messages; it is never a task source and never overrides current
+  source values.
+- **Same chat/contact ≠ duplicate.** A new question, topic change, or separate request from the same
+  sender is a new task even when another task from that sender is still pending.
+- **Trace/diagnostics are metadata-only** (sender/chat ids, stage ids, decisions, a short text
+  preview) — never full message bodies. This is a privacy boundary; do not widen it.
+
 ## TUI Direction
 
 The TUI should keep moving toward Claude Code parity, but within current repo
