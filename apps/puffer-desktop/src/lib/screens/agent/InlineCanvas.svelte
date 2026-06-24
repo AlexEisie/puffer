@@ -3,6 +3,7 @@
   import { updateCanvasState } from "../../api/desktop";
   import CanvasSubmitButton from "./CanvasSubmitButton.svelte";
   import InlineCanvasNode from "./InlineCanvasNode.svelte";
+  import { initialValues } from "./inlineCanvasInitialValues";
 
   type CanvasSpec = Record<string, unknown>;
   type Props = {
@@ -49,39 +50,6 @@
     return Array.isArray(spec.body)
       ? spec.body.filter((item): item is CanvasSpec => typeof item === "object" && item !== null)
       : [];
-  }
-
-  function initialValues(root: unknown): Record<string, unknown> {
-    const collected: Record<string, unknown> = {};
-    collectInitial(root, collected);
-    return collected;
-  }
-
-  function collectInitial(node: unknown, collected: Record<string, unknown>) {
-    if (Array.isArray(node)) {
-      node.forEach((item) => collectInitial(item, collected));
-      return;
-    }
-    if (typeof node !== "object" || node === null) return;
-    const record = node as CanvasSpec;
-    const type = typeof record.type === "string" ? record.type : "";
-    const id = typeof record.id === "string" ? record.id : "";
-    if (id && ["toggle", "singleSelect", "multiSelect", "slider", "barSelect", "textInput"].includes(type)) {
-      collected[id] = defaultValue(type, record);
-    }
-    collectInitial(record.children, collected);
-    collectInitial(record.body, collected);
-  }
-
-  function defaultValue(type: string, node: CanvasSpec): unknown {
-    if (node.value !== undefined) return node.value;
-    if (type === "toggle") return false;
-    if (type === "multiSelect") return [];
-    if (type === "slider") return typeof node.min === "number" ? node.min : 0;
-    if (type === "textInput") return "";
-    const options = Array.isArray(node.options) ? node.options : [];
-    const first = options.find((item) => typeof item === "object" && item !== null) as CanvasSpec | undefined;
-    return first?.id ?? first?.label ?? null;
   }
 
   function setValue(id: string, value: unknown) {
