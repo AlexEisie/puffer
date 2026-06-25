@@ -119,10 +119,12 @@ the key in `CanvasState.values`.
 - avoid_when: read-only records → use `table`.
 - writes back: a 2D array (`rows`) reflecting the final edits and order.
 
-### mediaPicker `{id,items:[{id,url,label?}],multi?,value?}`
+### mediaPicker `{id,items:[{id,url,label?,description?}],multi?,value?}`
 - purpose: pick from a grid of images.
 - use_when: the user selects one (or, with `multi:true`, several) generated
   candidate images.
+- preview: on desktop, clicking an item's image opens a preview showing the
+  enlarged image and that item's `description` (centered).
 - writes back: single → the chosen item `id`; multi → an array of selected ids.
 
 ### mediaModelSelect `{}`

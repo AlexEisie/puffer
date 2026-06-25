@@ -125,3 +125,23 @@ fn short_drama_stage1_and_stage2_drafts_are_regenerable() {
     // Draft specs use the top-level `body` array the inline renderer requires.
     assert!(body.contains("body:[{type:\"card\""));
 }
+
+#[test]
+fn short_drama_stage3_generates_one_image_per_character() {
+    let body = include_str!("../../../resources/skills/short-drama-generation/SKILL.md");
+    // One image per character; combined sheets are forbidden.
+    assert!(body.contains("one image per character"));
+    assert!(body.contains("N characters → N calls → N images"));
+    assert!(body.contains("Never combine multiple characters into one image"));
+    // Stage 3 canvas: default-checked multi picker, one item per character, no wrapping card.
+    assert!(body.contains("canvas-drama-<id>-stage3"));
+    assert!(body.contains("multi:true"));
+    assert!(body.contains("{id,url,label,description}"));
+    assert!(body.contains("no wrapping card"));
+    assert!(body.contains("the character name only"));
+    // Each character reference is persisted for Stage 4 per-shot lookup.
+    assert!(body.contains("characterRefs"));
+    // The old Regenerate toggle is removed.
+    assert!(!body.contains("id:\"regen\""));
+    assert!(!body.contains("values.regen"));
+}

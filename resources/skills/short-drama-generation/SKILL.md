@@ -95,30 +95,43 @@ to `.puffer/media/images|videos/` — you only reference them, never relocate th
    are `https://` or `asset://` URLs.
    - If present, use those URLs directly as `--image-reference` in stage 4. Do NOT
      generate images.
-   - If absent and the user wants character-consistent shots, generate each character
-     once with `imagegen --prompt "<character sheet>" --count 1 --provider <imgProvider> --model <imgModel>`. Make the character art
-     stylized / non-photorealistic (cartoon, 3D render, illustration): image-to-video
-     providers (e.g. BytePlus) reject photoreal real-person images on moderation. Read
-     the tool result's `remoteSourceUrl` for that artifact (same key the video tool uses):
-       - If `remoteSourceUrl` is present, use it as `--image-reference` in stage 4.
+   - If absent and the user wants character-consistent shots, **generate one image per character**:
+     collect the distinct character names from the confirmed storyboard's `characters`
+     column, and for each name run exactly one `imagegen` call —
+     `imagegen --prompt "<single-character full-body front-view sheet>" --count 1 --provider <imgProvider> --model <imgModel>`.
+     One call → one character → one image; N characters → N calls → N images.
+     Never combine multiple characters into one image. Make each character stylized /
+     non-photorealistic (cartoon, 3D render, illustration): image-to-video providers
+     (e.g. BytePlus) reject photoreal real-person images on moderation. For each image read
+     the tool result's `remoteSourceUrl` (same key the video tool uses):
+       - If `remoteSourceUrl` is present, record it under that character in `manifest.json`
+         `characterRefs` (`{ "<character>": "<url>" }`) and use it as that character's
+         `--image-reference` in stage 4.
        - If `remoteSourceUrl` is absent, stop and report that the configured image
          provider does not produce a referenceable URL, so image-to-video is unavailable.
          Do NOT silently fall back to text-to-video.
    - If absent and consistency is not required, run text-to-video in stage 4.
 
-   When you generated candidate images, gate the choice: render `Canvas` with
-   `canvasId = canvas-drama-<id>-stage3`, a `card` containing a `mediaPicker`
-   (`id:"pick"`, `items` = one `{id,url,label}` per generated artifact, using each
-   artifact's `remoteSourceUrl` — or its asset url on desktop — as the `url`) and a
-   `toggle` (`id:"regen"`, label "Regenerate"), then end the turn. In the next turn read
-   it back with `CanvasState`: the picked item's image url becomes stage 4's
-   `--image-reference`; if `values.regen` is true, regenerate the candidates and gate
-   again instead of advancing.
+   When you generated the per-character images, gate the choice: render `Canvas` with
+   `canvasId = canvas-drama-<id>-stage3` and `title:"Character image"`, whose `body` is a
+   single `mediaPicker` with no wrapping card: `{type:"mediaPicker", id:"pick", multi:true,
+   value:[<every item id>], items:[{id,url,label,description}, …]}` — one item per character,
+   `url` = that character's `remoteSourceUrl` (or its asset url on desktop),
+   `label` = the character name only, `description` = that character's sheet description.
+   `value` lists every item id so all characters are checked by default. Then end the turn.
+   In the next turn read it back with `CanvasState`: `pick` is the array of checked item ids;
+   map each back to its character via `characterRefs`. Checked
+   characters' urls become stage 4
+   `--image-reference`s; any unchecked character falls back to text-to-video for the shots
+   it appears in. There is no Regenerate toggle — to redo a character, generate it again and
+   re-render this canvas.
 
 4. **Per-shot video.** For each shot in storyboard order, run one `videogen` command:
    - `videogen --prompt "<shot visual + action>" --provider <vidProvider> --model <vidModel>`
-   - Add `--image-reference <url>` once per `https://`/`asset://` reference the shot uses;
-     keep order stable and refer to them as image 1, image 2, … in the prompt.
+   - Add `--image-reference <url>` for each character in that shot's `characters` column that
+     has a checked `characterRefs` url; keep order stable and refer to them as image 1,
+     image 2, … in the prompt. A shot whose characters are all unchecked or unavailable runs
+     text-to-video.
    - Each `videogen` call blocks until that clip is finished (the tool polls the provider
      to completion), so set an explicit long Bash timeout within the current Bash cap —
      budget per shot, not for the whole drama. One call → one finished clip.
