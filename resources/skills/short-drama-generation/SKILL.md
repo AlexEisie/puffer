@@ -29,7 +29,8 @@ the user reviews and edits a draft before you act on it. The mechanism uses no n
 infrastructure — it is render → end-turn → re-entry → read-back:
 
 - In a desktop inline environment, render the draft with `Canvas`, using
-  `canvasId` = `canvas-drama-<id>-stage<N>` (N = the stage number). Then **end the
+  `canvasId` = `canvas-drama-<slug>-stage<N>` (N = the stage number; `<slug>` is just a
+  cosmetic label — the backend assigns the real canvasId). Then **end the
   current turn** — do NOT busy-wait or poll inside the skill.
 - The user edits the Canvas and submits; submission automatically starts a new turn.
   That new turn **first** calls `CanvasState` with the same `canvasId` to read back the
@@ -42,18 +43,29 @@ infrastructure — it is render → end-turn → re-entry → read-back:
 
 ## Pipeline (run in order; skip any stage whose inputs the prompt already supplies)
 
-Pick a short kebab slug `<id>` from the drama title. Put project files under
-`.puffer/media/drama/<id>/`. Generated image/video artifacts are written by the tools
-to `.puffer/media/images|videos/` — you only reference them, never relocate them.
+Form the drama `<id>` as `<slug>-<session8>`, where `<slug>` is a short kebab slug of
+the drama title and `<session8>` is the first 8 characters of the session id (the
+`sessionId` field returned by every `CanvasState` read-back — first available after the
+Stage 0 read-back). The `<session8>` suffix is what makes each run land in a **fresh**
+directory; without it, re-running a similar prompt collides with an earlier run's files
+and the manifest write fails. Project files go under `.puffer/media/drama/<id>/`.
+
+**Mint `<id>` exactly once** — when you first create `.puffer/media/drama/<id>/` (the
+Stage 0 manifest write, which happens after the Stage 0 read-back) — then reuse that
+**exact** `<id>` verbatim for every later stage, recovering it from your own earlier
+writes in the conversation. Never re-derive a bare title slug, and never write into a
+pre-existing drama directory. (Same session asked for a second drama → append `-2`,
+`-3`, ….) Generated image/video artifacts are written by the tools to
+`.puffer/media/images|videos/` — you only reference them, never relocate them.
 
 0. **Models (gate before any credit-consuming stage).** Confirm the image and video
    provider/model up front. Both are mandatory.
 
-   Render `Canvas` with `canvasId = canvas-drama-<id>-stage0` whose body is a single
+   Render `Canvas` with `canvasId = canvas-drama-<slug>-stage0` whose body is a single
    `mediaModelSelect` node:
 
    ```json
-   { "type": "Canvas", "canvasId": "canvas-drama-<id>-stage0",
+   { "type": "Canvas", "canvasId": "canvas-drama-<slug>-stage0",
      "spec": { "title": "Models", "body": [ { "type": "mediaModelSelect" } ] } }
    ```
 
@@ -66,11 +78,13 @@ to `.puffer/media/images|videos/` — you only reference them, never relocate th
    In the next turn read back with `CanvasState` (same canvasId): `values` carries
    `{imgProvider,imgModel,vidProvider,vidModel}`. **Validate**: if `imgModel` or `vidModel` is empty,
    stop and report that both image and video models must be selected (direct the user to Settings if a
-   kind has no provider). Record the four values in `manifest.json` for Stages 3/4.
+   kind has no provider). Record the four values in `manifest.json` for Stages 3/4 — this
+   manifest write first creates `.puffer/media/drama/<id>/`, so this is where you mint
+   `<id> = <slug>-<session8>` using the `sessionId` from this read-back.
 
 1. **Script.** If the prompt already contains a script (or names a script file), use it
    directly (no gate needed). Otherwise draft one, then gate it: render
-   `Canvas` with `canvasId = canvas-drama-<id>-stage1` and spec
+   `Canvas` with `canvasId = canvas-drama-<slug>-stage1` and spec
    `{title:"Script draft",body:[{type:"textarea",id:"script",rows:14,value:"<draft>"}]}`
    The spec is exactly this — the canvas title is the only heading. Do **not** add a
    `summary`, do **not** wrap the textarea in a `card`, and do **not** set `regenerable`;
@@ -85,7 +99,7 @@ to `.puffer/media/images|videos/` — you only reference them, never relocate th
    appear, and any stability constraints. These fields become the video prompt — richer
    shots yield better clips.
 
-   Gate the draft: render `Canvas` with `canvasId = canvas-drama-<id>-stage2` and spec
+   Gate the draft: render `Canvas` with `canvasId = canvas-drama-<slug>-stage2` and spec
    `{title:"Storyboard",body:[{type:"editableTable",id:"storyboard",layout:"cards",columns:["shotId","subject","action","duration","characters"],rows:<draft shots>}]}`
    (`layout:"cards"` renders one card per shot with column 0 = shotId as the card
    title and the rest as labeled wrapping fields — the editableTable sits directly in
@@ -119,7 +133,7 @@ to `.puffer/media/images|videos/` — you only reference them, never relocate th
    - If absent and consistency is not required, run text-to-video in stage 4.
 
    When you generated the per-character images, gate the choice: render `Canvas` with
-   `canvasId = canvas-drama-<id>-stage3` and `title:"Character image"`, whose `body` is a
+   `canvasId = canvas-drama-<slug>-stage3` and `title:"Character image"`, whose `body` is a
    single `mediaPicker` with no wrapping card: `{type:"mediaPicker", id:"pick", multi:true,
    value:[<every item id>], items:[{id,url,label,description}, …]}` — one item per character.
    Set `url` to that character's `remoteSourceUrl` (or its asset url on desktop), `label` to
@@ -142,13 +156,13 @@ to `.puffer/media/images|videos/` — you only reference them, never relocate th
      budget per shot, not for the whole drama. One call → one finished clip.
    - Read `path` from the tool result and record it into the manifest (see below).
    - After running the shots, gate retries: render `Canvas` with
-     `canvasId = canvas-drama-<id>-stage4`, a read-only `table` of per-shot status
+     `canvasId = canvas-drama-<slug>-stage4`, a read-only `table` of per-shot status
      (shotId, status) and a `multiSelect` (`id:"retry"`, options = the shotIds), then end
      the turn. In the next turn read it back with `CanvasState` and re-run `videogen` only
      for the shotIds in `values.retry`; if none are selected, advance.
 
 5. **Compose.** Before composing, gate the final order and mux mode: render `Canvas` with
-   `canvasId = canvas-drama-<id>-stage5`, a `card` containing an `editableTable`
+   `canvasId = canvas-drama-<slug>-stage5`, a `card` containing an `editableTable`
    (`id:"order"`, `columns: ["shotId"]`, `rows` = the succeeded clips in current order —
    the user confirms/reorders) and a `singleSelect` (`id:"mux"`, options `copy` /
    `re-encode`), then end the turn. In the next turn read it back with `CanvasState`:
