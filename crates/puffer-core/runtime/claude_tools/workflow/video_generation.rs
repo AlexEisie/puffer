@@ -269,7 +269,6 @@ mod tests {
     use crate::permissions::profile::{EffectiveApprovalPolicy, EffectiveSandboxMode};
     use crate::permissions::FilesystemPermissionPolicy;
     use crate::runtime::claude_tools::{execute_tool, ProviderToolContext};
-    use crate::AppState;
     use indexmap::IndexMap;
     use puffer_config::MediaGenerationConfig;
     use puffer_media::MediaFailureDiagnostic;
