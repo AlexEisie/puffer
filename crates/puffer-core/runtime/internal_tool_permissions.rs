@@ -605,6 +605,36 @@ fn browser_definition(registry: &ToolRegistry) -> Option<&ToolDefinition> {
         .or_else(|| registry.internal_definition("browser"))
 }
 
+/// Which media kinds a parallel batch wants to run that are still pending approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct MediaDemand {
+    image: bool,
+    video: bool,
+}
+
+impl MediaDemand {
+    fn is_empty(&self) -> bool {
+        !self.image && !self.video
+    }
+}
+
+/// Classifies a batch's Bash commands and returns which media kinds are both
+/// invoked and still `Ask` in `perms`. Already-`Allow` kinds need no prompt;
+/// `Deny` kinds are never promoted. Reuses the canonical parser so detection
+/// matches how generated-media outputs are recognized elsewhere.
+fn batch_media_demand(commands: &[&str], perms: &MediaPermissionSnapshot) -> MediaDemand {
+    use puffer_media::GeneratedMediaInternalCommandKind as Kind;
+    let mut demand = MediaDemand::default();
+    for command in commands {
+        match puffer_media::generated_media_internal_command_kind(command) {
+            Some(Kind::Image) if perms.image == ToolPermissionBehavior::Ask => demand.image = true,
+            Some(Kind::Video) if perms.video == ToolPermissionBehavior::Ask => demand.video = true,
+            _ => {}
+        }
+    }
+    demand
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1007,5 +1037,61 @@ mod tests {
         );
         assert!(!resp.success);
         assert!(resp.reason.unwrap().contains("single command"));
+    }
+
+    fn snapshot_all_ask() -> MediaPermissionSnapshot {
+        MediaPermissionSnapshot {
+            image: ToolPermissionBehavior::Ask,
+            video: ToolPermissionBehavior::Ask,
+            capabilities: ToolPermissionBehavior::Allow,
+        }
+    }
+
+    #[test]
+    fn demand_detects_image_only() {
+        let d = batch_media_demand(&["imagegen '{\"prompt\":\"x\"}'"], &snapshot_all_ask());
+        assert!(d.image && !d.video);
+        assert!(!d.is_empty());
+    }
+
+    #[test]
+    fn demand_detects_video_only() {
+        let d = batch_media_demand(&["videogen '{\"prompt\":\"x\"}'"], &snapshot_all_ask());
+        assert!(d.video && !d.image);
+    }
+
+    #[test]
+    fn demand_detects_both_kinds_in_batch() {
+        let d = batch_media_demand(&["imagegen '{}'", "videogen '{}'"], &snapshot_all_ask());
+        assert!(d.image && d.video);
+    }
+
+    #[test]
+    fn demand_empty_for_non_media_batch() {
+        let d = batch_media_demand(&["ls -la", "grep foo bar.txt"], &snapshot_all_ask());
+        assert!(d.is_empty());
+    }
+
+    #[test]
+    fn demand_excludes_already_allowed_kind() {
+        let mut perms = snapshot_all_ask();
+        perms.image = ToolPermissionBehavior::Allow;
+        let d = batch_media_demand(&["imagegen '{}'"], &perms);
+        assert!(!d.image, "already-Allow image needs no prompt");
+    }
+
+    #[test]
+    fn demand_excludes_denied_kind() {
+        let mut perms = snapshot_all_ask();
+        perms.video = ToolPermissionBehavior::Deny;
+        let d = batch_media_demand(&["videogen '{}'"], &perms);
+        assert!(!d.video, "never prompt to override an explicit Deny");
+    }
+
+    #[test]
+    fn demand_ignores_compound_media_command() {
+        // generated_media_internal_command_kind rejects unquoted ; | & — no classification.
+        let d = batch_media_demand(&["imagegen '{}' ; imagegen '{}'"], &snapshot_all_ask());
+        assert!(d.is_empty());
     }
 }
