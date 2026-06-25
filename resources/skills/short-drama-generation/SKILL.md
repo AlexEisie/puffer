@@ -266,6 +266,11 @@ not a schema'd artifact:
   clause. This sidesteps "axis ratio value not allowed" / "ratio not mapped" rejections on
   models that only support their own default ratio. If an image still comes back slightly
   non-square, that is acceptable for a reference frame — do not retry with a ratio flag.
+- A parallel media batch (Stage 3 images or Stage 4 videos) raises the media approval
+  **once** for the whole turn. Choose **Always allow** when first prompted so later chunks
+  run with no further prompt; "Approve once" only covers the current turn, so each chunk
+  re-prompts. A trailing chunk of a single call uses the normal single-command path and may
+  prompt on its own unless Always allow was chosen — this is expected, not an error.
 - Do not advance any gated stage on draft values — wait for the stage's confirmation to
   be read back first.
 - If `CanvasState` returns no value for a gated stage (the user did not submit), report
