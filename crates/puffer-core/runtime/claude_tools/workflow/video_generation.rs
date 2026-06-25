@@ -577,7 +577,7 @@ mod tests {
         let registry = ProviderRegistry::new();
         let auth_store = AuthStore::default();
         let discovery_cache = ExactMediaDiscoveryCache::empty();
-        let mut state = test_state(None, dir.path());
+        let state = test_state(None, dir.path());
 
         let error = execute_video_generation(
             state.config.media.video.as_ref(),
@@ -883,7 +883,7 @@ mod tests {
         let registry = video_registry(base_url);
         let auth_store = auth_store();
         let discovery_cache = ExactMediaDiscoveryCache::empty();
-        let mut state = test_state(Some(video_settings()), dir.path());
+        let state = test_state(Some(video_settings()), dir.path());
 
         let output = execute_video_generation(
             state.config.media.video.as_ref(),
