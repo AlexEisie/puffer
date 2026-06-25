@@ -162,21 +162,24 @@ pub(super) fn execute_openai_tool_calls(
     // `&mut state` borrow must end before `provider_context` takes its long-lived
     // immutable borrow of `state` (captured by the workers), so the gate runs first.
     if let Some(snapshot) = media_snapshot.as_mut() {
-        let commands: Vec<String> = tool_calls
-            .iter()
-            .enumerate()
-            .filter(|(i, tc)| {
-                tc.name == "Bash" && matches!(permissions[*i], PermissionOutcome::Allowed(_))
-            })
-            .filter_map(|(_, tc)| {
+        super::internal_tool_permissions::authorize_parallel_media_batch(
+            snapshot,
+            state,
+            resources,
+            registry,
+            cwd,
+            tool_calls,
+            &permissions,
+            |tc| {
+                if tc.name != "Bash" {
+                    return None;
+                }
                 tc.arguments
                     .get("command")
                     .and_then(Value::as_str)
                     .map(str::to_string)
-            })
-            .collect();
-        let command_refs: Vec<&str> = commands.iter().map(String::as_str).collect();
-        snapshot.authorize_media_batch(state, resources, registry, cwd, &command_refs);
+            },
+        );
     }
 
     // Clone immutable data needed by parallel tools.

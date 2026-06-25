@@ -105,30 +105,24 @@ pub(super) fn execute_tool_batch(
     // long-lived immutable borrow of `inputs.state` (captured by the workers),
     // so the gate runs before that point.
     if let Some(snapshot) = media_snapshot.as_mut() {
-        let commands: Vec<String> = tool_calls
-            .iter()
-            .enumerate()
-            .filter(|(i, tc)| {
-                tc.tool_id == "Bash" && matches!(permissions[*i], PermissionOutcome::Allowed(_))
-            })
-            .filter_map(|(_, tc)| {
-                serde_json::from_str::<Value>(&tc.input)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("command")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    })
-            })
-            .collect();
-        let command_refs: Vec<&str> = commands.iter().map(String::as_str).collect();
-        snapshot.authorize_media_batch(
+        crate::runtime::internal_tool_permissions::authorize_parallel_media_batch(
+            snapshot,
             inputs.state,
             inputs.resources,
             inputs.registry,
             cwd,
-            &command_refs,
+            tool_calls,
+            &permissions,
+            |tc| {
+                if tc.tool_id != "Bash" {
+                    return None;
+                }
+                serde_json::from_str::<Value>(&tc.input)
+                    .ok()?
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            },
         );
     }
 

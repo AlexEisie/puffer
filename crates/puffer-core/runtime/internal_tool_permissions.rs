@@ -5,6 +5,7 @@ use super::permission_prompt::{
     build_permission_prompt_request, prompt_for_permission, BrowserPermissionPromptSource,
     PermissionPromptAction,
 };
+use super::tool_executor::PermissionOutcome;
 use crate::permissions::acl::{append_allow_all_rule, append_allow_browser_rule};
 use crate::permissions::browser_grants::{suggested_browser_grant_scope, BrowserGrantScopeKind};
 use crate::permissions::browser_target::browser_permission_context_for_tool;
@@ -38,6 +39,9 @@ impl MediaPermissionSnapshot {
     /// (`true` = approved). Pure aside from the injected closure.
     fn authorize_media_batch(&mut self, commands: &[&str], mut authorize: impl FnMut(&str) -> bool) {
         let demand = batch_media_demand(commands, self);
+        if demand.is_empty() {
+            return;
+        }
         if demand.image && authorize("image-generation") {
             self.image = ToolPermissionBehavior::Allow;
         }
@@ -146,6 +150,32 @@ impl MediaCapabilitySnapshot {
     }
 }
 
+/// Runs the parallel-batch media authorization gate for a backend whose tool
+/// calls expose their Bash command via `bash_command` (which returns `None` for
+/// non-Bash calls). Collects the command of every *permitted* Bash call, then
+/// prompts once per demanded-and-`Ask` media kind, upgrading `snapshot` in place.
+/// Backend-agnostic: each backend supplies only the per-call command extractor,
+/// so the gate flow and the `&mut AppState` borrow contract live in one place.
+pub(in crate::runtime) fn authorize_parallel_media_batch<T>(
+    snapshot: &mut MediaCapabilitySnapshot,
+    state: &mut AppState,
+    resources: &LoadedResources,
+    registry: &ToolRegistry,
+    cwd: &Path,
+    tool_calls: &[T],
+    permissions: &[PermissionOutcome],
+    bash_command: impl Fn(&T) -> Option<String>,
+) {
+    let commands: Vec<String> = tool_calls
+        .iter()
+        .zip(permissions)
+        .filter(|(_, outcome)| matches!(outcome, PermissionOutcome::Allowed(_)))
+        .filter_map(|(call, _)| bash_command(call))
+        .collect();
+    let command_refs: Vec<&str> = commands.iter().map(String::as_str).collect();
+    snapshot.authorize_media_batch(state, resources, registry, cwd, &command_refs);
+}
+
 /// Resolves the three media tool permission decisions once, before parallel dispatch.
 pub(crate) fn resolve_media_permission_snapshot(
     perm_ctx: &crate::permissions::RuntimePermissionContext,
@@ -170,8 +200,9 @@ pub(crate) fn resolve_media_permission_snapshot(
 }
 
 /// Executes a media internal tool with shared references only (no &mut AppState),
-/// for use from parallel workers. Non-media or not-Allowed requests fail with a
-/// clear instruction to run as a single command.
+/// for use from parallel workers. A non-media request fails with an instruction to
+/// run it as a single command; a media request whose kind was not approved for this
+/// batch fails with guidance to approve the prompt (see [`run_media_tool`]).
 pub(crate) fn execute_media_internal_tool(
     ctx: &MediaCapabilityContext<'_>,
     cwd: &std::path::Path,
@@ -219,16 +250,22 @@ pub(crate) fn execute_media_internal_tool(
 }
 
 /// Runs a media tool only when its pre-resolved permission is `Allow`, mapping
-/// the result (and any diagnostic) into a wire response. Ask/Deny short-circuit
-/// with guidance to run the tool as a single, non-parallel command.
+/// the result (and any diagnostic) into a wire response. When the kind was not
+/// approved for this batch, short-circuits with guidance to approve the one-shot
+/// prompt (or enable "Always allow").
 fn run_media_tool(
     behavior: ToolPermissionBehavior,
     canonical: &str,
     run: impl FnOnce() -> anyhow::Result<String>,
 ) -> InternalToolExecutionResponse {
     if !matches!(behavior, ToolPermissionBehavior::Allow) {
+        let label = match canonical {
+            "imagegeneration" => "Image generation",
+            "videogeneration" => "Video generation",
+            other => other,
+        };
         return InternalToolExecutionResponse::failure(format!(
-            "{canonical} generation was not approved for this batch; \
+            "{label} was not approved for this batch; \
              approve it once when prompted, or enable Always allow"
         ));
     }
