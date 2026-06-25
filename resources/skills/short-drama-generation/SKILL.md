@@ -154,12 +154,19 @@ pre-existing drama directory. (Same session asked for a second drama → append 
        - If `remoteSourceUrl` is present, record it under that character in `manifest.json`
          `characterRefs` (`{ "<character>": "<url>" }`) and use it as that character's
          `--image-reference` in stage 4.
-       - If `remoteSourceUrl` is absent, stop and report that the configured image
-         provider does not produce a referenceable URL, so image-to-video is unavailable.
-         Do NOT silently fall back to text-to-video.
+       - If a character's `imagegen` failed or its `remoteSourceUrl` is absent **while other
+         characters in the batch did get one**, that single character has no usable reference:
+         record no `characterRefs` entry for it and let it fall back to text-to-video for the
+         shots it appears in (Stage 4). The other characters proceed normally — one failure
+         never aborts the batch.
+       - If **no** character in the whole cast produced a `remoteSourceUrl`, that is the
+         configured image provider not producing referenceable URLs at all — stop and report
+         that image-to-video is unavailable. Do NOT silently degrade the entire cast to
+         text-to-video; the user chose an image model on purpose.
    - If absent and consistency is not required, run text-to-video in stage 4.
 
-   When you generated the per-character images, gate the choice: render `Canvas` with
+   When you have generated the per-character images for **all** chunks (not after each
+   chunk), gate the choice once: render `Canvas` with
    `canvasId = canvas-drama-<slug>-stage3` and `title:"Character image"`, whose `body` is a
    single `mediaPicker` with no wrapping card: `{type:"mediaPicker", id:"pick", multi:true,
    value:[<every item id>], items:[{id,url,label,description}, …]}` — one item per character.
