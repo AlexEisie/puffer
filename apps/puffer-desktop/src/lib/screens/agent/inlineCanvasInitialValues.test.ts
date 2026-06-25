@@ -30,6 +30,13 @@ describe("initialValues new primitives", () => {
     const v = initialValues({ body: [{ type: "mediaModelSelect" }] });
     expect(v).toEqual({ imgProvider: "", imgModel: "", vidProvider: "", vidModel: "" });
   });
+  it("seeds mediaPicker selection from value (default-checked characters)", () => {
+    const v = initialValues({ body: [
+      { type: "mediaPicker", id: "pick", multi: true, value: ["a", "b", "c"],
+        items: [{ id: "a" }, { id: "b" }, { id: "c" }] },
+    ]});
+    expect(v).toEqual({ pick: ["a", "b", "c"] });
+  });
   it("seeds dependentSelect to its first option id", () => {
     const v = initialValues({ body: [
       { type: "singleSelect", id: "p", options: [{ id: "byteplus", label: "BytePlus" }] },

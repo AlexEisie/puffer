@@ -503,19 +503,39 @@
     gap: 8px;
   }
   :global(.ic-media-cell) {
-    padding: 0;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 6px;
     border: 2px solid transparent;
     border-radius: 6px;
-    cursor: pointer;
-    background: none;
   }
   :global(.ic-media-cell.selected) {
     border-color: var(--accent, #4a8);
   }
-  :global(.ic-media-cell img) {
+  :global(.ic-media-check) {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 1;
+    cursor: pointer;
+  }
+  :global(.ic-media-thumb) {
+    padding: 0;
+    border: none;
+    background: none;
+    cursor: zoom-in;
+  }
+  :global(.ic-media-thumb img) {
     width: 100%;
     display: block;
     border-radius: 4px;
+  }
+  :global(.ic-media-name) {
+    font-size: 13px;
+    text-align: center;
   }
   :global(.ic-code) {
     margin: 0;

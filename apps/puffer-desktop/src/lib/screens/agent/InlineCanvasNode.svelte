@@ -1,5 +1,6 @@
 <script lang="ts">
   import InlineCanvasNode from "./InlineCanvasNode.svelte";
+  import CanvasImagePreview from "./CanvasImagePreview.svelte";
   import { filterDependentOptions, resolveDependentValue } from "./dependentSelect";
   import { listMediaCapabilities, loadSettingsSnapshot, updateConfig } from "../../api/desktop";
   import { availableMediaCapabilities } from "./mediaCapabilityState";
@@ -160,6 +161,11 @@
       onChange(id, iid);
     }
   }
+
+  // --- mediaPicker: click-to-preview overlay state ---
+  let previewItem = $state<CanvasNode | null>(null);
+  function openPreview(item: CanvasNode) { previewItem = item; }
+  function closePreview() { previewItem = null; }
 
   // --- mediaModelSelect: self-contained image/video model picker (Stage 0) ---
   // The node owns four fixed value keys instead of a single `id`.
@@ -452,12 +458,29 @@
 {:else if componentType === "mediaPicker"}
   <div class="ic-media-picker">
     {#each items(node.items) as item, i (`mp-${i}`)}
-      <button type="button" class="ic-media-cell" class:selected={isPicked(item)} onclick={() => pick(item)}>
-        <img src={text(item.url)} alt={text(item.label)} loading="lazy" />
-        {#if item.label}<span>{text(item.label)}</span>{/if}
-      </button>
+      <div class="ic-media-cell" class:selected={isPicked(item)}>
+        <input
+          type="checkbox"
+          class="ic-media-check"
+          checked={isPicked(item)}
+          aria-label={`Use ${text(item.label) || "image"}`}
+          onchange={() => pick(item)}
+        />
+        <button type="button" class="ic-media-thumb" onclick={() => openPreview(item)}>
+          <img src={text(item.url)} alt={text(item.label)} loading="lazy" />
+        </button>
+        {#if item.label}<span class="ic-media-name">{text(item.label)}</span>{/if}
+      </div>
     {/each}
   </div>
+  {#if previewItem}
+    <CanvasImagePreview
+      url={text(previewItem.url)}
+      name={text(previewItem.label)}
+      description={text(previewItem.description)}
+      onClose={closePreview}
+    />
+  {/if}
 {:else if componentType === "finding"}
   <article class={`ic-finding severity-${text(node.severity || "info")}`}>
     <div class="ic-finding-head">
