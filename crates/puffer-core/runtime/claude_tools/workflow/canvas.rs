@@ -372,11 +372,44 @@ fn should_open_browser_fallback() -> bool {
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
-/// Executes the `Canvas` workflow tool. `input` is the canvas spec itself.
-pub fn execute_canvas(state: &mut AppState, cwd: &Path, input: Value) -> Result<String> {
+/// Normalizes a Canvas spec so `body` is always a JSON array.
+///
+/// The model frequently serializes array arguments as a JSON-encoded string;
+/// that single case has one unambiguous decoding, so we coerce it. Anything that
+/// does not resolve to an array is a contract violation the model must fix, so we
+/// return an actionable error instead of rendering nothing and reporting success.
+fn normalize_spec(mut input: Value) -> Result<Value> {
     if !input.is_object() {
         anyhow::bail!("Canvas input must be a JSON object (the canvas spec)");
     }
+    let coerced = match input.get("body") {
+        Some(Value::Array(_)) => None, // already well-formed (empty array is fine)
+        Some(Value::String(raw)) => {
+            let parsed = serde_json::from_str::<Value>(raw)
+                .ok()
+                .filter(|value| value.is_array())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Canvas `body` must be a JSON array of node objects, not a \
+                         JSON-encoded string. Pass the components as an array."
+                    )
+                })?;
+            Some(parsed)
+        }
+        _ => anyhow::bail!(
+            "Canvas `body` is required and must be a JSON array of node objects \
+             (not a string or scalar)."
+        ),
+    };
+    if let Some(parsed) = coerced {
+        input["body"] = parsed;
+    }
+    Ok(input)
+}
+
+/// Executes the `Canvas` workflow tool. `input` is the canvas spec itself.
+pub fn execute_canvas(state: &mut AppState, cwd: &Path, input: Value) -> Result<String> {
+    let input = normalize_spec(input)?;
     let node_count = input
         .get("body")
         .and_then(Value::as_array)
@@ -516,6 +549,57 @@ mod tests {
         let state_path = parsed["statePath"].as_str().unwrap();
         assert!(std::path::Path::new(state_path).exists(), "state file written");
         assert!(parsed["canvasId"].as_str().unwrap().starts_with("canvas-"));
+    }
+
+    #[test]
+    fn normalize_spec_passes_through_array_body() {
+        let spec = json!({ "title": "T", "body": [{ "type": "text", "value": "hi" }] });
+        let out = normalize_spec(spec).unwrap();
+        assert!(out["body"].is_array());
+        assert_eq!(out["body"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn execute_coerces_stringified_array_body() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cwd = tempdir.path().to_path_buf();
+        let mut state = temp_state(cwd.clone());
+        // body arrives as a JSON-ENCODED STRING (the bug), not an array.
+        let spec = json!({
+            "title": "Script draft",
+            "body": "[{\"type\": \"textarea\", \"id\": \"script\", \"rows\": 14, \"value\": \"hello\"}]"
+        });
+        let out = execute_canvas(&mut state, &cwd, spec).unwrap();
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["status"], "rendered");
+        assert_eq!(parsed["nodes"], 1, "stringified array counted as one node");
+        // state.json initial values include the interactive node's value.
+        let state_path = parsed["statePath"].as_str().unwrap();
+        let state_json: Value =
+            serde_json::from_str(&std::fs::read_to_string(state_path).unwrap()).unwrap();
+        assert_eq!(state_json["values"]["script"], "hello");
+    }
+
+    #[test]
+    fn execute_rejects_non_array_string_body() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cwd = tempdir.path().to_path_buf();
+        let mut state = temp_state(cwd.clone());
+        let spec = json!({ "title": "T", "body": "not even json" });
+        let err = execute_canvas(&mut state, &cwd, spec).unwrap_err();
+        assert!(err.to_string().contains("body"), "error names the body field");
+        assert!(!canvas_dir(&cwd).exists(), "no partial canvas artifacts written");
+    }
+
+    #[test]
+    fn execute_rejects_missing_body() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cwd = tempdir.path().to_path_buf();
+        let mut state = temp_state(cwd.clone());
+        let spec = json!({ "title": "T" });
+        let err = execute_canvas(&mut state, &cwd, spec).unwrap_err();
+        assert!(err.to_string().contains("body"));
+        assert!(!canvas_dir(&cwd).exists());
     }
 
     #[test]
