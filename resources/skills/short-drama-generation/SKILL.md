@@ -179,17 +179,23 @@ pre-existing drama directory. (Same session asked for a second drama → append 
    appears in. There is no Regenerate toggle — to redo a character, generate it again and
    re-render this canvas.
 
-4. **Per-shot video.** For each shot in storyboard order, run one `videogen` command:
+4. **Per-shot video.** Generate the shots **in parallel**: emit a chunk's `videogen` calls
+   **together in a single turn** so the backend runs them concurrently (one approval unblocks
+   the batch). Cap each turn at **5** `videogen` calls; more than 5 shots → successive turns
+   of ≤5 (e.g. 12 shots → 5, 5, 2). Generation order does not matter here — the final play
+   order is confirmed in Stage 5. Build one `videogen` command per shot:
    - `videogen --prompt "<shot visual + action>" --provider <vidProvider> --model <vidModel>`
    - Add `--image-reference <url>` for each character in that shot's `characters` column that
      has a checked `characterRefs` url; keep order stable and refer to them as image 1,
      image 2, … in the prompt. A shot whose characters are all unchecked or unavailable runs
      text-to-video.
-   - Each `videogen` call blocks until that clip is finished (the tool polls the provider
-     to completion), so set an explicit long Bash timeout within the current Bash cap —
-     budget per shot, not for the whole drama. One call → one finished clip.
+   - Each `videogen` call polls its clip to completion in its own parallel worker, so a chunk
+     finishes in roughly the slowest single clip's time, not the sum. Set an explicit long
+     Bash timeout within the current Bash cap on **each** call, sized for the slowest single
+     clip — never for the whole drama. One call → one finished clip.
    - Read `path` from the tool result and record it into the manifest (see below).
-   - After running the shots, gate the keep/drop selection (mirroring stage 3):
+   - After **all** shot chunks have finished (not after each chunk), gate the keep/drop
+     selection once (mirroring stage 3):
      render `Canvas` with `canvasId = canvas-drama-<slug>-stage4` and
      `title:"Per-shot video"`, whose `body` is a single `mediaPicker` with no wrapping
      card: `{type:"mediaPicker", id:"shots", multi:true, value:[<every succeeded shotId>],
