@@ -7575,6 +7575,119 @@ models: []
         assert_eq!(context.url.as_deref(), Some("https://example.com/cart"));
     }
 
+    /// Issue #667: the visible in-app BrowserPane lists/subscribes by chat
+    /// session UUID, but the Bash `browser` skill registers tabs under the
+    /// workspace-stable cli-browser id. The `browser_agent` "list" arm must fall
+    /// back to the CLI keyspace when the chat UUID owns no tabs (so the pane is
+    /// not blank), and must register an event bridge so later CLI tab-list
+    /// changes are mirrored onto `browser:<chat-uuid>:tabs` for live updates.
+    #[test]
+    fn browser_agent_list_falls_back_to_cli_keyspace_and_bridges_events() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let state = Arc::new(test_daemon_state());
+        let chat_root = Uuid::new_v4().to_string();
+
+        // A live CLI-browser tab opened by the Bash `browser` skill.
+        let cli_id =
+            crate::daemon_browser::default_cli_session_id(&state.paths).expect("cli session id");
+        state
+            .browsers
+            .test_record_tab(&cli_id, "t1", "https://example.com/cart", "Cart");
+
+        // The pane lists by its chat-session UUID, which owns no tabs of its own.
+        let listed: crate::daemon_browser::BrowserTabsState = serde_json::from_value(
+            crate::daemon_browser::handle_browser_agent(
+                &state,
+                &json!({ "action": "list", "sessionId": chat_root }),
+            )
+            .expect("browser_agent list"),
+        )
+        .expect("decode tabs state");
+        assert_eq!(
+            listed.tabs.len(),
+            1,
+            "pane list must surface the live CLI tab instead of a blank pane"
+        );
+        assert_eq!(listed.tabs[0].url, "https://example.com/cart");
+
+        // Listing also registered an event bridge cli_id -> chat_root. A
+        // subsequent CLI tab-list publish must mirror onto the pane's channel.
+        let mut events = state.event_sender().subscribe();
+        crate::daemon_browser::test_publish_tabs(&state, &cli_id);
+
+        let mut saw_chat_channel = false;
+        let mut saw_cli_channel = false;
+        while let Ok(env) = events.try_recv() {
+            if let ServerEnvelope::Event { event, payload } = env {
+                if event == format!("browser:{chat_root}:tabs") {
+                    saw_chat_channel = true;
+                    assert_eq!(
+                        payload["tabs"][0]["url"], "https://example.com/cart",
+                        "mirrored payload must carry the live CLI tab"
+                    );
+                } else if event == format!("browser:{cli_id}:tabs") {
+                    saw_cli_channel = true;
+                }
+            }
+        }
+        assert!(
+            saw_cli_channel,
+            "CLI keyspace always publishes its own channel"
+        );
+        assert!(
+            saw_chat_channel,
+            "bridged pane must receive mirrored CLI tab updates on its chat-uuid channel"
+        );
+    }
+
+    /// Precedence invariant (#667): when the chat-session UUID owns its own
+    /// typed-Browser tab, the list must return that tab and must NOT fall back
+    /// to (or bridge) the CLI keyspace.
+    #[test]
+    fn browser_agent_list_prefers_chat_own_tabs_over_cli_fallback() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let state = Arc::new(test_daemon_state());
+        let chat_root = Uuid::new_v4().to_string();
+
+        let cli_id =
+            crate::daemon_browser::default_cli_session_id(&state.paths).expect("cli session id");
+        state
+            .browsers
+            .test_record_tab(&cli_id, "t1", "https://cli.example/cart", "CLI");
+        // The chat session has its own tab (typed Browser tool path).
+        state
+            .browsers
+            .test_record_tab(&chat_root, "t1", "https://chat.example/own", "Own");
+
+        let listed: crate::daemon_browser::BrowserTabsState = serde_json::from_value(
+            crate::daemon_browser::handle_browser_agent(
+                &state,
+                &json!({ "action": "list", "sessionId": chat_root }),
+            )
+            .expect("browser_agent list"),
+        )
+        .expect("decode tabs state");
+        assert_eq!(listed.tabs.len(), 1);
+        assert_eq!(
+            listed.tabs[0].url, "https://chat.example/own",
+            "chat-session's own tab must win over the CLI fallback"
+        );
+
+        // No bridge should have been registered; a CLI publish must NOT leak
+        // onto the chat-uuid channel.
+        let mut events = state.event_sender().subscribe();
+        crate::daemon_browser::test_publish_tabs(&state, &cli_id);
+        while let Ok(env) = events.try_recv() {
+            if let ServerEnvelope::Event { event, .. } = env {
+                assert_ne!(
+                    event,
+                    format!("browser:{chat_root}:tabs"),
+                    "no bridge must exist when the chat session owns its tabs"
+                );
+            }
+        }
+    }
+
     /// Issue #560: a restarted daemon has an empty tab registry, so a resumed
     /// session whose transcript used the browser must get a stale-state
     /// reminder; sessions that never touched the browser stay clean.

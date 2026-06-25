@@ -59,9 +59,10 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
                 width,
                 height,
             );
-            Ok(serde_json::to_value(
-                state.browsers.list_tabs(&root_session_id),
-            )?)
+            Ok(serde_json::to_value(list_tabs_with_cli_fallback(
+                state,
+                &root_session_id,
+            ))?)
         }
         "open" => {
             let tab_id =
@@ -1140,12 +1141,75 @@ fn active_or_first(tabs: &BrowserTabsState) -> Option<BrowserTabInfo> {
         .cloned()
 }
 
-fn publish_tabs(state: &Arc<DaemonState>, root_session_id: &str) {
+/// Workspace-stable CLI-browser root session ids start with this prefix
+/// (`cli-browser-<slug>-<uuid>`, see `client::new_browser_session_id`). Chat
+/// session UUIDs never do, so this distinguishes a Bash-`browser` keyspace from
+/// a typed-Browser/pane keyspace without a registry lookup.
+const CLI_BROWSER_SESSION_PREFIX: &str = "cli-browser-";
+
+fn is_cli_browser_session(session_id: &str) -> bool {
+    session_id.starts_with(CLI_BROWSER_SESSION_PREFIX)
+}
+
+/// Lists tabs for `root_session_id`, falling back to the workspace-stable
+/// cli-browser keyspace when the chat-session UUID owns no tabs of its own
+/// (issue #667). The Bash `browser` skill registers tabs under the cli-browser
+/// id, but the visible in-app pane lists/subscribes by chat-session UUID — so
+/// without this fallback the pane shows a blank `about:blank` even while a CLI
+/// tab is live. Precedence is preserved: a chat-session's own tabs always win;
+/// the CLI keyspace is consulted only when the chat keyspace is empty. When the
+/// fallback fires it also registers an event bridge so future CLI tab-list
+/// changes are mirrored onto this pane's `browser:<chat-uuid>:tabs` channel.
+fn list_tabs_with_cli_fallback(
+    state: &Arc<DaemonState>,
+    root_session_id: &str,
+) -> BrowserTabsState {
+    let primary = state.browsers.list_tabs(root_session_id);
+    if !primary.tabs.is_empty() {
+        return primary;
+    }
+    // Only a typed/chat keyspace falls back; a CLI keyspace listing itself must
+    // not bridge onto itself (and `register_tab_bridge` guards that too).
+    if is_cli_browser_session(root_session_id) {
+        return primary;
+    }
+    let Ok(cli_session_id) = crate::daemon_browser::default_cli_session_id(state.config_paths())
+    else {
+        return primary;
+    };
+    if cli_session_id == root_session_id {
+        return primary;
+    }
+    let cli_tabs = state.browsers.list_tabs(&cli_session_id);
+    if cli_tabs.tabs.is_empty() {
+        return primary;
+    }
+    // Late-join reconcile: remember this pane so subsequent CLI tab updates are
+    // mirrored to its channel (registration is idempotent).
+    state
+        .browsers
+        .register_tab_bridge(&cli_session_id, root_session_id);
+    cli_tabs
+}
+
+pub(crate) fn publish_tabs(state: &Arc<DaemonState>, root_session_id: &str) {
+    let payload = serde_json::to_value(state.browsers.list_tabs(root_session_id))
+        .unwrap_or_else(|_| json!({ "tabs": [] }));
     state.publish_event(ServerEnvelope::Event {
         event: format!("browser:{root_session_id}:tabs"),
-        payload: serde_json::to_value(state.browsers.list_tabs(root_session_id))
-            .unwrap_or_else(|_| json!({ "tabs": [] })),
+        payload: payload.clone(),
     });
+    // Mirror CLI-browser tab updates onto every chat-session pane bridged to
+    // this keyspace, so the visible pane gets live updates with no frontend
+    // change (issue #667). Only the cli-browser keyspace carries viewers.
+    if is_cli_browser_session(root_session_id) {
+        for viewer in state.browsers.bridged_viewers(root_session_id) {
+            state.publish_event(ServerEnvelope::Event {
+                event: format!("browser:{viewer}:tabs"),
+                payload: payload.clone(),
+            });
+        }
+    }
 }
 
 fn optional_string(params: &Value, key: &str) -> Option<String> {
