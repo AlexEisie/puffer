@@ -17,7 +17,11 @@
 
   let { spec, canvasId, sessionId, onSubmitCanvasState }: Props = $props();
 
-  let values = $state<Record<string, unknown>>({});
+  // Intentionally capture only the initial spec: a tool call's input is immutable,
+  // only the live object reference churns. Re-seeding here would wipe the async
+  // media defaults. Regenerate is a new call_id → new instance → natural re-init.
+  // svelte-ignore state_referenced_locally
+  let values = $state<Record<string, unknown>>(initialValues(spec));
   let saveState = $state<"idle" | "saving" | "saved" | "error">("idle");
   let submitState = $state<SubmitState>("idle");
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -34,10 +38,6 @@
   const regenerateEnabled = $derived(
     canRegenerate({ regenerable, canSubmit: canSubmitCanvas, regenerating, submitState })
   );
-
-  $effect(() => {
-    values = initialValues(spec);
-  });
 
   $effect(() => {
     if (sessionId && canvasId && Object.keys(pendingPatch).length > 0 && !saveTimer) {
