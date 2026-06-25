@@ -643,6 +643,25 @@ mod tests {
     }
 
     #[test]
+    fn initial_values_media_picker_kind_path_items_are_inert() {
+        // `kind`/`path` on mediaPicker items are a pure frontend concern; the
+        // backend only branches on `multi`, so video items must not perturb the
+        // default `value` (empty array for multi:true, null otherwise).
+        let spec = json!({ "body": [
+            { "type": "mediaPicker", "id": "shotsMany", "multi": true, "items": [
+                { "id": "shot-001", "kind": "video", "path": ".puffer/media/videos/a/1.mp4" },
+                { "id": "shot-002", "kind": "video", "path": ".puffer/media/videos/a/2.mp4" },
+            ] },
+            { "type": "mediaPicker", "id": "shotsOne", "items": [
+                { "id": "shot-003", "kind": "video", "path": ".puffer/media/videos/a/3.mp4" },
+            ] },
+        ]});
+        let values = initial_canvas_values(&spec);
+        assert_eq!(values["shotsMany"], json!([]));
+        assert_eq!(values["shotsOne"], Value::Null);
+    }
+
+    #[test]
     fn initial_values_seed_dependent_select_first_option() {
         let spec = json!({
             "body": [
