@@ -419,7 +419,7 @@
   </label>
 {:else if componentType === "textarea"}
   <label class="ic-control">
-    {#if text(node.label ?? node.id)}<span class="ic-control-label">{text(node.label ?? node.id)}</span>{/if}
+    {#if text(node.label)}<span class="ic-control-label">{text(node.label)}</span>{/if}
     <textarea
       class="ic-textarea"
       rows={numeric(node.rows, 8)}

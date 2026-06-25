@@ -71,8 +71,11 @@ to `.puffer/media/images|videos/` — you only reference them, never relocate th
 1. **Script.** If the prompt already contains a script (or names a script file), use it
    directly (no gate needed). Otherwise draft one, then gate it: render
    `Canvas` with `canvasId = canvas-drama-<id>-stage1` and spec
-   `{title:"Script draft",regenerable:true,body:[{type:"card",title:"Script draft",children:[{type:"textarea",id:"script",rows:14,value:"<draft>"}]}]}`,
-   then end the turn. In the next turn read it back with `CanvasState` (same canvasId)
+   `{title:"Script draft",body:[{type:"textarea",id:"script",rows:14,value:"<draft>"}]}`
+   The spec is exactly this — the canvas title is the only heading. Do **not** add a
+   `summary`, do **not** wrap the textarea in a `card`, and do **not** set `regenerable`;
+   the script draft textarea shows directly with only a Submit action. Then end the turn.
+   In the next turn read it back with `CanvasState` (same canvasId)
    and save `values.script` to `.puffer/media/drama/<id>/script.md`.
 
 2. **Storyboard.** If the prompt already contains a shot breakdown, use it directly.

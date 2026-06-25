@@ -118,12 +118,19 @@ fn short_drama_skill_gates_model_selection_in_stage0() {
 }
 
 #[test]
-fn short_drama_stage1_and_stage2_drafts_are_regenerable() {
+fn short_drama_stage1_script_gate_is_a_bare_textarea() {
     let body = include_str!("../../../resources/skills/short-drama-generation/SKILL.md");
-    // Both gated draft canvases opt into the Regenerate button.
-    assert!(body.contains("regenerable:true"));
-    // Draft specs use the top-level `body` array the inline renderer requires.
-    assert!(body.contains("body:[{type:\"card\""));
+    // The script gate goes straight to the textarea: no summary, no wrapping card,
+    // no Regenerate button — the canvas title is the only chrome.
+    assert!(body.contains("{title:\"Script draft\",body:[{type:\"textarea\""));
+}
+
+#[test]
+fn short_drama_stage2_storyboard_draft_is_regenerable() {
+    let body = include_str!("../../../resources/skills/short-drama-generation/SKILL.md");
+    // The storyboard draft opts into the Regenerate button and uses the
+    // top-level `body` array (a card) the inline renderer requires.
+    assert!(body.contains("{title:\"Storyboard\",regenerable:true,body:[{type:\"card\""));
 }
 
 #[test]
