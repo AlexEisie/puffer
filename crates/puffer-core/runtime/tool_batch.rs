@@ -80,26 +80,14 @@ pub(super) fn execute_tool_batch(
         )?);
     }
 
-    let session_id = inputs.state.session.id;
-    let provider_context = backend_to_provider_context(
-        session.tool_execution_backend(),
-        inputs.model_id,
-        &inputs.state.config.network.proxy,
-    );
-    // Cloned once before `thread::scope` because the worker closures cannot
-    // touch `inputs.state` (no `&mut AppState` across spawn boundaries).
-    // `Arc<dyn ToolRunner>` is `Send + Sync` and clones cheaply.
-    let runner = inputs.state.tool_runner.clone();
-
-    // Media-capability context for parallel Bash workers, built only when the
+    // Media-capability snapshot for parallel Bash workers, captured only when the
     // batch contains a permitted Bash call (avoids a permission-file read on
     // Bash-free batches). The owned snapshot is declared before `thread::scope`
-    // so it outlives the worker closures; `inputs.auth_store` (`&mut`) is
-    // reborrowed as `&` inside `context()` — NLL ends the `&mut` borrow first.
+    // so it outlives the worker closures.
     let has_permitted_bash = tool_calls.iter().enumerate().any(|(i, tc)| {
         tc.tool_id == "Bash" && matches!(permissions[i], PermissionOutcome::Allowed(_))
     });
-    let media_snapshot = if has_permitted_bash {
+    let mut media_snapshot = if has_permitted_bash {
         Some(
             crate::runtime::internal_tool_permissions::MediaCapabilitySnapshot::capture(
                 cwd,
@@ -111,6 +99,54 @@ pub(super) fn execute_tool_batch(
     } else {
         None
     };
+    // Media authorization gate: detect which media kinds this batch's permitted
+    // Bash calls demand and prompt once per kind here, on the main thread. The
+    // `&mut inputs.state` borrow must end before `provider_context` takes its
+    // long-lived immutable borrow of `inputs.state` (captured by the workers),
+    // so the gate runs before that point.
+    if let Some(snapshot) = media_snapshot.as_mut() {
+        let commands: Vec<String> = tool_calls
+            .iter()
+            .enumerate()
+            .filter(|(i, tc)| {
+                tc.tool_id == "Bash" && matches!(permissions[*i], PermissionOutcome::Allowed(_))
+            })
+            .filter_map(|(_, tc)| {
+                serde_json::from_str::<Value>(&tc.input)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("command")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+            })
+            .collect();
+        let command_refs: Vec<&str> = commands.iter().map(String::as_str).collect();
+        snapshot.authorize_media_batch(
+            inputs.state,
+            inputs.resources,
+            inputs.registry,
+            cwd,
+            &command_refs,
+        );
+    }
+
+    let session_id = inputs.state.session.id;
+    let provider_context = backend_to_provider_context(
+        session.tool_execution_backend(),
+        inputs.model_id,
+        &inputs.state.config.network.proxy,
+    );
+    // Cloned once before `thread::scope` because the worker closures cannot
+    // touch `inputs.state` (no `&mut AppState` across spawn boundaries).
+    // `Arc<dyn ToolRunner>` is `Send + Sync` and clones cheaply.
+    let runner = inputs.state.tool_runner.clone();
+
+    // Borrow the (possibly upgraded) snapshot into the shared worker context.
+    // `context()` reborrows `inputs.auth_store` (`&mut`) as `&` — NLL ends the
+    // `&mut` borrow first — and neither field touches `inputs.state`, so this
+    // coexists with `provider_context`'s immutable borrow.
     let media_ctx = media_snapshot
         .as_ref()
         .map(|snapshot| snapshot.context(inputs.providers, inputs.auth_store));

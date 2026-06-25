@@ -144,6 +144,41 @@ pub(super) fn execute_openai_tool_calls(
     }
 
     // ---------- Phase 2: Execute tools ----------
+    // Media-capability snapshot for parallel Bash workers, captured only when the
+    // batch contains a permitted Bash call (avoids a permission-file read on
+    // Bash-free batches). The owned snapshot outlives `thread::scope`.
+    let has_permitted_bash = tool_calls.iter().enumerate().any(|(i, tc)| {
+        tc.name == "Bash" && matches!(permissions[i], PermissionOutcome::Allowed(_))
+    });
+    let mut media_snapshot = if has_permitted_bash {
+        Some(super::internal_tool_permissions::MediaCapabilitySnapshot::capture(
+            cwd, resources, state, registry,
+        )?)
+    } else {
+        None
+    };
+    // Media authorization gate: detect which media kinds this batch's permitted
+    // Bash calls demand and prompt once per kind here, on the main thread. The
+    // `&mut state` borrow must end before `provider_context` takes its long-lived
+    // immutable borrow of `state` (captured by the workers), so the gate runs first.
+    if let Some(snapshot) = media_snapshot.as_mut() {
+        let commands: Vec<String> = tool_calls
+            .iter()
+            .enumerate()
+            .filter(|(i, tc)| {
+                tc.name == "Bash" && matches!(permissions[*i], PermissionOutcome::Allowed(_))
+            })
+            .filter_map(|(_, tc)| {
+                tc.arguments
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        let command_refs: Vec<&str> = commands.iter().map(String::as_str).collect();
+        snapshot.authorize_media_batch(state, resources, registry, cwd, &command_refs);
+    }
+
     // Clone immutable data needed by parallel tools.
     let provider_context = super::claude_tools::ProviderToolContext::OpenAI {
         request_config,
@@ -155,21 +190,9 @@ pub(super) fn execute_openai_tool_calls(
     // active `ToolRunner` (e.g. `RemoteToolRunner`) without touching `state`.
     let runner = state.tool_runner.clone();
 
-    // Media-capability context for parallel Bash workers, built only when the
-    // batch contains a permitted Bash call (avoids a permission-file read on
-    // Bash-free batches). The owned snapshot outlives `thread::scope`;
+    // Borrow the (possibly upgraded) snapshot into the shared worker context.
     // `auth_store` (`&mut`) is reborrowed as `&` inside `context()` — NLL ends
-    // the `&mut` borrow first.
-    let has_permitted_bash = tool_calls.iter().enumerate().any(|(i, tc)| {
-        tc.name == "Bash" && matches!(permissions[i], PermissionOutcome::Allowed(_))
-    });
-    let media_snapshot = if has_permitted_bash {
-        Some(super::internal_tool_permissions::MediaCapabilitySnapshot::capture(
-            cwd, resources, state, registry,
-        )?)
-    } else {
-        None
-    };
+    // the `&mut` borrow first — and neither field touches `state`.
     let media_ctx = media_snapshot
         .as_ref()
         .map(|snapshot| snapshot.context(providers, auth_store));

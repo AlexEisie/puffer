@@ -228,7 +228,8 @@ fn run_media_tool(
 ) -> InternalToolExecutionResponse {
     if !matches!(behavior, ToolPermissionBehavior::Allow) {
         return InternalToolExecutionResponse::failure(format!(
-            "{canonical} requires approval; run it as a single command"
+            "{canonical} generation was not approved for this batch; \
+             approve it once when prompted, or enable Always allow"
         ));
     }
     internal_tool_execution_response(run())
@@ -1048,7 +1049,7 @@ mod tests {
             },
         );
         assert!(!resp.success);
-        assert!(resp.reason.unwrap().contains("single command"));
+        assert!(resp.reason.unwrap().contains("not approved for this batch"));
     }
 
     #[test]
@@ -1079,7 +1080,9 @@ mod tests {
             },
         );
         assert!(!resp.success);
-        assert!(resp.reason.unwrap().contains("single command"));
+        // Non-media internal tools genuinely aren't available in a parallel batch;
+        // this `other`-arm message is unchanged by the media failure-message fix.
+        assert!(resp.reason.unwrap().contains("not available in a parallel batch"));
     }
 
     fn snapshot_all_ask() -> MediaPermissionSnapshot {
