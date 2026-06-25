@@ -119,6 +119,19 @@ pre-existing drama directory. (Same session asked for a second drama → append 
      collect the distinct character names from the confirmed storyboard's `characters`
      column, and for each name run exactly one `imagegen` call.
 
+     **Square 1:1 is the goal, not a fixed flag.** The reference image must be square, but
+     the means depends on what the chosen image model supports — never hardcode
+     `--aspect square`. Squareness is carried primarily by the prompt (mandatory clause
+     below) and only reinforced by `--aspect` when the model actually offers a 1:1 ratio.
+
+     **Probe the model's ratio support once (before the first character).** Run
+     `mediacaps --kind image` (alias of `media-capabilities`), find the entry whose
+     `providerId`/`modelId` equal the Stage 0 confirmed image provider/model, and read its
+     `ratio` axis `control.enum.values`:
+       - If those values include `1:1`, append `--aspect 1:1` to every `imagegen` call below.
+       - If the only value is `Auto` (or no 1:1 is offered — e.g. Seedream image models),
+         do **not** pass `--aspect` at all; the prompt's square clause carries the framing.
+
      **Style anchor (compose once, reuse verbatim).** Before generating, write a single
      shared style phrase describing the drama's overall look (medium, rendering, palette,
      line/lighting), derived from the storyboard's `style` field — e.g.
@@ -127,13 +140,14 @@ pre-existing drama directory. (Same session asked for a second drama → append 
      keeps the whole cast in one consistent style. Do not vary it per character.
 
      **Per-character prompt template** — for each character build:
-     `<style anchor>, full-body head-to-toe front view of <character + appearance>, standing,
-     centered, plain pure-white background, even studio lighting, no text, no letters, no
-     watermark, no logo, no captions` — then run exactly:
-     `imagegen --prompt "<that prompt>" --count 1 --aspect square --provider <imgProvider> --model <imgModel>`.
-     `--aspect square` forces the required 1:1 frame; the white-background / full-body /
-     no-text clauses are mandatory in every prompt. One call → one character → one image;
-     N characters → N calls → N images.
+     `<style anchor>, square 1:1 composition with equal width and height, full-body
+     head-to-toe front view of <character + appearance>, standing, centered, plain
+     pure-white background, even studio lighting, no text, no letters, no watermark, no
+     logo, no captions` — then run:
+     `imagegen --prompt "<that prompt>" --count 1 [--aspect 1:1 only if the probe showed 1:1 support] --provider <imgProvider> --model <imgModel>`.
+     The `square 1:1` / white-background / full-body / no-text clauses are mandatory in
+     every prompt; `--aspect` is optional reinforcement, never the source of truth. One
+     call → one character → one image; N characters → N calls → N images.
      Never combine multiple characters into one image. Make each character stylized /
      non-photorealistic (cartoon, 3D render, illustration): image-to-video providers
      (e.g. BytePlus) reject photoreal real-person images on moderation. For each image read
@@ -236,6 +250,10 @@ not a schema'd artifact:
   provider for that kind in Settings — never fall back to text-to-video or to config defaults.
 - If `imgModel` or `vidModel` is empty on read-back, stop and report that both image and video models
   must be selected before continuing.
+- If `imagegen` rejects the aspect value (e.g. `axis ratio value 1:1 is not allowed` or
+  `ratio ... is not mapped` — the chosen model only supports its own default/`Auto` ratio),
+  retry the **same** call once without `--aspect`; the prompt's square clause still applies.
+  Never fail the character-image stage over the aspect knob.
 - Do not advance any gated stage on draft values — wait for the stage's confirmation to
   be read back first.
 - If `CanvasState` returns no value for a gated stage (the user did not submit), report
