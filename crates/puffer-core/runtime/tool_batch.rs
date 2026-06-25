@@ -91,6 +91,42 @@ pub(super) fn execute_tool_batch(
     // `Arc<dyn ToolRunner>` is `Send + Sync` and clones cheaply.
     let runner = inputs.state.tool_runner.clone();
 
+    // Build the media-capability context for parallel Bash workers.
+    // All owned locals must be declared before `thread::scope` so they
+    // outlive the worker closures. `inputs.auth_store` is `&mut AuthStore`;
+    // we reborrow it as `&AuthStore` here — NLL ends the `&mut` borrow first.
+    let media_perm_ctx = crate::permissions::load_runtime_permission_context_with_inputs(
+        cwd,
+        inputs.resources,
+        inputs.state,
+        crate::permissions::RuntimePermissionInputs::default(),
+    )?;
+    let media_permissions =
+        crate::runtime::internal_tool_permissions::resolve_media_permission_snapshot(
+            &media_perm_ctx,
+            inputs.registry,
+        );
+    let media_image_cfg = inputs.state.config.media.image.clone();
+    let media_video_cfg = inputs.state.config.media.video.clone();
+    let media_discovery_cache = inputs
+        .state
+        .exact_media_discovery_cache
+        .clone()
+        .unwrap_or_else(puffer_media::ExactMediaDiscoveryCache::empty);
+    let media_process_store = inputs.state.process_store.clone();
+    let media_providers: &puffer_provider_registry::ProviderRegistry = inputs.providers;
+    let media_auth_store: &puffer_provider_registry::AuthStore = inputs.auth_store;
+    let media_ctx = crate::runtime::internal_tool_permissions::MediaCapabilityContext {
+        permissions: media_permissions,
+        image_settings: media_image_cfg.as_ref(),
+        video_settings: media_video_cfg.as_ref(),
+        providers: media_providers,
+        auth_store: media_auth_store,
+        discovery_cache: &media_discovery_cache,
+        process_store: Some(&media_process_store),
+    };
+    let media_ctx_ref = &media_ctx;
+
     let mut results: Vec<Option<(String, bool, bool, Value)>> = vec![None; tool_calls.len()];
 
     let observability_handle = inputs.observability.clone();
@@ -192,6 +228,7 @@ pub(super) fn execute_tool_batch(
                         registry,
                         provider_context_ref,
                         &runner_clone,
+                        media_ctx_ref,
                     ) {
                         Ok(exec) => {
                             let terminate = extract_terminate(&exec.output.metadata);

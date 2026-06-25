@@ -191,6 +191,26 @@ fn parallel_path_dispatches_through_runner() {
         session_granted: true,
         allow_all_paths: true,
     };
+
+    // Permissive dummy media context for Grep/Glob tests — Bash branch is
+    // never taken here, so this context is required by the signature but unused.
+    let test_providers = puffer_provider_registry::ProviderRegistry::new();
+    let test_auth_store = puffer_provider_registry::AuthStore::default();
+    let test_cache = puffer_media::ExactMediaDiscoveryCache::empty();
+    let test_media_ctx = crate::runtime::internal_tool_permissions::MediaCapabilityContext {
+        permissions: crate::runtime::internal_tool_permissions::MediaPermissionSnapshot {
+            image: crate::permissions::ToolPermissionBehavior::Allow,
+            video: crate::permissions::ToolPermissionBehavior::Allow,
+            capabilities: crate::permissions::ToolPermissionBehavior::Allow,
+        },
+        image_settings: None,
+        video_settings: None,
+        providers: &test_providers,
+        auth_store: &test_auth_store,
+        discovery_cache: &test_cache,
+        process_store: None,
+    };
+
     let grep_input = json!({"pattern": "parallel-runner", "path": "sample.txt"});
     let grep_result = execute_parallel_tool(
         &grep_def,
@@ -203,6 +223,7 @@ fn parallel_path_dispatches_through_runner() {
         &registry,
         &provider_context,
         &runner,
+        &test_media_ctx,
     )
     .expect("Grep through runner");
     assert!(grep_result.success, "Grep should succeed");
@@ -229,6 +250,7 @@ fn parallel_path_dispatches_through_runner() {
         &registry,
         &provider_context,
         &runner,
+        &test_media_ctx,
     )
     .expect("Glob through runner");
     assert!(glob_result.success, "Glob should succeed");

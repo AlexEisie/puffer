@@ -422,7 +422,13 @@ pub(crate) fn execute_parallel_tool(
     registry: &ToolRegistry,
     provider_context: &ProviderToolContext<'_>,
     runner: &Arc<dyn ToolRunner>,
+    media_ctx: &super::internal_tool_permissions::MediaCapabilityContext<'_>,
 ) -> Result<ToolExecutionResult> {
+    if definition.id == "Bash" {
+        return execute_parallel_bash_with_media_broker(
+            definition, cwd, session_id, input, media_ctx,
+        );
+    }
     if runner_adapter::is_runner_supported(definition.id.as_str()) {
         let request = RunnerToolRequest {
             tool_id: definition.id.clone(),
