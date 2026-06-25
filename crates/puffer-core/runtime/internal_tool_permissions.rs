@@ -24,6 +24,120 @@ use puffer_tools::{ToolDefinition, ToolRegistry};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+/// Snapshot of the three media tool permission decisions resolved before parallel dispatch.
+#[derive(Clone, Copy)]
+pub(crate) struct MediaPermissionSnapshot {
+    pub image: ToolPermissionBehavior,
+    pub video: ToolPermissionBehavior,
+    pub capabilities: ToolPermissionBehavior,
+}
+
+/// Shared-ref context for executing media tools from parallel workers (no &mut AppState).
+pub(crate) struct MediaCapabilityContext<'a> {
+    pub permissions: MediaPermissionSnapshot,
+    pub image_settings: Option<&'a puffer_config::MediaGenerationConfig>,
+    pub video_settings: Option<&'a puffer_config::MediaGenerationConfig>,
+    pub providers: &'a ProviderRegistry,
+    pub auth_store: &'a AuthStore,
+    pub discovery_cache: &'a ExactMediaDiscoveryCache,
+    pub process_store: Option<
+        &'a std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>,
+    >,
+}
+
+/// Resolves the three media tool permission decisions once, before parallel dispatch.
+pub(crate) fn resolve_media_permission_snapshot(
+    perm_ctx: &crate::permissions::RuntimePermissionContext,
+    registry: &ToolRegistry,
+) -> MediaPermissionSnapshot {
+    let behavior = |tool_id: &str| {
+        registry
+            .internal_definition(tool_id)
+            .map(|def| {
+                perm_ctx
+                    .decision_for_tool_call(def, &serde_json::Value::Null)
+                    .behavior
+            })
+            .unwrap_or(ToolPermissionBehavior::Deny)
+    };
+    MediaPermissionSnapshot {
+        image: behavior("image-generation"),
+        video: behavior("video-generation"),
+        // media-capabilities is always allowed (see resolve_internal_tool_permission_result)
+        capabilities: ToolPermissionBehavior::Allow,
+    }
+}
+
+/// Executes a media internal tool with shared references only (no &mut AppState),
+/// for use from parallel workers. Non-media or not-Allowed requests fail with a
+/// clear instruction to run as a single command.
+pub(crate) fn execute_media_internal_tool(
+    ctx: &MediaCapabilityContext<'_>,
+    cwd: &std::path::Path,
+    request: InternalToolExecutionRequest,
+) -> InternalToolExecutionResponse {
+    use crate::runtime::claude_tools::workflow::{image_generation, media_capabilities, video_generation};
+    let canonical = canonical_tool_name(&request.tool_id);
+    let behavior = match canonical.as_str() {
+        "imagegeneration" => ctx.permissions.image,
+        "videogeneration" => ctx.permissions.video,
+        "mediacapabilities" => ctx.permissions.capabilities,
+        other => {
+            return InternalToolExecutionResponse::failure(format!(
+                "internal tool `{other}` is not available in a parallel batch; run it as a single command"
+            ));
+        }
+    };
+    if !matches!(behavior, ToolPermissionBehavior::Allow) {
+        return InternalToolExecutionResponse::failure(format!(
+            "{canonical} requires approval; run it as a single command"
+        ));
+    }
+    let result = match canonical.as_str() {
+        "imagegeneration" => image_generation::execute_image_generation(
+            ctx.image_settings,
+            cwd,
+            request.input,
+            Some(image_generation::ImageGenerationMediaContext {
+                providers: ctx.providers,
+                auth_store: ctx.auth_store,
+                discovery_cache: ctx.discovery_cache,
+            }),
+        ),
+        "videogeneration" => video_generation::execute_video_generation(
+            ctx.video_settings,
+            cwd,
+            request.input,
+            Some(video_generation::VideoGenerationMediaContext {
+                providers: ctx.providers,
+                auth_store: ctx.auth_store,
+                discovery_cache: ctx.discovery_cache,
+            }),
+        ),
+        "mediacapabilities" => media_capabilities::execute_media_capabilities(
+            ctx.providers,
+            ctx.auth_store,
+            ctx.discovery_cache,
+            request.input,
+        ),
+        _ => unreachable!("behavior match already filtered non-media tools"),
+    };
+    match result {
+        Ok(output) => InternalToolExecutionResponse::success(output),
+        Err(error) => {
+            let reason = format!("{error:#}");
+            if let Some(diagnostic) = puffer_media::media_failure_diagnostic(&error) {
+                let fallback = reason.clone();
+                let value = serde_json::to_value(diagnostic)
+                    .unwrap_or_else(|_| serde_json::json!({ "error": fallback }));
+                InternalToolExecutionResponse::failure_with_diagnostic(reason, value)
+            } else {
+                InternalToolExecutionResponse::failure(reason)
+            }
+        }
+    }
+}
+
 /// Resolves one structured permission request from a first-party internal tool.
 pub(crate) fn resolve_internal_tool_permission(
     state: &mut AppState,
@@ -433,17 +547,21 @@ fn browser_definition(registry: &ToolRegistry) -> Option<&ToolDefinition> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use indexmap::IndexMap;
     use puffer_config::MediaGenerationConfig;
     use puffer_provider_registry::{
-        AuthMode, AuthStore, Axis, AxisRole, ControlKind, MediaExecutionDescriptor,
-        MediaExecutionKind, MediaKindDescriptor, MediaModelDescriptor, MediaOperation,
-        ModelDescriptor, ProviderDescriptor, ProviderMediaDescriptor, ProviderRegistry, Variant,
-        Variants, WireType,
+        AuthMode, AuthStore, Axis, AxisRole, ControlKind, MediaBatchDescriptor,
+        MediaExecutionDescriptor, MediaExecutionKind, MediaKindDescriptor, MediaMap,
+        MediaModelDescriptor, MediaOperation, MediaSizeMap, ModelDescriptor, ProviderDescriptor,
+        ProviderMediaDescriptor, ProviderRegistry, Variant, Variants, WireType,
     };
     use puffer_resources::{LoadedItem, SourceInfo, SourceKind, ToolSpec};
     use puffer_session_store::SessionMetadata;
     use serde_json::json;
     use std::collections::BTreeMap;
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+    use std::thread;
     use tempfile::tempdir;
     use uuid::Uuid;
 
@@ -608,5 +726,225 @@ mod tests {
             models: Vec::<ModelDescriptor>::new(),
         });
         registry
+    }
+
+    // ── helpers shared by the media_internal_tool_* tests ──────────────────
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        let mut buffer = [0_u8; 8192];
+        let size = stream.read(&mut buffer).expect("read request");
+        String::from_utf8_lossy(&buffer[..size]).to_string()
+    }
+
+    fn spawn_image_generation_server() -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let request_text = read_http_request(&mut stream);
+            let body = json!({
+                "data": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("response");
+            request_text
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn registry_with_provider(base_url: String) -> ProviderRegistry {
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderDescriptor {
+            id: "exact-provider".to_string(),
+            display_name: "Exact Provider".to_string(),
+            base_url,
+            default_api: "openai-responses".to_string(),
+            auth_modes: vec![AuthMode::ApiKey],
+            headers: IndexMap::new(),
+            query_params: IndexMap::new(),
+            chat_completions_path: None,
+            discovery: None,
+            media: Some(ProviderMediaDescriptor {
+                image: Some(MediaKindDescriptor {
+                    discovery: None,
+                    execution: Some(MediaExecutionDescriptor {
+                        adapter: MediaExecutionKind::ImagesJson,
+                        base_url: None,
+                        path: "/custom/images".to_string(),
+                        batch: MediaBatchDescriptor::default(),
+                        prompt_format: Default::default(),
+                    }),
+                    models: vec![MediaModelDescriptor {
+                        id: "exact-image-model".to_string(),
+                        display_name: Some("Exact Image Model".to_string()),
+                        max_outputs: Some(9),
+                        execution: None,
+                        operations: vec![MediaOperation::Generate],
+                        axes: vec![
+                            Axis {
+                                id: "mode".to_string(),
+                                label: "Mode".to_string(),
+                                role: AxisRole::Param,
+                                control: ControlKind::Enum {
+                                    values: vec!["1K SD".to_string()],
+                                    default: "1K SD".to_string(),
+                                },
+                                request_field: None,
+                                wire_type: WireType::String,
+                            },
+                            Axis {
+                                id: "ratio".to_string(),
+                                label: "Ratio".to_string(),
+                                role: AxisRole::Param,
+                                control: ControlKind::Enum {
+                                    values: vec!["1:1".to_string(), "16:9".to_string()],
+                                    default: "1:1".to_string(),
+                                },
+                                request_field: None,
+                                wire_type: WireType::String,
+                            },
+                        ],
+                        variants: Variants::Single(Variant {
+                            model_id: "exact-image-model".to_string(),
+                            base_params: BTreeMap::from([
+                                ("quality".to_string(), "auto".to_string()),
+                                ("output_format".to_string(), "png".to_string()),
+                            ]),
+                        }),
+                        media_map: Some(MediaMap {
+                            ratio: None,
+                            size: Some(MediaSizeMap {
+                                field: "size".to_string(),
+                                values: BTreeMap::from([(
+                                    "1K SD".to_string(),
+                                    BTreeMap::from([
+                                        ("1:1".to_string(), Some("1024x1024".to_string())),
+                                        ("16:9".to_string(), Some("1536x1024".to_string())),
+                                    ]),
+                                )]),
+                            }),
+                        }),
+                    }],
+                }),
+                video: None,
+            }),
+            models: Vec::<ModelDescriptor>::new(),
+        });
+        registry
+    }
+
+    fn auth_store_with_key() -> AuthStore {
+        let mut auth_store = AuthStore::default();
+        auth_store.set_api_key("exact-provider", "sk-test");
+        auth_store
+    }
+
+    // ── Task-2 TDD tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn media_internal_tool_executes_image_when_allowed() {
+        let (base_url, _server) = spawn_image_generation_server();
+        let dir = tempfile::tempdir().unwrap();
+        let providers = registry_with_provider(base_url);
+        let auth_store = auth_store_with_key();
+        let cache = puffer_media::ExactMediaDiscoveryCache::empty();
+        let image_cfg = puffer_config::MediaGenerationConfig {
+            provider_id: "exact-provider".to_string(),
+            logical_model_id: "exact-image-model".to_string(),
+            selections: std::collections::BTreeMap::from([
+                ("mode".to_string(), "1K SD".to_string()),
+                ("ratio".to_string(), "1:1".to_string()),
+                ("output".to_string(), "1".to_string()),
+            ]),
+        };
+        let ctx = MediaCapabilityContext {
+            permissions: MediaPermissionSnapshot {
+                image: ToolPermissionBehavior::Allow,
+                video: ToolPermissionBehavior::Allow,
+                capabilities: ToolPermissionBehavior::Allow,
+            },
+            image_settings: Some(&image_cfg),
+            video_settings: None,
+            providers: &providers,
+            auth_store: &auth_store,
+            discovery_cache: &cache,
+            process_store: None,
+        };
+        let resp = execute_media_internal_tool(
+            &ctx,
+            dir.path(),
+            InternalToolExecutionRequest {
+                tool_id: "image-generation".to_string(),
+                input: serde_json::json!({"prompt": "draw a ship", "count": 1}),
+            },
+        );
+        assert!(resp.success, "expected success, got {:?}", resp.reason);
+    }
+
+    #[test]
+    fn media_internal_tool_denies_when_not_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let providers = puffer_provider_registry::ProviderRegistry::new();
+        let auth_store = puffer_provider_registry::AuthStore::default();
+        let cache = puffer_media::ExactMediaDiscoveryCache::empty();
+        let ctx = MediaCapabilityContext {
+            permissions: MediaPermissionSnapshot {
+                image: ToolPermissionBehavior::Ask,
+                video: ToolPermissionBehavior::Allow,
+                capabilities: ToolPermissionBehavior::Allow,
+            },
+            image_settings: None,
+            video_settings: None,
+            providers: &providers,
+            auth_store: &auth_store,
+            discovery_cache: &cache,
+            process_store: None,
+        };
+        let resp = execute_media_internal_tool(
+            &ctx,
+            dir.path(),
+            InternalToolExecutionRequest {
+                tool_id: "image-generation".to_string(),
+                input: serde_json::json!({"prompt": "x"}),
+            },
+        );
+        assert!(!resp.success);
+        assert!(resp.reason.unwrap().contains("single command"));
+    }
+
+    #[test]
+    fn media_internal_tool_rejects_non_media_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let providers = puffer_provider_registry::ProviderRegistry::new();
+        let auth_store = puffer_provider_registry::AuthStore::default();
+        let cache = puffer_media::ExactMediaDiscoveryCache::empty();
+        let ctx = MediaCapabilityContext {
+            permissions: MediaPermissionSnapshot {
+                image: ToolPermissionBehavior::Allow,
+                video: ToolPermissionBehavior::Allow,
+                capabilities: ToolPermissionBehavior::Allow,
+            },
+            image_settings: None,
+            video_settings: None,
+            providers: &providers,
+            auth_store: &auth_store,
+            discovery_cache: &cache,
+            process_store: None,
+        };
+        let resp = execute_media_internal_tool(
+            &ctx,
+            dir.path(),
+            InternalToolExecutionRequest {
+                tool_id: "email".to_string(),
+                input: serde_json::json!({}),
+            },
+        );
+        assert!(!resp.success);
+        assert!(resp.reason.unwrap().contains("single command"));
     }
 }
