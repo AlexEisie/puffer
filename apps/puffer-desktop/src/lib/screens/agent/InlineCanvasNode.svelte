@@ -10,7 +10,7 @@
     updateConfig,
   } from "../../api/desktop";
   import { availableMediaCapabilities } from "./mediaCapabilityState";
-  import { mediaPreview, mediaThumb, videoItemsToResolve } from "./mediaPickerItems";
+  import { mediaItemView, videoItemsToResolve } from "./mediaPickerItems";
   import {
     providerOptions,
     modelOptions,
@@ -188,22 +188,29 @@
   function closePreview() { previewItem = null; }
 
   // --- mediaPicker: video access URLs, resolved once per item id ---
-  // A present key means the id is resolved; "" is the failure sentinel so a
-  // non-available/throwing access RPC is never retried. Reassigned (not mutated)
-  // so Svelte tracks it, mirroring MessageAttachmentPreviewStrip's previewUrls.
+  // `videoUrls`: a present key means the id is resolved; "" is the failure
+  // sentinel so a non-available/throwing access RPC is never retried. Reassigned
+  // (not mutated) so Svelte tracks it, mirroring MessageAttachmentPreviewStrip.
+  // `videoResolving`: in-flight ids, kept off the reactive map so a sibling clip
+  // completing (which re-runs the effect) does not re-issue an RPC for ids whose
+  // resolution has started but not yet landed in `videoUrls`.
   let videoUrls = $state<Record<string, string>>({});
+  const videoResolving = new Set<string>();
   async function resolveVideoUrl(itemId: string, path: string) {
+    videoResolving.add(itemId);
     try {
       const access = await createFileMediaAccess(path);
       videoUrls = { ...videoUrls, [itemId]: access.state === "available" ? access.url : "" };
     } catch {
       videoUrls = { ...videoUrls, [itemId]: "" };
+    } finally {
+      videoResolving.delete(itemId);
     }
   }
   $effect(() => {
     if (componentType !== "mediaPicker") return;
     for (const { id: itemId, path } of videoItemsToResolve(items(node.items), videoUrls)) {
-      void resolveVideoUrl(itemId, path);
+      if (!videoResolving.has(itemId)) void resolveVideoUrl(itemId, path);
     }
   });
 
@@ -535,7 +542,7 @@
 {:else if componentType === "mediaPicker"}
   <div class="ic-media-picker">
     {#each items(node.items) as item, i (`mp-${i}`)}
-      {@const thumb = mediaThumb(item, videoUrls)}
+      {@const thumb = mediaItemView(item, videoUrls)}
       <div class="ic-media-cell" class:selected={isPicked(item)}>
         <input
           type="checkbox"
@@ -566,7 +573,7 @@
     {/each}
   </div>
   {#if previewItem}
-    {@const preview = mediaPreview(previewItem, videoUrls)}
+    {@const preview = mediaItemView(previewItem, videoUrls)}
     <CanvasMediaPreview
       kind={preview.kind}
       url={preview.url}

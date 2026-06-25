@@ -15,7 +15,7 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-<div class="cip-overlay" role="dialog" aria-modal="true" aria-label="Character Preview">
+<div class="cip-overlay" role="dialog" aria-modal="true" aria-label="Media preview">
   <!-- Full-bleed button behind the panel: clicking outside the panel closes. -->
   <button type="button" class="cip-backdrop" aria-label="Close preview" onclick={onClose}></button>
   <div class="cip-panel">

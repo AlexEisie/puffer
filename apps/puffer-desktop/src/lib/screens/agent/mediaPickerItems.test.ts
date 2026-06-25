@@ -3,8 +3,7 @@ import {
   mediaItemKind,
   mediaItemId,
   videoItemsToResolve,
-  mediaThumb,
-  mediaPreview,
+  mediaItemView,
 } from "./mediaPickerItems";
 
 describe("mediaItemKind", () => {
@@ -57,9 +56,9 @@ describe("videoItemsToResolve", () => {
   });
 });
 
-describe("mediaThumb", () => {
+describe("mediaItemView", () => {
   it("image item renders its url and is always available", () => {
-    expect(mediaThumb({ kind: "image", url: "http://img/b.png" }, {})).toEqual({
+    expect(mediaItemView({ kind: "image", url: "http://img/b.png" }, {})).toEqual({
       kind: "image",
       url: "http://img/b.png",
       available: true,
@@ -67,27 +66,12 @@ describe("mediaThumb", () => {
   });
   it("video item with a resolved url is available", () => {
     expect(
-      mediaThumb({ id: "a", kind: "video", path: "x/a.mp4" }, { a: "http://t/a" })
+      mediaItemView({ id: "a", kind: "video", path: "x/a.mp4" }, { a: "http://t/a" })
     ).toEqual({ kind: "video", url: "http://t/a", available: true });
   });
   it("video item that is unresolved or failed is unavailable with no url", () => {
     const item = { id: "a", kind: "video", path: "x/a.mp4" };
-    expect(mediaThumb(item, {})).toEqual({ kind: "video", url: "", available: false });
-    expect(mediaThumb(item, { a: "" })).toEqual({ kind: "video", url: "", available: false });
-  });
-});
-
-describe("mediaPreview", () => {
-  it("passes image url straight through", () => {
-    expect(mediaPreview({ kind: "image", url: "http://img/b.png" }, {})).toEqual({
-      kind: "image",
-      url: "http://img/b.png",
-    });
-  });
-  it("passes the resolved video url, or empty when unresolved/failed", () => {
-    const item = { id: "a", kind: "video", path: "x/a.mp4" };
-    expect(mediaPreview(item, { a: "http://t/a" })).toEqual({ kind: "video", url: "http://t/a" });
-    expect(mediaPreview(item, {})).toEqual({ kind: "video", url: "" });
-    expect(mediaPreview(item, { a: "" })).toEqual({ kind: "video", url: "" });
+    expect(mediaItemView(item, {})).toEqual({ kind: "video", url: "", available: false });
+    expect(mediaItemView(item, { a: "" })).toEqual({ kind: "video", url: "", available: false });
   });
 });

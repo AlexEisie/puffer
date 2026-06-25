@@ -50,29 +50,17 @@ export function videoItemsToResolve(
   return out;
 }
 
-export type MediaThumb =
-  | { kind: "image"; url: string; available: true }
-  | { kind: "video"; url: string; available: boolean };
+/** Resolved render state of one media item, shared by the grid thumbnail and the
+ *  click-to-open preview popup: its kind, the URL to load, and whether it can be
+ *  interacted with. An image always renders from its `url`; a video is available
+ *  only once a non-empty access URL is resolved, otherwise the cell is shown
+ *  disabled ("preview unavailable") and never opens an empty popup. */
+export type MediaItemView = { kind: MediaItemKind; url: string; available: boolean };
 
-/** Thumbnail render state for one item. Images always render (matching the
- *  prior behaviour); a video is only available once a non-empty access URL is
- *  resolved, otherwise the cell shows a disabled "preview unavailable" state. */
-export function mediaThumb(item: MediaPickerItem, resolved: ResolvedVideoUrls): MediaThumb {
+export function mediaItemView(item: MediaPickerItem, resolved: ResolvedVideoUrls): MediaItemView {
   if (mediaItemKind(item) === "video") {
     const url = asString(resolved[mediaItemId(item)]);
     return { kind: "video", url, available: url.length > 0 };
   }
   return { kind: "image", url: asString(item.url), available: true };
-}
-
-export type MediaPreview = { kind: MediaItemKind; url: string };
-
-/** Props for the click-to-open `CanvasMediaPreview` popup: an image's url is
- *  passed straight through; a video uses its resolved access URL (empty when
- *  unresolved/failed, in which case the popup simply has nothing to play). */
-export function mediaPreview(item: MediaPickerItem, resolved: ResolvedVideoUrls): MediaPreview {
-  if (mediaItemKind(item) === "video") {
-    return { kind: "video", url: asString(resolved[mediaItemId(item)]) };
-  }
-  return { kind: "image", url: asString(item.url) };
 }
