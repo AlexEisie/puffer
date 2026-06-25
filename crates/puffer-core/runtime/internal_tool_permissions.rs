@@ -32,6 +32,21 @@ pub(crate) struct MediaPermissionSnapshot {
     pub capabilities: ToolPermissionBehavior,
 }
 
+impl MediaPermissionSnapshot {
+    /// Promotes each media kind the batch demands to `Allow` when `authorize`
+    /// approves it. `authorize(tool_id)` is the injected permission check
+    /// (`true` = approved). Pure aside from the injected closure.
+    fn authorize_media_batch(&mut self, commands: &[&str], mut authorize: impl FnMut(&str) -> bool) {
+        let demand = batch_media_demand(commands, self);
+        if demand.image && authorize("image-generation") {
+            self.image = ToolPermissionBehavior::Allow;
+        }
+        if demand.video && authorize("video-generation") {
+            self.video = ToolPermissionBehavior::Allow;
+        }
+    }
+}
+
 /// Shared-ref context for executing media tools from parallel workers (no &mut AppState).
 pub(crate) struct MediaCapabilityContext<'a> {
     pub permissions: MediaPermissionSnapshot,
@@ -100,6 +115,34 @@ impl MediaCapabilitySnapshot {
             discovery_cache: &self.discovery_cache,
             process_store: Some(&self.process_store),
         }
+    }
+
+    /// Prompts once per demanded media kind (reusing `resolve_internal_tool_permission`,
+    /// which loads the permission context, prompts on `Ask`, and persists the session
+    /// grant on "Always allow"), upgrading this batch's snapshot on approval. Runs on the
+    /// main thread before `thread::scope`; the `&mut AppState` borrow ends before workers
+    /// capture shared refs.
+    pub(crate) fn authorize_media_batch(
+        &mut self,
+        state: &mut AppState,
+        resources: &LoadedResources,
+        registry: &ToolRegistry,
+        cwd: &Path,
+        commands: &[&str],
+    ) {
+        self.permissions.authorize_media_batch(commands, |tool_id| {
+            resolve_internal_tool_permission(
+                state,
+                resources,
+                registry,
+                cwd,
+                InternalToolPermissionRequest {
+                    tool_id: tool_id.to_string(),
+                    input: Value::Null,
+                },
+            )
+            .is_allowed()
+        });
     }
 }
 
@@ -1093,5 +1136,42 @@ mod tests {
         // generated_media_internal_command_kind rejects unquoted ; | & — no classification.
         let d = batch_media_demand(&["imagegen '{}' ; imagegen '{}'"], &snapshot_all_ask());
         assert!(d.is_empty());
+    }
+
+    #[test]
+    fn gate_upgrades_demanded_kind_when_authorized() {
+        let mut perms = snapshot_all_ask();
+        perms.authorize_media_batch(&["imagegen '{}'"], |_| true);
+        assert_eq!(perms.image, ToolPermissionBehavior::Allow);
+        assert_eq!(perms.video, ToolPermissionBehavior::Ask, "video not demanded → unchanged");
+    }
+
+    #[test]
+    fn gate_leaves_kind_when_denied() {
+        let mut perms = snapshot_all_ask();
+        perms.authorize_media_batch(&["imagegen '{}'"], |_| false);
+        assert_eq!(perms.image, ToolPermissionBehavior::Ask);
+    }
+
+    #[test]
+    fn gate_no_call_when_no_demand() {
+        let mut perms = snapshot_all_ask();
+        let mut calls = 0;
+        perms.authorize_media_batch(&["ls"], |_| {
+            calls += 1;
+            true
+        });
+        assert_eq!(calls, 0, "authorize never invoked without demand");
+        assert_eq!(perms.image, ToolPermissionBehavior::Ask);
+    }
+
+    #[test]
+    fn gate_upgrades_only_authorized_kind_in_mixed_batch() {
+        let mut perms = snapshot_all_ask();
+        perms.authorize_media_batch(&["imagegen '{}'", "videogen '{}'"], |tool_id| {
+            tool_id == "image-generation"
+        });
+        assert_eq!(perms.image, ToolPermissionBehavior::Allow);
+        assert_eq!(perms.video, ToolPermissionBehavior::Ask);
     }
 }
