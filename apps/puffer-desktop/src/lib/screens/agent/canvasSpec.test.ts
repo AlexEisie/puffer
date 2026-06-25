@@ -10,10 +10,15 @@ describe("normalizeCanvasSpec", () => {
     expect((out?.body as unknown[]).length).toBe(1);
   });
 
-  it("leaves a real array body unchanged", () => {
+  it("leaves a real array body unchanged (same reference, no copy)", () => {
     const body = [{ type: "text", value: "hi" }];
     const out = normalizeCanvasSpec({ title: "T", body });
-    expect(out?.body).toEqual(body);
+    expect(out?.body).toBe(body);
+  });
+
+  it("leaves a spec without a body unchanged", () => {
+    const spec = { title: "T" };
+    expect(normalizeCanvasSpec(spec)).toBe(spec);
   });
 
   it("leaves a non-JSON string body unchanged (not a canvas)", () => {

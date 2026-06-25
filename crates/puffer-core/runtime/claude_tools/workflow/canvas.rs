@@ -410,11 +410,11 @@ fn normalize_spec(mut input: Value) -> Result<Value> {
 /// Executes the `Canvas` workflow tool. `input` is the canvas spec itself.
 pub fn execute_canvas(state: &mut AppState, cwd: &Path, input: Value) -> Result<String> {
     let input = normalize_spec(input)?;
-    let node_count = input
-        .get("body")
-        .and_then(Value::as_array)
-        .map(|n| n.len())
-        .unwrap_or(0);
+    // `normalize_spec` guarantees `body` is a JSON array, so this never panics.
+    let node_count = input["body"]
+        .as_array()
+        .expect("normalize_spec guarantees body is an array")
+        .len();
     let stamp = now_ms();
     let canvas_id = canvas_id_from_stamp(stamp);
     let bridge = resolve_bridge(&state.session.id.to_string()).map(|mut bridge| {
