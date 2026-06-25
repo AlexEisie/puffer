@@ -404,6 +404,12 @@ pub(crate) fn execute_parallel_bash_with_media_broker(
 /// needed is passed by value/reference; no mutable application state is
 /// touched, enabling concurrent execution via `std::thread::scope`.
 ///
+/// `Bash` is special-cased: it runs in-process with its own media broker via
+/// [`execute_parallel_bash_with_media_broker`] (so subprocess imagegen/videogen
+/// can call back), never through the broker-less runner. `media_ctx` is the
+/// shared media-capability context the caller builds when the batch contains a
+/// permitted Bash; it is `None` for Bash-free batches.
+///
 /// For tools in `runner_adapter::is_runner_supported(...)` (currently
 /// `Glob | Grep | WebFetch` in the parallel path), execution is routed through the supplied
 /// `Arc<dyn ToolRunner>` so a `RemoteToolRunner` can intercept parallel
@@ -422,9 +428,14 @@ pub(crate) fn execute_parallel_tool(
     registry: &ToolRegistry,
     provider_context: &ProviderToolContext<'_>,
     runner: &Arc<dyn ToolRunner>,
-    media_ctx: &super::internal_tool_permissions::MediaCapabilityContext<'_>,
+    media_ctx: Option<&super::internal_tool_permissions::MediaCapabilityContext<'_>>,
 ) -> Result<ToolExecutionResult> {
     if definition.id == "Bash" {
+        // The caller builds the media context whenever a permitted Bash is in the
+        // batch, so this is always present here; guard rather than panic.
+        let media_ctx = media_ctx.ok_or_else(|| {
+            anyhow::anyhow!("parallel Bash dispatched without a media-capability context")
+        })?;
         return execute_parallel_bash_with_media_broker(
             definition, cwd, session_id, input, media_ctx,
         );

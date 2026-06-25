@@ -45,6 +45,64 @@ pub(crate) struct MediaCapabilityContext<'a> {
     >,
 }
 
+/// Owned media-capability data captured from `AppState` before a parallel batch
+/// enters `thread::scope`. Borrow it into a [`MediaCapabilityContext`] per call
+/// site with [`Self::context`]; the owned value must outlive the scope.
+pub(crate) struct MediaCapabilitySnapshot {
+    permissions: MediaPermissionSnapshot,
+    image_settings: Option<puffer_config::MediaGenerationConfig>,
+    video_settings: Option<puffer_config::MediaGenerationConfig>,
+    discovery_cache: ExactMediaDiscoveryCache,
+    process_store: std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>,
+}
+
+impl MediaCapabilitySnapshot {
+    /// Captures the media-capability inputs from `state` once. Reads only shared
+    /// state (config, discovery cache, process store) plus the permission policy,
+    /// so it never needs `&mut AppState`.
+    pub(crate) fn capture(
+        cwd: &Path,
+        resources: &LoadedResources,
+        state: &AppState,
+        registry: &ToolRegistry,
+    ) -> anyhow::Result<Self> {
+        let perm_ctx = crate::permissions::load_runtime_permission_context_with_inputs(
+            cwd,
+            resources,
+            state,
+            crate::permissions::RuntimePermissionInputs::default(),
+        )?;
+        Ok(Self {
+            permissions: resolve_media_permission_snapshot(&perm_ctx, registry),
+            image_settings: state.config.media.image.clone(),
+            video_settings: state.config.media.video.clone(),
+            discovery_cache: state
+                .exact_media_discovery_cache
+                .clone()
+                .unwrap_or_else(ExactMediaDiscoveryCache::empty),
+            process_store: state.process_store.clone(),
+        })
+    }
+
+    /// Borrows this snapshot, together with the shared provider/auth registries,
+    /// into a context the parallel workers share.
+    pub(crate) fn context<'a>(
+        &'a self,
+        providers: &'a ProviderRegistry,
+        auth_store: &'a AuthStore,
+    ) -> MediaCapabilityContext<'a> {
+        MediaCapabilityContext {
+            permissions: self.permissions,
+            image_settings: self.image_settings.as_ref(),
+            video_settings: self.video_settings.as_ref(),
+            providers,
+            auth_store,
+            discovery_cache: &self.discovery_cache,
+            process_store: Some(&self.process_store),
+        }
+    }
+}
+
 /// Resolves the three media tool permission decisions once, before parallel dispatch.
 pub(crate) fn resolve_media_permission_snapshot(
     perm_ctx: &crate::permissions::RuntimePermissionContext,
@@ -78,64 +136,59 @@ pub(crate) fn execute_media_internal_tool(
 ) -> InternalToolExecutionResponse {
     use crate::runtime::claude_tools::workflow::{image_generation, media_capabilities, video_generation};
     let canonical = canonical_tool_name(&request.tool_id);
-    let behavior = match canonical.as_str() {
-        "imagegeneration" => ctx.permissions.image,
-        "videogeneration" => ctx.permissions.video,
-        "mediacapabilities" => ctx.permissions.capabilities,
-        other => {
-            return InternalToolExecutionResponse::failure(format!(
-                "internal tool `{other}` is not available in a parallel batch; run it as a single command"
-            ));
-        }
-    };
+    match canonical.as_str() {
+        "imagegeneration" => run_media_tool(ctx.permissions.image, &canonical, || {
+            image_generation::execute_image_generation(
+                ctx.image_settings,
+                cwd,
+                request.input,
+                Some(image_generation::ImageGenerationMediaContext {
+                    providers: ctx.providers,
+                    auth_store: ctx.auth_store,
+                    discovery_cache: ctx.discovery_cache,
+                }),
+            )
+        }),
+        "videogeneration" => run_media_tool(ctx.permissions.video, &canonical, || {
+            video_generation::execute_video_generation(
+                ctx.video_settings,
+                cwd,
+                request.input,
+                Some(video_generation::VideoGenerationMediaContext {
+                    providers: ctx.providers,
+                    auth_store: ctx.auth_store,
+                    discovery_cache: ctx.discovery_cache,
+                }),
+            )
+        }),
+        "mediacapabilities" => run_media_tool(ctx.permissions.capabilities, &canonical, || {
+            media_capabilities::execute_media_capabilities(
+                ctx.providers,
+                ctx.auth_store,
+                ctx.discovery_cache,
+                request.input,
+            )
+        }),
+        other => InternalToolExecutionResponse::failure(format!(
+            "internal tool `{other}` is not available in a parallel batch; run it as a single command"
+        )),
+    }
+}
+
+/// Runs a media tool only when its pre-resolved permission is `Allow`, mapping
+/// the result (and any diagnostic) into a wire response. Ask/Deny short-circuit
+/// with guidance to run the tool as a single, non-parallel command.
+fn run_media_tool(
+    behavior: ToolPermissionBehavior,
+    canonical: &str,
+    run: impl FnOnce() -> anyhow::Result<String>,
+) -> InternalToolExecutionResponse {
     if !matches!(behavior, ToolPermissionBehavior::Allow) {
         return InternalToolExecutionResponse::failure(format!(
             "{canonical} requires approval; run it as a single command"
         ));
     }
-    let result = match canonical.as_str() {
-        "imagegeneration" => image_generation::execute_image_generation(
-            ctx.image_settings,
-            cwd,
-            request.input,
-            Some(image_generation::ImageGenerationMediaContext {
-                providers: ctx.providers,
-                auth_store: ctx.auth_store,
-                discovery_cache: ctx.discovery_cache,
-            }),
-        ),
-        "videogeneration" => video_generation::execute_video_generation(
-            ctx.video_settings,
-            cwd,
-            request.input,
-            Some(video_generation::VideoGenerationMediaContext {
-                providers: ctx.providers,
-                auth_store: ctx.auth_store,
-                discovery_cache: ctx.discovery_cache,
-            }),
-        ),
-        "mediacapabilities" => media_capabilities::execute_media_capabilities(
-            ctx.providers,
-            ctx.auth_store,
-            ctx.discovery_cache,
-            request.input,
-        ),
-        _ => unreachable!("behavior match already filtered non-media tools"),
-    };
-    match result {
-        Ok(output) => InternalToolExecutionResponse::success(output),
-        Err(error) => {
-            let reason = format!("{error:#}");
-            if let Some(diagnostic) = puffer_media::media_failure_diagnostic(&error) {
-                let fallback = reason.clone();
-                let value = serde_json::to_value(diagnostic)
-                    .unwrap_or_else(|_| serde_json::json!({ "error": fallback }));
-                InternalToolExecutionResponse::failure_with_diagnostic(reason, value)
-            } else {
-                InternalToolExecutionResponse::failure(reason)
-            }
-        }
-    }
+    internal_tool_execution_response(run())
 }
 
 /// Resolves one structured permission request from a first-party internal tool.
@@ -163,7 +216,7 @@ pub(crate) fn execute_internal_tool_request(
     cwd: &Path,
     request: InternalToolExecutionRequest,
 ) -> InternalToolExecutionResponse {
-    match execute_internal_tool_request_result(
+    internal_tool_execution_response(execute_internal_tool_request_result(
         state,
         resources,
         registry,
@@ -172,7 +225,15 @@ pub(crate) fn execute_internal_tool_request(
         discovery_cache,
         cwd,
         request,
-    ) {
+    ))
+}
+
+/// Maps an internal media tool result into a wire response, preserving media
+/// failure diagnostics. Shared by the serial and parallel execution paths.
+fn internal_tool_execution_response(
+    result: anyhow::Result<String>,
+) -> InternalToolExecutionResponse {
+    match result {
         Ok(output) => InternalToolExecutionResponse::success(output),
         Err(error) => {
             let reason = format!("{error:#}");

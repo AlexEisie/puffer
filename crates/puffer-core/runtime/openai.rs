@@ -155,34 +155,25 @@ pub(super) fn execute_openai_tool_calls(
     // active `ToolRunner` (e.g. `RemoteToolRunner`) without touching `state`.
     let runner = state.tool_runner.clone();
 
-    // Build the media-capability context for parallel Bash workers.
-    // All owned locals must be declared before `thread::scope` so they
-    // outlive the worker closures. `auth_store` is `&mut AuthStore`;
-    // we reborrow it as `&AuthStore` here — NLL ends the `&mut` borrow first.
-    let media_perm_ctx = crate::permissions::load_runtime_permission_context_with_inputs(
-        cwd, resources, state, crate::permissions::RuntimePermissionInputs::default(),
-    )?;
-    let media_permissions =
-        super::internal_tool_permissions::resolve_media_permission_snapshot(&media_perm_ctx, registry);
-    let media_image_cfg = state.config.media.image.clone();
-    let media_video_cfg = state.config.media.video.clone();
-    let media_discovery_cache = state
-        .exact_media_discovery_cache
-        .clone()
-        .unwrap_or_else(puffer_media::ExactMediaDiscoveryCache::empty);
-    let media_process_store = state.process_store.clone();
-    let media_providers: &puffer_provider_registry::ProviderRegistry = providers;
-    let media_auth_store: &puffer_provider_registry::AuthStore = auth_store;
-    let media_ctx = super::internal_tool_permissions::MediaCapabilityContext {
-        permissions: media_permissions,
-        image_settings: media_image_cfg.as_ref(),
-        video_settings: media_video_cfg.as_ref(),
-        providers: media_providers,
-        auth_store: media_auth_store,
-        discovery_cache: &media_discovery_cache,
-        process_store: Some(&media_process_store),
+    // Media-capability context for parallel Bash workers, built only when the
+    // batch contains a permitted Bash call (avoids a permission-file read on
+    // Bash-free batches). The owned snapshot outlives `thread::scope`;
+    // `auth_store` (`&mut`) is reborrowed as `&` inside `context()` — NLL ends
+    // the `&mut` borrow first.
+    let has_permitted_bash = tool_calls.iter().enumerate().any(|(i, tc)| {
+        tc.name == "Bash" && matches!(permissions[i], PermissionOutcome::Allowed(_))
+    });
+    let media_snapshot = if has_permitted_bash {
+        Some(super::internal_tool_permissions::MediaCapabilitySnapshot::capture(
+            cwd, resources, state, registry,
+        )?)
+    } else {
+        None
     };
-    let media_ctx_ref = &media_ctx;
+    let media_ctx = media_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.context(providers, auth_store));
+    let media_ctx_ref = media_ctx.as_ref();
 
     // Pre-allocate results array; each slot filled by either parallel or serial exec.
     let mut results: Vec<Option<(String, bool, Value)>> = vec![None; tool_calls.len()];
