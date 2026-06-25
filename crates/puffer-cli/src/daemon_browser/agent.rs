@@ -14,7 +14,8 @@ use super::params::{optional_u32, required_string, required_string_array};
 use super::ref_resolution::{
     fill_expression, focus_expression, hosted_fill_focus_check_expression,
     hosted_fill_point_expression, in_frame_prepare_fill_fn, in_frame_readback_fn,
-    in_frame_select_fn, in_frame_set_checked_fn, scroll_into_view_expression, select_expression,
+    in_frame_select_fn, in_frame_set_checked_fn, main_doc_focus_clear_expression,
+    main_doc_readback_expression, scroll_into_view_expression, select_expression,
     set_checkable_state_expression, target_point_expression, upload_input_handle_expression,
 };
 use super::screenshot::{parse_agent_screenshot_options, BrowserElementRef};
@@ -529,23 +530,48 @@ impl BrowserRegistry {
         if target.in_frame {
             return in_frame_fill(&session, &target, text);
         }
-        let outcome = session.evaluate(fill_expression(&target, text)?)?.value;
-        let hosted = outcome
-            .get("hostedFrameFill")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if !hosted {
-            return Ok(json!({ "ok": true }));
+        // Fast path: the native value-setter + dispatched input/change events
+        // fill most fields. `fill_expression` reads the value back synchronously
+        // and throws "value did not stick" when the set was ignored. A
+        // keystroke-guarded MAIN-DOCUMENT input (e.g. Olive Young #cardNo)
+        // rejects any value not produced by genuine per-character keystrokes, so
+        // it either throws here or briefly accepts and reverts. In both cases
+        // fall back to a per-character trusted-keystroke fill (#675).
+        match session.evaluate(fill_expression(&target, text)?) {
+            Ok(evaluation) => {
+                let outcome = evaluation.value;
+                let hosted = outcome
+                    .get("hostedFrameFill")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if hosted {
+                    let x = outcome
+                        .get("x")
+                        .and_then(Value::as_f64)
+                        .context("hosted frame fill point missing x")?;
+                    let y = outcome
+                        .get("y")
+                        .and_then(Value::as_f64)
+                        .context("hosted frame fill point missing y")?;
+                    return hosted_frame_fill(&session, x, y, text);
+                }
+                // The synchronous in-page readback passed, but a keystroke-guarded
+                // input can accept the programmatic value and revert it a tick
+                // later. Re-read after a beat; if it reverted to empty, fall back
+                // to the keystroke path rather than reporting a false success.
+                if !text.is_empty() {
+                    thread::sleep(Duration::from_millis(120));
+                    if main_doc_field_is_empty(&session, &target)? {
+                        return main_doc_keystroke_fill(&session, &target, text);
+                    }
+                }
+                Ok(json!({ "ok": true }))
+            }
+            Err(err) if is_value_did_not_stick(&err) => {
+                main_doc_keystroke_fill(&session, &target, text)
+            }
+            Err(err) => Err(err),
         }
-        let x = outcome
-            .get("x")
-            .and_then(Value::as_f64)
-            .context("hosted frame fill point missing x")?;
-        let y = outcome
-            .get("y")
-            .and_then(Value::as_f64)
-            .context("hosted frame fill point missing y")?;
-        hosted_frame_fill(&session, x, y, text)
     }
 
     /// Selects one option in a native `<select>` ref from the last agent snapshot.
@@ -756,7 +782,7 @@ fn in_frame_fill(session: &BrowserSession, target: &BrowserElementRef, text: &st
     // insertText leaves the field empty at submit time even though it briefly
     // shows in the DOM (#656 follow-up).
     for ch in text.chars() {
-        type_in_frame_char(session, ch)?;
+        type_char(session, ch)?;
     }
     // Let the widget's re-render settle, then read the value back. Unlike a
     // top-document hosted fill, an in-frame field's value CAN be read — so a
@@ -789,28 +815,153 @@ fn in_frame_fill(session: &BrowserSession, target: &BrowserElementRef, text: &st
     }))
 }
 
-/// Types one character into the focused in-frame field as a real keystroke
-/// (`keyDown` carrying the text, then `keyUp`). `nativeVirtualKeyCode` is never
-/// set (see input.rs / #636), so this stays on the renderer-only path.
-fn type_in_frame_char(session: &BrowserSession, ch: char) -> Result<()> {
+/// True when a `fill_expression` failure is the in-page "value did not stick"
+/// rejection — the signal that a guarded/controlled main-document input ignored
+/// the native value-setter — rather than a transport/resolution error. Only
+/// that specific rejection arms the keystroke fallback (#675), so a missing ref
+/// or a CDP transport failure still surfaces unchanged.
+fn is_value_did_not_stick(err: &anyhow::Error) -> bool {
+    err.to_string().contains("value did not stick")
+}
+
+/// Re-reads a resolved main-document field's value and reports whether it is
+/// empty. Used to catch a guarded input that accepted the native value-setter
+/// synchronously but reverted it a tick later (#675).
+fn main_doc_field_is_empty(session: &BrowserSession, target: &BrowserElementRef) -> Result<bool> {
+    let readback = session.evaluate(main_doc_readback_expression(target)?)?.value;
+    let value = readback
+        .get("value")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    Ok(value.is_empty())
+}
+
+/// Fills a keystroke-guarded MAIN-DOCUMENT input (#675) the native value-setter
+/// path can't satisfy — the field reverts any value not produced by genuine
+/// per-character keystrokes (Olive Young #cardNo; same guard family as Amazon's
+/// APX in #656, but that fix only covered the cross-origin in-frame path).
+///
+/// Unlike the in-frame path, the top document CAN resolve this node, so the
+/// click is a real coordinate mouse press at the field's viewport center
+/// (trusted input the guard accepts) and focus/readback go through the
+/// top-document ref resolver. The sequence: real click to focus → verify
+/// `document.activeElement` IS the target and clear residual (#580 guard, so
+/// keystrokes can't leak into the wrong element) → triple-click select-all →
+/// one trusted keystroke per character → read the value back and BAIL HONESTLY
+/// if it still reverted (never a false success, #580).
+///
+/// This fires ONLY after the native-setter fill was rejected, so fields that
+/// fill fine keep the fast path and are unaffected.
+fn main_doc_keystroke_fill(
+    session: &BrowserSession,
+    target: &BrowserElementRef,
+    text: &str,
+) -> Result<Value> {
+    let (x, y) = main_doc_target_point(session, target)?;
+    // A real coordinate mouse press is trusted input the keystroke guard
+    // accepts; it also routes focus by browser-side hit testing exactly like a
+    // user click.
+    dispatch_agent_mouse_click(session, x, y, 1)?;
+    // Verify focus actually landed on the resolved field before sending any
+    // keystrokes, and clear any residual value so typing replaces rather than
+    // appends (#580: never let keystrokes leak into whatever else holds focus).
+    let prepared = session
+        .evaluate(main_doc_focus_clear_expression(target)?)?
+        .value;
+    let focused = prepared
+        .get("focused")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !focused {
+        bail!(
+            "fill failed: clicking the field at ({x:.0}, {y:.0}) did not move focus onto it (it \
+             may be covered by an overlay or still loading). No text was sent."
+        );
+    }
+    // Triple-click select-all clears anything the guard re-inserted after the
+    // programmatic clear above, so the keystrokes replace it.
+    dispatch_agent_mouse_click(session, x, y, 2)?;
+    dispatch_agent_mouse_click(session, x, y, 3)?;
+    for ch in text.chars() {
+        type_char(session, ch)?;
+    }
+    // Let the guard's re-render settle, then read the value back. If it still
+    // reverted to empty even after genuine per-character keystrokes, bail with
+    // the same honest error rather than claiming a fill that did not stick
+    // (#580: no false success).
+    thread::sleep(Duration::from_millis(180));
+    if !text.is_empty() && main_doc_field_is_empty(session, target)? {
+        bail!(
+            "fill failed: value did not stick — the field reverted to empty even after typing one \
+             trusted keystroke per character, so the page is guarding it in a way this fill cannot \
+             satisfy. No value stuck."
+        );
+    }
+    Ok(json!({
+        "ok": true,
+        "mode": "keystroke",
+        "note": "The field rejected a programmatic value, so it was filled by typing one trusted \
+                 keystroke per character; the value was read back and confirmed to persist."
+    }))
+}
+
+/// Resolves the current viewport center point of a resolved MAIN-DOCUMENT field
+/// for the keystroke fallback's real mouse click. Reuses the same
+/// scroll-into-view + clamp logic as the top-document target-point path so the
+/// click lands where the field is actually rendered.
+fn main_doc_target_point(session: &BrowserSession, target: &BrowserElementRef) -> Result<(f64, f64)> {
+    let evaluated = session.evaluate(target_point_expression(target)?)?.value;
+    let x = evaluated
+        .get("x")
+        .and_then(Value::as_f64)
+        .context("main-document field target point missing x")?;
+    let y = evaluated
+        .get("y")
+        .and_then(Value::as_f64)
+        .context("main-document field target point missing y")?;
+    if !x.is_finite() || !y.is_finite() {
+        bail!("main-document field target point is not finite; re-snapshot");
+    }
+    Ok((x, y))
+}
+
+/// Types one character into the focused field as a real keystroke (`keyDown`
+/// carrying the text, then `keyUp`). The dispatched events are top-level — they
+/// route to whatever frame currently holds focus — so this serves both the
+/// in-frame payment path (#656) and the main-document keystroke fallback (#675).
+/// `nativeVirtualKeyCode` is never set (see input.rs / #636), so this stays on
+/// the renderer-only path and never triggers OS key-repeat storms.
+fn type_char(session: &BrowserSession, ch: char) -> Result<()> {
+    let (key_down, key_up) = type_char_events(ch);
+    session.input(key_down)?;
+    session.input(key_up)
+}
+
+/// Builds the `keyDown`+`keyUp` pair for one trusted character keystroke. Pure
+/// so the #636 invariant (the `Key` variant carries no native key code, only a
+/// renderer-visible `code`/`text`) is unit-testable without a live browser. The
+/// `keyDown` carries the character as `text`; the `keyUp` carries none.
+fn type_char_events(ch: char) -> (BrowserInputEvent, BrowserInputEvent) {
     let key = ch.to_string();
     let code = dom_code_for_char(ch);
-    session.input(BrowserInputEvent::Key {
-        event_type: "keyDown".to_string(),
-        key: key.clone(),
-        code: code.clone(),
-        text: Some(key.clone()),
-        modifiers: 0,
-        commands: Vec::new(),
-    })?;
-    session.input(BrowserInputEvent::Key {
-        event_type: "keyUp".to_string(),
-        key,
-        code,
-        text: None,
-        modifiers: 0,
-        commands: Vec::new(),
-    })
+    (
+        BrowserInputEvent::Key {
+            event_type: "keyDown".to_string(),
+            key: key.clone(),
+            code: code.clone(),
+            text: Some(key.clone()),
+            modifiers: 0,
+            commands: Vec::new(),
+        },
+        BrowserInputEvent::Key {
+            event_type: "keyUp".to_string(),
+            key,
+            code,
+            text: None,
+            modifiers: 0,
+            commands: Vec::new(),
+        },
+    )
 }
 
 /// Best-effort DOM `code` (e.g. `Digit4`, `KeyA`) for a character so guarded
@@ -1368,5 +1519,70 @@ mod tests {
             tab_id_from_page(&json!({ "page": "t4" })).as_deref(),
             Some("t4")
         );
+    }
+
+    #[test]
+    fn dom_code_for_char_maps_digits_and_letters_only() {
+        assert_eq!(dom_code_for_char('4'), "Digit4");
+        assert_eq!(dom_code_for_char('a'), "KeyA");
+        assert_eq!(dom_code_for_char('Z'), "KeyZ");
+        // Non-alphanumeric characters carry no DOM code; the keystroke's text
+        // still inserts them.
+        assert_eq!(dom_code_for_char(' '), "");
+        assert_eq!(dom_code_for_char('-'), "");
+    }
+
+    #[test]
+    fn type_char_events_carry_text_on_keydown_only_and_no_native_key_code() {
+        // The keystroke pair drives both the in-frame (#656) and main-document
+        // (#675) trusted fills. The keyDown carries the character as text; the
+        // keyUp carries none. Crucially, the `Key` variant has no field for a
+        // native virtual key code at all, so it can never reach the OS NSEvent
+        // path that caused the macOS autorepeat storm (#636).
+        let (down, up) = type_char_events('4');
+        match down {
+            BrowserInputEvent::Key {
+                event_type,
+                key,
+                code,
+                text,
+                modifiers,
+                commands,
+            } => {
+                assert_eq!(event_type, "keyDown");
+                assert_eq!(key, "4");
+                assert_eq!(code, "Digit4");
+                assert_eq!(text.as_deref(), Some("4"));
+                assert_eq!(modifiers, 0);
+                assert!(commands.is_empty());
+            }
+            _ => panic!("expected keyDown Key event"),
+        }
+        match up {
+            BrowserInputEvent::Key {
+                event_type, text, ..
+            } => {
+                assert_eq!(event_type, "keyUp");
+                assert_eq!(text, None);
+            }
+            _ => panic!("expected keyUp Key event"),
+        }
+    }
+
+    #[test]
+    fn is_value_did_not_stick_arms_fallback_only_for_the_revert_rejection() {
+        // Only the in-page "value did not stick" rejection arms the keystroke
+        // fallback (#675). A missing ref or a transport error must surface
+        // unchanged so the fallback never fires for unrelated failures.
+        assert!(is_value_did_not_stick(&anyhow::anyhow!(
+            "fill failed: value did not stick (the field may be inside a cross-origin iframe \
+             or guarded by the page)"
+        )));
+        assert!(!is_value_did_not_stick(&anyhow::anyhow!(
+            "No element matched browser ref @e7"
+        )));
+        assert!(!is_value_did_not_stick(&anyhow::anyhow!(
+            "timed out waiting for browser evaluation"
+        )));
     }
 }
