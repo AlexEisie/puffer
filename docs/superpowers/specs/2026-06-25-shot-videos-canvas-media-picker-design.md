@@ -52,7 +52,16 @@ long-term value, stability, and performance; avoid over-engineering.
    frontend mints a streaming URL via the existing `createFileMediaAccess(path)`
    primitive (HTTP Range support). This is provider-independent and is the same
    path the app already uses to play in-workspace videos. (Chosen over relying
-   on `remoteSourceUrl`, which silently fails for local-only providers.)
+   on `remoteSourceUrl`, which silently fails for local-only providers.) Every
+   succeeded shot has a local `path` regardless of provider — `complete_video_job`
+   always downloads the clip to disk — so `path` is the universally-reliable key
+   and `remoteSourceUrl` is irrelevant to Stage 4.
+
+`create_file_media_access` is documented (`daemon.rs:1019`) as serving "arbitrary
+in-workspace video files … validates the path before inserting, so a ticket never
+escapes the workspace," with Range support (`PARTIAL_CONTENT`, tested at
+`daemon.rs:8363`). Clips live under cwd `.puffer/media/videos/`, so this is the
+intended, already-tested mechanism — no backend change and no new feasibility risk.
 
 ## Architecture
 
@@ -91,7 +100,9 @@ that the preview popup plays the clip.
   `<video src={accessUrl} muted preload="metadata" playsinline>` (Range +
   `metadata` preload fetches only enough for the first frame — the performance
   lever). Otherwise render the existing `<img src={item.url}>`. The checkbox,
-  selected state, and label markup are unchanged.
+  selected state, and label markup are unchanged. The `<video>` elements need the
+  same `<!-- svelte-ignore a11y_media_has_caption -->` the app already uses for
+  caption-less generated videos (`AttachmentOverlay.svelte:163`).
 - **Preview popup.** Generalize `CanvasImagePreview.svelte` → rename to
   `CanvasMediaPreview.svelte`, taking a `kind` prop. `kind === "video"` renders
   `<video src={accessUrl} controls autoplay>` (reusing the playback pattern
@@ -138,6 +149,10 @@ user checks/unchecks → submit → CanvasState read-back → kept shotIds → S
 - A shot whose `videogen` failed produces no clip → it is simply not added as an
   item; the skill reports failed shots plainly in turn text (existing failure
   contract), it does not fabricate a tile.
+- Access-ticket TTL: `createFileMediaAccess` returns an `expiresAtMs` ticket. For
+  a short review gate this is a non-issue; if the canvas sits open past the TTL a
+  later play may 404. We deliberately do **not** build re-minting (YAGNI) — note
+  it as a known limit. If it bites in practice, lazily re-resolve on preview-open.
 
 ## Testing
 
@@ -153,11 +168,11 @@ user checks/unchecks → submit → CanvasState read-back → kept shotIds → S
 - **Skill:** no Rust test asserts Stage 4 prompt text (verified via grep); the
   SKILL.md change is doc-only and validated by reading.
 
-## Verification before implementation
+## Verification (done during design)
 
-- Confirm `create_file_media_access` allowed-roots include workspace
-  `.puffer/media/videos` (clips live under cwd, so this should already hold —
-  confirm in the daemon handler before wiring).
+- `create_file_media_access` allowed-roots cover workspace media — confirmed via
+  the daemon handler comment and Range tests (`daemon.rs:1019`, `:8363`). No
+  open feasibility risk remains; nothing left to verify before wiring.
 
 ## Alternatives considered
 
