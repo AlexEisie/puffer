@@ -109,7 +109,7 @@ fn execute_internal_tool_request_result(
         "telegram" => "Telegram",
         "imagegeneration" => {
             return crate::runtime::claude_tools::workflow::image_generation::execute_image_generation(
-                state,
+                state.config.media.image.as_ref(),
                 cwd,
                 request.input,
                 Some(crate::runtime::claude_tools::workflow::image_generation::ImageGenerationMediaContext {
@@ -121,7 +121,7 @@ fn execute_internal_tool_request_result(
         }
         "videogeneration" => {
             return crate::runtime::claude_tools::workflow::video_generation::execute_video_generation(
-                state,
+                state.config.media.video.as_ref(),
                 cwd,
                 request.input,
                 Some(crate::runtime::claude_tools::workflow::video_generation::VideoGenerationMediaContext {

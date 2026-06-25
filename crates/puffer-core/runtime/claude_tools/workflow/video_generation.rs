@@ -1,3 +1,4 @@
+#[cfg(test)]
 use crate::AppState;
 use anyhow::{bail, Context, Result};
 use puffer_config::MediaGenerationConfig;
@@ -51,14 +52,14 @@ struct VideoRequest {
 
 /// Builds a text-to-video request from tool input and executes the media runtime.
 pub fn execute_video_generation(
-    state: &mut AppState,
+    video_settings: Option<&MediaGenerationConfig>,
     cwd: &Path,
     input: Value,
     media_context: Option<VideoGenerationMediaContext<'_>>,
 ) -> Result<String> {
     let parsed: VideoGenerationInput =
         serde_json::from_value(input).context("invalid VideoGeneration input")?;
-    let settings = state.config.media.video.as_ref();
+    let settings = video_settings;
     let request = build_video_request(cwd, parsed, settings)?;
     let media_context = media_context.context("VideoGeneration media runtime is not configured")?;
     let generated = generate_exact_media_with_cache(
@@ -579,7 +580,7 @@ mod tests {
         let mut state = test_state(None, dir.path());
 
         let error = execute_video_generation(
-            &mut state,
+            state.config.media.video.as_ref(),
             dir.path(),
             json!({"prompt": "make a ship launch video"}),
             Some(VideoGenerationMediaContext {
@@ -885,7 +886,7 @@ mod tests {
         let mut state = test_state(Some(video_settings()), dir.path());
 
         let output = execute_video_generation(
-            &mut state,
+            state.config.media.video.as_ref(),
             dir.path(),
             json!({
                 "prompt": "make a ship launch video",

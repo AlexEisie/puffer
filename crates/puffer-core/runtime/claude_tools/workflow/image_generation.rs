@@ -1,3 +1,4 @@
+#[cfg(test)]
 use crate::AppState;
 use anyhow::{bail, Context, Result};
 use puffer_config::MediaGenerationConfig;
@@ -78,14 +79,14 @@ struct ImageGenerationResult {
 
 /// Generates an image through the exact media runtime and returns artifact metadata.
 pub fn execute_image_generation(
-    state: &mut AppState,
+    image_settings: Option<&MediaGenerationConfig>,
     cwd: &Path,
     input: Value,
     media_context: Option<ImageGenerationMediaContext<'_>>,
 ) -> Result<String> {
     let parsed: ImageGenerationInput =
         serde_json::from_value(input).context("invalid ImageGeneration input")?;
-    let settings = state.config.media.image.as_ref();
+    let settings = image_settings;
     let request = build_image_request(cwd, parsed, settings)?;
     let media_context = media_context.context("ImageGeneration media runtime is not configured")?;
     let generated = generate_exact_image_with_cache(
@@ -882,7 +883,7 @@ mod tests {
         );
 
         let error = execute_image_generation(
-            &mut state,
+            state.config.media.image.as_ref(),
             dir.path(),
             json!({"prompt": "draw a ship", "count": 1}),
             Some(ImageGenerationMediaContext {
@@ -919,7 +920,7 @@ mod tests {
         );
 
         let error = execute_image_generation(
-            &mut state,
+            state.config.media.image.as_ref(),
             dir.path(),
             json!({"prompt": "draw a ship", "count": 1}),
             Some(ImageGenerationMediaContext {
@@ -954,7 +955,7 @@ mod tests {
         );
 
         let output = execute_image_generation(
-            &mut state,
+            state.config.media.image.as_ref(),
             dir.path(),
             json!({
                 "prompt": "draw a ship",

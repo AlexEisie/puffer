@@ -835,13 +835,13 @@ fn execute_workflow_tool_with_media_context(
         "update_goal" => workflow::goal::execute_update_goal(state, cwd, input),
         "HttpRequest" => workflow::http_request::execute_http_request(state, cwd, input),
         "ImageGeneration" => workflow::image_generation::execute_image_generation(
-            state,
+            state.config.media.image.as_ref(),
             cwd,
             input,
             image_media_context,
         ),
         "VideoGeneration" => workflow::video_generation::execute_video_generation(
-            state,
+            state.config.media.video.as_ref(),
             cwd,
             input,
             video_media_context,
