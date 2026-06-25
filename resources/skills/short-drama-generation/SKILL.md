@@ -115,15 +115,14 @@ to `.puffer/media/images|videos/` — you only reference them, never relocate th
    When you generated the per-character images, gate the choice: render `Canvas` with
    `canvasId = canvas-drama-<id>-stage3` and `title:"Character image"`, whose `body` is a
    single `mediaPicker` with no wrapping card: `{type:"mediaPicker", id:"pick", multi:true,
-   value:[<every item id>], items:[{id,url,label,description}, …]}` — one item per character,
-   `url` = that character's `remoteSourceUrl` (or its asset url on desktop),
-   `label` = the character name only, `description` = that character's sheet description.
-   `value` lists every item id so all characters are checked by default. Then end the turn.
-   In the next turn read it back with `CanvasState`: `pick` is the array of checked item ids;
-   map each back to its character via `characterRefs`. Checked
-   characters' urls become stage 4
-   `--image-reference`s; any unchecked character falls back to text-to-video for the shots
-   it appears in. There is no Regenerate toggle — to redo a character, generate it again and
+   value:[<every item id>], items:[{id,url,label,description}, …]}` — one item per character.
+   Set `url` to that character's `remoteSourceUrl` (or its asset url on desktop), `label` to
+   the character name only, and `description` to that character's sheet description. `value`
+   lists every item id, so all characters are checked by default. Then end the turn. In the
+   next turn read it back with `CanvasState`: `pick` is the array of checked item ids; map
+   each back to its character via `characterRefs`. Checked characters' urls become stage 4
+   `--image-reference`s; any unchecked character falls back to text-to-video for the shots it
+   appears in. There is no Regenerate toggle — to redo a character, generate it again and
    re-render this canvas.
 
 4. **Per-shot video.** For each shot in storyboard order, run one `videogen` command:
