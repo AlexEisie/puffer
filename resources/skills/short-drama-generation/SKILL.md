@@ -115,9 +115,13 @@ pre-existing drama directory. (Same session asked for a second drama → append 
    are `https://` or `asset://` URLs.
    - If present, use those URLs directly as `--image-reference` in stage 4. Do NOT
      generate images.
-   - If absent and the user wants character-consistent shots, **generate one image per character**:
-     collect the distinct character names from the confirmed storyboard's `characters`
-     column, and for each name run exactly one `imagegen` call.
+   - If absent and the user wants character-consistent shots, **generate one image per character,
+     in parallel**: collect the distinct character names from the confirmed storyboard's
+     `characters` column, and emit the per-character `imagegen` calls **together in a single
+     turn** so the backend runs them concurrently (one approval unblocks the whole batch).
+     Cap each turn at **5** `imagegen` calls; if there are more than 5 characters, send
+     successive turns of ≤5 (e.g. 7 characters → 5 then 2). Still exactly one `imagegen` per
+     character — never fold two characters into one call.
 
      **Square is carried by the prompt — never pass `--aspect`.** The reference image must
      read as square, but different image models support different ratio knobs and some
@@ -141,7 +145,8 @@ pre-existing drama directory. (Same session asked for a second drama → append 
      `imagegen --prompt "<that prompt>" --count 1 --provider <imgProvider> --model <imgModel>`.
      The `square 1:1` / white-background / full-body / no-text clauses are mandatory in
      every prompt and are the **sole** source of squareness — never add `--aspect`. One
-     call → one character → one image; N characters → N calls → N images.
+     call → one character → one image; the N (≤5 per turn) calls go out together as one
+     parallel batch, and you read every result back after the batch returns.
      Never combine multiple characters into one image. Make each character stylized /
      non-photorealistic (cartoon, 3D render, illustration): image-to-video providers
      (e.g. BytePlus) reject photoreal real-person images on moderation. For each image read
