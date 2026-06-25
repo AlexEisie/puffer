@@ -264,3 +264,61 @@ fn null_optional_read_fields_are_treated_as_absent() {
     assert!(!read_field_is_present(&input, "offset"));
     assert!(!read_field_is_present(&input, "limit"));
 }
+
+#[test]
+fn parallel_bash_media_broker_exposes_endpoint_to_child() {
+    use crate::runtime::internal_tool_permissions::{MediaCapabilityContext, MediaPermissionSnapshot};
+    use crate::permissions::ToolPermissionBehavior;
+    let dir = tempfile::tempdir().unwrap();
+    let providers = puffer_provider_registry::ProviderRegistry::new();
+    let auth_store = puffer_provider_registry::AuthStore::default();
+    let cache = puffer_media::ExactMediaDiscoveryCache::empty();
+    let ctx = MediaCapabilityContext {
+        permissions: MediaPermissionSnapshot { image: ToolPermissionBehavior::Allow, video: ToolPermissionBehavior::Allow, capabilities: ToolPermissionBehavior::Allow },
+        image_settings: None, video_settings: None,
+        providers: &providers, auth_store: &auth_store, discovery_cache: &cache, process_store: None,
+    };
+    let def = puffer_tools::builtin_tool_definition(puffer_tools::ToolKind::Bash);
+    let result = execute_parallel_bash_with_media_broker(
+        &def,
+        dir.path(),
+        &uuid::Uuid::nil(),
+        serde_json::json!({
+            "command": "printf '%s' \"$PUFFER_INTERNAL_PERMISSION_ADDR\"",
+            "timeout": 5000, "run_in_background": false, "tty": false
+        }),
+        &ctx,
+    )
+    .expect("bash exec");
+    let printed = result.output.stdout;
+    assert!(printed.contains("127.0.0.1:"), "child did not see broker endpoint: {printed:?}");
+}
+
+#[test]
+fn parallel_bash_media_broker_supports_concurrent_workers() {
+    use crate::runtime::internal_tool_permissions::{MediaCapabilityContext, MediaPermissionSnapshot};
+    use crate::permissions::ToolPermissionBehavior;
+    let dir = tempfile::tempdir().unwrap();
+    let providers = puffer_provider_registry::ProviderRegistry::new();
+    let auth_store = puffer_provider_registry::AuthStore::default();
+    let cache = puffer_media::ExactMediaDiscoveryCache::empty();
+    let def = puffer_tools::builtin_tool_definition(puffer_tools::ToolKind::Bash);
+    let ctx = MediaCapabilityContext {
+        permissions: MediaPermissionSnapshot { image: ToolPermissionBehavior::Allow, video: ToolPermissionBehavior::Allow, capabilities: ToolPermissionBehavior::Allow },
+        image_settings: None, video_settings: None,
+        providers: &providers, auth_store: &auth_store, discovery_cache: &cache, process_store: None,
+    };
+    std::thread::scope(|s| {
+        let h: Vec<_> = (0..2).map(|_| s.spawn(|| {
+            execute_parallel_bash_with_media_broker(
+                &def, dir.path(), &uuid::Uuid::nil(),
+                serde_json::json!({"command":"printf '%s' \"$PUFFER_INTERNAL_PERMISSION_ADDR\"","timeout":5000,"run_in_background":false,"tty":false}),
+                &ctx,
+            ).expect("bash exec")
+        })).collect();
+        for handle in h {
+            let out = handle.join().unwrap().output.stdout;
+            assert!(out.contains("127.0.0.1:"), "worker missing endpoint: {out:?}");
+        }
+    });
+}

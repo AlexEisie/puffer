@@ -361,6 +361,42 @@ pub(crate) fn execute_tool(
     }
 }
 
+/// Runs a parallel-batch `Bash` in-process with its own internal-tool broker so
+/// that subprocess media tools (imagegen/videogen) can call back and execute
+/// concurrently. The broker handler is media-only and uses shared references.
+pub(crate) fn execute_parallel_bash_with_media_broker(
+    definition: &ToolDefinition,
+    cwd: &Path,
+    session_id: &Uuid,
+    args: Value,
+    media_ctx: &super::internal_tool_permissions::MediaCapabilityContext<'_>,
+) -> Result<ToolExecutionResult> {
+    let mut handler = |request: bash_internal_permissions::InternalToolBrokerRequest| match request {
+        bash_internal_permissions::InternalToolBrokerRequest::Execution(req) => {
+            bash_internal_permissions::InternalToolBrokerResponse::Execution(
+                super::internal_tool_permissions::execute_media_internal_tool(media_ctx, cwd, req),
+            )
+        }
+        bash_internal_permissions::InternalToolBrokerRequest::Permission(_) => {
+            bash_internal_permissions::InternalToolBrokerResponse::Permission(
+                puffer_tools::internal_permissions::InternalToolPermissionResponse::deny(
+                    "internal tool permission is not available in a parallel batch; run it as a single command",
+                ),
+            )
+        }
+    };
+    let execution = bash::execute_from_value_with_internal_permissions(
+        cwd,
+        session_id,
+        args,
+        media_ctx.process_store,
+        Some(&mut handler),
+    )?;
+    let output = serde_json::to_string_pretty(&execution.output)
+        .context("failed to serialize Bash output")?;
+    Ok(tool_result(definition, execution.success, output))
+}
+
 /// Executes a parallel-safe tool without `&mut AppState`.
 ///
 /// This handles only tools identified by `is_parallel_safe_tool()` and
