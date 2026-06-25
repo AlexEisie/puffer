@@ -1,6 +1,6 @@
 <script lang="ts">
   import InlineCanvasNode from "./InlineCanvasNode.svelte";
-  import CanvasImagePreview from "./CanvasImagePreview.svelte";
+  import CanvasMediaPreview from "./CanvasMediaPreview.svelte";
   import { filterDependentOptions, resolveDependentValue } from "./dependentSelect";
   import { appendRow } from "./editableTableRows";
   import { listMediaCapabilities, loadSettingsSnapshot, updateConfig } from "../../api/desktop";
@@ -525,7 +525,7 @@
     {/each}
   </div>
   {#if previewItem}
-    <CanvasImagePreview
+    <CanvasMediaPreview
       url={text(previewItem.url)}
       name={text(previewItem.label)}
       description={text(previewItem.description)}

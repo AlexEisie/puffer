@@ -3,9 +3,10 @@
     url: string;
     name: string;
     description?: string;
+    kind?: "image" | "video";
     onClose: () => void;
   }
-  let { url, name, description, onClose }: Props = $props();
+  let { url, name, description, kind = "image", onClose }: Props = $props();
 
   function onKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") onClose();
@@ -19,7 +20,12 @@
   <button type="button" class="cip-backdrop" aria-label="Close preview" onclick={onClose}></button>
   <div class="cip-panel">
     <button type="button" class="cip-close" aria-label="Close preview" onclick={onClose}>✕</button>
-    <img class="cip-image" src={url} alt={name} />
+    {#if kind === "video"}
+      <!-- svelte-ignore a11y_media_has_caption: Generated videos do not have caption tracks. -->
+      <video class="cip-media" src={url} controls autoplay playsinline aria-label={name}></video>
+    {:else}
+      <img class="cip-media" src={url} alt={name} />
+    {/if}
     <div class="cip-meta">
       <strong class="cip-name">{name}</strong>
       {#if description}<p class="cip-desc">{description}</p>{/if}
@@ -53,7 +59,7 @@
     background: transparent; border: none; color: inherit;
     font-size: 16px; cursor: pointer; line-height: 1;
   }
-  .cip-image { max-width: 100%; max-height: 64vh; object-fit: contain; border-radius: 8px; }
+  .cip-media { max-width: 100%; max-height: 64vh; object-fit: contain; border-radius: 8px; }
   .cip-meta { text-align: center; }
   .cip-name { display: block; font-size: 15px; }
   .cip-desc { margin: 6px 0 0; font-size: 13px; opacity: 0.85; }
