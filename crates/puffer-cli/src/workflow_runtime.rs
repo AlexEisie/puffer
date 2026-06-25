@@ -952,6 +952,7 @@ fn read_prior_telegram_context_messages(
                     "message_id": message_id,
                     "date_ms": date_ms,
                     "ts": date_ms,
+                    "reply_to": payload.get("reply_to").cloned().unwrap_or(Value::Null),
                     "text": text,
                 }),
             ));
@@ -1493,6 +1494,7 @@ fn current_telegram_source_message_from_trigger(payload: &Value, text: &str) -> 
         "message_id": message_id,
         "date_ms": date_ms,
         "ts": date_ms,
+        "reply_to": payload.get("reply_to").cloned().unwrap_or(Value::Null),
         "text": text,
         "is_outgoing": is_outgoing,
     }))
@@ -2697,7 +2699,11 @@ NO_TASK_DECISIONS:
                             "from": "me",
                             "direction": "outgoing",
                             "text": "我看一下，16:00 前回复",
-                            "date_ms": 2_000
+                            "date_ms": 2_000,
+                            "reply_to": {
+                                "kind": "message",
+                                "message_id": 6835
+                            }
                         }
                     ]
                 }
@@ -2735,6 +2741,7 @@ NO_TASK_DECISIONS:
         assert_eq!(source_messages[0]["text"], "刚刚的异常还在继续");
         assert_eq!(source_messages[1]["direction"], "outgoing");
         assert_eq!(source_messages[1]["text"], "我看一下，16:00 前回复");
+        assert_eq!(source_messages[1]["reply_to"]["message_id"], 6835);
         assert_eq!(source_messages[2]["message_id"], 6836);
         assert_eq!(
             source_messages[2]["text"],

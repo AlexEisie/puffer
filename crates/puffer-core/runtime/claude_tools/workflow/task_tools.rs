@@ -2226,6 +2226,7 @@ fn current_telegram_source_message_from_stamp(stamp: &MonitorSourceStampContext)
         "message_id": message_id,
         "date_ms": date_ms,
         "ts": date_ms,
+        "reply_to": payload.get("reply_to").cloned().unwrap_or(Value::Null),
         "text": text,
         "is_outgoing": is_outgoing,
     }))
@@ -3428,6 +3429,10 @@ mod tests {
                 "chat_kind": "user",
                 "message_id": 6836,
                 "date_ms": 1_009,
+                "reply_to": {
+                    "kind": "message",
+                    "message_id": 6835
+                },
                 "sender_id": "8759047281",
                 "sender_username": "alice",
                 "sender_name": "Alice",
@@ -3436,7 +3441,7 @@ mod tests {
                     "scope": "same_chat_before_current_message",
                     "messages": [
                         { "from": "them", "direction": "incoming", "text": "prior 1", "date_ms": 1_001 },
-                        { "from": "me", "direction": "outgoing", "text": "在", "date_ms": 1_002 },
+                        { "from": "me", "direction": "outgoing", "text": "在", "date_ms": 1_002, "reply_to": { "kind": "message", "message_id": 6801 } },
                         { "from": "them", "direction": "incoming", "text": "prior 3", "date_ms": 1_003 },
                         { "from": "me", "direction": "outgoing", "text": "prior 4", "date_ms": 1_004 },
                         { "from": "them", "direction": "incoming", "text": "prior 5", "date_ms": 1_005 },
@@ -3497,11 +3502,13 @@ mod tests {
         assert_eq!(source_messages.len(), 8);
         assert_eq!(source_messages[0]["text"], "在");
         assert_eq!(source_messages[0]["direction"], "outgoing");
+        assert_eq!(source_messages[0]["reply_to"]["message_id"], 6801);
         assert_eq!(source_messages[7]["text"], "What's the latest on WLF?");
         assert_eq!(source_messages[7]["direction"], "incoming");
         assert_eq!(source_messages[7]["sender"]["username"], "alice");
         assert_eq!(source_messages[7]["chat"]["id"], 42);
         assert_eq!(source_messages[7]["message_id"], 6836);
+        assert_eq!(source_messages[7]["reply_to"]["message_id"], 6835);
     }
 
     #[test]
