@@ -169,15 +169,23 @@ pre-existing drama directory. (Same session asked for a second drama → append 
      to completion), so set an explicit long Bash timeout within the current Bash cap —
      budget per shot, not for the whole drama. One call → one finished clip.
    - Read `path` from the tool result and record it into the manifest (see below).
-   - After running the shots, gate retries: render `Canvas` with
-     `canvasId = canvas-drama-<slug>-stage4`, a read-only `table` of per-shot status
-     (shotId, status) and a `multiSelect` (`id:"retry"`, options = the shotIds), then end
-     the turn. In the next turn read it back with `CanvasState` and re-run `videogen` only
-     for the shotIds in `values.retry`; if none are selected, advance.
+   - After running the shots, gate the keep/drop selection (mirroring stage 3):
+     render `Canvas` with `canvasId = canvas-drama-<slug>-stage4` and
+     `title:"Per-shot video"`, whose `body` is a single `mediaPicker` with no wrapping
+     card: `{type:"mediaPicker", id:"shots", multi:true, value:[<every succeeded shotId>],
+     items:[{id,kind:"video",path,label,description}, …]}` — one item per SUCCEEDED shot.
+     Set `id` and `label` to the shotId, `kind` to `"video"`, `path` to that clip's
+     workspace path from the manifest, and `description` to the shot's prompt summary.
+     `value` lists every succeeded shotId, so all clips are checked by default. Then end
+     the turn. In the next turn read it back with `CanvasState`: `shots` is the array of
+     checked shotIds — these are the clips kept for composition; unchecked shots are
+     dropped. There is no retry — to redo a shot, re-run its `videogen` and re-render this
+     canvas (same as stage 3's redo note). A shot whose `videogen` failed is not added as a
+     tile; report failed shots plainly in turn text (see Failure contracts).
 
 5. **Compose.** Before composing, gate the final order and mux mode: render `Canvas` with
    `canvasId = canvas-drama-<slug>-stage5`, a `card` containing an `editableTable`
-   (`id:"order"`, `columns: ["shotId"]`, `rows` = the succeeded clips in current order —
+   (`id:"order"`, `columns: ["shotId"]`, `rows` = the stage-4-kept clips in current order —
    the user confirms/reorders) and a `singleSelect` (`id:"mux"`, options `copy` /
    `re-encode`), then end the turn. In the next turn read it back with `CanvasState`:
    compose in the confirmed `values.order`, preferring stream-copy unless `values.mux` is
@@ -185,8 +193,8 @@ pre-existing drama directory. (Same session asked for a second drama → append 
 
    Stitch the successful shot clips in the confirmed order with ffmpeg. First
    probe ffmpeg: `command -v ffmpeg`. If missing, stop and report — do not fake a file.
-   Include only shots whose video succeeded; if none succeeded, skip composition and
-   report. Build the concat list with single-quote escaping (each clip line is
+   Include only the stage-4-kept clips (the confirmed `values.order`); if none were
+   kept, skip composition and report. Build the concat list with single-quote escaping (each clip line is
    `file '<path>'`, with any `'` in the path written as `'\''`). Prefer stream-copy
    (clips from the same provider share codec/params); only if concat-copy fails with a
    codec/params mismatch, retry with a re-encode:
