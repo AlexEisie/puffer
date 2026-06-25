@@ -497,6 +497,58 @@
   :global(.ic-et-actions) {
     white-space: nowrap;
   }
+  :global(.ic-et-cards) {
+    display: grid;
+    gap: 10px;
+  }
+  :global(.ic-et-card) {
+    display: grid;
+    gap: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    background: color-mix(in oklab, var(--card) 60%, transparent);
+  }
+  :global(.ic-et-card-head) {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  :global(.ic-et-card-title) {
+    flex: 1;
+    min-width: 0;
+    font: inherit;
+    font-weight: 600;
+    border: 0;
+    background: transparent;
+    color: var(--foreground);
+    padding: 2px 0;
+  }
+  :global(.ic-et-card-fields) {
+    display: grid;
+    gap: 8px;
+  }
+  :global(.ic-et-card-field) {
+    display: grid;
+    gap: 3px;
+  }
+  :global(.ic-et-card-label) {
+    font-size: var(--pf-chat-meta-size);
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+  :global(.ic-et-field) {
+    width: 100%;
+    resize: none;
+    overflow: hidden;
+    font: inherit;
+    line-height: 1.5;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--background);
+    color: var(--foreground);
+    padding: 6px 8px;
+  }
   :global(.ic-media-picker) {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));

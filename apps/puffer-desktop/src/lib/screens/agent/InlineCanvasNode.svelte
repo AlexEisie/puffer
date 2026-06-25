@@ -140,6 +140,22 @@
     commitRows(next);
   }
 
+  function columnNames(): string[] {
+    return Array.isArray(node.columns) ? node.columns.map(text) : [];
+  }
+
+  // Auto-grow a textarea to fit its content so long fields wrap and expand
+  // instead of scrolling. Avoids `field-sizing: content`, unreliable on WKWebView.
+  function autogrow(el: HTMLTextAreaElement) {
+    const resize = () => {
+      el.style.height = "auto";
+      el.style.height = `${el.scrollHeight}px`;
+    };
+    resize();
+    el.addEventListener("input", resize);
+    return { destroy: () => el.removeEventListener("input", resize) };
+  }
+
   function isPicked(item: CanvasNode): boolean {
     const v = values[id];
     if (v === null || v === undefined) return false;
@@ -429,30 +445,67 @@
     ></textarea>
   </label>
 {:else if componentType === "editableTable"}
-  <div class="ic-editable-table">
-    <table class="ic-table">
-      <thead><tr>
-        {#each Array.isArray(node.columns) ? node.columns : [] as col, i (`etc-${i}`)}<th>{text(col)}</th>{/each}
-        <th></th>
-      </tr></thead>
-      <tbody>
-        {#each curRows() as row, r (`etr-${r}`)}
-          <tr>
-            {#each row as cell, c (`etcell-${c}`)}
-              <td><input class="ic-et-cell" value={text(cell)}
-                oninput={(e) => updateCell(r, c, e.currentTarget.value)} /></td>
-            {/each}
-            <td class="ic-et-actions">
+  {#if node.layout === "cards"}
+    <div class="ic-et-cards">
+      {#each curRows() as row, r (`etcard-${r}`)}
+        <article class="ic-et-card">
+          <header class="ic-et-card-head">
+            <input
+              class="ic-et-card-title"
+              value={text(row[0])}
+              aria-label={columnNames()[0] || "id"}
+              oninput={(e) => updateCell(r, 0, e.currentTarget.value)}
+            />
+            <div class="ic-et-actions">
               <button type="button" onclick={() => moveRow(r, -1)} aria-label="Move up">↑</button>
               <button type="button" onclick={() => moveRow(r, 1)} aria-label="Move down">↓</button>
               <button type="button" onclick={() => removeRow(r)} aria-label="Delete">✕</button>
-            </td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
-    <button type="button" class="ic-et-add" onclick={addRow}>+ Add row</button>
-  </div>
+            </div>
+          </header>
+          <div class="ic-et-card-fields">
+            {#each row.slice(1) as cell, ci (`etcardf-${r}-${ci}`)}
+              <label class="ic-et-card-field">
+                <span class="ic-et-card-label">{columnNames()[ci + 1] || ""}</span>
+                <textarea
+                  class="ic-et-field"
+                  rows="1"
+                  value={text(cell)}
+                  use:autogrow
+                  oninput={(e) => updateCell(r, ci + 1, e.currentTarget.value)}
+                ></textarea>
+              </label>
+            {/each}
+          </div>
+        </article>
+      {/each}
+      <button type="button" class="ic-et-add" onclick={addRow}>+ Add shot</button>
+    </div>
+  {:else}
+    <div class="ic-editable-table">
+      <table class="ic-table">
+        <thead><tr>
+          {#each Array.isArray(node.columns) ? node.columns : [] as col, i (`etc-${i}`)}<th>{text(col)}</th>{/each}
+          <th></th>
+        </tr></thead>
+        <tbody>
+          {#each curRows() as row, r (`etr-${r}`)}
+            <tr>
+              {#each row as cell, c (`etcell-${c}`)}
+                <td><input class="ic-et-cell" value={text(cell)}
+                  oninput={(e) => updateCell(r, c, e.currentTarget.value)} /></td>
+              {/each}
+              <td class="ic-et-actions">
+                <button type="button" onclick={() => moveRow(r, -1)} aria-label="Move up">↑</button>
+                <button type="button" onclick={() => moveRow(r, 1)} aria-label="Move down">↓</button>
+                <button type="button" onclick={() => removeRow(r)} aria-label="Delete">✕</button>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+      <button type="button" class="ic-et-add" onclick={addRow}>+ Add row</button>
+    </div>
+  {/if}
 {:else if componentType === "mediaPicker"}
   <div class="ic-media-picker">
     {#each items(node.items) as item, i (`mp-${i}`)}

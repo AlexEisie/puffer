@@ -86,8 +86,11 @@ to `.puffer/media/images|videos/` — you only reference them, never relocate th
    shots yield better clips.
 
    Gate the draft: render `Canvas` with `canvasId = canvas-drama-<id>-stage2` and spec
-   `{title:"Storyboard",regenerable:true,body:[{type:"card",children:[{type:"editableTable",id:"storyboard",columns:["shotId","subject","action","duration","characters"],rows:<draft shots>}]}]}`
-   (one row per shot, column 0 = shotId), then end the turn. In the next
+   `{title:"Storyboard",body:[{type:"editableTable",id:"storyboard",layout:"cards",columns:["shotId","subject","action","duration","characters"],rows:<draft shots>}]}`
+   (`layout:"cards"` renders one card per shot with column 0 = shotId as the card
+   title and the rest as labeled wrapping fields — the editableTable sits directly in
+   `body`). Do **not** wrap it in a `card` and do **not** set `regenerable`. Then end
+   the turn. In the next
    turn read it back with `CanvasState`: `values` for the editableTable id
    `"storyboard"` is the confirmed 2D array. In one shot, write
    `.puffer/media/drama/<id>/storyboard.md` (a markdown table of the confirmed rows) and

@@ -126,11 +126,13 @@ fn short_drama_stage1_script_gate_is_a_bare_textarea() {
 }
 
 #[test]
-fn short_drama_stage2_storyboard_draft_is_regenerable() {
+fn short_drama_stage2_storyboard_draft_uses_card_layout() {
     let body = include_str!("../../../resources/skills/short-drama-generation/SKILL.md");
-    // The storyboard draft opts into the Regenerate button and uses the
-    // top-level `body` array (a card) the inline renderer requires.
-    assert!(body.contains("{title:\"Storyboard\",regenerable:true,body:[{type:\"card\""));
+    // The storyboard renders the editableTable directly in `body` using the
+    // card-per-shot layout so long subject/action/characters fields wrap instead
+    // of scrolling — no wrapping card, no Regenerate button.
+    assert!(body.contains("{title:\"Storyboard\",body:[{type:\"editableTable\""));
+    assert!(body.contains("layout:\"cards\""));
 }
 
 #[test]
