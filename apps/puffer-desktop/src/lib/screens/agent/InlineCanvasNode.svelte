@@ -3,8 +3,14 @@
   import CanvasMediaPreview from "./CanvasMediaPreview.svelte";
   import { filterDependentOptions, resolveDependentValue } from "./dependentSelect";
   import { appendRow } from "./editableTableRows";
-  import { listMediaCapabilities, loadSettingsSnapshot, updateConfig } from "../../api/desktop";
+  import {
+    createFileMediaAccess,
+    listMediaCapabilities,
+    loadSettingsSnapshot,
+    updateConfig,
+  } from "../../api/desktop";
   import { availableMediaCapabilities } from "./mediaCapabilityState";
+  import { mediaPreview, mediaThumb, videoItemsToResolve } from "./mediaPickerItems";
   import {
     providerOptions,
     modelOptions,
@@ -180,6 +186,26 @@
   let previewItem = $state<CanvasNode | null>(null);
   function openPreview(item: CanvasNode) { previewItem = item; }
   function closePreview() { previewItem = null; }
+
+  // --- mediaPicker: video access URLs, resolved once per item id ---
+  // A present key means the id is resolved; "" is the failure sentinel so a
+  // non-available/throwing access RPC is never retried. Reassigned (not mutated)
+  // so Svelte tracks it, mirroring MessageAttachmentPreviewStrip's previewUrls.
+  let videoUrls = $state<Record<string, string>>({});
+  async function resolveVideoUrl(itemId: string, path: string) {
+    try {
+      const access = await createFileMediaAccess(path);
+      videoUrls = { ...videoUrls, [itemId]: access.state === "available" ? access.url : "" };
+    } catch {
+      videoUrls = { ...videoUrls, [itemId]: "" };
+    }
+  }
+  $effect(() => {
+    if (componentType !== "mediaPicker") return;
+    for (const { id: itemId, path } of videoItemsToResolve(items(node.items), videoUrls)) {
+      void resolveVideoUrl(itemId, path);
+    }
+  });
 
   // --- mediaModelSelect: self-contained image/video model picker (Stage 0) ---
   // The node owns four fixed value keys instead of a single `id`.
@@ -509,24 +535,41 @@
 {:else if componentType === "mediaPicker"}
   <div class="ic-media-picker">
     {#each items(node.items) as item, i (`mp-${i}`)}
+      {@const thumb = mediaThumb(item, videoUrls)}
       <div class="ic-media-cell" class:selected={isPicked(item)}>
         <input
           type="checkbox"
           class="ic-media-check"
           checked={isPicked(item)}
-          aria-label={`Use ${text(item.label) || "image"}`}
+          aria-label={`Use ${text(item.label) || thumb.kind}`}
           onchange={() => pick(item)}
         />
-        <button type="button" class="ic-media-thumb" onclick={() => openPreview(item)}>
-          <img src={text(item.url)} alt={text(item.label)} loading="lazy" />
+        <button
+          type="button"
+          class="ic-media-thumb"
+          disabled={!thumb.available}
+          onclick={() => openPreview(item)}
+        >
+          {#if thumb.kind === "video"}
+            {#if thumb.available}
+              <!-- svelte-ignore a11y_media_has_caption: Generated videos do not have caption tracks. -->
+              <video src={thumb.url} muted preload="metadata" playsinline></video>
+            {:else}
+              <span class="ic-media-unavailable">preview unavailable</span>
+            {/if}
+          {:else}
+            <img src={thumb.url} alt={text(item.label)} loading="lazy" />
+          {/if}
         </button>
         {#if item.label}<span class="ic-media-name">{text(item.label)}</span>{/if}
       </div>
     {/each}
   </div>
   {#if previewItem}
+    {@const preview = mediaPreview(previewItem, videoUrls)}
     <CanvasMediaPreview
-      url={text(previewItem.url)}
+      kind={preview.kind}
+      url={preview.url}
       name={text(previewItem.label)}
       description={text(previewItem.description)}
       onClose={closePreview}

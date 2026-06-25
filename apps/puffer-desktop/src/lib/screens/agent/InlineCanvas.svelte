@@ -580,10 +580,26 @@
     background: none;
     cursor: zoom-in;
   }
-  :global(.ic-media-thumb img) {
+  :global(.ic-media-thumb img),
+  :global(.ic-media-thumb video) {
     width: 100%;
     display: block;
     border-radius: 4px;
+  }
+  :global(.ic-media-thumb:disabled) {
+    cursor: not-allowed;
+  }
+  :global(.ic-media-unavailable) {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    aspect-ratio: 1;
+    border-radius: 4px;
+    background: color-mix(in oklab, var(--muted) 40%, transparent);
+    color: var(--muted-foreground);
+    font-size: 12px;
+    text-align: center;
   }
   :global(.ic-media-name) {
     font-size: 13px;
