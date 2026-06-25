@@ -36,13 +36,16 @@
   .cip-backdrop {
     position: absolute; inset: 0;
     border: none; padding: 0; cursor: default;
-    background: rgba(0, 0, 0, 0.66);
+    /* Theme-aware scrim (matches the app's modals), not a fixed black. */
+    background: color-mix(in oklch, var(--background) 30%, transparent 70%);
   }
   .cip-panel {
     position: relative; z-index: 1;
     max-width: min(86vw, 720px); max-height: 88vh;
     display: flex; flex-direction: column; align-items: center; gap: 12px;
-    background: var(--ic-surface, #1b1b1f); border-radius: 12px; padding: 20px;
+    background: var(--card); color: var(--card-foreground);
+    border: 1px solid var(--border); border-radius: 12px; padding: 20px;
+    box-shadow: 0 24px 64px -12px oklch(0 0 0 / 0.35), 0 4px 16px -4px oklch(0 0 0 / 0.2);
     overflow: auto;
   }
   .cip-close {
