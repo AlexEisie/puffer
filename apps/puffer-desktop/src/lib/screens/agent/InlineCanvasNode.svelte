@@ -2,6 +2,7 @@
   import InlineCanvasNode from "./InlineCanvasNode.svelte";
   import CanvasImagePreview from "./CanvasImagePreview.svelte";
   import { filterDependentOptions, resolveDependentValue } from "./dependentSelect";
+  import { appendRow } from "./editableTableRows";
   import { listMediaCapabilities, loadSettingsSnapshot, updateConfig } from "../../api/desktop";
   import { availableMediaCapabilities } from "./mediaCapabilityState";
   import {
@@ -126,10 +127,7 @@
     commitRows(next);
   }
   function addRow() {
-    const next = curRows();
-    const colCount = Array.isArray(node.columns) ? node.columns.length : 0;
-    const width = Math.max(next[0]?.length ?? colCount, 1);
-    commitRows([...next.map((row) => [...row]), Array(width).fill("")]);
+    commitRows(appendRow(node.columns, curRows()));
   }
   function removeRow(r: number) {
     commitRows(curRows().filter((_, i) => i !== r));
@@ -421,7 +419,7 @@
   </label>
 {:else if componentType === "textarea"}
   <label class="ic-control">
-    <span class="ic-control-label">{text(node.label ?? node.id)}</span>
+    {#if text(node.label ?? node.id)}<span class="ic-control-label">{text(node.label ?? node.id)}</span>{/if}
     <textarea
       class="ic-textarea"
       rows={numeric(node.rows, 8)}
