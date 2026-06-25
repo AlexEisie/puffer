@@ -117,9 +117,23 @@ pre-existing drama directory. (Same session asked for a second drama → append 
      generate images.
    - If absent and the user wants character-consistent shots, **generate one image per character**:
      collect the distinct character names from the confirmed storyboard's `characters`
-     column, and for each name run exactly one `imagegen` call —
-     `imagegen --prompt "<single-character full-body front-view sheet>" --count 1 --provider <imgProvider> --model <imgModel>`.
-     One call → one character → one image; N characters → N calls → N images.
+     column, and for each name run exactly one `imagegen` call.
+
+     **Style anchor (compose once, reuse verbatim).** Before generating, write a single
+     shared style phrase describing the drama's overall look (medium, rendering, palette,
+     line/lighting), derived from the storyboard's `style` field — e.g.
+     `"flat 2D anime illustration, soft cel shading, muted warm palette, clean outlines"`.
+     Prepend this **exact same** phrase to every character's prompt; it is the anchor that
+     keeps the whole cast in one consistent style. Do not vary it per character.
+
+     **Per-character prompt template** — for each character build:
+     `<style anchor>, full-body head-to-toe front view of <character + appearance>, standing,
+     centered, plain pure-white background, even studio lighting, no text, no letters, no
+     watermark, no logo, no captions` — then run exactly:
+     `imagegen --prompt "<that prompt>" --count 1 --aspect square --provider <imgProvider> --model <imgModel>`.
+     `--aspect square` forces the required 1:1 frame; the white-background / full-body /
+     no-text clauses are mandatory in every prompt. One call → one character → one image;
+     N characters → N calls → N images.
      Never combine multiple characters into one image. Make each character stylized /
      non-photorealistic (cartoon, 3D render, illustration): image-to-video providers
      (e.g. BytePlus) reject photoreal real-person images on moderation. For each image read
