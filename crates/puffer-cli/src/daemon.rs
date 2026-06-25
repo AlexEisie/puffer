@@ -688,6 +688,35 @@ fn send_user_message_text(tool_id: &str, input: &str) -> Option<String> {
     Some(message)
 }
 
+/// Resolves browser launch settings, degrading to the empty default when
+/// staging fails so a captcha-extension staging error never blocks daemon
+/// startup (issue #670).
+///
+/// `BrowserLaunchSettings::from_config` stages bundled browser extensions (most
+/// notably the NopeCHA captcha extension) into a SHARED per-user dir. On a Bobo
+/// launch two stagers race for that dir — the native CEF host and the freshly
+/// spawned daemon — and before this guard a transient staging failure (e.g. the
+/// race deleting the destination mid-copy) propagated out of `DaemonState::load`
+/// via `?`. The daemon then exited before printing its handshake and Bobo
+/// surfaced a fatal "empty handshake line" startup dialog. The shared stage is
+/// now lock-serialized in `puffer-config`, but we additionally never let a
+/// staging error be fatal: on failure we log and start with no browser
+/// extensions so chat still comes up and the handshake is printed.
+fn browser_launch_settings_or_default(
+    result: Result<BrowserLaunchSettings>,
+) -> BrowserLaunchSettings {
+    match result {
+        Ok(settings) => settings,
+        Err(error) => {
+            eprintln!(
+                "puffer daemon: browser extension staging failed ({error:#}); \
+                 continuing without browser extensions"
+            );
+            BrowserLaunchSettings::default()
+        }
+    }
+}
+
 impl DaemonState {
     fn load(
         cwd: std::path::PathBuf,
@@ -698,7 +727,11 @@ impl DaemonState {
         yolo: bool,
     ) -> Result<Self> {
         let config = load_config(&paths)?;
-        let browser_launch_settings = BrowserLaunchSettings::from_config(&paths, &config)?;
+        // Browser extension staging (e.g. the NopeCHA captcha extension) must
+        // never block the daemon from coming up and printing its handshake.
+        // See `browser_launch_settings_or_default` for the rationale (#670).
+        let browser_launch_settings =
+            browser_launch_settings_or_default(BrowserLaunchSettings::from_config(&paths, &config));
         let (events, _rx) = broadcast::channel::<ServerEnvelope>(256);
         let browser_profile_root = paths.user_config_dir.join("browser-profiles");
         let ptys = Arc::new(PtyRegistry::new());
@@ -6750,8 +6783,9 @@ fn apply_daemon_yolo_mode(app_state: &mut AppState) {
 mod tests {
     use super::{
         append_ordered_turn_progress, apply_daemon_yolo_mode, apply_turn_model_override,
-        apply_turn_request_options, browser_permission_payload_json, browser_status_for_turn,
-        cancel_all_active_turns, connector_setup_connect_args, connector_setup_id, daemon_now_ms,
+        apply_turn_request_options, browser_launch_settings_or_default,
+        browser_permission_payload_json, browser_status_for_turn, cancel_all_active_turns,
+        connector_setup_connect_args, connector_setup_id, daemon_now_ms,
         desktop_latency_ms, file_media_mime_type, generated_video_handler,
         handle_create_file_media_access, handle_create_generated_video_access,
         handle_create_openai_realtime_client_secret, handle_create_session, handle_generate_media,
@@ -7357,6 +7391,38 @@ models: []
         ensure_workspace_dirs(&paths).expect("workspace dirs");
         DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
             .expect("daemon state")
+    }
+
+    /// Issue #670: a captcha-extension staging failure must NOT be fatal to the
+    /// daemon. Previously `BrowserLaunchSettings::from_config(...)?` propagated
+    /// the error out of `DaemonState::load`, so `run_async` returned `Err`
+    /// before printing its handshake and Bobo showed a fatal "empty handshake
+    /// line" startup dialog. The fix routes that `Result` through
+    /// `browser_launch_settings_or_default`, which swallows the error and falls
+    /// back to empty (no-extension) settings so startup proceeds.
+    ///
+    /// Tested at the helper seam (not via `DaemonState::load`) because forcing a
+    /// real staging failure requires a revealed secret, and `SecretVault::open`
+    /// hits the macOS Keychain — unavailable/cancelled in headless CI. The
+    /// reproduction of the underlying ENOENT race lives in puffer-config's
+    /// `concurrent_staging_into_shared_root_never_errors`.
+    #[test]
+    fn browser_launch_settings_staging_error_is_non_fatal() {
+        use crate::daemon_browser::BrowserLaunchSettings;
+
+        // A staging error must degrade to default (empty) settings, not propagate.
+        let degraded = browser_launch_settings_or_default(Err(anyhow::anyhow!(
+            "copy extension file .../awscaptcha.js to .../awscaptcha.js: No such file or directory (os error 2)"
+        )));
+        assert_eq!(degraded, BrowserLaunchSettings::default());
+        assert!(degraded.extension_dirs().is_empty());
+
+        // The happy path is untouched: a successful settings value passes through.
+        let staged = BrowserLaunchSettings::with_extension_dirs(vec![std::path::PathBuf::from(
+            "/tmp/ext/nopecha",
+        )]);
+        let passthrough = browser_launch_settings_or_default(Ok(staged.clone()));
+        assert_eq!(passthrough, staged);
     }
 
     fn insert_session_turn(state: &DaemonState, session_id: Uuid, turn_id: &str) {
