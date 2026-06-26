@@ -76,9 +76,11 @@ pre-existing drama directory. (Same session asked for a second drama → append 
    capabilities, build options, or branch on empty lists yourself. Then **end the turn**.
 
    In the next turn read back with `CanvasState` (same canvasId): `values` carries
-   `{imgProvider,imgModel,vidProvider,vidModel}`. **Validate**: if `imgModel` or `vidModel` is empty,
-   stop and report that both image and video models must be selected (direct the user to Settings if a
-   kind has no provider). Record the four values in `manifest.json` for Stages 3/4 — this
+   `{imgProvider,imgModel,vidProvider,vidModel,imgSupportsImageSet}`. **Validate**: if `imgModel` or
+   `vidModel` is empty, stop and report that both image and video models must be selected (direct the
+   user to Settings if a kind has no provider). Record these values in `manifest.json` for Stages 3/4
+   — including the boolean `imgSupportsImageSet` (the chosen image model's set capability), which
+   Stage 3 routes on — this
    manifest write first creates `.puffer/media/drama/<id>/`, so this is where you mint
    `<id> = <slug>-<session8>` using the `sessionId` from this read-back.
 
@@ -115,50 +117,61 @@ pre-existing drama directory. (Same session asked for a second drama → append 
    are `https://` or `asset://` URLs.
    - If present, use those URLs directly as `--image-reference` in stage 4. Do NOT
      generate images.
-   - If absent and the user wants character-consistent shots, **generate one image per character,
-     in parallel**: collect the distinct character names from the confirmed storyboard's
-     `characters` column, and emit the per-character `imagegen` calls **together in a single
-     turn** so the backend runs them concurrently (one approval unblocks the whole batch).
-     Cap each turn at **5** `imagegen` calls; if there are more than 5 characters, send
-     successive turns of ≤5 (e.g. 7 characters → 5 then 2). Still exactly one `imagegen` per
-     character — never fold two characters into one call.
+   - If absent and the user wants character-consistent shots, route on **`imgSupportsImageSet`** —
+     the boolean recorded in `manifest.json` from the Stage 0 read-back (the chosen image model's
+     set capability; no extra probe). **Branch only on this flag, never on a provider/model id.**
 
-     **Square is carried by the prompt — never pass `--aspect`.** The reference image must
-     read as square, but different image models support different ratio knobs and some
-     reject any explicit ratio. Do **not** probe model capabilities and do **not** pass
-     `--aspect` at all; squareness is carried entirely by the mandatory square clause in the
-     per-character prompt below. This keeps every character a plain built-in `imagegen` call
-     that works on any connected image model, with no capability lookup in front of it.
+     **Square is carried by the prompt — never pass `--aspect`.** The
+     reference image must read as square, but different image models support different ratio
+     knobs and some reject any explicit ratio. Do **not** pass `--aspect`; squareness is carried
+     entirely by the mandatory square clause in the prompts below — in **both** branches.
 
-     **Style anchor (compose once, reuse verbatim).** Before generating, write a single
-     shared style phrase describing the drama's overall look (medium, rendering, palette,
+     **Style anchor (compose once, reuse verbatim).** Before generating, write a single shared
+     style phrase describing the drama's overall look (medium, rendering, palette,
      line/lighting), derived from the storyboard's `style` field — e.g.
-     `"flat 2D anime illustration, soft cel shading, muted warm palette, clean outlines"`.
-     Prepend this **exact same** phrase to every character's prompt; it is the anchor that
-     keeps the whole cast in one consistent style. Do not vary it per character.
+     `"flat 2D anime illustration, soft cel shading, muted warm palette, clean outlines"`. It is
+     the anchor that keeps the whole cast in one consistent style; **both** branches reuse it
+     verbatim and never vary it per character.
 
-     **Per-character prompt template** — for each character build:
-     `<style anchor>, square 1:1 composition with equal width and height, full-body
-     head-to-toe front view of <character + appearance>, standing, centered, plain
-     pure-white background, even studio lighting, no text, no letters, no watermark, no
-     logo, no captions` — then run:
+     **(a) Set-capable model (`supportsImageSet: true`) — one coherent image set.** Compose a
+     single set prompt: the style anchor, then an enumerated cast — `1) <character + appearance>
+     2) … N) …` — stating **N separate full-body head-to-toe front-view square 1:1 portraits,
+     one per character, identical style, each on a plain pure-white background, even studio
+     lighting, no text, no letters, no watermark, no logo**. Then issue ONE grouped call:
+     `imagegen --image-set --count N --prompt "<that set prompt>" --provider <imgProvider> --model <imgModel>`.
+     One call returns N stylistically coherent images **in cast order** — map image *k* to
+     character *k*. The set is capped at **9 images per call**; if the cast is larger, split
+     into successive `--image-set` calls (e.g. 12 → 9 then 3) and keep cast order across them.
+     Never fold the cast into a non-set call and never add `--aspect`.
+
+     **(b) Not set-capable (`supportsImageSet: false`) — parallel single images.** Generate
+     **one image per character, in parallel**: collect the distinct character names from the
+     confirmed storyboard's `characters` column and emit the per-character `imagegen` calls
+     **together in a single turn** so the backend runs them concurrently (one approval unblocks
+     the whole batch). Cap each turn at **5** `imagegen` calls; more than 5 characters → send
+     successive turns of ≤5 (e.g. 7 characters → 5 then 2). One `imagegen` per character,
+     never folding two into one call — **N characters → N calls → N images**. For each
+     character build:
+     `<style anchor>, square 1:1 composition with equal width and height, full-body head-to-toe
+     front view of <character + appearance>, standing, centered, plain pure-white background,
+     even studio lighting, no text, no letters, no watermark, no logo, no captions` — then run
      `imagegen --prompt "<that prompt>" --count 1 --provider <imgProvider> --model <imgModel>`.
-     The `square 1:1` / white-background / full-body / no-text clauses are mandatory in
-     every prompt and are the **sole** source of squareness — never add `--aspect`. One
-     call → one character → one image; the N (≤5 per turn) calls go out together as one
-     parallel batch, and you read every result back after the batch returns.
-     Never combine multiple characters into one image. Make each character stylized /
-     non-photorealistic (cartoon, 3D render, illustration): image-to-video providers
-     (e.g. BytePlus) reject photoreal real-person images on moderation. For each image read
+     One call → one character → one image; the N (≤5 per turn) calls go out together as one
+     parallel batch, and you read every result back after the batch returns. Never add
+     `--aspect`.
+
+     **Both branches.** Make each character stylized / non-photorealistic (cartoon, 3D render,
+     illustration): image-to-video providers (e.g. BytePlus) reject photoreal real-person images
+     on moderation. **Never combine multiple characters into one image** — the set branch returns
+     N distinct images from one call; it does not draw a group sheet. For each returned image read
      the tool result's `remoteSourceUrl` (same key the video tool uses):
        - If `remoteSourceUrl` is present, record it under that character in `manifest.json`
          `characterRefs` (`{ "<character>": "<url>" }`) and use it as that character's
          `--image-reference` in stage 4.
-       - If a character's `imagegen` failed or its `remoteSourceUrl` is absent **while other
-         characters in the batch did get one**, that single character has no usable reference:
-         record no `characterRefs` entry for it and let it fall back to text-to-video for the
-         shots it appears in (Stage 4). The other characters proceed normally — one failure
-         never aborts the batch.
+       - If a character's image failed or its `remoteSourceUrl` is absent **while other
+         characters got one**, that single character has no usable reference: record no
+         `characterRefs` entry for it and let it fall back to text-to-video for the shots it
+         appears in (Stage 4). The rest proceed normally — one missing image never aborts the cast.
        - If **no** character in the whole cast produced a `remoteSourceUrl`, that is the
          configured image provider not producing referenceable URLs at all — stop and report
          that image-to-video is unavailable. Do NOT silently degrade the entire cast to
@@ -184,11 +197,18 @@ pre-existing drama directory. (Same session asked for a second drama → append 
    the batch). Cap each turn at **5** `videogen` calls; more than 5 shots → successive turns
    of ≤5 (e.g. 12 shots → 5, 5, 2). Generation order does not matter here — the final play
    order is confirmed in Stage 5. Build one `videogen` command per shot:
-   - `videogen --prompt "<shot visual + action>" --provider <vidProvider> --model <vidModel>`
+   - `videogen --prompt "<@Image bindings><shot visual + action>" --provider <vidProvider> --model <vidModel>`
    - Add `--image-reference <url>` for each character in that shot's `characters` column that
-     has a checked `characterRefs` url; keep order stable and refer to them as image 1,
-     image 2, … in the prompt. A shot whose characters are all unchecked or unavailable runs
-     text-to-video.
+     has a checked `characterRefs` url (the remote `remoteSourceUrl`, never a local/asset
+     name), in stable order. **Bind every reference in the prompt** — the provider does not
+     map image→character by upload order, so a multi-character shot mis-assigns faces without
+     explicit tags. Prefix the prompt with one binding line per reference, numbered to match
+     the `--image-reference` flags exactly (`@Image1` = the first `--image-reference`,
+     `@Image2` = the second, …):
+     `@Image1 = <character + one-line appearance>, keep this character's face, hair, and outfit
+     consistent; @Image2 = <next character + appearance>, …` — THEN the shot's visual + action.
+     A shot with one reference still gets its single `@Image1 = …` line. A shot whose
+     characters are all unchecked or unavailable runs text-to-video (no `@Image` bindings).
    - Each `videogen` call polls its clip to completion in its own parallel worker, so a chunk
      finishes in roughly the slowest single clip's time, not the sum. Set an explicit long
      Bash timeout within the current Bash cap on **each** call, sized for the slowest single
