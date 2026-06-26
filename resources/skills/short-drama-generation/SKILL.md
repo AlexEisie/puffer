@@ -116,7 +116,11 @@ pre-existing drama directory. (Same session asked for a second drama → append 
 3. **Character images (reference for video).** Scan the prompt for image references that
    are `https://` or `asset://` URLs.
    - If present, use those URLs directly as `--image-reference` in stage 4. Do NOT
-     generate images.
+     generate images. Note: `asset://` references only resolve on upload-capable video
+     providers (e.g. WorldRouter, which uploads the reference itself). A direct-URL provider
+     (e.g. BytePlus) sends the reference verbatim to the model and cannot fetch an `asset://`
+     handle — if the chosen video provider is direct-URL and the prompt supplied an `asset://`
+     reference, ask the user for a public `https://` URL instead of passing it through.
    - If absent and the user wants character-consistent shots, route on **`imgSupportsImageSet`** —
      the boolean recorded in `manifest.json` from the Stage 0 read-back (the chosen image model's
      set capability; no extra probe). **Branch only on this flag, never on a provider/model id.**
