@@ -143,10 +143,18 @@ pre-existing drama directory. (Same session asked for a second drama → append 
      one per character, identical style, each on a plain pure-white background, even studio
      lighting, no text, no letters, no watermark, no logo**. Then issue ONE grouped call:
      `imagegen --image-set --count N --prompt "<that set prompt>" --provider <imgProvider> --model <imgModel>`.
-     One call returns N stylistically coherent images **in cast order** — map image *k* to
-     character *k*. The set is capped at **9 images per call**; if the cast is larger, split
-     into successive `--image-set` calls (e.g. 12 → 9 then 3) and keep cast order across them.
-     Never fold the cast into a non-set call and never add `--aspect`.
+     One call returns N stylistically coherent images, but **the provider does NOT guarantee
+     the output order matches the prompt enumeration** — e.g. BytePlus Seedream may return cast
+     positions out of order, so binding image *k* → character *k* by index silently swaps
+     identities. **Never bind by position.** After the call returns, **Read each returned
+     artifact's local `path` and identify which enumerated character it depicts**, matching
+     distinguishing features (age, build, hair, clothing, colour) against the cast descriptions;
+     then record that **same** artifact's `remoteSourceUrl` under the identified character in
+     `characterRefs`. If two images cannot be confidently told apart (ambiguous look-alikes), do
+     NOT guess — regenerate just those characters through the per-character single-image path in
+     (b), whose identity is fixed by each separate call. The set is capped at **9 images per
+     call**; if the cast is larger, split into successive `--image-set` calls (e.g. 12 → 9 then
+     3). Never fold the cast into a non-set call and never add `--aspect`.
 
      **(b) Not set-capable (`supportsImageSet: false`) — parallel single images.** Generate
      **one image per character, in parallel**: collect the distinct character names from the
