@@ -187,9 +187,11 @@ pre-existing drama directory. (Same session asked for a second drama → append 
    the character name only, and `description` to that character's sheet description. `value`
    lists every item id, so all characters are checked by default. Then end the turn. In the
    next turn read it back with `CanvasState`: `pick` is the array of checked item ids; map
-   each back to its character via `characterRefs`. Checked characters' urls become stage 4
-   `--image-reference`s; any unchecked character falls back to text-to-video for the shots it
-   appears in. There is no Regenerate toggle — to redo a character, generate it again and
+   each back to its character via `characterRefs`. For each checked character, its
+   **`characterRefs` url (the remote `remoteSourceUrl`)** is the stage 4 `--image-reference`
+   value — the picker's `url` is the thumbnail only (it may be a desktop `asset://` url) and is
+   never used as the reference. Any unchecked character falls back to text-to-video for the
+   shots it appears in. There is no Regenerate toggle — to redo a character, generate it again and
    re-render this canvas.
 
 4. **Per-shot video.** Generate the shots **in parallel**: emit a chunk's `videogen` calls
@@ -199,8 +201,9 @@ pre-existing drama directory. (Same session asked for a second drama → append 
    order is confirmed in Stage 5. Build one `videogen` command per shot:
    - `videogen --prompt "<@Image bindings><shot visual + action>" --provider <vidProvider> --model <vidModel>`
    - Add `--image-reference <url>` for each character in that shot's `characters` column that
-     has a checked `characterRefs` url (the remote `remoteSourceUrl`, never a local/asset
-     name), in stable order. **Bind every reference in the prompt** — the provider does not
+     has a checked entry, taking the url from `characterRefs[<character>]` (the remote
+     `remoteSourceUrl` recorded in Stage 3 — not the picker's display url), in stable order.
+     **Bind every reference in the prompt** — the provider does not
      map image→character by upload order, so a multi-character shot mis-assigns faces without
      explicit tags. Prefix the prompt with one binding line per reference, numbered to match
      the `--image-reference` flags exactly (`@Image1` = the first `--image-reference`,
