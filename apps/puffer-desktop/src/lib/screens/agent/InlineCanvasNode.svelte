@@ -234,9 +234,11 @@
   // mints video URLs it may not use. `previewVideoState` drives the popup:
   // `loading` while resolving, `ready` with `previewVideoUrl`, `unavailable` on a
   // missing/failed access (the popup then shows "preview unavailable").
+  // Whether a preview is open is `previewItem !== null`; `previewVideoState` only
+  // tracks how a video preview is progressing, so it has no separate idle value.
   let previewItem = $state<CanvasNode | null>(null);
   let previewVideoUrl = $state<string>("");
-  let previewVideoState = $state<"idle" | "loading" | "ready" | "unavailable">("idle");
+  let previewVideoState = $state<"loading" | "ready" | "unavailable">("loading");
   async function openPreview(item: CanvasNode) {
     previewItem = item;
     if (mediaItemKind(item) !== "video") return;
@@ -263,7 +265,7 @@
   function closePreview() {
     previewItem = null;
     previewVideoUrl = "";
-    previewVideoState = "idle";
+    previewVideoState = "loading";
   }
 
   // Generated video access URLs are short-lived HTTP tickets, not blobs; only the
@@ -628,7 +630,9 @@
             <!-- Image item: its url. Video item: its first-frame poster image. -->
             <img src={thumb.url} alt={text(item.label) || thumb.kind} loading="lazy" />
           {:else}
-            <span class="ic-media-unavailable">{thumb.kind === "video" ? "▶ play" : "no preview"}</span>
+            <!-- Only videos reach here: images are always available, a video tile
+                 lands here only until (or unless) its poster resolves. -->
+            <span class="ic-media-unavailable">▶ play</span>
           {/if}
         </button>
         {#if item.label}<span class="ic-media-name">{text(item.label)}</span>{/if}
@@ -640,7 +644,7 @@
       <CanvasMediaPreview
         kind="video"
         url={previewVideoUrl}
-        status={previewVideoState === "idle" ? "loading" : previewVideoState}
+        status={previewVideoState}
         name={text(previewItem.label)}
         description={text(previewItem.description)}
         onClose={closePreview}

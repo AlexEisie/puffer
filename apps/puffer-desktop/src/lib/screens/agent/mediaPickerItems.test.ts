@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
   mediaItemKind,
-  mediaItemId,
   mediaItemArtifactId,
   videoItemsToResolve,
   mediaItemView,
@@ -16,14 +15,6 @@ describe("mediaItemKind", () => {
     expect(mediaItemKind({})).toBe("image");
     expect(mediaItemKind({ kind: 7 })).toBe("image");
     expect(mediaItemKind({ kind: "VIDEO" })).toBe("image");
-  });
-});
-
-describe("mediaItemId", () => {
-  it("reads a string id, else empty", () => {
-    expect(mediaItemId({ id: "shot-001" })).toBe("shot-001");
-    expect(mediaItemId({ id: 3 })).toBe("");
-    expect(mediaItemId({})).toBe("");
   });
 });
 
@@ -44,13 +35,13 @@ describe("videoItemsToResolve", () => {
     ];
     expect(videoItemsToResolve(items, {})).toEqual(["art-a", "art-c"]);
   });
-  it("skips video items missing a usable artifactId or id", () => {
+  it("skips video items missing a usable artifactId, independent of id", () => {
     const items = [
-      { id: "a", kind: "video" },
-      { id: "", kind: "video", artifactId: "art-a" },
-      { kind: "video", artifactId: "art-b" },
+      { id: "a", kind: "video" }, // no artifactId → skipped
+      { id: "", kind: "video", artifactId: "art-a" }, // missing id is irrelevant
+      { kind: "video", artifactId: "art-b" }, // absent id is irrelevant
     ];
-    expect(videoItemsToResolve(items, {})).toEqual([]);
+    expect(videoItemsToResolve(items, {})).toEqual(["art-a", "art-b"]);
   });
   it("does not re-resolve an artifactId already present (success or failure sentinel)", () => {
     const items = [

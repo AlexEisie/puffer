@@ -25,10 +25,6 @@ export function mediaItemKind(item: MediaPickerItem): MediaItemKind {
   return item.kind === "video" ? "video" : "image";
 }
 
-export function mediaItemId(item: MediaPickerItem): string {
-  return typeof item.id === "string" ? item.id : "";
-}
-
 export function mediaItemArtifactId(item: MediaPickerItem): string {
   return typeof item.artifactId === "string" ? item.artifactId : "";
 }
@@ -37,9 +33,10 @@ function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-/** The artifactIds of video items (with a usable id + artifactId) whose poster
- *  has not yet been resolved, so the caller mints each one exactly once. Deduped
- *  on artifactId against the already-resolved map. */
+/** The artifactIds of video items (with a usable artifactId) whose poster has not
+ *  yet been resolved, so the caller mints each one exactly once. Keyed purely on
+ *  artifactId — independent of the item's selectable `id` — and deduped against
+ *  the already-resolved map. */
 export function videoItemsToResolve(
   items: MediaPickerItem[],
   resolved: ResolvedPosterUrls
@@ -47,9 +44,8 @@ export function videoItemsToResolve(
   const out: string[] = [];
   for (const item of items) {
     if (mediaItemKind(item) !== "video") continue;
-    const id = mediaItemId(item);
     const artifactId = mediaItemArtifactId(item);
-    if (!id || !artifactId) continue;
+    if (!artifactId) continue;
     if (Object.prototype.hasOwnProperty.call(resolved, artifactId)) continue;
     out.push(artifactId);
   }
