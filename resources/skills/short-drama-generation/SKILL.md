@@ -228,15 +228,18 @@ pre-existing drama directory. (Same session asked for a second drama → append 
      finishes in roughly the slowest single clip's time, not the sum. Set an explicit long
      Bash timeout within the current Bash cap on **each** call, sized for the slowest single
      clip — never for the whole drama. One call → one finished clip.
-   - Read `path` from the tool result and record it into the manifest (see below).
+   - Read `path` and `artifactId` from the tool result and record both into the
+     manifest as `videoPath` and `videoArtifactId` (see below).
    - After **all** shot chunks have finished (not after each chunk), gate the keep/drop
      selection once (mirroring stage 3):
      render `Canvas` with `canvasId = canvas-drama-<slug>-stage4` and
      `title:"Per-shot video"`, whose `body` is a single `mediaPicker` with no wrapping
      card: `{type:"mediaPicker", id:"shots", multi:true, value:[<every succeeded shotId>],
-     items:[{id,kind:"video",path,label,description}, …]}` — one item per SUCCEEDED shot.
-     Set `id` and `label` to the shotId, `kind` to `"video"`, `path` to that clip's
-     workspace path from the manifest, and `description` to the shot's prompt summary.
+     items:[{id,kind:"video",artifactId,label,description}, …]}` — one item per SUCCEEDED shot.
+     Set `id` and `label` to the shotId, `kind` to `"video"`, `artifactId` to that clip's
+     `videoArtifactId` from the manifest, and `description` to the shot's prompt summary.
+     The picker renders each tile from its artifact's first-frame poster, so the item
+     needs no `path`.
      `value` lists every succeeded shotId, so all clips are checked by default. Then end
      the turn. In the next turn read it back with `CanvasState`: `shots` is the array of
      checked shotIds — these are the clips kept for composition; unchecked shots are

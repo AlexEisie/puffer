@@ -119,18 +119,20 @@ the key in `CanvasState.values`.
 - avoid_when: read-only records → use `table`.
 - writes back: a 2D array (`rows`) reflecting the final edits and order.
 
-### mediaPicker `{id,items:[{id,kind?,url?,path?,label?,description?}],multi?,value?}`
+### mediaPicker `{id,items:[{id,kind?,url?,artifactId?,label?,description?}],multi?,value?}`
 - purpose: pick from a grid of images or videos.
 - use_when: the user selects one (or, with `multi:true`, several) generated
   candidate images or video clips.
 - item kind: `kind` is `"image"` (default) or `"video"` — explicit, never
   inferred from the URL/extension. Image items carry a directly-loadable `url`;
-  video items carry a workspace-relative `path` (the frontend mints a streaming
-  access URL itself, so this works for every provider, including local-only ones).
+  video items carry the generated clip's `artifactId` (from the `videogen` tool
+  result), through which the frontend resolves both the first-frame poster
+  thumbnail and the on-demand streaming preview URL.
 - preview: on desktop, clicking an item opens a preview. Image items show the
   enlarged image; video items play the clip with controls. The grid thumbnail of
-  a video item is its first frame. Each preview also shows that item's
-  `description` (centered).
+  a video item is its first-frame poster image (resolved from `artifactId`); a
+  clip whose poster is unavailable still opens to play. Each preview also shows
+  that item's `description` (centered).
 - writes back: single → the chosen item `id`; multi → an array of selected ids.
 
 ### mediaModelSelect `{}`
