@@ -275,7 +275,12 @@ impl BytePlusVideoAdapter<ReqwestBytePlusVideoTransport> {
             api_token,
             submit_url: submit_url.into().trim_end_matches('/').to_string(),
             provider_id: provider_id.into(),
-            transport: ReqwestBytePlusVideoTransport::default(),
+            // Use a client with a bounded download timeout (the default has
+            // none) so the retrying downloader can re-attempt a stalled transfer
+            // instead of hanging.
+            transport: ReqwestBytePlusVideoTransport {
+                client: super::http_support::media_download_client()?,
+            },
         })
     }
 }
