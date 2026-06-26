@@ -403,6 +403,7 @@ export type MediaCapabilityInfo = {
   source: string;
   reason: string | null;
   checkedAtMs: number;
+  supportsImageSet: boolean;
 };
 
 export type ResourceCounts = {

@@ -6,6 +6,7 @@ import {
   selectionComplete,
   hasMediaModelSelect,
   buildMediaWriteBack,
+  selectedSupportsImageSet,
 } from "./mediaModelSelect";
 import type {
   MediaCapabilityInfo,
@@ -30,6 +31,7 @@ function cap(
     source: "test",
     reason: null,
     checkedAtMs: 0,
+    supportsImageSet: false,
     ...extra,
   };
 }
@@ -169,5 +171,34 @@ describe("buildMediaWriteBack", () => {
     );
     expect(out.image).toEqual({ providerId: "ark", logicalModelId: "seedream", selections: { ratio: "16:9" } });
     expect(out.video).toEqual({ providerId: "relay", logicalModelId: "kling", selections: { dur: "5" } });
+  });
+});
+
+describe("selectedSupportsImageSet", () => {
+  const available = [
+    cap("byteplus", "seedream", { supportsImageSet: true }),
+    cap("openai", "gpt-image-1", { supportsImageSet: false }),
+  ];
+
+  it("returns the chosen image model's set capability", () => {
+    expect(
+      selectedSupportsImageSet(available, { imgProvider: "byteplus", imgModel: "seedream" }),
+    ).toBe(true);
+    expect(
+      selectedSupportsImageSet(available, { imgProvider: "openai", imgModel: "gpt-image-1" }),
+    ).toBe(false);
+  });
+
+  it("is false when no image model is chosen or the model is unknown", () => {
+    expect(selectedSupportsImageSet(available, { imgProvider: "byteplus", imgModel: "" })).toBe(false);
+    expect(selectedSupportsImageSet(available, { imgProvider: "byteplus", imgModel: "ghost" })).toBe(false);
+  });
+
+  it("matches on provider+model so a same-id model under another provider doesn't leak", () => {
+    const ambiguous = [
+      cap("a", "m", { supportsImageSet: true }),
+      cap("b", "m", { supportsImageSet: false }),
+    ];
+    expect(selectedSupportsImageSet(ambiguous, { imgProvider: "b", imgModel: "m" })).toBe(false);
   });
 });
