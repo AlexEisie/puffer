@@ -76,11 +76,9 @@ pre-existing drama directory. (Same session asked for a second drama → append 
    capabilities, build options, or branch on empty lists yourself. Then **end the turn**.
 
    In the next turn read back with `CanvasState` (same canvasId): `values` carries
-   `{imgProvider,imgModel,vidProvider,vidModel,imgSupportsImageSet}`. **Validate**: if `imgModel` or
+   `{imgProvider,imgModel,vidProvider,vidModel}`. **Validate**: if `imgModel` or
    `vidModel` is empty, stop and report that both image and video models must be selected (direct the
-   user to Settings if a kind has no provider). Record these values in `manifest.json` for Stages 3/4
-   — including the boolean `imgSupportsImageSet` (the chosen image model's set capability), which
-   Stage 3 routes on — this
+   user to Settings if a kind has no provider). Record these values in `manifest.json` for Stages 3/4 — this
    manifest write first creates `.puffer/media/drama/<id>/`, so this is where you mint
    `<id> = <slug>-<session8>` using the `sessionId` from this read-back.
 
@@ -121,62 +119,37 @@ pre-existing drama directory. (Same session asked for a second drama → append 
      (e.g. BytePlus) sends the reference verbatim to the model and cannot fetch an `asset://`
      handle — if the chosen video provider is direct-URL and the prompt supplied an `asset://`
      reference, ask the user for a public `https://` URL instead of passing it through.
-   - If absent and the user wants character-consistent shots, route on **`imgSupportsImageSet`** —
-     the boolean recorded in `manifest.json` from the Stage 0 read-back (the chosen image model's
-     set capability; no extra probe). **Branch only on this flag, never on a provider/model id.**
+   - If absent and the user wants character-consistent shots, generate **one image per character in parallel** — never fold the cast into a grouped call. Identity is bound by which call you issued — each `imagegen` call is 1:1 with one character, so the returned artifact IS that character's reference; never bind by returned image order (providers do not guarantee it) and never identify a character by inspecting pixels. The call-to-character mapping is known at issue time and is the only binding used.
 
-     **Square is carried by the prompt — never pass `--aspect`.** The
-     reference image must read as square, but different image models support different ratio
-     knobs and some reject any explicit ratio. Do **not** pass `--aspect`; squareness is carried
-     entirely by the mandatory square clause in the prompts below — in **both** branches.
+     **Square is carried by the prompt — never pass `--aspect`.** The reference image
+     must read as square, but different image models support different ratio knobs and some
+     reject any explicit ratio. Do **not** pass `--aspect`; squareness is carried entirely by
+     the mandatory square clause in the per-character prompt below.
 
      **Style anchor (compose once, reuse verbatim).** Before generating, write a single shared
      style phrase describing the drama's overall look (medium, rendering, palette,
      line/lighting), derived from the storyboard's `style` field — e.g.
      `"flat 2D anime illustration, soft cel shading, muted warm palette, clean outlines"`. It is
-     the anchor that keeps the whole cast in one consistent style; **both** branches reuse it
-     verbatim and never vary it per character.
+     the anchor that keeps the whole cast in one consistent style; every per-character call reuses
+     it **verbatim** and never varies it per character. This shared anchor — not a grouped call —
+     is what makes the separately-generated cast cohere.
 
-     **(a) Set-capable model (`supportsImageSet: true`) — one coherent image set.** Compose a
-     single set prompt: the style anchor, then an enumerated cast — `1) <character + appearance>
-     2) … N) …` — stating **N separate full-body head-to-toe front-view square 1:1 portraits,
-     one per character, identical style, each on a plain pure-white background, even studio
-     lighting, no text, no letters, no watermark, no logo**. Then issue ONE grouped call:
-     `imagegen --image-set --count N --prompt "<that set prompt>" --provider <imgProvider> --model <imgModel>`.
-     One call returns N stylistically coherent images, but **the provider does NOT guarantee
-     the output order matches the prompt enumeration** — e.g. BytePlus Seedream may return cast
-     positions out of order, so binding image *k* → character *k* by index silently swaps
-     identities. **Never bind by position.** After the call returns, **Read each returned
-     artifact's local `path` and identify which enumerated character it depicts**, matching
-     distinguishing features (age, build, hair, clothing, colour) against the cast descriptions;
-     then record that **same** artifact's `remoteSourceUrl` under the identified character in
-     `characterRefs`. If two images cannot be confidently told apart (ambiguous look-alikes), do
-     NOT guess — regenerate just those characters through the per-character single-image path in
-     (b), whose identity is fixed by each separate call. The set is capped at **9 images per
-     call**; if the cast is larger, split into successive `--image-set` calls (e.g. 12 → 9 then
-     3). Never fold the cast into a non-set call and never add `--aspect`.
-
-     **(b) Not set-capable (`supportsImageSet: false`) — parallel single images.** Generate
-     **one image per character, in parallel**: collect the distinct character names from the
-     confirmed storyboard's `characters` column and emit the per-character `imagegen` calls
-     **together in a single turn** so the backend runs them concurrently (one approval unblocks
-     the whole batch). Cap each turn at **5** `imagegen` calls; more than 5 characters → send
-     successive turns of ≤5 (e.g. 7 characters → 5 then 2). One `imagegen` per character,
-     never folding two into one call — **N characters → N calls → N images**. For each
-     character build:
+     Collect the distinct character names from the confirmed storyboard's `characters` column and
+     emit the per-character `imagegen` calls **together in a single turn** so the backend runs them
+     concurrently (one approval unblocks the whole batch). Cap each turn at **5** `imagegen` calls;
+     more than 5 characters → send successive turns of ≤5 (e.g. 7 characters → 5 then 2). One
+     `imagegen` per character, never folding two into one call — **N characters → N calls → N images**. For each character build:
      `<style anchor>, square 1:1 composition with equal width and height, full-body head-to-toe
      front view of <character + appearance>, standing, centered, plain pure-white background,
      even studio lighting, no text, no letters, no watermark, no logo, no captions` — then run
      `imagegen --prompt "<that prompt>" --count 1 --provider <imgProvider> --model <imgModel>`.
-     One call → one character → one image; the N (≤5 per turn) calls go out together as one
-     parallel batch, and you read every result back after the batch returns. Never add
-     `--aspect`.
+     One call → one character → one image; the N (≤5 per turn) calls go out together as one parallel
+     batch, and you read every result back after the batch returns. Never add `--aspect`.
 
-     **Both branches.** Make each character stylized / non-photorealistic (cartoon, 3D render,
-     illustration): image-to-video providers (e.g. BytePlus) reject photoreal real-person images
-     on moderation. **Never combine multiple characters into one image** — the set branch returns
-     N distinct images from one call; it does not draw a group sheet. For each returned image read
-     the tool result's `remoteSourceUrl` (same key the video tool uses):
+     Make each character stylized / non-photorealistic (cartoon, 3D render, illustration):
+     image-to-video providers (e.g. BytePlus) reject photoreal real-person images on moderation.
+     **Never combine multiple characters into one image.** For each returned image read the tool
+     result's `remoteSourceUrl` (same key the video tool uses):
        - If `remoteSourceUrl` is present, record it under that character in `manifest.json`
          `characterRefs` (`{ "<character>": "<url>" }`) and use it as that character's
          `--image-reference` in stage 4.
