@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   mediaItemKind,
-  mediaItemId,
+  mediaItemArtifactId,
   videoItemsToResolve,
   mediaItemView,
 } from "./mediaPickerItems";
@@ -18,41 +18,39 @@ describe("mediaItemKind", () => {
   });
 });
 
-describe("mediaItemId", () => {
-  it("reads a string id, else empty", () => {
-    expect(mediaItemId({ id: "shot-001" })).toBe("shot-001");
-    expect(mediaItemId({ id: 3 })).toBe("");
-    expect(mediaItemId({})).toBe("");
+describe("mediaItemArtifactId", () => {
+  it("reads a string artifactId, else empty", () => {
+    expect(mediaItemArtifactId({ artifactId: "art-001" })).toBe("art-001");
+    expect(mediaItemArtifactId({ artifactId: 3 })).toBe("");
+    expect(mediaItemArtifactId({})).toBe("");
   });
 });
 
 describe("videoItemsToResolve", () => {
-  it("returns each video item's id+path exactly once, skipping images", () => {
+  it("returns each video item's artifactId exactly once, skipping images", () => {
     const items = [
-      { id: "a", kind: "video", path: "x/a.mp4" },
+      { id: "a", kind: "video", artifactId: "art-a" },
       { id: "b", kind: "image", url: "http://img/b.png" },
-      { id: "c", kind: "video", path: "x/c.mp4" },
+      { id: "c", kind: "video", artifactId: "art-c" },
     ];
-    expect(videoItemsToResolve(items, {})).toEqual([
-      { id: "a", path: "x/a.mp4" },
-      { id: "c", path: "x/c.mp4" },
-    ]);
+    expect(videoItemsToResolve(items, {})).toEqual(["art-a", "art-c"]);
   });
-  it("skips video items missing a usable path or id", () => {
+  it("skips video items missing a usable artifactId, independent of id", () => {
     const items = [
-      { id: "a", kind: "video" },
-      { id: "", kind: "video", path: "x/a.mp4" },
-      { kind: "video", path: "x/b.mp4" },
+      { id: "a", kind: "video" }, // no artifactId → skipped
+      { id: "", kind: "video", artifactId: "art-a" }, // missing id is irrelevant
+      { kind: "video", artifactId: "art-b" }, // absent id is irrelevant
     ];
-    expect(videoItemsToResolve(items, {})).toEqual([]);
+    expect(videoItemsToResolve(items, {})).toEqual(["art-a", "art-b"]);
   });
-  it("does not re-resolve an id already present (success or failure sentinel)", () => {
+  it("does not re-resolve an artifactId already present (success or failure sentinel)", () => {
     const items = [
-      { id: "a", kind: "video", path: "x/a.mp4" },
-      { id: "b", kind: "video", path: "x/b.mp4" },
+      { id: "a", kind: "video", artifactId: "art-a" },
+      { id: "b", kind: "video", artifactId: "art-b" },
     ];
-    // a resolved to a url, b resolved to the failure sentinel "" — both are done.
-    expect(videoItemsToResolve(items, { a: "http://t/a", b: "" })).toEqual([]);
+    // art-a resolved to a poster url, art-b resolved to the failure sentinel ""
+    // — both are done.
+    expect(videoItemsToResolve(items, { "art-a": "blob:poster-a", "art-b": "" })).toEqual([]);
   });
 });
 
@@ -64,14 +62,18 @@ describe("mediaItemView", () => {
       available: true,
     });
   });
-  it("video item with a resolved url is available", () => {
+  it("video item with a resolved poster url is available", () => {
     expect(
-      mediaItemView({ id: "a", kind: "video", path: "x/a.mp4" }, { a: "http://t/a" })
-    ).toEqual({ kind: "video", url: "http://t/a", available: true });
+      mediaItemView({ id: "a", kind: "video", artifactId: "art-a" }, { "art-a": "blob:poster-a" })
+    ).toEqual({ kind: "video", url: "blob:poster-a", available: true });
   });
-  it("video item that is unresolved or failed is unavailable with no url", () => {
-    const item = { id: "a", kind: "video", path: "x/a.mp4" };
+  it("video item whose poster is unresolved or failed is unavailable with no url", () => {
+    const item = { id: "a", kind: "video", artifactId: "art-a" };
     expect(mediaItemView(item, {})).toEqual({ kind: "video", url: "", available: false });
-    expect(mediaItemView(item, { a: "" })).toEqual({ kind: "video", url: "", available: false });
+    expect(mediaItemView(item, { "art-a": "" })).toEqual({
+      kind: "video",
+      url: "",
+      available: false,
+    });
   });
 });

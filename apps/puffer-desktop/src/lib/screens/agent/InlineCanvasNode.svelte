@@ -1,16 +1,23 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import InlineCanvasNode from "./InlineCanvasNode.svelte";
   import CanvasMediaPreview from "./CanvasMediaPreview.svelte";
   import { filterDependentOptions, resolveDependentValue } from "./dependentSelect";
   import { appendRow } from "./editableTableRows";
   import {
-    createFileMediaAccess,
+    createGeneratedVideoAccess,
     listMediaCapabilities,
     loadSettingsSnapshot,
+    readGeneratedMediaPreview,
     updateConfig,
   } from "../../api/desktop";
   import { availableMediaCapabilities } from "./mediaCapabilityState";
-  import { mediaItemView, videoItemsToResolve } from "./mediaPickerItems";
+  import {
+    mediaItemArtifactId,
+    mediaItemKind,
+    mediaItemView,
+    videoItemsToResolve,
+  } from "./mediaPickerItems";
   import {
     providerOptions,
     modelOptions,
@@ -25,10 +32,11 @@
   type Props = {
     node: CanvasNode;
     values: Record<string, unknown>;
+    sessionId: string | null;
     onChange: (id: string, value: unknown) => void;
   };
 
-  let { node, values, onChange }: Props = $props();
+  let { node, values, sessionId, onChange }: Props = $props();
 
   function text(value: unknown): string {
     if (value === null || value === undefined) return "";
@@ -182,35 +190,88 @@
     }
   }
 
-  // --- mediaPicker: click-to-preview overlay state ---
-  let previewItem = $state<CanvasNode | null>(null);
-  function openPreview(item: CanvasNode) { previewItem = item; }
-  function closePreview() { previewItem = null; }
-
-  // --- mediaPicker: video access URLs, resolved once per item id ---
-  // `videoUrls`: a present key means the id is resolved; "" is the failure
-  // sentinel so a non-available/throwing access RPC is never retried. Reassigned
-  // (not mutated) so Svelte tracks it, mirroring MessageAttachmentPreviewStrip.
-  // `videoResolving`: in-flight ids, kept off the reactive map so a sibling clip
-  // completing (which re-runs the effect) does not re-issue an RPC for ids whose
-  // resolution has started but not yet landed in `videoUrls`.
-  let videoUrls = $state<Record<string, string>>({});
-  const videoResolving = new Set<string>();
-  async function resolveVideoUrl(itemId: string, path: string) {
-    videoResolving.add(itemId);
+  // --- mediaPicker: poster thumbnails, resolved once per artifactId ---
+  // Each video tile shows its first-frame poster (an `<img>`); macOS WKWebView
+  // will not paint a `<video preload="metadata">` first frame, so the grid is
+  // poster-based via the artifact lane. `posterUrls`: a present key (by
+  // artifactId) means resolved; "" is the failure sentinel so a non-available or
+  // throwing preview RPC is never retried. Values are blob: object URLs we own
+  // and must revoke on destroy. Reassigned (not mutated) so Svelte tracks it.
+  // `posterResolving`: in-flight artifactIds kept off the reactive map so a
+  // sibling poster landing (which re-runs the effect) does not re-issue an RPC.
+  let posterUrls = $state<Record<string, string>>({});
+  const posterResolving = new Set<string>();
+  async function resolvePosterUrl(artifactId: string) {
+    if (!sessionId) return;
+    posterResolving.add(artifactId);
     try {
-      const access = await createFileMediaAccess(path);
-      videoUrls = { ...videoUrls, [itemId]: access.state === "available" ? access.url : "" };
+      const preview = await readGeneratedMediaPreview(sessionId, artifactId);
+      if (preview.state === "available") {
+        const url = URL.createObjectURL(
+          new Blob([new Uint8Array(preview.bytes)], { type: preview.mimeType })
+        );
+        posterUrls = { ...posterUrls, [artifactId]: url };
+      } else {
+        posterUrls = { ...posterUrls, [artifactId]: "" };
+      }
     } catch {
-      videoUrls = { ...videoUrls, [itemId]: "" };
+      posterUrls = { ...posterUrls, [artifactId]: "" };
     } finally {
-      videoResolving.delete(itemId);
+      posterResolving.delete(artifactId);
     }
   }
   $effect(() => {
-    if (componentType !== "mediaPicker") return;
-    for (const { id: itemId, path } of videoItemsToResolve(items(node.items), videoUrls)) {
-      if (!videoResolving.has(itemId)) void resolveVideoUrl(itemId, path);
+    if (componentType !== "mediaPicker" || !sessionId) return;
+    for (const artifactId of videoItemsToResolve(items(node.items), posterUrls)) {
+      if (!posterResolving.has(artifactId)) void resolvePosterUrl(artifactId);
+    }
+  });
+
+  // --- mediaPicker: click-to-preview overlay state ---
+  // Image previews read straight from the item url; video previews resolve a
+  // playable streaming URL on demand (the artifact lane), so the bulk grid never
+  // mints video URLs it may not use. `previewVideoState` drives the popup:
+  // `loading` while resolving, `ready` with `previewVideoUrl`, `unavailable` on a
+  // missing/failed access (the popup then shows "preview unavailable").
+  // Whether a preview is open is `previewItem !== null`; `previewVideoState` only
+  // tracks how a video preview is progressing, so it has no separate idle value.
+  let previewItem = $state<CanvasNode | null>(null);
+  let previewVideoUrl = $state<string>("");
+  let previewVideoState = $state<"loading" | "ready" | "unavailable">("loading");
+  async function openPreview(item: CanvasNode) {
+    previewItem = item;
+    if (mediaItemKind(item) !== "video") return;
+    previewVideoUrl = "";
+    previewVideoState = "loading";
+    const artifactId = mediaItemArtifactId(item);
+    if (!sessionId || !artifactId) {
+      previewVideoState = "unavailable";
+      return;
+    }
+    try {
+      const access = await createGeneratedVideoAccess(sessionId, artifactId);
+      if (previewItem !== item) return; // user closed or switched while resolving
+      if (access.state === "available") {
+        previewVideoUrl = access.url;
+        previewVideoState = "ready";
+      } else {
+        previewVideoState = "unavailable";
+      }
+    } catch {
+      if (previewItem === item) previewVideoState = "unavailable";
+    }
+  }
+  function closePreview() {
+    previewItem = null;
+    previewVideoUrl = "";
+    previewVideoState = "loading";
+  }
+
+  // Generated video access URLs are short-lived HTTP tickets, not blobs; only the
+  // poster object URLs we minted need revoking.
+  onDestroy(() => {
+    for (const url of Object.values(posterUrls)) {
+      if (url.startsWith("blob:")) URL.revokeObjectURL(url);
     }
   });
 
@@ -318,26 +379,26 @@
   <section class="ic-section">
     {#if node.title}<h4>{text(node.title)}</h4>{/if}
     {#each children(node.children) as child, index (`${text(child.type)}-${index}`)}
-      <InlineCanvasNode node={child} {values} {onChange} />
+      <InlineCanvasNode node={child} {values} {sessionId} {onChange} />
     {/each}
   </section>
 {:else if componentType === "grid"}
   <div class="ic-grid" style={`--ic-min:${numeric(node.min, 190)}px`}>
     {#each children(node.children) as child, index (`${text(child.type)}-${index}`)}
-      <InlineCanvasNode node={child} {values} {onChange} />
+      <InlineCanvasNode node={child} {values} {sessionId} {onChange} />
     {/each}
   </div>
 {:else if componentType === "columns"}
   <div class="ic-columns">
     {#each children(node.children) as child, index (`${text(child.type)}-${index}`)}
-      <InlineCanvasNode node={child} {values} {onChange} />
+      <InlineCanvasNode node={child} {values} {sessionId} {onChange} />
     {/each}
   </div>
 {:else if componentType === "card"}
   <div class="ic-card">
     {#if node.title}<div class="ic-card-title">{text(node.title)}</div>{/if}
     {#each children(node.children) as child, index (`${text(child.type)}-${index}`)}
-      <InlineCanvasNode node={child} {values} {onChange} />
+      <InlineCanvasNode node={child} {values} {sessionId} {onChange} />
     {/each}
   </div>
 {:else if componentType === "divider"}
@@ -542,7 +603,7 @@
 {:else if componentType === "mediaPicker"}
   <div class="ic-media-picker">
     {#each items(node.items) as item, i (`mp-${i}`)}
-      {@const thumb = mediaItemView(item, videoUrls)}
+      {@const thumb = mediaItemView(item, posterUrls)}
       <div class="ic-media-cell" class:selected={isPicked(item)}>
         <input
           type="checkbox"
@@ -554,18 +615,15 @@
         <button
           type="button"
           class="ic-media-thumb"
-          disabled={!thumb.available}
           onclick={() => openPreview(item)}
         >
-          {#if thumb.kind === "video"}
-            {#if thumb.available}
-              <!-- svelte-ignore a11y_media_has_caption: Generated videos do not have caption tracks. -->
-              <video src={thumb.url} muted preload="metadata" playsinline></video>
-            {:else}
-              <span class="ic-media-unavailable">preview unavailable</span>
-            {/if}
+          {#if thumb.available}
+            <!-- Image item: its url. Video item: its first-frame poster image. -->
+            <img src={thumb.url} alt={text(item.label) || thumb.kind} loading="lazy" />
           {:else}
-            <img src={thumb.url} alt={text(item.label)} loading="lazy" />
+            <!-- Only videos reach here: images are always available, a video tile
+                 lands here only until (or unless) its poster resolves. -->
+            <span class="ic-media-unavailable">▶ play</span>
           {/if}
         </button>
         {#if item.label}<span class="ic-media-name">{text(item.label)}</span>{/if}
@@ -573,14 +631,25 @@
     {/each}
   </div>
   {#if previewItem}
-    {@const preview = mediaItemView(previewItem, videoUrls)}
-    <CanvasMediaPreview
-      kind={preview.kind}
-      url={preview.url}
-      name={text(previewItem.label)}
-      description={text(previewItem.description)}
-      onClose={closePreview}
-    />
+    {#if mediaItemKind(previewItem) === "video"}
+      <CanvasMediaPreview
+        kind="video"
+        url={previewVideoUrl}
+        status={previewVideoState}
+        name={text(previewItem.label)}
+        description={text(previewItem.description)}
+        onClose={closePreview}
+      />
+    {:else}
+      {@const preview = mediaItemView(previewItem, posterUrls)}
+      <CanvasMediaPreview
+        kind="image"
+        url={preview.url}
+        name={text(previewItem.label)}
+        description={text(previewItem.description)}
+        onClose={closePreview}
+      />
+    {/if}
   {/if}
 {:else if componentType === "finding"}
   <article class={`ic-finding severity-${text(node.severity || "info")}`}>

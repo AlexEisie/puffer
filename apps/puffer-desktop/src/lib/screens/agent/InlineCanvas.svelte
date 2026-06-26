@@ -200,7 +200,7 @@
 
   <div class="inline-canvas-body">
     {#each bodyNodes() as node, index (`${text(node.type)}-${index}`)}
-      <InlineCanvasNode {node} {values} onChange={setValue} />
+      <InlineCanvasNode {node} {values} {sessionId} onChange={setValue} />
     {/each}
     {#if onSubmitCanvasState}
       <div class="inline-canvas-selection-actions">

@@ -2840,6 +2840,7 @@ fn media_capability_info_dto(capability: MediaCapabilityView) -> MediaCapability
         source: capability.source,
         reason: capability.reason,
         checked_at_ms: capability.checked_at_ms,
+        supports_image_set: capability.supports_image_set,
     }
 }
 

@@ -30,6 +30,7 @@ function cap(
     source: "test",
     reason: null,
     checkedAtMs: 0,
+    supportsImageSet: false,
     ...extra,
   };
 }

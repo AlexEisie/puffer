@@ -43,6 +43,7 @@ fn media_capabilities_json(kind: &str, views: Vec<MediaCapabilityView>) -> Strin
                 "modelId": view.model_id,
                 "modelDisplayName": view.model_display_name,
                 "status": view.status,
+                "supportsImageSet": view.supports_image_set,
             })
         })
         .collect();
@@ -56,7 +57,7 @@ mod tests {
     use puffer_media::MediaCapabilityView;
     use serde_json::Value;
 
-    fn view(provider: &str, model: &str, status: &str) -> MediaCapabilityView {
+    fn view(provider: &str, model: &str, status: &str, supports_image_set: bool) -> MediaCapabilityView {
         MediaCapabilityView {
             provider_id: provider.to_string(),
             provider_display_name: format!("{provider} display"),
@@ -70,6 +71,7 @@ mod tests {
             source: "static".to_string(),
             reason: None,
             checked_at_ms: 0,
+            supports_image_set,
         }
     }
 
@@ -78,8 +80,8 @@ mod tests {
         let out = media_capabilities_json(
             "image",
             vec![
-                view("byteplus", "seedream", "available"),
-                view("worldrouter", "blocked", "unavailable"),
+                view("byteplus", "seedream", "available", true),
+                view("worldrouter", "blocked", "unavailable", false),
             ],
         );
         let parsed: Value = serde_json::from_str(&out).unwrap();
@@ -90,5 +92,6 @@ mod tests {
         assert_eq!(caps[0]["modelId"], "seedream");
         assert_eq!(caps[0]["providerDisplayName"], "byteplus display");
         assert_eq!(caps[0]["status"], "available");
+        assert_eq!(caps[0]["supportsImageSet"], true);
     }
 }

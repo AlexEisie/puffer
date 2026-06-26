@@ -149,10 +149,20 @@ fn short_drama_stage2_storyboard_draft_uses_card_layout() {
 #[test]
 fn short_drama_stage3_generates_one_image_per_character() {
     let body = include_str!("../../../resources/skills/short-drama-generation/SKILL.md");
-    // One image per character; combined sheets are forbidden.
+    // Stage 3 is a single path: one image per character.
     assert!(body.contains("one image per character"));
     assert!(body.contains("N characters → N calls → N images"));
     assert!(body.contains("Never combine multiple characters into one image"));
+    // Identity is bound by the call, never by returned order or pixel inspection.
+    assert!(body.contains("bound by which call you issued"));
+    assert!(body.contains("never bind by returned image order"));
+    // The image-set branch and its routing are gone from this skill.
+    assert!(!body.contains("--image-set"));
+    assert!(!body.contains("supportsImageSet"));
+    assert!(!body.contains("imgSupportsImageSet"));
+    assert!(!body.contains("both branches"));
+    // Character images never use a seed.
+    assert!(!body.contains("--seed"));
     // Stage 3 canvas: default-checked multi picker, one item per character, no wrapping card.
     assert!(body.contains("canvas-drama-<slug>-stage3"));
     assert!(body.contains("multi:true"));
