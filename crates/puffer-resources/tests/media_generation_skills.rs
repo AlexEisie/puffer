@@ -107,6 +107,8 @@ fn short_drama_skill_gates_model_selection_in_stage0() {
     assert!(body.contains("imgModel"));
     assert!(body.contains("vidProvider"));
     assert!(body.contains("vidModel"));
+    // The chosen image model's set capability is surfaced for Stage 3 routing.
+    assert!(body.contains("imgSupportsImageSet"));
     // The old bash flow and hand-built cascade are gone.
     assert!(!body.contains("media-capabilities"));
     assert!(!body.contains("dependentSelect"));
@@ -149,10 +151,17 @@ fn short_drama_stage2_storyboard_draft_uses_card_layout() {
 #[test]
 fn short_drama_stage3_generates_one_image_per_character() {
     let body = include_str!("../../../resources/skills/short-drama-generation/SKILL.md");
-    // One image per character; combined sheets are forbidden.
+    // Stage 3 routes on the declared capability flag (never a model id); the set-capable
+    // branch issues one grouped `--image-set` call, the fallback stays one-per-character.
+    assert!(body.contains("supportsImageSet"));
+    assert!(body.contains("--image-set"));
+    assert!(body.contains("Branch only on"));
+    // The fallback path is still one image per character; combined sheets are forbidden.
     assert!(body.contains("one image per character"));
     assert!(body.contains("N characters → N calls → N images"));
     assert!(body.contains("Never combine multiple characters into one image"));
+    // Character images never use a seed.
+    assert!(!body.contains("--seed"));
     // Stage 3 canvas: default-checked multi picker, one item per character, no wrapping card.
     assert!(body.contains("canvas-drama-<slug>-stage3"));
     assert!(body.contains("multi:true"));
