@@ -3,8 +3,8 @@ use crate::AppState;
 use anyhow::{bail, Context, Result};
 use puffer_config::MediaGenerationConfig;
 use puffer_media::{
-    generate_exact_image_with_cache, validate_image_generation_count, ExactImageGenerationRequest,
-    ExactMediaDiscoveryCache,
+    generate_exact_image_with_cache, list_exact_media_capabilities_with_cache,
+    validate_image_generation_count, ExactImageGenerationRequest, ExactMediaDiscoveryCache,
 };
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use serde::Deserialize;
@@ -41,6 +41,10 @@ struct ImageGenerationInput {
     provider: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    /// When true, request the cast as one coherent grouped image set. Raises
+    /// the count cap to the grouped maximum; gated to set-capable models.
+    #[serde(default)]
+    image_set: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -87,8 +91,21 @@ pub fn execute_image_generation(
     let parsed: ImageGenerationInput =
         serde_json::from_value(input).context("invalid ImageGeneration input")?;
     let settings = image_settings;
+    let image_set = parsed.image_set;
     let request = build_image_request(cwd, parsed, settings)?;
     let media_context = media_context.context("ImageGeneration media runtime is not configured")?;
+    // Defensive: `--image-set` must target a set-capable model. The skill routes
+    // on `supportsImageSet`, so the normal flow never trips this guard.
+    if image_set {
+        let supports = model_supports_image_set(
+            media_context.providers,
+            media_context.auth_store,
+            media_context.discovery_cache,
+            &request.provider,
+            &request.model,
+        );
+        ensure_image_set_supported(supports)?;
+    }
     let generated = generate_exact_image_with_cache(
         media_context.providers,
         media_context.auth_store,
@@ -269,6 +286,32 @@ fn apply_count_override(
     validate_image_generation_count(count)?;
     parameters.insert("output".to_string(), count.to_string());
     Ok(())
+}
+
+/// Defensive guard: an `--image-set` request must target a set-capable model.
+/// Called only on the image-set path; the skill routes via `supportsImageSet`,
+/// so the normal flow never trips this.
+fn ensure_image_set_supported(supports_image_set: bool) -> Result<()> {
+    if !supports_image_set {
+        bail!("image set requested but the selected model does not support grouped image generation");
+    }
+    Ok(())
+}
+
+/// Looks up whether the resolved provider/model exposes grouped image-set
+/// capability, defaulting to false when the model is not found.
+fn model_supports_image_set(
+    providers: &ProviderRegistry,
+    auth_store: &AuthStore,
+    discovery_cache: &ExactMediaDiscoveryCache,
+    provider: &str,
+    model: &str,
+) -> bool {
+    list_exact_media_capabilities_with_cache(providers, auth_store, Some("image"), discovery_cache)
+        .into_iter()
+        .find(|view| view.provider_id == provider && view.model_id == model)
+        .map(|view| view.supports_image_set)
+        .unwrap_or(false)
 }
 
 fn apply_aspect_parameter(
@@ -575,6 +618,7 @@ mod tests {
                     retry_from_error: None,
                     provider: None,
                     model: None,
+                    image_set: false,
                 },
                 Some(&image_settings()),
             )
@@ -585,6 +629,16 @@ mod tests {
                 "image generation count must be between 1 and 9"
             );
         }
+    }
+
+    #[test]
+    fn image_set_gate_rejects_non_set_capable_model() {
+        let error = ensure_image_set_supported(false).unwrap_err();
+        assert!(
+            error.to_string().contains("does not support grouped"),
+            "{error}"
+        );
+        assert!(ensure_image_set_supported(true).is_ok());
     }
 
     #[test]
@@ -613,6 +667,7 @@ mod tests {
                 retry_from_error: None,
                 provider: Some("byteplus".to_string()),
                 model: Some("seedream".to_string()),
+                image_set: false,
             },
             Some(&image_settings()),
         )
@@ -635,6 +690,7 @@ mod tests {
                 retry_from_error: None,
                 provider: None,
                 model: None,
+                image_set: false,
             },
             Some(&image_settings()),
         )
@@ -657,6 +713,7 @@ mod tests {
                 retry_from_error: None,
                 provider: None,
                 model: None,
+                image_set: false,
             },
             None,
         )
@@ -680,6 +737,7 @@ mod tests {
                 retry_from_error: None,
                 provider: None,
                 model: None,
+                image_set: false,
             },
             Some(&image_settings()),
         )
@@ -712,6 +770,7 @@ mod tests {
                 retry_from_error: None,
                 provider: None,
                 model: None,
+                image_set: false,
             },
             Some(&settings),
         )
@@ -746,6 +805,7 @@ mod tests {
                 retry_from_error: None,
                 provider: None,
                 model: None,
+                image_set: false,
             },
             Some(&settings),
         )
@@ -779,6 +839,7 @@ mod tests {
                 retry_from_error: None,
                 provider: None,
                 model: None,
+                image_set: false,
             },
             Some(&settings),
         )
@@ -813,6 +874,7 @@ mod tests {
                 retry_from_error: None,
                 provider: None,
                 model: None,
+                image_set: false,
             },
             Some(&settings),
         )
@@ -848,6 +910,7 @@ mod tests {
                 retry_from_error: None,
                 provider: None,
                 model: None,
+                image_set: false,
             },
             Some(&settings),
         )

@@ -581,6 +581,7 @@ pub(crate) struct MediaCapabilityInfoDto {
     pub(crate) source: String,
     pub(crate) reason: Option<String>,
     pub(crate) checked_at_ms: u64,
+    pub(crate) supports_image_set: bool,
 }
 
 /// One user-facing axis of a logical media model. `control` carries the typed

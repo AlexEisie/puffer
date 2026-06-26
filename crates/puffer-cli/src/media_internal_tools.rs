@@ -34,6 +34,10 @@ pub(crate) struct ImageGenerationArgs {
     /// Logical model id (overrides the configured default; requires --provider).
     #[arg(long)]
     pub(crate) model: Option<String>,
+    /// Request the cast as ONE coherent image set (grouped single call).
+    /// Only valid on set-capable models; the skill routes via `supportsImageSet`.
+    #[arg(long = "image-set")]
+    pub(crate) image_set: bool,
 }
 
 /// CLI arguments for `puffer internal-tool video-generation`.
@@ -98,6 +102,9 @@ pub(crate) fn image_generation_input(args: &ImageGenerationArgs) -> Result<Value
     }
     insert_optional_string(&mut object, "provider", &args.provider);
     insert_optional_string(&mut object, "model", &args.model);
+    if args.image_set {
+        object.insert("imageSet".to_string(), Value::Bool(true));
+    }
     Ok(Value::Object(object))
 }
 
@@ -277,6 +284,7 @@ mod tests {
             retry_from_error_json: Some("{".to_string()),
             provider: None,
             model: None,
+            image_set: false,
         };
         let video = VideoGenerationArgs {
             prompt: "clip".to_string(),
@@ -314,6 +322,7 @@ mod tests {
             retry_from_error_json: None,
             provider: None,
             model: None,
+            image_set: false,
         })
         .unwrap_err();
 
@@ -335,10 +344,30 @@ mod tests {
             retry_from_error_json: None,
             provider: Some("byteplus".to_string()),
             model: Some("seedream".to_string()),
+            image_set: false,
         };
         let input = image_generation_input(&args).unwrap();
         assert_eq!(input["provider"], "byteplus");
         assert_eq!(input["model"], "seedream");
+        assert!(input.get("imageSet").is_none());
+    }
+
+    #[test]
+    fn image_input_sets_image_set_flag_only_when_requested() {
+        let args = ImageGenerationArgs {
+            prompt: "the whole cast".to_string(),
+            count: 4,
+            aspect: None,
+            prompt_reference: None,
+            purpose: None,
+            retry_from_error_json: None,
+            provider: Some("byteplus".to_string()),
+            model: Some("seedream-4-5".to_string()),
+            image_set: true,
+        };
+        let input = image_generation_input(&args).unwrap();
+        assert_eq!(input["imageSet"], true);
+        assert_eq!(input["count"], 4);
     }
 
     #[test]
