@@ -321,6 +321,7 @@ fn inference_sampling_keeps_top_contacts_per_prefix() {
         candidates.push(Candidate {
             id: format!("telegram@user{index}"),
             name: None,
+            public_username: None,
             avatar: None,
             score: 100.0 - index as f64,
             last_message_at_ms: None,
@@ -331,6 +332,7 @@ fn inference_sampling_keeps_top_contacts_per_prefix() {
         candidates.push(Candidate {
             id: format!("google@user{index}@example.com"),
             name: None,
+            public_username: None,
             avatar: None,
             score: 10.0 - index as f64,
             last_message_at_ms: None,
@@ -364,6 +366,7 @@ fn inference_sampling_excludes_bot_candidates() {
         Candidate {
             id: "telegram@alertbot".to_string(),
             name: Some("Alert Bot".to_string()),
+            public_username: None,
             avatar: None,
             score: 100.0,
             last_message_at_ms: None,
@@ -372,6 +375,7 @@ fn inference_sampling_excludes_bot_candidates() {
         Candidate {
             id: "google@support-bot@example.com".to_string(),
             name: Some("Support Bot".to_string()),
+            public_username: None,
             avatar: None,
             score: 90.0,
             last_message_at_ms: None,
@@ -380,6 +384,7 @@ fn inference_sampling_excludes_bot_candidates() {
         Candidate {
             id: "telegram@alice".to_string(),
             name: Some("Alice".to_string()),
+            public_username: None,
             avatar: None,
             score: 80.0,
             last_message_at_ms: None,
@@ -598,6 +603,14 @@ fn contacts_list_prefers_telegram_peer_cache_names() {
         .unwrap();
 
     assert_eq!(candidate["name"], "Rin Tohsaka");
+    assert_eq!(candidate["display"]["label"], "Rin Tohsaka");
+    assert_eq!(candidate["display"]["name"], "Rin Tohsaka");
+    assert_eq!(candidate["display"]["public_username"], "tohsakar_in");
+    assert_eq!(candidate["display"]["username_label"], "@tohsakar_in");
+    assert!(
+        !candidate["display"].to_string().contains("37253512"),
+        "{candidate:#}"
+    );
     assert!(candidate.get("avatar").is_none(), "{candidate:#}");
 
     let search = handle_contacts_search(&paths, &json!({ "query": "rin", "limit": 10 })).unwrap();
@@ -914,6 +927,102 @@ fn contacts_refresh_forces_telegram_peer_cache_hydration_when_cache_is_non_empty
 }
 
 #[test]
+fn contacts_list_returns_cursor_pagination_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_config_paths(temp.path());
+    let account_dir = paths
+        .user_config_dir
+        .join("telegram-accounts")
+        .join("telegram-user");
+    std::fs::create_dir_all(&account_dir).unwrap();
+    std::fs::write(
+        account_dir.join("peer-cache.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "peers": [
+                telegram_peer_cache_user(1, "Alice", 1_700_000_001_000_i64),
+                telegram_peer_cache_user(2, "Bob", 1_700_000_002_000_i64),
+                telegram_peer_cache_user(3, "Cara", 1_700_000_003_000_i64)
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let first = handle_contacts_list(&paths, &json!({ "limit": 2 })).unwrap();
+    let first_candidates = first["candidates"].as_array().unwrap();
+
+    assert_eq!(first["limit"], 2);
+    assert_eq!(first["returned_count"], 2);
+    assert_eq!(first["candidate_count"], 3);
+    assert_eq!(first["has_more"], true);
+    let cursor = first["next_cursor"].as_str().unwrap();
+    assert!(!cursor.is_empty());
+
+    let second = handle_contacts_list(&paths, &json!({ "limit": 2, "cursor": cursor })).unwrap();
+    let second_candidates = second["candidates"].as_array().unwrap();
+
+    assert_eq!(second["returned_count"], 1);
+    assert_eq!(second["candidate_count"], 3);
+    assert_eq!(second["has_more"], false);
+    assert!(second["next_cursor"].is_null());
+    assert!(first_candidates
+        .iter()
+        .all(|candidate| candidate["id"] != second_candidates[0]["id"]));
+}
+
+#[test]
+fn contacts_cursor_pagination_survives_new_candidate_ahead_of_cursor() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_config_paths(temp.path());
+    let account_dir = paths
+        .user_config_dir
+        .join("telegram-accounts")
+        .join("telegram-user");
+    std::fs::create_dir_all(&account_dir).unwrap();
+    std::fs::write(
+        account_dir.join("peer-cache.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "peers": [
+                telegram_peer_cache_user(2, "Bob", 1_700_000_002_000_i64),
+                telegram_peer_cache_user(3, "Cara", 1_700_000_003_000_i64),
+                telegram_peer_cache_user(4, "Dina", 1_700_000_004_000_i64)
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let first = handle_contacts_list(&paths, &json!({ "limit": 2 })).unwrap();
+    let first_candidates = first["candidates"].as_array().unwrap();
+    assert_eq!(first_candidates[0]["id"], "telegram-user-id@2");
+    assert_eq!(first_candidates[1]["id"], "telegram-user-id@3");
+    let cursor = first["next_cursor"].as_str().unwrap();
+
+    std::fs::write(
+        account_dir.join("peer-cache.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "peers": [
+                telegram_peer_cache_user(1, "New Contact", 1_700_000_001_000_i64),
+                telegram_peer_cache_user(2, "Bob", 1_700_000_002_000_i64),
+                telegram_peer_cache_user(3, "Cara", 1_700_000_003_000_i64),
+                telegram_peer_cache_user(4, "Dina", 1_700_000_004_000_i64)
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let second = handle_contacts_list(&paths, &json!({ "limit": 2, "cursor": cursor })).unwrap();
+    let second_candidates = second["candidates"].as_array().unwrap();
+
+    assert_eq!(second_candidates.len(), 1);
+    assert_eq!(second_candidates[0]["id"], "telegram-user-id@4");
+}
+
+#[test]
 fn telegram_peer_cache_skips_malformed_entries() {
     let temp = tempfile::tempdir().unwrap();
     let paths = test_config_paths(temp.path());
@@ -1148,6 +1257,7 @@ fn read_test_message(payload: Value) -> TelegramDiagMessage {
     TelegramDiagMessage {
         contact_id: telegram_contact_id(&payload, &chat_kind).unwrap(),
         name,
+        public_username: payload_string(&payload, "chat_username"),
         avatar: None,
         destination_name,
         destination_username: payload_string(&payload, "chat_username"),
