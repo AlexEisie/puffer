@@ -31,6 +31,28 @@ impl CallbackListener {
         })
     }
 
+    /// Binds a fixed localhost callback port for the provided path. Used by
+    /// flows whose OAuth client registers an exact redirect URI: the
+    /// OpenAI/Codex client only accepts `http://localhost:1455/auth/callback`,
+    /// so an ephemeral port (as `bind_localhost` uses) is rejected by the
+    /// provider with `authorize_hydra_invalid_request`.
+    pub(crate) fn bind_localhost_port(path: &str, port: u16) -> Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", port)).with_context(|| {
+            format!("failed to bind callback listener on port {port} for {path}")
+        })?;
+        listener.set_nonblocking(true)?;
+        Ok(Self {
+            listener,
+            host: "127.0.0.1".to_string(),
+            port,
+            expected_path: path.to_string(),
+            // `localhost` (not 127.0.0.1) to match the provider-registered
+            // redirect URI exactly; the browser resolves it to 127.0.0.1
+            // where this listener is bound.
+            redirect_uri: format!("http://localhost:{port}{path}"),
+        })
+    }
+
     /// Returns the automatic redirect URI associated with this listener.
     pub(crate) fn redirect_uri(&self) -> &str {
         &self.redirect_uri
