@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// Owns one ephemeral localhost OAuth callback listener.
@@ -66,20 +65,7 @@ impl CallbackListener {
 
 /// Tries to open a URL in the user's default browser.
 pub(crate) fn open_browser(url: &str) -> bool {
-    let mut command = if cfg!(target_os = "macos") {
-        let mut command = Command::new("open");
-        command.arg(url);
-        command
-    } else if cfg!(target_os = "windows") {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "start", "", url]);
-        command
-    } else {
-        let mut command = Command::new("xdg-open");
-        command.arg(url);
-        command
-    };
-    command.spawn().is_ok()
+    webbrowser::open(url).is_ok()
 }
 
 fn parse_callback_request(
