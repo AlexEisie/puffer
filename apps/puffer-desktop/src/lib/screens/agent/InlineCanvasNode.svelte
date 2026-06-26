@@ -23,7 +23,6 @@
     modelOptions,
     seedSelection,
     buildMediaWriteBack,
-    selectedSupportsImageSet,
   } from "./mediaModelSelect";
   import type { MediaCapabilityInfo, MediaSettings } from "../../types";
 
@@ -358,14 +357,6 @@
     if (componentType !== "mediaModelSelect" || mediaLoading) return;
     reconcileMediaModel("imgProvider", "imgModel", mediaImgAvailable);
     reconcileMediaModel("vidProvider", "vidModel", mediaVidAvailable);
-  });
-
-  // Mirror the chosen image model's set capability into the read-back so the
-  // short-drama skill can route set-vs-parallel from CanvasState without re-probing.
-  $effect(() => {
-    if (componentType !== "mediaModelSelect" || mediaLoading) return;
-    const supports = selectedSupportsImageSet(mediaImgAvailable, values);
-    if (values.imgSupportsImageSet !== supports) onChange("imgSupportsImageSet", supports);
   });
 
   // Sticky write-back: debounce a single global updateConfig carrying both kinds.

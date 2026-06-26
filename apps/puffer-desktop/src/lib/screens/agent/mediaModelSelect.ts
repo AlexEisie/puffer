@@ -68,25 +68,6 @@ export function selectionComplete(values: Record<string, unknown>): boolean {
   return str(values.imgModel).length > 0 && str(values.vidModel).length > 0;
 }
 
-/**
- * The chosen image model's set-generation capability, surfaced into the Stage-0
- * read-back as `imgSupportsImageSet` so the short-drama skill can route
- * set-vs-parallel without re-probing capabilities. False when no image model is
- * chosen or the chosen one is not in `available`.
- */
-export function selectedSupportsImageSet(
-  available: MediaCapabilityInfo[],
-  values: Record<string, unknown>,
-): boolean {
-  const provider = str(values.imgProvider);
-  const model = str(values.imgModel);
-  if (!model) return false;
-  const capability = available.find(
-    (c) => c.providerId === provider && c.modelId === model,
-  );
-  return capability?.supportsImageSet ?? false;
-}
-
 /** Whether a canvas spec contains a `mediaModelSelect` node anywhere in its tree. */
 export function hasMediaModelSelect(spec: unknown): boolean {
   if (Array.isArray(spec)) return spec.some((node) => hasMediaModelSelect(node));
