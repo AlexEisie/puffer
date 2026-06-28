@@ -114,6 +114,11 @@ body {
 }
 .dark body { background: var(--background); }
 button, input, textarea, select { font: inherit; color: inherit; }
+/* Native <select> popups: WebView2 on Windows ignores `color-scheme` for the
+   option listbox, so options would inherit the near-white --foreground over a
+   native white popup in dark mode (illegible). Color the options explicitly so
+   the popup follows the theme in both light and dark mode. */
+option, optgroup { background-color: var(--popover); color: var(--popover-foreground); }
 a { color: inherit; text-decoration: none; }
 
 h1, h2, h3, h4, h5, h6 {
